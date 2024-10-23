@@ -6,13 +6,26 @@ readme = "README.md"
 description = "gossip messages over broadcast trees"
 license = "MIT/Apache-2.0"
 authors = ["n0 team"]
-repository = "https://github.com/n0-computer/iroh"
+repository = "https://github.com/n0-computer/iroh-gossip"
 
 # Sadly this also needs to be updated in .github/workflows/ci.yml
 rust-version = "1.76"
 
-[lints]
-workspace = true
+[lints.rust]
+missing_debug_implementations = "warn"
+
+# We use this --cfg for documenting the cargo features on which an API
+# is available.  To preview this locally use: RUSTFLAGS="--cfg
+# iroh_docsrs cargo +nightly doc --all-features".  We use our own
+# iroh_docsrs instead of the common docsrs to avoid also enabling this
+# feature in any dependencies, because some indirect dependencies
+# require a feature enabled when using `--cfg docsrs` which we can not
+# do.  To enable for a crate set `#![cfg_attr(iroh_docsrs,
+# feature(doc_cfg))]` in the crate.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(iroh_docsrs)"] }
+
+[lints.clippy]
+unused-async = "warn"
 
 [dependencies]
 anyhow = { version = "1" }
@@ -22,8 +35,8 @@ bytes = { version = "1.7", features = ["serde"] }
 derive_more = { version = "1.0.0", features = ["add", "debug", "deref", "display", "from", "try_into", "into"] }
 ed25519-dalek = { version = "2.0.0", features = ["serde", "rand_core"] }
 indexmap = "2.0"
-iroh-base = { version = "0.27.0", path = "../iroh-base" }
-iroh-metrics = { version = "0.27.0", path = "../iroh-metrics" }
+iroh-base = "0.27.0"
+iroh-metrics = "0.27.0"
 postcard = { version = "1", default-features = false, features = ["alloc", "use-std", "experimental-derive"] }
 rand = { version = "0.8.5", features = ["std_rng"] }
 rand_core = "0.6.4"
@@ -33,15 +46,15 @@ serde = { version = "1.0.164", features = ["derive"] }
 futures-lite = { version = "2.3", optional = true }
 futures-concurrency = { version = "7.6.1", optional = true }
 futures-util = { version = "0.3.30", optional = true }
-iroh-net = { path = "../iroh-net", version = "0.27.0", optional = true, default-features = false }
+iroh-net = { version = "0.27.0", optional = true, default-features = false }
 tokio = { version = "1", optional = true, features = ["io-util", "sync", "rt", "macros", "net", "fs"] }
 tokio-util = { version = "0.7.12", optional = true, features = ["codec", "rt"] }
 tracing = "0.1"
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }
-iroh-net = { path = "../iroh-net", version = "0.27.0", default-features = false, features = ["test-utils"] }
-iroh-test = { path = "../iroh-test" }
+iroh-net = { version = "0.27.0", default-features = false, features = ["test-utils"] }
+iroh-test = "0.27.0"
 rand_chacha = "0.3.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2.4.0"
