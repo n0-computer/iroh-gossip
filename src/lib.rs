@@ -13,4 +13,6 @@ pub mod metrics;
 #[cfg_attr(iroh_docsrs, doc(cfg(feature = "net")))]
 pub mod net;
 pub mod proto;
+
+#[cfg(feature = "rpc")]
 pub mod rpc;
