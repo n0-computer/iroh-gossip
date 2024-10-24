@@ -9,6 +9,8 @@ use nested_enum_utils::enum_conversions;
 use quic_rpc_derive::rpc_requests;
 use serde::{Deserialize, Serialize};
 
+pub mod client;
+
 /// The RPC service type for the gossip protocol
 #[derive(Debug, Clone)]
 pub struct RpcService;
