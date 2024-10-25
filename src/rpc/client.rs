@@ -35,6 +35,13 @@ impl Default for SubscribeOpts {
 }
 
 impl<I: quic_rpc::Service> Client<I> {
+    /// Creates a new gossip client.
+    pub fn new(
+        rpc: quic_rpc::RpcClient<I, quic_rpc::transport::boxed::Connection<I>, RpcService>,
+    ) -> Self {
+        Self { rpc }
+    }
+
     /// Subscribes to a gossip topic.
     ///
     /// Returns a sink to send updates to the topic and a stream of responses.

@@ -223,6 +223,46 @@ impl Gossip {
             .await
             .map_err(|_| anyhow!("gossip actor dropped"))
     }
+
+    /// Handle a gossip request from the RPC server.
+    #[cfg(feature = "rpc")]
+    pub async fn handle_rpc_request<S: quic_rpc::Service>(
+        &self,
+        msg: crate::rpc::Request,
+        chan: quic_rpc::server::RpcChannel<
+            S,
+            quic_rpc::transport::boxed::ServerEndpoint<S::Req, S::Res>,
+            crate::rpc::RpcService,
+        >,
+    ) -> Result<
+        (),
+        quic_rpc::server::RpcServerError<
+            quic_rpc::transport::boxed::ServerEndpoint<S::Req, S::Res>,
+        >,
+    > {
+        use iroh_base::rpc::RpcError;
+        use quic_rpc::server::RpcServerError;
+
+        use crate::rpc::Request::*;
+        match msg {
+            Subscribe(msg) => {
+                let this = self.clone();
+                chan.bidi_streaming(msg, this, move |handler, req, updates| {
+                    let stream = handler.join_with_stream(
+                        req.topic,
+                        crate::net::JoinOptions {
+                            bootstrap: req.bootstrap,
+                            subscription_capacity: req.subscription_capacity,
+                        },
+                        Box::pin(updates),
+                    );
+                    futures_util::TryStreamExt::map_err(stream, RpcError::from)
+                })
+                .await
+            }
+            Update(_msg) => Err(RpcServerError::UnexpectedUpdateMessage),
+        }
+    }
 }
 
 /// Input messages for the gossip [`Actor`].
