@@ -50,6 +50,8 @@ iroh-net = { version = "0.27.0", optional = true, default-features = false }
 tokio = { version = "1", optional = true, features = ["io-util", "sync", "rt", "macros", "net", "fs"] }
 tokio-util = { version = "0.7.12", optional = true, features = ["codec", "rt"] }
 tracing = "0.1"
+data-encoding = { version = "2.6.0", optional = true }
+hex = "0.4.3"
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -71,9 +73,11 @@ net = [
     "dep:futures-concurrency"
 ]
 
+examples = ["net", "dep:data-encoding"]
+
 [[example]]
 name = "chat"
-required-features = ["net"]
+required-features = ["examples"]
 
 [package.metadata.docs.rs]
 all-features = true
