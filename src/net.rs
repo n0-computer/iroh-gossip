@@ -230,9 +230,9 @@ impl Gossip {
         &self,
         msg: crate::rpc::Request,
         chan: quic_rpc::server::RpcChannel<
-            S,
-            quic_rpc::transport::boxed::ServerEndpoint<S::Req, S::Res>,
             crate::rpc::RpcService,
+            quic_rpc::transport::boxed::ServerEndpoint<S::Req, S::Res>,
+            S,
         >,
     ) -> Result<
         (),

@@ -12,8 +12,9 @@ use crate::rpc::{RpcService, SubscribeRequest};
 
 /// Iroh gossip client.
 #[derive(Debug, Clone)]
-pub struct Client<O: quic_rpc::Service = RpcService> {
-    pub(super) rpc: quic_rpc::RpcClient<O, quic_rpc::transport::boxed::Connection<O>, RpcService>,
+pub struct Client<S: quic_rpc::Service = RpcService> {
+    pub(super) rpc:
+        quic_rpc::RpcClient<RpcService, quic_rpc::transport::boxed::Connection<S::Res, S::Req>, S>,
 }
 
 /// Options for subscribing to a gossip topic.
@@ -37,7 +38,11 @@ impl Default for SubscribeOpts {
 impl<I: quic_rpc::Service> Client<I> {
     /// Creates a new gossip client.
     pub fn new(
-        rpc: quic_rpc::RpcClient<I, quic_rpc::transport::boxed::Connection<I>, RpcService>,
+        rpc: quic_rpc::RpcClient<
+            RpcService,
+            quic_rpc::transport::boxed::Connection<I::Res, I::Req>,
+            I,
+        >,
     ) -> Self {
         Self { rpc }
     }
