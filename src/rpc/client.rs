@@ -49,14 +49,14 @@ where
     ///
     /// Returns a sink to send updates to the topic and a stream of responses.
     ///
-    /// Updates are either [Broadcast](iroh_gossip::net::Command::Broadcast)
-    /// or [BroadcastNeighbors](iroh_gossip::net::Command::BroadcastNeighbors).
+    /// Updates are either [Broadcast](crate::net::Command::Broadcast)
+    /// or [BroadcastNeighbors](crate::net::Command::BroadcastNeighbors).
     ///
     /// Broadcasts are gossiped to the entire swarm, while BroadcastNeighbors are sent to
     /// just the immediate neighbors of the node.
     ///
-    /// Responses are either [Gossip](iroh_gossip::net::Event::Gossip) or
-    /// [Lagged](iroh_gossip::net::Event::Lagged).
+    /// Responses are either [Gossip](crate::net::Event::Gossip) or
+    /// [Lagged](crate::net::Event::Lagged).
     ///
     /// Gossip events contain the actual message content, as well as information about the
     /// immediate neighbors of the node.

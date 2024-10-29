@@ -16,3 +16,8 @@ pub mod proto;
 
 #[cfg(feature = "rpc")]
 pub mod rpc;
+#[cfg(feature = "rpc")]
+pub use rpc::{
+    client::Client,
+    proto::{Request as RpcRequest, Response as RpcResponse, RpcService},
+};

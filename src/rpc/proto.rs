@@ -1,4 +1,4 @@
-//! The RPC types for a gossip client
+//! The RPC protocol between client and node
 use std::collections::BTreeSet;
 
 pub use crate::net::{Command as SubscribeUpdate, Event as SubscribeResponse};
