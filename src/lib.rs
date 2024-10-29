@@ -15,7 +15,9 @@ pub mod net;
 pub mod proto;
 
 #[cfg(feature = "rpc")]
+#[cfg_attr(iroh_docsrs, doc(cfg(feature = "rpc")))]
 pub mod rpc;
+#[cfg_attr(iroh_docsrs, doc(cfg(feature = "rpc")))]
 #[cfg(feature = "rpc")]
 pub use rpc::{
     client::Client,
