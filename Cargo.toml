@@ -82,5 +82,5 @@ all-features = true
 rustdoc-args = ["--cfg", "iroh_docsrs"]
 
 [patch.crates-io]
-iroh-net = { git = "https://github.com/n0-computer/iroh", branch = "main" }
+iroh-net = { git = "https://github.com/n0-computer/iroh", branch = "flub/owned-connect" }
 iroh-router = { git = "https://github.com/n0-computer/iroh", branch = "main" }

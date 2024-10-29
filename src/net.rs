@@ -19,7 +19,7 @@ use futures_util::TryFutureExt;
 use iroh_metrics::inc;
 use iroh_net::{
     dialer::Dialer,
-    endpoint::{get_remote_node_id, Connecting, Connection, DirectAddr},
+    endpoint::{Connecting, Connection, DirectAddr},
     key::PublicKey,
     AddrInfo, Endpoint, NodeAddr, NodeId,
 };
@@ -155,7 +155,7 @@ impl Gossip {
     ///
     /// Make sure to check the ALPN protocol yourself before passing the connection.
     pub async fn handle_connection(&self, conn: Connection) -> anyhow::Result<()> {
-        let peer_id = get_remote_node_id(&conn)?;
+        let peer_id = conn.remote_node_id()?;
         self.send(ToActor::HandleConnection(peer_id, ConnOrigin::Accept, conn))
             .await?;
         Ok(())
