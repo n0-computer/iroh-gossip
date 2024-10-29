@@ -1,15 +1,17 @@
 //! Iroh gossip client.
-use anyhow::Result;
-use quic_rpc::client::BoxedServiceConnection;
 use std::collections::BTreeSet;
 
+use anyhow::Result;
 use futures_lite::{Stream, StreamExt};
 use futures_util::{Sink, SinkExt};
 use iroh_net::NodeId;
+use quic_rpc::client::BoxedServiceConnection;
 
-use crate::net::{Command as SubscribeUpdate, Event as SubscribeResponse};
-use crate::proto::TopicId;
-use crate::rpc::proto::{RpcService, SubscribeRequest};
+use crate::{
+    net::{Command as SubscribeUpdate, Event as SubscribeResponse},
+    proto::TopicId,
+    rpc::proto::{RpcService, SubscribeRequest},
+};
 
 /// Iroh gossip client.
 #[derive(Debug, Clone)]
