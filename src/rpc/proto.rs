@@ -1,13 +1,14 @@
 //! The RPC protocol between client and node
 use std::collections::BTreeSet;
 
-pub use crate::net::{Command as SubscribeUpdate, Event as SubscribeResponse};
-use crate::proto::TopicId;
 use iroh_base::rpc::RpcResult;
 use iroh_net::NodeId;
 use nested_enum_utils::enum_conversions;
 use quic_rpc_derive::rpc_requests;
 use serde::{Deserialize, Serialize};
+
+pub use crate::net::{Command as SubscribeUpdate, Event as SubscribeResponse};
+use crate::proto::TopicId;
 
 /// The RPC service type for the gossip protocol
 #[derive(Debug, Clone)]
