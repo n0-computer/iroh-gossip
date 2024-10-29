@@ -857,6 +857,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "educe"
+version = "0.4.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f0042ff8246a363dbe77d2ceedb073339e85a804b9a47636c6e016a9a32c05f"
+dependencies = [
+ "enum-ordinalize",
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
+]
+
+[[package]]
 name = "elliptic-curve"
 version = "0.13.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -894,6 +906,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1e6a265c649f3f5979b601d26f1d05ada116434c87741c9493cb56218f76cbc"
 dependencies = [
  "heck",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.82",
+]
+
+[[package]]
+name = "enum-ordinalize"
+version = "3.1.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1bf1fa3f06bbff1ea5b1a9c7b14aa992a39657db60a2759457328d7e058f49ee"
+dependencies = [
+ "num-bigint",
+ "num-traits",
  "proc-macro2",
  "quote",
  "syn 2.0.82",
@@ -1717,11 +1742,16 @@ dependencies = [
  "iroh-net",
  "iroh-router",
  "iroh-test",
+ "nested_enum_utils",
  "postcard",
+ "quic-rpc",
+ "quic-rpc-derive",
  "rand",
  "rand_chacha",
  "rand_core",
  "serde",
+ "serde-error",
+ "strum",
  "tokio",
  "tokio-util",
  "tracing",
@@ -2126,6 +2156,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a51313c5820b0b02bd422f4b44776fbf47961755c74ce64afc73bfad10226c3"
 dependencies = [
  "getrandom",
+]
+
+[[package]]
+name = "nested_enum_utils"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f256ef99e7ac37428ef98c89bef9d84b590172de4bbfbe81b68a4cd3abadb32"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -2847,6 +2889,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "quic-rpc"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b0ea1bd0b3124538bb71ed8cedbe92608fd1cf227e4f5ff53fb28746737b794"
+dependencies = [
+ "anyhow",
+ "derive_more",
+ "educe",
+ "flume",
+ "futures-lite 2.3.0",
+ "futures-sink",
+ "futures-util",
+ "hex",
+ "pin-project",
+ "serde",
+ "slab",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "quic-rpc-derive"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94b91a3f7a42657cbfbd0c2499c1f037738eff45bb7f59c6ce3d3d9e890d141c"
+dependencies = [
+ "proc-macro2",
+ "quic-rpc",
+ "quote",
+ "syn 1.0.109",
+]
+
+[[package]]
 name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3374,9 +3449,9 @@ dependencies = [
 
 [[package]]
 name = "serde-error"
-version = "0.1.2"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e988182713aeed6a619a88bca186f6d6407483485ffe44c869ee264f8eabd13f"
+checksum = "342110fb7a5d801060c885da03bf91bfa7c7ca936deafcc64bb6706375605d47"
 dependencies = [
  "serde",
 ]
