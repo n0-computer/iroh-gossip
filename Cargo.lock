@@ -1896,7 +1896,7 @@ dependencies = [
 [[package]]
 name = "iroh-net"
 version = "0.27.0"
-source = "git+https://github.com/n0-computer/iroh?branch=main#17f30b1947397937d77cf0e745a95eb04e1cdf57"
+source = "git+https://github.com/n0-computer/iroh?branch=main#fe684c23e60fc8c35d3ec02bf088f36e1e248c50"
 dependencies = [
  "anyhow",
  "backoff",
@@ -2021,7 +2021,7 @@ dependencies = [
 [[package]]
 name = "iroh-router"
 version = "0.27.0"
-source = "git+https://github.com/n0-computer/iroh?branch=main#17f30b1947397937d77cf0e745a95eb04e1cdf57"
+source = "git+https://github.com/n0-computer/iroh?branch=main#fe684c23e60fc8c35d3ec02bf088f36e1e248c50"
 dependencies = [
  "anyhow",
  "futures-buffered",
