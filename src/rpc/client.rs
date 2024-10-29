@@ -1,4 +1,7 @@
 //! Iroh gossip client.
+//!
+//! Create a [`Client`] with a [`quic_rpc::RpcClient`] and use it to interact
+//! with a node that runs gossip.
 use std::collections::BTreeSet;
 
 use anyhow::Result;
