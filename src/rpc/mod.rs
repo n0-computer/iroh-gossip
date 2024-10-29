@@ -1,51 +1,37 @@
-//! The RPC types for a gossip client
-use std::collections::BTreeSet;
-
+//! Provides a rpc protocol as well as a client for the protocol
+use crate::net::Gossip;
 pub use crate::net::{Command as SubscribeUpdate, Event as SubscribeResponse};
-use crate::proto::TopicId;
-use iroh_base::rpc::RpcResult;
-use iroh_net::NodeId;
-use nested_enum_utils::enum_conversions;
-use quic_rpc_derive::rpc_requests;
-use serde::{Deserialize, Serialize};
-
 pub mod client;
+pub mod proto;
 
-/// The RPC service type for the gossip protocol
-#[derive(Debug, Clone)]
-pub struct RpcService;
+impl Gossip {
+    /// Handle a gossip request from the RPC server.
+    pub async fn handle_rpc_request<S: quic_rpc::Service, C: quic_rpc::ServiceEndpoint<S>>(
+        &self,
+        msg: crate::rpc::proto::Request,
+        chan: quic_rpc::server::RpcChannel<crate::rpc::proto::RpcService, C, S>,
+    ) -> Result<(), quic_rpc::server::RpcServerError<C>> {
+        use iroh_base::rpc::RpcError;
+        use quic_rpc::server::RpcServerError;
 
-impl quic_rpc::Service for RpcService {
-    type Req = Request;
-    type Res = Response;
-}
-
-#[allow(missing_docs)]
-#[derive(strum::Display, Debug, Serialize, Deserialize)]
-#[enum_conversions]
-#[rpc_requests(RpcService)]
-pub enum Request {
-    #[bidi_streaming(update = SubscribeUpdate, response = RpcResult<SubscribeResponse>)]
-    Subscribe(SubscribeRequest),
-    Update(SubscribeUpdate),
-}
-
-#[allow(missing_docs)]
-#[derive(strum::Display, Debug, Serialize, Deserialize)]
-#[enum_conversions]
-pub enum Response {
-    Subscribe(RpcResult<SubscribeResponse>),
-}
-
-/// A request to the node to subscribe to gossip events.
-///
-/// This is basically a topic and additional options
-#[derive(Serialize, Deserialize, Debug)]
-pub struct SubscribeRequest {
-    /// The topic to subscribe to
-    pub topic: TopicId,
-    /// The nodes to bootstrap the subscription from
-    pub bootstrap: BTreeSet<NodeId>,
-    /// The capacity of the subscription
-    pub subscription_capacity: usize,
+        use crate::rpc::proto::Request::*;
+        match msg {
+            Subscribe(msg) => {
+                let this = self.clone();
+                chan.bidi_streaming(msg, this, move |handler, req, updates| {
+                    let stream = handler.join_with_stream(
+                        req.topic,
+                        crate::net::JoinOptions {
+                            bootstrap: req.bootstrap,
+                            subscription_capacity: req.subscription_capacity,
+                        },
+                        Box::pin(updates),
+                    );
+                    futures_util::TryStreamExt::map_err(stream, RpcError::from)
+                })
+                .await
+            }
+            Update(_msg) => Err(RpcServerError::UnexpectedUpdateMessage),
+        }
+    }
 }

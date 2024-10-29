@@ -1,5 +1,6 @@
 //! Iroh gossip client.
 use anyhow::Result;
+use quic_rpc::client::BoxedServiceConnection;
 use std::collections::BTreeSet;
 
 use futures_lite::{Stream, StreamExt};
@@ -8,13 +9,12 @@ use iroh_net::NodeId;
 
 use crate::net::{Command as SubscribeUpdate, Event as SubscribeResponse};
 use crate::proto::TopicId;
-use crate::rpc::{RpcService, SubscribeRequest};
+use crate::rpc::proto::{RpcService, SubscribeRequest};
 
 /// Iroh gossip client.
 #[derive(Debug, Clone)]
-pub struct Client<S: quic_rpc::Service = RpcService> {
-    pub(super) rpc:
-        quic_rpc::RpcClient<RpcService, quic_rpc::transport::boxed::Connection<S::Res, S::Req>, S>,
+pub struct Client<S = RpcService, C = BoxedServiceConnection<S>> {
+    pub(super) rpc: quic_rpc::RpcClient<RpcService, C, S>,
 }
 
 /// Options for subscribing to a gossip topic.
@@ -35,15 +35,13 @@ impl Default for SubscribeOpts {
     }
 }
 
-impl<I: quic_rpc::Service> Client<I> {
+impl<S, C> Client<S, C>
+where
+    S: quic_rpc::Service,
+    C: quic_rpc::ServiceConnection<S>,
+{
     /// Creates a new gossip client.
-    pub fn new(
-        rpc: quic_rpc::RpcClient<
-            RpcService,
-            quic_rpc::transport::boxed::Connection<I::Res, I::Req>,
-            I,
-        >,
-    ) -> Self {
+    pub fn new(rpc: quic_rpc::RpcClient<RpcService, C, S>) -> Self {
         Self { rpc }
     }
 
