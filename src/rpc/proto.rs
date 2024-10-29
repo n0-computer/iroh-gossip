@@ -1,7 +1,6 @@
 //! The RPC protocol between client and node
 use std::collections::BTreeSet;
 
-use iroh_base::rpc::RpcResult;
 use iroh_net::NodeId;
 use nested_enum_utils::enum_conversions;
 use quic_rpc_derive::rpc_requests;
@@ -18,6 +17,8 @@ impl quic_rpc::Service for RpcService {
     type Req = Request;
     type Res = Response;
 }
+
+type RpcResult<T> = std::result::Result<T, serde_error::Error>;
 
 #[allow(missing_docs)]
 #[derive(strum::Display, Debug, Serialize, Deserialize)]

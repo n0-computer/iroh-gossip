@@ -11,7 +11,6 @@ impl Gossip {
         msg: crate::rpc::proto::Request,
         chan: quic_rpc::server::RpcChannel<crate::rpc::proto::RpcService, C, S>,
     ) -> Result<(), quic_rpc::server::RpcServerError<C>> {
-        use iroh_base::rpc::RpcError;
         use quic_rpc::server::RpcServerError;
 
         use crate::rpc::proto::Request::*;
@@ -27,7 +26,7 @@ impl Gossip {
                         },
                         Box::pin(updates),
                     );
-                    futures_util::TryStreamExt::map_err(stream, RpcError::from)
+                    futures_util::TryStreamExt::map_err(stream, |e| serde_error::Error::new(&*e))
                 })
                 .await
             }
