@@ -1782,7 +1782,7 @@ dependencies = [
 [[package]]
 name = "iroh-net"
 version = "0.28.0"
-source = "git+https://github.com/n0-computer/iroh?branch=main#2073bf40176789c36a607d10a6bbaef38b16846b"
+source = "git+https://github.com/n0-computer/iroh?branch=main#5437dbb4e409200f66c3d97d9b277be14a2b6b33"
 dependencies = [
  "anyhow",
  "axum",
@@ -1915,8 +1915,8 @@ dependencies = [
 
 [[package]]
 name = "iroh-router"
-version = "0.27.0"
-source = "git+https://github.com/n0-computer/iroh?branch=main#2073bf40176789c36a607d10a6bbaef38b16846b"
+version = "0.28.0"
+source = "git+https://github.com/n0-computer/iroh?branch=main#5437dbb4e409200f66c3d97d9b277be14a2b6b33"
 dependencies = [
  "anyhow",
  "futures-buffered",
@@ -2256,7 +2256,7 @@ dependencies = [
 [[package]]
 name = "netwatch"
 version = "0.1.0"
-source = "git+https://github.com/n0-computer/iroh?branch=main#2073bf40176789c36a607d10a6bbaef38b16846b"
+source = "git+https://github.com/n0-computer/iroh?branch=main#5437dbb4e409200f66c3d97d9b277be14a2b6b33"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2750,7 +2750,7 @@ checksum = "cc9c68a3f6da06753e9335d63e27f6b9754dd1920d941135b7ea8224f141adb2"
 [[package]]
 name = "portmapper"
 version = "0.1.0"
-source = "git+https://github.com/n0-computer/iroh?branch=main#2073bf40176789c36a607d10a6bbaef38b16846b"
+source = "git+https://github.com/n0-computer/iroh?branch=main#5437dbb4e409200f66c3d97d9b277be14a2b6b33"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
