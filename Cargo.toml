@@ -35,8 +35,8 @@ bytes = { version = "1.7", features = ["serde"] }
 derive_more = { version = "1.0.0", features = ["add", "debug", "deref", "display", "from", "try_into", "into"] }
 ed25519-dalek = { version = "2.0.0", features = ["serde", "rand_core"] }
 indexmap = "2.0"
-iroh-base = "0.27.0"
-iroh-metrics = "0.27.0"
+iroh-base = "0.28.0"
+iroh-metrics = "0.28.0"
 postcard = { version = "1", default-features = false, features = ["alloc", "use-std", "experimental-derive"] }
 rand = { version = "0.8.5", features = ["std_rng"] }
 rand_core = "0.6.4"
@@ -62,7 +62,7 @@ serde-error = "0.1.3"
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }
 iroh-net = { version = "0.27.0", default-features = false, features = ["test-utils"] }
-iroh-test = "0.27.0"
+iroh-test = "0.28.0"
 rand_chacha = "0.3.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2.4.0"
