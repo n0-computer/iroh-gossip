@@ -1885,7 +1885,7 @@ dependencies = [
  "iroh-test",
  "nested_enum_utils",
  "postcard",
- "quic-rpc 0.13.0",
+ "quic-rpc 0.14.0 (git+https://github.com/n0-computer/quic-rpc?branch=map-transports-not-services)",
  "quic-rpc-derive",
  "rand",
  "rand_chacha",
@@ -1924,7 +1924,7 @@ dependencies = [
 [[package]]
 name = "iroh-net"
 version = "0.28.1"
-source = "git+https://github.com/n0-computer/iroh?branch=main#134a93b5a60103b3ce8fa4aacb52cdbcb291d00b"
+source = "git+https://github.com/n0-computer/iroh?branch=main#258eb33ed598c25be98986463fc1f798b374848a"
 dependencies = [
  "anyhow",
  "axum",
@@ -1953,8 +1953,8 @@ dependencies = [
  "igd-next",
  "iroh-base",
  "iroh-metrics",
- "iroh-quinn 0.12.0",
- "iroh-quinn-proto 0.12.0",
+ "iroh-quinn",
+ "iroh-quinn-proto",
  "iroh-quinn-udp",
  "libc",
  "netdev",
@@ -2008,30 +2008,12 @@ dependencies = [
 
 [[package]]
 name = "iroh-quinn"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fd590a39a14cfc168efa4d894de5039d65641e62d8da4a80733018ababe3c33"
-dependencies = [
- "bytes",
- "iroh-quinn-proto 0.11.6",
- "iroh-quinn-udp",
- "pin-project-lite",
- "rustc-hash",
- "rustls",
- "socket2",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "iroh-quinn"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35ba75a5c57cff299d2d7ca1ddee053f66339d1756bd79ec637bcad5aa61100e"
 dependencies = [
  "bytes",
- "iroh-quinn-proto 0.12.0",
+ "iroh-quinn-proto",
  "iroh-quinn-udp",
  "pin-project-lite",
  "rustc-hash",
@@ -2039,24 +2021,6 @@ dependencies = [
  "socket2",
  "thiserror",
  "tokio",
- "tracing",
-]
-
-[[package]]
-name = "iroh-quinn-proto"
-version = "0.11.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5fd0538ff12efe3d61ea1deda2d7913f4270873a519d43e6995c6e87a1558538"
-dependencies = [
- "bytes",
- "rand",
- "ring",
- "rustc-hash",
- "rustls",
- "rustls-platform-verifier",
- "slab",
- "thiserror",
- "tinyvec",
  "tracing",
 ]
 
@@ -2094,7 +2058,7 @@ dependencies = [
 [[package]]
 name = "iroh-router"
 version = "0.28.0"
-source = "git+https://github.com/n0-computer/iroh?branch=main#134a93b5a60103b3ce8fa4aacb52cdbcb291d00b"
+source = "git+https://github.com/n0-computer/iroh?branch=main#258eb33ed598c25be98986463fc1f798b374848a"
 dependencies = [
  "anyhow",
  "futures-buffered",
@@ -2440,7 +2404,7 @@ dependencies = [
 [[package]]
 name = "netwatch"
 version = "0.1.0"
-source = "git+https://github.com/n0-computer/iroh?branch=main#134a93b5a60103b3ce8fa4aacb52cdbcb291d00b"
+source = "git+https://github.com/n0-computer/iroh?branch=main#258eb33ed598c25be98986463fc1f798b374848a"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2934,7 +2898,7 @@ checksum = "cc9c68a3f6da06753e9335d63e27f6b9754dd1920d941135b7ea8224f141adb2"
 [[package]]
 name = "portmapper"
 version = "0.1.0"
-source = "git+https://github.com/n0-computer/iroh?branch=main#134a93b5a60103b3ce8fa4aacb52cdbcb291d00b"
+source = "git+https://github.com/n0-computer/iroh?branch=main#258eb33ed598c25be98986463fc1f798b374848a"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3131,30 +3095,6 @@ dependencies = [
 
 [[package]]
 name = "quic-rpc"
-version = "0.13.0"
-source = "git+https://github.com/n0-computer/quic-rpc?branch=map-transports-not-services#c30ba6a08c3ec0e1a05ff6f15a1681cd75ddcf0f"
-dependencies = [
- "anyhow",
- "bincode",
- "derive_more",
- "educe",
- "flume",
- "futures-lite 2.4.0",
- "futures-sink",
- "futures-util",
- "hex",
- "iroh-quinn 0.11.3",
- "pin-project",
- "serde",
- "slab",
- "tokio",
- "tokio-serde",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "quic-rpc"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d8431b2e7c22929347b61a354d4936d71fe7ab1e6b0475dc50e98276970dfec"
@@ -3175,13 +3115,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "quic-rpc"
+version = "0.14.0"
+source = "git+https://github.com/n0-computer/quic-rpc?branch=map-transports-not-services#7bad06c7243b53b7c612e95293c1fb2d5643f864"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "derive_more",
+ "educe",
+ "flume",
+ "futures-lite 2.4.0",
+ "futures-sink",
+ "futures-util",
+ "hex",
+ "iroh-quinn",
+ "pin-project",
+ "serde",
+ "slab",
+ "tokio",
+ "tokio-serde",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "quic-rpc-derive"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "403bc8506c847468e00170dbbbfe2c54d13b090031bcbe474cd3faea021cbd9f"
 dependencies = [
  "proc-macro2",
- "quic-rpc 0.14.0",
+ "quic-rpc 0.14.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "quote",
  "syn 1.0.109",
 ]
