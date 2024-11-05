@@ -321,6 +321,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c3c1a368f70d6cf7302d78f8f7093da241fb8e8807c05cc9e51a125895a6d5b"
 
 [[package]]
+name = "bincode"
+version = "1.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1744,7 +1753,7 @@ dependencies = [
  "iroh-test",
  "nested_enum_utils",
  "postcard",
- "quic-rpc",
+ "quic-rpc 0.13.0 (git+https://github.com/n0-computer/quic-rpc?branch=map-transports-not-services)",
  "quic-rpc-derive",
  "rand",
  "rand_chacha",
@@ -2910,13 +2919,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "quic-rpc"
+version = "0.13.0"
+source = "git+https://github.com/n0-computer/quic-rpc?branch=map-transports-not-services#c30ba6a08c3ec0e1a05ff6f15a1681cd75ddcf0f"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "derive_more",
+ "educe",
+ "flume",
+ "futures-lite 2.3.0",
+ "futures-sink",
+ "futures-util",
+ "hex",
+ "iroh-quinn",
+ "pin-project",
+ "serde",
+ "slab",
+ "tokio",
+ "tokio-serde",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "quic-rpc-derive"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94b91a3f7a42657cbfbd0c2499c1f037738eff45bb7f59c6ce3d3d9e890d141c"
 dependencies = [
  "proc-macro2",
- "quic-rpc",
+ "quic-rpc 0.13.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "quote",
  "syn 1.0.109",
 ]
@@ -4047,6 +4080,21 @@ dependencies = [
  "url",
  "webpki-roots",
  "x509-parser",
+]
+
+[[package]]
+name = "tokio-serde"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "911a61637386b789af998ee23f50aa30d5fd7edcec8d6d3dedae5e5815205466"
+dependencies = [
+ "bincode",
+ "bytes",
+ "educe",
+ "futures-core",
+ "futures-sink",
+ "pin-project",
+ "serde",
 ]
 
 [[package]]

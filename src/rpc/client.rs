@@ -18,8 +18,8 @@ use crate::{
 
 /// Iroh gossip client.
 #[derive(Debug, Clone)]
-pub struct Client<S = RpcService, C = BoxedServiceConnection<S>> {
-    pub(super) rpc: quic_rpc::RpcClient<RpcService, C, S>,
+pub struct Client<C = BoxedServiceConnection<RpcService>> {
+    pub(super) rpc: quic_rpc::RpcClient<RpcService, C>,
 }
 
 /// Options for subscribing to a gossip topic.
@@ -40,13 +40,12 @@ impl Default for SubscribeOpts {
     }
 }
 
-impl<S, C> Client<S, C>
+impl<C> Client<C>
 where
-    S: quic_rpc::Service,
-    C: quic_rpc::ServiceConnection<S>,
+    C: quic_rpc::ServiceConnection<RpcService>,
 {
     /// Creates a new gossip client.
-    pub fn new(rpc: quic_rpc::RpcClient<RpcService, C, S>) -> Self {
+    pub fn new(rpc: quic_rpc::RpcClient<RpcService, C>) -> Self {
         Self { rpc }
     }
 
