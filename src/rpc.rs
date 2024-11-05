@@ -9,7 +9,6 @@ pub mod proto;
 impl Gossip {
     /// Handle a gossip request from the RPC server.
     pub async fn handle_rpc_request<
-        S: quic_rpc::Service,
         C: quic_rpc::ServiceEndpoint<RpcService>,
     >(
         &self,
