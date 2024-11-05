@@ -226,9 +226,9 @@ dependencies = [
  "bytes",
  "futures-util",
  "http 1.1.0",
- "http-body 1.0.1",
+ "http-body",
  "http-body-util",
- "hyper 1.5.0",
+ "hyper",
  "hyper-util",
  "itoa",
  "matchit",
@@ -259,7 +259,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "http 1.1.0",
- "http-body 1.0.1",
+ "http-body",
  "http-body-util",
  "mime",
  "pin-project-lite",
@@ -319,15 +319,6 @@ name = "base64ct"
 version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c3c1a368f70d6cf7302d78f8f7093da241fb8e8807c05cc9e51a125895a6d5b"
-
-[[package]]
-name = "bincode"
-version = "1.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "bitflags"
@@ -1333,25 +1324,6 @@ dependencies = [
 
 [[package]]
 name = "h2"
-version = "0.3.26"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81fe527a889e1532da5c525686d96d4c2e74cdd345badf8dfef9f6b39dd5f5e8"
-dependencies = [
- "bytes",
- "fnv",
- "futures-core",
- "futures-sink",
- "futures-util",
- "http 0.2.12",
- "indexmap",
- "slab",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "h2"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "524e8ac6999421f49a846c2d4411f337e53497d8ec55d67753beffa43c5d9205"
@@ -1512,17 +1484,6 @@ dependencies = [
 
 [[package]]
 name = "http-body"
-version = "0.4.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ceab25649e9960c0311ea418d17bee82c0dcec1bd053b5f9a66e265a693bed2"
-dependencies = [
- "bytes",
- "http 0.2.12",
- "pin-project-lite",
-]
-
-[[package]]
-name = "http-body"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1efedce1fb8e6913f23e0c92de8e62cd5b772a67e7b3946df930a62566c93184"
@@ -1540,7 +1501,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "http 1.1.0",
- "http-body 1.0.1",
+ "http-body",
  "pin-project-lite",
 ]
 
@@ -1558,30 +1519,6 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "hyper"
-version = "0.14.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c08302e8fa335b151b788c775ff56e7a03ae64ff85c548ee820fecb70356e85"
-dependencies = [
- "bytes",
- "futures-channel",
- "futures-core",
- "futures-util",
- "h2 0.3.26",
- "http 0.2.12",
- "http-body 0.4.6",
- "httparse",
- "httpdate",
- "itoa",
- "pin-project-lite",
- "socket2",
- "tokio",
- "tower-service",
- "tracing",
- "want",
-]
-
-[[package]]
-name = "hyper"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbbff0a806a4728c99295b254c8838933b5b082d75e3cb70c8dab21fdfbcfa9a"
@@ -1589,9 +1526,9 @@ dependencies = [
  "bytes",
  "futures-channel",
  "futures-util",
- "h2 0.4.6",
+ "h2",
  "http 1.1.0",
- "http-body 1.0.1",
+ "http-body",
  "httparse",
  "httpdate",
  "itoa",
@@ -1609,7 +1546,7 @@ checksum = "08afdbb5c31130e3034af566421053ab03787c640246a446327f550d11bcb333"
 dependencies = [
  "futures-util",
  "http 1.1.0",
- "hyper 1.5.0",
+ "hyper",
  "hyper-util",
  "rustls",
  "rustls-pki-types",
@@ -1629,8 +1566,8 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "http 1.1.0",
- "http-body 1.0.1",
- "hyper 1.5.0",
+ "http-body",
+ "hyper",
  "pin-project-lite",
  "socket2",
  "tokio",
@@ -1822,7 +1759,7 @@ dependencies = [
  "futures",
  "http 1.1.0",
  "http-body-util",
- "hyper 1.5.0",
+ "hyper",
  "hyper-util",
  "log",
  "rand",
@@ -1939,7 +1876,7 @@ dependencies = [
  "iroh-test",
  "nested_enum_utils",
  "postcard",
- "quic-rpc 0.14.0 (git+https://github.com/n0-computer/quic-rpc?branch=naming-bikeshedding)",
+ "quic-rpc",
  "quic-rpc-derive",
  "rand",
  "rand_chacha",
@@ -1963,7 +1900,7 @@ dependencies = [
  "anyhow",
  "erased_set",
  "http-body-util",
- "hyper 1.5.0",
+ "hyper",
  "hyper-util",
  "once_cell",
  "prometheus-client",
@@ -2002,7 +1939,7 @@ dependencies = [
  "hostname",
  "http 1.1.0",
  "http-body-util",
- "hyper 1.5.0",
+ "hyper",
  "hyper-util",
  "igd-next",
  "iroh-base",
@@ -3149,9 +3086,8 @@ dependencies = [
 
 [[package]]
 name = "quic-rpc"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d8431b2e7c22929347b61a354d4936d71fe7ab1e6b0475dc50e98276970dfec"
+version = "0.15.0"
+source = "git+https://github.com/n0-computer/quic-rpc?branch=map-transports-not-services#16b7c4942365b96fc750627459261e52e1190f6c"
 dependencies = [
  "anyhow",
  "derive_more",
@@ -3165,43 +3101,16 @@ dependencies = [
  "serde",
  "slab",
  "tokio",
- "tracing",
-]
-
-[[package]]
-name = "quic-rpc"
-version = "0.14.0"
-source = "git+https://github.com/n0-computer/quic-rpc?branch=naming-bikeshedding#d9637d1982e90c1ee6fb65a62f354fb319ebfb37"
-dependencies = [
- "anyhow",
- "bincode",
- "bytes",
- "derive_more",
- "educe",
- "flume",
- "futures-lite 2.4.0",
- "futures-sink",
- "futures-util",
- "hex",
- "hyper 0.14.31",
- "iroh-quinn",
- "pin-project",
- "serde",
- "slab",
- "tokio",
- "tokio-serde",
- "tokio-util",
  "tracing",
 ]
 
 [[package]]
 name = "quic-rpc-derive"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "403bc8506c847468e00170dbbbfe2c54d13b090031bcbe474cd3faea021cbd9f"
+version = "0.15.0"
+source = "git+https://github.com/n0-computer/quic-rpc?branch=map-transports-not-services#16b7c4942365b96fc750627459261e52e1190f6c"
 dependencies = [
  "proc-macro2",
- "quic-rpc 0.14.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "quic-rpc",
  "quote",
  "syn 1.0.109",
 ]
@@ -3401,9 +3310,9 @@ dependencies = [
  "futures-core",
  "futures-util",
  "http 1.1.0",
- "http-body 1.0.1",
+ "http-body",
  "http-body-util",
- "hyper 1.5.0",
+ "hyper",
  "hyper-rustls",
  "hyper-util",
  "ipnet",
@@ -4337,21 +4246,6 @@ dependencies = [
  "url",
  "webpki-roots",
  "x509-parser",
-]
-
-[[package]]
-name = "tokio-serde"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "911a61637386b789af998ee23f50aa30d5fd7edcec8d6d3dedae5e5815205466"
-dependencies = [
- "bincode",
- "bytes",
- "educe",
- "futures-core",
- "futures-sink",
- "pin-project",
- "serde",
 ]
 
 [[package]]
