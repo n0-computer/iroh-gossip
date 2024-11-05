@@ -8,7 +8,7 @@ use anyhow::Result;
 use futures_lite::{Stream, StreamExt};
 use futures_util::{Sink, SinkExt};
 use iroh_net::NodeId;
-use quic_rpc::client::BoxedServiceConnection;
+use quic_rpc::client::BoxedConnector;
 
 use crate::{
     net::{Command as SubscribeUpdate, Event as SubscribeResponse},
@@ -18,7 +18,7 @@ use crate::{
 
 /// Iroh gossip client.
 #[derive(Debug, Clone)]
-pub struct Client<C = BoxedServiceConnection<RpcService>> {
+pub struct Client<C = BoxedConnector<RpcService>> {
     pub(super) rpc: quic_rpc::RpcClient<RpcService, C>,
 }
 
@@ -42,7 +42,7 @@ impl Default for SubscribeOpts {
 
 impl<C> Client<C>
 where
-    C: quic_rpc::ServiceConnection<RpcService>,
+    C: quic_rpc::Connector<RpcService>,
 {
     /// Creates a new gossip client.
     pub fn new(rpc: quic_rpc::RpcClient<RpcService, C>) -> Self {

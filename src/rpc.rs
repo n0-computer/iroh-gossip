@@ -1,5 +1,6 @@
 //! Provides a rpc protocol as well as a client for the protocol
 use proto::RpcService;
+use quic_rpc::server::ChannelTypes;
 
 use crate::net::Gossip;
 pub use crate::net::{Command as SubscribeUpdate, Event as SubscribeResponse};
@@ -8,7 +9,7 @@ pub mod proto;
 
 impl Gossip {
     /// Handle a gossip request from the RPC server.
-    pub async fn handle_rpc_request<C: quic_rpc::ServiceChannel<RpcService>>(
+    pub async fn handle_rpc_request<C: ChannelTypes<RpcService>>(
         &self,
         msg: crate::rpc::proto::Request,
         chan: quic_rpc::server::RpcChannel<RpcService, C>,
