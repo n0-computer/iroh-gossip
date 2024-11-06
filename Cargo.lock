@@ -370,9 +370,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.1.34"
+version = "1.1.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67b9470d453346108f93a59222a9a1a5724db32d0a4727b7ab7ace4b4d822dc9"
+checksum = "0f57c4b4da2a9d619dd035f27316d7a426305b75be93d09e92f2b9229c34feaf"
 dependencies = [
  "shlex",
 ]
@@ -1915,7 +1915,7 @@ dependencies = [
 [[package]]
 name = "iroh-net"
 version = "0.28.1"
-source = "git+https://github.com/n0-computer/iroh?branch=main#134a93b5a60103b3ce8fa4aacb52cdbcb291d00b"
+source = "git+https://github.com/n0-computer/iroh?branch=main#0a7a534128bf1234a326fcfba134d878e796c377"
 dependencies = [
  "anyhow",
  "axum",
@@ -2049,7 +2049,7 @@ dependencies = [
 [[package]]
 name = "iroh-router"
 version = "0.28.0"
-source = "git+https://github.com/n0-computer/iroh?branch=main#134a93b5a60103b3ce8fa4aacb52cdbcb291d00b"
+source = "git+https://github.com/n0-computer/iroh?branch=main#0a7a534128bf1234a326fcfba134d878e796c377"
 dependencies = [
  "anyhow",
  "futures-buffered",
@@ -2395,7 +2395,7 @@ dependencies = [
 [[package]]
 name = "netwatch"
 version = "0.1.0"
-source = "git+https://github.com/n0-computer/iroh?branch=main#134a93b5a60103b3ce8fa4aacb52cdbcb291d00b"
+source = "git+https://github.com/n0-computer/iroh?branch=main#0a7a534128bf1234a326fcfba134d878e796c377"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2889,7 +2889,7 @@ checksum = "cc9c68a3f6da06753e9335d63e27f6b9754dd1920d941135b7ea8224f141adb2"
 [[package]]
 name = "portmapper"
 version = "0.1.0"
-source = "git+https://github.com/n0-computer/iroh?branch=main#134a93b5a60103b3ce8fa4aacb52cdbcb291d00b"
+source = "git+https://github.com/n0-computer/iroh?branch=main#0a7a534128bf1234a326fcfba134d878e796c377"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3086,9 +3086,9 @@ dependencies = [
 
 [[package]]
 name = "quic-rpc"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d8431b2e7c22929347b61a354d4936d71fe7ab1e6b0475dc50e98276970dfec"
+checksum = "61e131f594054d27d077162815db3b5e9ddd76a28fbb9091b68095971e75c286"
 dependencies = [
  "anyhow",
  "derive_more",
@@ -3107,9 +3107,9 @@ dependencies = [
 
 [[package]]
 name = "quic-rpc-derive"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "403bc8506c847468e00170dbbbfe2c54d13b090031bcbe474cd3faea021cbd9f"
+checksum = "cbef4c942978f74ef296ae40d43d4375c9d730b65a582688a358108cfd5c0cf7"
 dependencies = [
  "proc-macro2",
  "quic-rpc",
@@ -3160,9 +3160,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-udp"
-version = "0.5.6"
+version = "0.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e346e016eacfff12233c243718197ca12f148c84e1e84268a896699b41c71780"
+checksum = "7d5a626c6807713b15cac82a6acaccd6043c9a5408c24baae07611fec3f243da"
 dependencies = [
  "cfg_aliases",
  "libc",
