@@ -145,7 +145,8 @@ impl Gossip {
             to_actor_tx,
             _actor_handle: Arc::new(AbortOnDropHandle::new(actor_handle)),
             max_message_size,
-            rpc_handler: Default::default(),
+            #[cfg(feature = "rpc")]
+            rpc_handler: OnceLock::new(),
         }
     }
 
