@@ -108,6 +108,10 @@
 <a href="#108" id="108">108</a>
 <a href="#109" id="109">109</a>
 <a href="#110" id="110">110</a>
+<a href="#111" id="111">111</a>
+<a href="#112" id="112">112</a>
+<a href="#113" id="113">113</a>
+<a href="#114" id="114">114</a>
 </pre></div><pre class="rust"><code><span class="doccomment">//! Iroh gossip client.
 //!
 //! Create a [`Client`] with a [`quic_rpc::RpcClient`] and use it to interact
@@ -118,7 +122,7 @@
 <span class="kw">use </span>futures_lite::{Stream, StreamExt};
 <span class="kw">use </span>futures_util::{Sink, SinkExt};
 <span class="kw">use </span>iroh_net::NodeId;
-<span class="kw">use </span>quic_rpc::client::BoxedConnector;
+<span class="kw">use </span>quic_rpc::{client::BoxedConnector, transport::flume::FlumeConnector};
 
 <span class="kw">use crate</span>::{
     net::{Command <span class="kw">as </span>SubscribeUpdate, Event <span class="kw">as </span>SubscribeResponse},
@@ -131,6 +135,10 @@
 </span><span class="kw">pub struct </span>Client&lt;C = BoxedConnector&lt;RpcService&gt;&gt; {
     <span class="kw">pub</span>(<span class="kw">super</span>) rpc: quic_rpc::RpcClient&lt;RpcService, C&gt;,
 }
+
+<span class="doccomment">/// Type alias for a memory-backed client.
+</span><span class="kw">pub type </span>MemClient =
+    Client&lt;FlumeConnector&lt;<span class="kw">crate</span>::rpc::proto::Response, <span class="kw">crate</span>::rpc::proto::Request&gt;&gt;;
 
 <span class="doccomment">/// Options for subscribing to a gossip topic.
 </span><span class="attr">#[derive(Debug, Clone)]

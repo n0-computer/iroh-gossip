@@ -107,11 +107,10 @@
 <a href="#107" id="107">107</a>
 <a href="#108" id="108">108</a>
 <a href="#109" id="109">109</a>
-<a href="#110" id="110">110</a>
 </pre></div><pre class="rust"><code><span class="doccomment">//! Provides a rpc protocol as well as a client for the protocol
 </span><span class="kw">use </span>std::sync::Arc;
 
-<span class="kw">use </span>client::Client;
+<span class="kw">use </span>client::MemClient;
 <span class="kw">use </span>proto::{Request, Response, RpcService};
 <span class="kw">use </span>quic_rpc::{server::ChannelTypes, transport::flume::FlumeConnector, RpcClient, RpcServer};
 <span class="kw">use </span>tokio::task::JoinSet;
@@ -126,7 +125,7 @@
 <span class="attr">#[derive(Debug)]
 </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">struct </span>RpcHandler {
     <span class="doccomment">/// Client to hand out
-    </span>client: client::Client&lt;FlumeConnector&lt;Response, Request&gt;&gt;,
+    </span>client: MemClient,
     <span class="doccomment">/// Handler task
     </span>_handler: AbortOnDropHandle&lt;()&gt;,
 }
@@ -135,8 +134,8 @@
     <span class="kw">fn </span>new(gossip: <span class="kw-2">&amp;</span>Gossip) -&gt; <span class="self">Self </span>{
         <span class="kw">let </span>gossip = gossip.clone();
         <span class="kw">let </span>(listener, connector) = quic_rpc::transport::flume::channel(<span class="number">1</span>);
-        <span class="kw">let </span>listener = RpcServer::&lt;RpcService, <span class="kw">_</span>&gt;::new(listener);
-        <span class="kw">let </span>client = Client::new(RpcClient::new(connector));
+        <span class="kw">let </span>listener = RpcServer::new(listener);
+        <span class="kw">let </span>client = MemClient::new(RpcClient::new(connector));
         <span class="kw">let </span>task = tokio::spawn(<span class="kw">async move </span>{
             <span class="kw">let </span><span class="kw-2">mut </span>tasks = JoinSet::new();
             <span class="kw">loop </span>{
@@ -144,7 +143,7 @@
                     <span class="prelude-val">Some</span>(res) = tasks.join_next(), <span class="kw">if </span>!tasks.is_empty() =&gt; {
                         <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = res {
                             <span class="kw">if </span>e.is_panic() {
-                                <span class="macro">error!</span>(<span class="string">"Panic in task: {e}"</span>);
+                                <span class="macro">error!</span>(<span class="string">"Panic handling RPC request: {e}"</span>);
                             }
                         }
                     }
@@ -192,12 +191,11 @@
     <span class="doccomment">/// Handle a gossip request from the RPC server.
     </span><span class="kw">pub async fn </span>handle_rpc_request&lt;C: ChannelTypes&lt;RpcService&gt;&gt;(
         <span class="kw-2">&amp;</span><span class="self">self</span>,
-        msg: <span class="kw">crate</span>::rpc::proto::Request,
+        msg: Request,
         chan: quic_rpc::server::RpcChannel&lt;RpcService, C&gt;,
     ) -&gt; <span class="prelude-ty">Result</span>&lt;(), quic_rpc::server::RpcServerError&lt;C&gt;&gt; {
         <span class="kw">use </span>quic_rpc::server::RpcServerError;
-
-        <span class="kw">use </span><span class="kw">crate</span>::rpc::proto::Request::<span class="kw-2">*</span>;
+        <span class="kw">use </span>Request::<span class="kw-2">*</span>;
         <span class="kw">match </span>msg {
             Subscribe(msg) =&gt; {
                 <span class="kw">let </span>this = <span class="self">self</span>.clone();
