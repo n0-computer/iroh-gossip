@@ -1,7 +1,7 @@
 //! Provides a rpc protocol as well as a client for the protocol
 use std::sync::Arc;
 
-use client::Client;
+use client::MemClient;
 use proto::{Request, Response, RpcService};
 use quic_rpc::{server::ChannelTypes, transport::flume::FlumeConnector, RpcClient, RpcServer};
 use tokio::task::JoinSet;
@@ -16,7 +16,7 @@ pub mod proto;
 #[derive(Debug)]
 pub(crate) struct RpcHandler {
     /// Client to hand out
-    client: client::Client<FlumeConnector<Response, Request>>,
+    client: MemClient,
     /// Handler task
     _handler: AbortOnDropHandle<()>,
 }
@@ -25,8 +25,8 @@ impl RpcHandler {
     fn new(gossip: &Gossip) -> Self {
         let gossip = gossip.clone();
         let (listener, connector) = quic_rpc::transport::flume::channel(1);
-        let listener = RpcServer::<RpcService, _>::new(listener);
-        let client = Client::new(RpcClient::new(connector));
+        let listener = RpcServer::new(listener);
+        let client = MemClient::new(RpcClient::new(connector));
         let task = tokio::spawn(async move {
             let mut tasks = JoinSet::new();
             loop {
@@ -34,7 +34,7 @@ impl RpcHandler {
                     Some(res) = tasks.join_next(), if !tasks.is_empty() => {
                         if let Err(e) = res {
                             if e.is_panic() {
-                                error!("Panic in task: {e}");
+                                error!("Panic handling RPC request: {e}");
                             }
                         }
                     }
@@ -82,12 +82,11 @@ impl Gossip {
     /// Handle a gossip request from the RPC server.
     pub async fn handle_rpc_request<C: ChannelTypes<RpcService>>(
         &self,
-        msg: crate::rpc::proto::Request,
+        msg: Request,
         chan: quic_rpc::server::RpcChannel<RpcService, C>,
     ) -> Result<(), quic_rpc::server::RpcServerError<C>> {
         use quic_rpc::server::RpcServerError;
-
-        use crate::rpc::proto::Request::*;
+        use Request::*;
         match msg {
             Subscribe(msg) => {
                 let this = self.clone();
