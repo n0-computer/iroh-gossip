@@ -2,9 +2,7 @@
 use client::MemClient;
 use proto::{Request, Response, RpcService};
 use quic_rpc::{server::ChannelTypes, transport::flume::FlumeConnector, RpcClient, RpcServer};
-use tokio::task::JoinSet;
 use tokio_util::task::AbortOnDropHandle;
-use tracing::{error, warn};
 
 use crate::net::Gossip;
 pub use crate::net::{Command as SubscribeUpdate, Event as SubscribeResponse};
@@ -25,61 +23,23 @@ impl RpcHandler {
         let (listener, connector) = quic_rpc::transport::flume::channel(1);
         let listener = RpcServer::new(listener);
         let client = MemClient::new(RpcClient::new(connector));
-        let task = tokio::spawn(async move {
-            let mut tasks = JoinSet::new();
-            loop {
-                tokio::select! {
-                    Some(res) = tasks.join_next(), if !tasks.is_empty() => {
-                        if let Err(e) = res {
-                            if e.is_panic() {
-                                error!("Panic handling RPC request: {e}");
-                            }
-                        }
-                    }
-                    req = listener.accept() => {
-                        let req = match req {
-                            Ok(req) => req,
-                            Err(e) => {
-                                warn!("Error accepting RPC request: {e}");
-                                continue;
-                            }
-                        };
-                        let gossip = gossip.clone();
-                        tasks.spawn(async move {
-                            let (req, client) = match req.read_first().await {
-                                Ok((req, client)) => (req, client),
-                                Err(e) => {
-                                    warn!("Error reading first message: {e}");
-                                    return;
-                                }
-                            };
-                            if let Err(cause) = gossip.handle_rpc_request(req, client).await {
-                                warn!("Error handling RPC request: {:?}", cause);
-                            }
-                        });
-                    }
-                }
-            }
-        });
-        Self {
-            client,
-            _handler: AbortOnDropHandle::new(task),
-        }
+        let _handler = listener
+            .spawn_accept_loop(move |req, chan| gossip.clone().handle_rpc_request(req, chan));
+
+        Self { client, _handler }
     }
 }
 
 impl Gossip {
     /// Get an in-memory gossip client
     pub fn client(&self) -> &client::Client<FlumeConnector<Response, Request>> {
-        let handler = self
-            .rpc_handler
-            .get_or_init(|| RpcHandler::new(self));
+        let handler = self.rpc_handler.get_or_init(|| RpcHandler::new(self));
         &handler.client
     }
 
     /// Handle a gossip request from the RPC server.
     pub async fn handle_rpc_request<C: ChannelTypes<RpcService>>(
-        &self,
+        self,
         msg: Request,
         chan: quic_rpc::server::RpcChannel<RpcService, C>,
     ) -> Result<(), quic_rpc::server::RpcServerError<C>> {
