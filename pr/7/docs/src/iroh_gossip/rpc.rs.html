@@ -105,12 +105,8 @@
 <a href="#105" id="105">105</a>
 <a href="#106" id="106">106</a>
 <a href="#107" id="107">107</a>
-<a href="#108" id="108">108</a>
-<a href="#109" id="109">109</a>
 </pre></div><pre class="rust"><code><span class="doccomment">//! Provides a rpc protocol as well as a client for the protocol
-</span><span class="kw">use </span>std::sync::Arc;
-
-<span class="kw">use </span>client::MemClient;
+</span><span class="kw">use </span>client::MemClient;
 <span class="kw">use </span>proto::{Request, Response, RpcService};
 <span class="kw">use </span>quic_rpc::{server::ChannelTypes, transport::flume::FlumeConnector, RpcClient, RpcServer};
 <span class="kw">use </span>tokio::task::JoinSet;
@@ -184,7 +180,7 @@
     </span><span class="kw">pub fn </span>client(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>client::Client&lt;FlumeConnector&lt;Response, Request&gt;&gt; {
         <span class="kw">let </span>handler = <span class="self">self
             </span>.rpc_handler
-            .get_or_init(|| Arc::new(RpcHandler::new(<span class="self">self</span>)));
+            .get_or_init(|| RpcHandler::new(<span class="self">self</span>));
         <span class="kw-2">&amp;</span>handler.client
     }
 

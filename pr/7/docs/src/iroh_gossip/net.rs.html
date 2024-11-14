@@ -1022,7 +1022,7 @@
 </span><span class="kw">use </span>std::{
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
     pin::Pin,
-    sync::{Arc, OnceLock},
+    sync::Arc,
     task::{Context, Poll},
     time::Instant,
 };
@@ -1112,7 +1112,7 @@
     _actor_handle: Arc&lt;AbortOnDropHandle&lt;()&gt;&gt;,
     max_message_size: usize,
     <span class="attr">#[cfg(feature = <span class="string">"rpc"</span>)]
-    </span><span class="kw">pub</span>(<span class="kw">crate</span>) rpc_handler: OnceLock&lt;Arc&lt;<span class="kw">crate</span>::rpc::RpcHandler&gt;&gt;,
+    </span><span class="kw">pub</span>(<span class="kw">crate</span>) rpc_handler: Arc&lt;std::sync::OnceLock&lt;<span class="kw">crate</span>::rpc::RpcHandler&gt;&gt;,
 }
 
 <span class="kw">impl </span>ProtocolHandler <span class="kw">for </span>Gossip {
@@ -1165,7 +1165,7 @@
             _actor_handle: Arc::new(AbortOnDropHandle::new(actor_handle)),
             max_message_size,
             <span class="attr">#[cfg(feature = <span class="string">"rpc"</span>)]
-            </span>rpc_handler: OnceLock::new(),
+            </span>rpc_handler: Default::default(),
         }
     }
 
