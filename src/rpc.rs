@@ -1,6 +1,4 @@
 //! Provides a rpc protocol as well as a client for the protocol
-use std::sync::Arc;
-
 use client::MemClient;
 use proto::{Request, Response, RpcService};
 use quic_rpc::{server::ChannelTypes, transport::flume::FlumeConnector, RpcClient, RpcServer};
@@ -75,7 +73,7 @@ impl Gossip {
     pub fn client(&self) -> &client::Client<FlumeConnector<Response, Request>> {
         let handler = self
             .rpc_handler
-            .get_or_init(|| Arc::new(RpcHandler::new(self)));
+            .get_or_init(|| RpcHandler::new(self));
         &handler.client
     }
 

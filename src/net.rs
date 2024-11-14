@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
     pin::Pin,
-    sync::{Arc, OnceLock},
+    sync::Arc,
     task::{Context, Poll},
     time::Instant,
 };
@@ -93,7 +93,7 @@ pub struct Gossip {
     _actor_handle: Arc<AbortOnDropHandle<()>>,
     max_message_size: usize,
     #[cfg(feature = "rpc")]
-    pub(crate) rpc_handler: OnceLock<Arc<crate::rpc::RpcHandler>>,
+    pub(crate) rpc_handler: Arc<std::sync::OnceLock<crate::rpc::RpcHandler>>,
 }
 
 impl ProtocolHandler for Gossip {
@@ -146,7 +146,7 @@ impl Gossip {
             _actor_handle: Arc::new(AbortOnDropHandle::new(actor_handle)),
             max_message_size,
             #[cfg(feature = "rpc")]
-            rpc_handler: OnceLock::new(),
+            rpc_handler: Default::default(),
         }
     }
 
