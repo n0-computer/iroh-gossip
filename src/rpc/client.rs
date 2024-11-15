@@ -8,7 +8,7 @@ use anyhow::Result;
 use futures_lite::{Stream, StreamExt};
 use futures_util::{Sink, SinkExt};
 use iroh_net::NodeId;
-use quic_rpc::client::BoxedConnector;
+use quic_rpc::{client::BoxedConnector, transport::flume::FlumeConnector};
 
 use crate::{
     net::{Command as SubscribeUpdate, Event as SubscribeResponse},
@@ -21,6 +21,10 @@ use crate::{
 pub struct Client<C = BoxedConnector<RpcService>> {
     pub(super) rpc: quic_rpc::RpcClient<RpcService, C>,
 }
+
+/// Type alias for a memory-backed client.
+pub type MemClient =
+    Client<FlumeConnector<crate::rpc::proto::Response, crate::rpc::proto::Request>>;
 
 /// Options for subscribing to a gossip topic.
 #[derive(Debug, Clone)]

@@ -92,6 +92,8 @@ pub struct Gossip {
     to_actor_tx: mpsc::Sender<ToActor>,
     _actor_handle: Arc<AbortOnDropHandle<()>>,
     max_message_size: usize,
+    #[cfg(feature = "rpc")]
+    pub(crate) rpc_handler: Arc<std::sync::OnceLock<crate::rpc::RpcHandler>>,
 }
 
 impl ProtocolHandler for Gossip {
@@ -143,6 +145,8 @@ impl Gossip {
             to_actor_tx,
             _actor_handle: Arc::new(AbortOnDropHandle::new(actor_handle)),
             max_message_size,
+            #[cfg(feature = "rpc")]
+            rpc_handler: Default::default(),
         }
     }
 
