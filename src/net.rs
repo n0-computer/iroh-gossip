@@ -831,10 +831,7 @@ mod test {
 
     use bytes::Bytes;
     use futures_concurrency::future::TryJoin;
-    use iroh_net::{
-        key::SecretKey,
-        relay::{RelayMap, RelayMode},
-    };
+    use iroh_net::{key::SecretKey, RelayMap, RelayMode};
     use tokio::{spawn, time::timeout};
     use tokio_util::sync::CancellationToken;
     use tracing::info;
