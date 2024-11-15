@@ -14,15 +14,16 @@ use futures_concurrency::{
     future::TryJoin,
     stream::{stream_group, StreamGroup},
 };
-use futures_lite::{stream::Stream, StreamExt};
+use futures_lite::{future::Boxed as BoxedFuture, stream::Stream, StreamExt};
 use futures_util::TryFutureExt;
 use iroh_metrics::inc;
 use iroh_net::{
     dialer::Dialer,
-    endpoint::{get_remote_node_id, Connection, DirectAddr},
+    endpoint::{get_remote_node_id, Connecting, Connection, DirectAddr},
     key::PublicKey,
     AddrInfo, Endpoint, NodeAddr, NodeId,
 };
+use iroh_router::ProtocolHandler;
 use rand::rngs::StdRng;
 use rand_core::SeedableRng;
 use tokio::{sync::mpsc, task::JoinSet};
@@ -91,6 +92,14 @@ pub struct Gossip {
     to_actor_tx: mpsc::Sender<ToActor>,
     _actor_handle: Arc<AbortOnDropHandle<()>>,
     max_message_size: usize,
+    #[cfg(feature = "rpc")]
+    pub(crate) rpc_handler: Arc<std::sync::OnceLock<crate::rpc::RpcHandler>>,
+}
+
+impl ProtocolHandler for Gossip {
+    fn accept(self: Arc<Self>, conn: Connecting) -> BoxedFuture<Result<()>> {
+        Box::pin(async move { self.handle_connection(conn.await?).await })
+    }
 }
 
 impl Gossip {
@@ -136,6 +145,8 @@ impl Gossip {
             to_actor_tx,
             _actor_handle: Arc::new(AbortOnDropHandle::new(actor_handle)),
             max_message_size,
+            #[cfg(feature = "rpc")]
+            rpc_handler: Default::default(),
         }
     }
 
@@ -820,10 +831,7 @@ mod test {
 
     use bytes::Bytes;
     use futures_concurrency::future::TryJoin;
-    use iroh_net::{
-        key::SecretKey,
-        relay::{RelayMap, RelayMode},
-    };
+    use iroh_net::{key::SecretKey, RelayMap, RelayMode};
     use tokio::{spawn, time::timeout};
     use tokio_util::sync::CancellationToken;
     use tracing::info;

@@ -16,8 +16,7 @@ use iroh_gossip::{
 };
 use iroh_net::{
     key::{PublicKey, SecretKey},
-    relay::{RelayMap, RelayMode, RelayUrl},
-    Endpoint, NodeAddr,
+    Endpoint, NodeAddr, RelayMap, RelayMode, RelayUrl,
 };
 use serde::{Deserialize, Serialize};
 use tracing::warn;
