@@ -21,13 +21,13 @@ pub enum GossipCommands {
 
 Example usage:
 
-    $ iroh gossip subscribe --topic test --start
+    $ <cmd> gossip subscribe --topic test --start
 
 This will print the current node's id. Open another terminal
 or another machine and you can join the same topic:
 
     # on another machine/terminal
-    $ iroh gossip subscribe --topic test <other node_id> --start
+    $ <cmd> gossip subscribe --topic test <other node_id> --start
 
 Any lines entered in stdin will be sent to the given topic
 and received messages will be printed to stdout line-by-line.
