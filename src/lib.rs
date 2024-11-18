@@ -14,6 +14,9 @@ pub mod metrics;
 pub mod net;
 pub mod proto;
 
+#[cfg(feature = "cli")]
+#[cfg_attr(iroh_docsrs, doc(cfg(feature = "cli")))]
+pub mod cli;
 #[cfg(feature = "rpc")]
 #[cfg_attr(iroh_docsrs, doc(cfg(feature = "rpc")))]
 pub mod rpc;

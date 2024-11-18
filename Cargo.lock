@@ -1867,6 +1867,7 @@ dependencies = [
  "futures-concurrency",
  "futures-lite 2.5.0",
  "futures-util",
+ "hex",
  "indexmap",
  "iroh-base",
  "iroh-blake3",
