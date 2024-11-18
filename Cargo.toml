@@ -88,6 +88,7 @@ rpc = [
     "dep:strum",
 ]
 cli = [
+    "rpc",
     "dep:clap",
     "dep:hex"
 ]
