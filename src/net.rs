@@ -10,10 +10,7 @@ use std::{
 
 use anyhow::{anyhow, Context as _, Result};
 use bytes::BytesMut;
-use futures_concurrency::{
-    future::TryJoin,
-    stream::{stream_group, StreamGroup},
-};
+use futures_concurrency::stream::{stream_group, StreamGroup};
 use futures_lite::{future::Boxed as BoxedFuture, stream::Stream, StreamExt};
 use futures_util::TryFutureExt;
 use iroh_metrics::inc;
@@ -444,6 +441,11 @@ impl Actor {
         };
 
         let (send_tx, send_rx) = mpsc::channel(SEND_QUEUE_CAP);
+
+        // enqueue messages
+        for msg in queue.into_iter().take(SEND_QUEUE_CAP) {
+            send_tx.try_send(msg).expect("at most cap messages");
+        }
         let max_message_size = self.state.max_message_size();
         let in_event_tx = self.in_event_tx.clone();
 
@@ -457,17 +459,12 @@ impl Actor {
                     send_rx,
                     &in_event_tx,
                     max_message_size,
-                    queue,
                 )
                 .await
                 {
                     Ok(()) => debug!("connection closed without error"),
                     Err(err) => warn!("connection closed: {err:?}"),
                 }
-                in_event_tx
-                    .send(InEvent::PeerDisconnected(peer_id))
-                    .await
-                    .ok();
             }
             .instrument(error_span!("gossip_conn", peer = %peer_id.fmt_short())),
         );
@@ -685,7 +682,6 @@ async fn connection_loop(
     mut send_rx: mpsc::Receiver<ProtoMessage>,
     in_event_tx: &mpsc::Sender<InEvent>,
     max_message_size: usize,
-    queue: Vec<ProtoMessage>,
 ) -> anyhow::Result<()> {
     let (mut send, mut recv) = match origin {
         ConnOrigin::Accept => conn.accept_bi().await?,
@@ -695,28 +691,39 @@ async fn connection_loop(
     let mut send_buf = BytesMut::new();
     let mut recv_buf = BytesMut::new();
 
-    let send_loop = async {
-        for msg in queue {
-            write_message(&mut send, &mut send_buf, &msg, max_message_size).await?
-        }
-        while let Some(msg) = send_rx.recv().await {
-            write_message(&mut send, &mut send_buf, &msg, max_message_size).await?
-        }
-        Ok::<_, anyhow::Error>(())
-    };
+    loop {
+        tokio::select! {
+            biased;
 
-    let recv_loop = async {
-        loop {
-            let msg = read_message(&mut recv, &mut recv_buf, max_message_size).await?;
-            match msg {
-                None => break,
-                Some(msg) => in_event_tx.send(InEvent::RecvMessage(from, msg)).await?,
+            msg = send_rx.recv() => {
+                match msg {
+                    Some(msg) => {
+                        write_message(&mut send, &mut send_buf, &msg, max_message_size).await?
+                    }
+                    None => {
+                        debug!("send_rx shutdown, stopping loop for {}", from);
+                        break;
+                    }
+                }
+            }
+            msg = read_message(&mut recv, &mut recv_buf, max_message_size) => {
+                match msg {
+                    Ok(Some(msg)) => in_event_tx.send(InEvent::RecvMessage(from, msg)).await?,
+                    Ok(None) => {
+                        debug!("in_event_tx shutdown, stopping loop for {}", from);
+                        break;
+                    },
+                    Err(err) => {
+                        return Err(err);
+                    }
+                }
             }
         }
-        Ok::<_, anyhow::Error>(())
-    };
+    }
 
-    (send_loop, recv_loop).try_join().await?;
+    if let Err(err) = in_event_tx.send(InEvent::PeerDisconnected(from)).await {
+        warn!("failed to send PeerDisconnected({}): {:?}", from, err);
+    }
 
     Ok(())
 }
