@@ -105,33 +105,9 @@ impl ProtocolHandler for Gossip {
 impl Gossip {
     /// Spawn a gossip actor and get a handle for it
     pub fn from_endpoint(endpoint: Endpoint, config: proto::Config, my_addr: &AddrInfo) -> Self {
-        let peer_id = endpoint.node_id();
-        let dialer = Dialer::new(endpoint.clone());
-        let state = proto::State::new(
-            peer_id,
-            encode_peer_data(my_addr).unwrap(),
-            config,
-            rand::rngs::StdRng::from_entropy(),
-        );
-        let (to_actor_tx, to_actor_rx) = mpsc::channel(TO_ACTOR_CAP);
-        let (in_event_tx, in_event_rx) = mpsc::channel(IN_EVENT_CAP);
-
-        let me = endpoint.node_id().fmt_short();
-        let max_message_size = state.max_message_size();
-        let actor = Actor {
-            endpoint,
-            state,
-            dialer,
-            to_actor_rx,
-            in_event_rx,
-            in_event_tx,
-            timers: Timers::new(),
-            command_rx: StreamGroup::new().keyed(),
-            peers: Default::default(),
-            topics: Default::default(),
-            quit_queue: Default::default(),
-            connection_tasks: Default::default(),
-        };
+        let (actor, to_actor_tx) = Actor::new(endpoint, config, my_addr);
+        let me = actor.endpoint.node_id().fmt_short();
+        let max_message_size = actor.state.max_message_size();
 
         let actor_handle = tokio::spawn(
             async move {
@@ -278,6 +254,40 @@ struct Actor {
 }
 
 impl Actor {
+    fn new(
+        endpoint: Endpoint,
+        config: proto::Config,
+        my_addr: &AddrInfo,
+    ) -> (Self, mpsc::Sender<ToActor>) {
+        let peer_id = endpoint.node_id();
+        let dialer = Dialer::new(endpoint.clone());
+        let state = proto::State::new(
+            peer_id,
+            encode_peer_data(my_addr).unwrap(),
+            config,
+            rand::rngs::StdRng::from_entropy(),
+        );
+        let (to_actor_tx, to_actor_rx) = mpsc::channel(TO_ACTOR_CAP);
+        let (in_event_tx, in_event_rx) = mpsc::channel(IN_EVENT_CAP);
+
+        let actor = Actor {
+            endpoint,
+            state,
+            dialer,
+            to_actor_rx,
+            in_event_rx,
+            in_event_tx,
+            timers: Timers::new(),
+            command_rx: StreamGroup::new().keyed(),
+            peers: Default::default(),
+            topics: Default::default(),
+            quit_queue: Default::default(),
+            connection_tasks: Default::default(),
+        };
+
+        (actor, to_actor_tx)
+    }
+
     pub async fn run(mut self) -> anyhow::Result<()> {
         // Watch for changes in direct addresses to update our peer data.
         let mut direct_addresses_stream = self.endpoint.direct_addresses();
@@ -290,9 +300,7 @@ impl Actor {
             .next()
             .await
             .ok_or_else(|| anyhow!("Failed to discover direct addresses"))?;
-        let peer_data = our_peer_data(&self.endpoint, &current_addresses)?;
-        self.handle_in_event(InEvent::UpdatePeerData(peer_data), Instant::now())
-            .await?;
+        self.handle_addr_update(&current_addresses).await?;
 
         let mut i = 0;
         loop {
@@ -320,12 +328,10 @@ impl Actor {
                     trace!(?i, "tick: new_endpoints");
                     inc!(Metrics, actor_tick_endpoint);
                     current_addresses = new_addresses;
-                    let peer_data = our_peer_data(&self.endpoint, &current_addresses)?;
-                    self.handle_in_event(InEvent::UpdatePeerData(peer_data), Instant::now()).await?;
+                    self.handle_addr_update(&current_addresses).await?;
                 }
                 Some(_relay_url) = home_relay_stream.next() => {
-                    let peer_data = our_peer_data(&self.endpoint, &current_addresses)?;
-                    self.handle_in_event(InEvent::UpdatePeerData(peer_data), Instant::now()).await?;
+                    self.handle_addr_update(&current_addresses).await?;
                 }
                 (peer_id, res) = self.dialer.next_conn() => {
                     trace!(?i, "tick: dialer");
@@ -370,6 +376,15 @@ impl Actor {
             }
         }
         Ok(())
+    }
+
+    async fn handle_addr_update(
+        &mut self,
+        current_addresses: &BTreeSet<DirectAddr>,
+    ) -> anyhow::Result<()> {
+        let peer_data = our_peer_data(&self.endpoint, &current_addresses)?;
+        self.handle_in_event(InEvent::UpdatePeerData(peer_data), Instant::now())
+            .await
     }
 
     async fn handle_command(
