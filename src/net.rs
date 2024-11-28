@@ -289,18 +289,8 @@ impl Actor {
     }
 
     pub async fn run(mut self) -> anyhow::Result<()> {
-        // Watch for changes in direct addresses to update our peer data.
-        let mut direct_addresses_stream = self.endpoint.direct_addresses();
-        // Watch for changes of our home relay to update our peer data.
-        let mut home_relay_stream = self.endpoint.watch_home_relay();
-
-        // With each gossip message we provide addressing information to reach our node.
-        // We wait until at least one direct address is discovered.
-        let mut current_addresses = direct_addresses_stream
-            .next()
-            .await
-            .ok_or_else(|| anyhow!("Failed to discover direct addresses"))?;
-        self.handle_addr_update(&current_addresses).await?;
+        let (mut current_addresses, mut home_relay_stream, mut direct_addresses_stream) =
+            self.setup().await?;
 
         let mut i = 0;
         loop {
@@ -321,6 +311,36 @@ impl Actor {
             }
         }
         Ok(())
+    }
+
+    /// Performs the initial actor setup to run the [`Actor::event_loop`].
+    ///
+    /// This updates our current address and return it. It also returns the home relay stream and
+    /// direct addr stream.
+    async fn setup(
+        &mut self,
+    ) -> anyhow::Result<(
+        BTreeSet<DirectAddr>,
+        impl Stream<Item = iroh_net::RelayUrl> + Unpin,
+        impl Stream<Item = BTreeSet<DirectAddr>> + Unpin,
+    )> {
+        // Watch for changes in direct addresses to update our peer data.
+        let mut direct_addresses_stream = self.endpoint.direct_addresses();
+        // Watch for changes of our home relay to update our peer data.
+        let home_relay_stream = self.endpoint.watch_home_relay();
+
+        // With each gossip message we provide addressing information to reach our node.
+        // We wait until at least one direct address is discovered.
+        let current_addresses = direct_addresses_stream
+            .next()
+            .await
+            .ok_or_else(|| anyhow!("Failed to discover direct addresses"))?;
+        self.handle_addr_update(&current_addresses).await?;
+        Ok((
+            current_addresses,
+            home_relay_stream,
+            direct_addresses_stream,
+        ))
     }
 
     /// One event loop processing step.
@@ -875,9 +895,114 @@ mod test {
     use iroh_net::{key::SecretKey, RelayMap, RelayMode};
     use tokio::{spawn, time::timeout};
     use tokio_util::sync::CancellationToken;
-    use tracing::info;
+    use tracing::{info, instrument};
 
     use super::*;
+
+    struct ManualActorLoop {
+        actor: Actor,
+        current_addresses: BTreeSet<DirectAddr>,
+        home_relay_stream: Box<dyn Stream<Item = iroh_net::RelayUrl> + Unpin>,
+        direct_addresses_stream: Box<dyn Stream<Item = BTreeSet<DirectAddr>> + Unpin>,
+        me: String,
+        step: usize,
+    }
+
+    impl std::ops::Deref for ManualActorLoop {
+        type Target = Actor;
+
+        fn deref(&self) -> &Self::Target {
+            &self.actor
+        }
+    }
+
+    impl std::ops::DerefMut for ManualActorLoop {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.actor
+        }
+    }
+
+    impl ManualActorLoop {
+        async fn new(mut actor: Actor) -> anyhow::Result<Self> {
+            let me = actor.endpoint.node_id().fmt_short();
+            let (current_addresses, home_relay_stream, direct_addresses_stream) =
+                actor.setup().await?;
+            let test_rig = Self {
+                actor,
+                current_addresses,
+                home_relay_stream: Box::new(home_relay_stream),
+                direct_addresses_stream: Box::new(direct_addresses_stream),
+                me,
+                step: 0,
+            };
+            Ok(test_rig)
+        }
+
+        #[instrument(skip_all, fields(me = self.me))]
+        async fn step(&mut self) -> anyhow::Result<()> {
+            let ManualActorLoop {
+                actor,
+                current_addresses,
+                home_relay_stream,
+                direct_addresses_stream,
+                me: _,
+                step,
+            } = self;
+            *step += 1;
+            actor
+                .event_loop(
+                    current_addresses,
+                    home_relay_stream,
+                    direct_addresses_stream,
+                    *step,
+                )
+                .await?;
+            Ok(())
+        }
+    }
+
+    impl Gossip {
+        /// Creates a gossip instance and its actor without spawning it.
+        ///
+        /// This creates the endpoint and spawns the endpoint loop as well. The handle for the
+        /// endpoing task is returned along the gossip instance and actor. Since the actor is not
+        /// actually spawned as [`Gossip::from_endpoint`] would, the gossip instance will have a
+        /// handle to a dummy task instead.
+        async fn gossip_and_actor(
+            rng: &mut rand_chacha::ChaCha12Rng,
+            config: proto::Config,
+            relay_map: RelayMap,
+            cancel: CancellationToken,
+        ) -> anyhow::Result<(Self, Actor, tokio::task::JoinHandle<anyhow::Result<()>>)> {
+            let my_addr = AddrInfo {
+                relay_url: relay_map.nodes().next().map(|relay| relay.url.clone()),
+                direct_addresses: Default::default(),
+            };
+            let endpoint = create_endpoint(rng, relay_map).await?;
+
+            let (actor, to_actor_tx) = Actor::new(endpoint, config, &my_addr);
+            let max_message_size = actor.state.max_message_size();
+
+            let _actor_handle = Arc::new(AbortOnDropHandle::new(tokio::spawn(
+                futures_lite::future::pending(),
+            )));
+            let gossip = Self {
+                to_actor_tx,
+                _actor_handle,
+                max_message_size,
+                #[cfg(feature = "rpc")]
+                rpc_handler: Default::default(),
+            };
+
+            let endpoing_task = tokio::spawn(endpoint_loop(
+                actor.endpoint.clone(),
+                gossip.clone(),
+                cancel,
+            ));
+
+            Ok((gossip, actor, endpoing_task))
+        }
+    }
 
     async fn create_endpoint(
         rng: &mut rand_chacha::ChaCha12Rng,
@@ -1053,5 +1178,152 @@ mod test {
                 .unwrap()
                 .unwrap();
         }
+    }
+
+    /// Test that when a gossip topic is no longer needed it's actually unsubscribed.
+    ///
+    /// This test will:
+    /// - Create two endpoints, the first using manual event loop.
+    /// - Subscribe both nodes to the same topic. The first node will subscribe twice and connect
+    ///   to the second node. The second node will subscribe without bootstrap.
+    /// - Ensure that the first node removes the subscription iff all topic handles have been
+    ///   dropped
+    // NOTE: this is a regression test.
+    #[tokio::test]
+    async fn subscription_cleanup() -> testresult::TestResult {
+        let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
+        let _guard = iroh_test::logging::setup();
+        let ct = CancellationToken::new();
+        let (relay_map, relay_url, _guard) =
+            iroh_net::test_utils::run_relay_server().await.unwrap();
+
+        // create the first node with a manual actor loop
+        let (go1, actor, ep1_handle) =
+            Gossip::gossip_and_actor(rng, Default::default(), relay_map.clone(), ct.clone())
+                .await?;
+        let mut actor = ManualActorLoop::new(actor).await?;
+
+        // create the second node with the usual actor loop
+        let (go2, ep2, ep2_handle) = {
+            let (mut g, actor, ep_handle) =
+                Gossip::gossip_and_actor(rng, Default::default(), relay_map.clone(), ct.clone())
+                    .await?;
+            let ep = actor.endpoint.clone();
+            let me = ep.node_id().fmt_short();
+            let actor_handle = tokio::spawn(
+                async move {
+                    if let Err(err) = actor.run().await {
+                        warn!("gossip actor closed with error: {err:?}");
+                    }
+                }
+                .instrument(error_span!("gossip", %me)),
+            );
+            g._actor_handle = Arc::new(AbortOnDropHandle::new(actor_handle));
+            (g, ep, ep_handle)
+        };
+
+        let tasks = [ep1_handle, ep2_handle];
+
+        let node_id1 = actor.endpoint.node_id();
+        let node_id2 = ep2.node_id();
+        debug!(%node_id1, %node_id2, "----- nodes ready: adding peers -----");
+
+        // create the topic and subscribe:
+        // - first node subscribes twice with the second node as bootstrap
+        // - second node subscribes once without bootstrap
+        let topic: TopicId = blake3::hash(b"subscription_cleanup").into();
+
+        let addr2 = NodeAddr::new(node_id2).with_relay_url(relay_url);
+        actor.endpoint.add_node_addr(addr2)?;
+
+        debug!("----- joining  ----- ");
+        // join the topics
+        go2.join(topic, vec![]).await?;
+        // start the join
+        let sub_1a = go1.join(topic, vec![node_id2]);
+        actor.step().await?;
+        // let sub
+        //
+        // let [sub_1a, mut sub_1b, mut sub2] = [
+        //     go1.join(topic, vec![node_id2]),
+        //     go1.join(topic, vec![node_id2]),
+        //     go2.join(topic, vec![]),
+        // ]
+        // .try_join()
+        // .await?;
+        //
+        // let (sink1, _stream1) = sub1.split();
+        //
+        // let len = 2;
+        //
+        // // publish messages on node1
+        // let pub1 = spawn(async move {
+        //     for i in 0..len {
+        //         let message = format!("hi{}", i);
+        //         info!("go1 broadcast: {message:?}");
+        //         sink1.broadcast(message.into_bytes().into()).await.unwrap();
+        //         tokio::time::sleep(Duration::from_micros(1)).await;
+        //     }
+        // });
+        //
+        // // wait for messages on node2
+        // let sub2 = spawn(async move {
+        //     let mut recv = vec![];
+        //     loop {
+        //         let ev = sub2.next().await.unwrap().unwrap();
+        //         info!("go2 event: {ev:?}");
+        //         if let Event::Gossip(GossipEvent::Received(msg)) = ev {
+        //             recv.push(msg.content);
+        //         }
+        //         if recv.len() == len {
+        //             return recv;
+        //         }
+        //     }
+        // });
+        //
+        // // wait for messages on node3
+        // let sub3 = spawn(async move {
+        //     let mut recv = vec![];
+        //     loop {
+        //         let ev = sub3.next().await.unwrap().unwrap();
+        //         info!("go3 event: {ev:?}");
+        //         if let Event::Gossip(GossipEvent::Received(msg)) = ev {
+        //             recv.push(msg.content);
+        //         }
+        //         if recv.len() == len {
+        //             return recv;
+        //         }
+        //     }
+        // });
+        //
+        // timeout(Duration::from_secs(10), pub1)
+        //     .await
+        //     .unwrap()
+        //     .unwrap();
+        // let recv2 = timeout(Duration::from_secs(10), sub2)
+        //     .await
+        //     .unwrap()
+        //     .unwrap();
+        // let recv3 = timeout(Duration::from_secs(10), sub3)
+        //     .await
+        //     .unwrap()
+        //     .unwrap();
+        //
+        // let expected: Vec<Bytes> = (0..len)
+        //     .map(|i| Bytes::from(format!("hi{i}").into_bytes()))
+        //     .collect();
+        // assert_eq!(recv2, expected);
+        // assert_eq!(recv3, expected);
+        //
+        // ct.cancel();
+        // for t in tasks {
+        //     timeout(Duration::from_secs(10), t)
+        //         .await
+        //         .unwrap()
+        //         .unwrap()
+        //         .unwrap();
+        // }
+        //
+        testresult::TestResult::Ok(())
     }
 }
