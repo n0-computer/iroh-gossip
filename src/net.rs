@@ -307,75 +307,101 @@ impl Actor {
             i += 1;
             trace!(?i, "tick");
             inc!(Metrics, actor_tick_main);
-            tokio::select! {
-                biased;
-                msg = self.to_actor_rx.recv() => {
-                    trace!(?i, "tick: to_actor_rx");
-                    inc!(Metrics, actor_tick_rx);
-                    match msg {
-                        Some(msg) => self.handle_to_actor_msg(msg, Instant::now()).await?,
-                        None => {
-                            debug!("all gossip handles dropped, stop gossip actor");
-                            break;
-                        }
-                    }
-                },
-                Some((key, (topic, command))) = self.command_rx.next(), if !self.command_rx.is_empty() => {
-                    trace!(?i, "tick: command_rx");
-                    self.handle_command(topic, key, command).await?;
-                },
-                Some(new_addresses) = direct_addresses_stream.next() => {
-                    trace!(?i, "tick: new_endpoints");
-                    inc!(Metrics, actor_tick_endpoint);
-                    current_addresses = new_addresses;
-                    self.handle_addr_update(&current_addresses).await?;
-                }
-                Some(_relay_url) = home_relay_stream.next() => {
-                    self.handle_addr_update(&current_addresses).await?;
-                }
-                (peer_id, res) = self.dialer.next_conn() => {
-                    trace!(?i, "tick: dialer");
-                    inc!(Metrics, actor_tick_dialer);
-                    match res {
-                        Ok(conn) => {
-                            debug!(peer = ?peer_id, "dial successful");
-                            inc!(Metrics, actor_tick_dialer_success);
-                            self.handle_connection(peer_id, ConnOrigin::Dial, conn);
-                        }
-                        Err(err) => {
-                            warn!(peer = ?peer_id, "dial failed: {err}");
-                            inc!(Metrics, actor_tick_dialer_failure);
-                        }
+            let step = self
+                .event_loop(
+                    &mut current_addresses,
+                    &mut home_relay_stream,
+                    &mut direct_addresses_stream,
+                    i,
+                )
+                .await?;
+
+            if let Some(()) = step {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// One event loop processing step.
+    ///
+    /// Some is returned when no further processing should be performed.
+    async fn event_loop(
+        &mut self,
+        current_addresses: &mut BTreeSet<DirectAddr>,
+        home_relay_stream: &mut (impl Stream<Item = iroh_net::RelayUrl> + Unpin),
+        direct_addresses_stream: &mut (impl Stream<Item = BTreeSet<DirectAddr>> + Unpin),
+        i: usize,
+    ) -> anyhow::Result<Option<()>> {
+        tokio::select! {
+            biased;
+            msg = self.to_actor_rx.recv() => {
+                trace!(?i, "tick: to_actor_rx");
+                inc!(Metrics, actor_tick_rx);
+                match msg {
+                    Some(msg) => self.handle_to_actor_msg(msg, Instant::now()).await?,
+                    None => {
+                        debug!("all gossip handles dropped, stop gossip actor");
+                        return Ok(Some(()))
                     }
                 }
-                event = self.in_event_rx.recv() => {
-                    trace!(?i, "tick: in_event_rx");
-                    inc!(Metrics, actor_tick_in_event_rx);
-                    match event {
-                        Some(event) => {
-                            self.handle_in_event(event, Instant::now()).await.context("in_event_rx.recv -> handle_in_event")?;
-                        }
-                        None => unreachable!()
+            },
+            Some((key, (topic, command))) = self.command_rx.next(), if !self.command_rx.is_empty() => {
+                trace!(?i, "tick: command_rx");
+                self.handle_command(topic, key, command).await?;
+            },
+            Some(new_addresses) = direct_addresses_stream.next() => {
+                trace!(?i, "tick: new_endpoints");
+                inc!(Metrics, actor_tick_endpoint);
+                *current_addresses = new_addresses;
+                self.handle_addr_update(&current_addresses).await?;
+            }
+            Some(_relay_url) = home_relay_stream.next() => {
+                self.handle_addr_update(&current_addresses).await?;
+            }
+            (peer_id, res) = self.dialer.next_conn() => {
+                trace!(?i, "tick: dialer");
+                inc!(Metrics, actor_tick_dialer);
+                match res {
+                    Ok(conn) => {
+                        debug!(peer = ?peer_id, "dial successful");
+                        inc!(Metrics, actor_tick_dialer_success);
+                        self.handle_connection(peer_id, ConnOrigin::Dial, conn);
+                    }
+                    Err(err) => {
+                        warn!(peer = ?peer_id, "dial failed: {err}");
+                        inc!(Metrics, actor_tick_dialer_failure);
                     }
                 }
-                drain = self.timers.wait_and_drain() => {
-                    trace!(?i, "tick: timers");
-                    inc!(Metrics, actor_tick_timers);
-                    let now = Instant::now();
-                    for (_instant, timer) in drain {
-                        self.handle_in_event(InEvent::TimerExpired(timer), now).await.context("timers.drain_expired -> handle_in_event")?;
+            }
+            event = self.in_event_rx.recv() => {
+                trace!(?i, "tick: in_event_rx");
+                inc!(Metrics, actor_tick_in_event_rx);
+                match event {
+                    Some(event) => {
+                        self.handle_in_event(event, Instant::now()).await.context("in_event_rx.recv -> handle_in_event")?;
                     }
+                    None => unreachable!()
                 }
-                Some(res) = self.connection_tasks.join_next(), if !self.connection_tasks.is_empty() => {
-                    if let Err(err) = res {
-                        if !err.is_cancelled() {
-                            warn!("connection task panicked: {err:?}");
-                        }
+            }
+            drain = self.timers.wait_and_drain() => {
+                trace!(?i, "tick: timers");
+                inc!(Metrics, actor_tick_timers);
+                let now = Instant::now();
+                for (_instant, timer) in drain {
+                    self.handle_in_event(InEvent::TimerExpired(timer), now).await.context("timers.drain_expired -> handle_in_event")?;
+                }
+            }
+            Some(res) = self.connection_tasks.join_next(), if !self.connection_tasks.is_empty() => {
+                if let Err(err) = res {
+                    if !err.is_cancelled() {
+                        warn!("connection task panicked: {err:?}");
                     }
                 }
             }
         }
-        Ok(())
+
+        Ok(None)
     }
 
     async fn handle_addr_update(
