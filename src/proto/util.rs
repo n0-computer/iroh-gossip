@@ -34,20 +34,22 @@ macro_rules! idbytes_impls {
 
         impl ::std::fmt::Display for $ty {
             fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-                write!(f, "{}", ::iroh_base::base32::fmt(&self.0))
+                write!(f, "{}", ::hex::encode(&self.0))
             }
         }
 
         impl ::std::fmt::Debug for $ty {
             fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-                write!(f, "{}({})", $name, ::iroh_base::base32::fmt_short(&self.0))
+                write!(f, "{}({})", $name, ::hex::encode(&self.0))
             }
         }
 
         impl ::std::str::FromStr for $ty {
             type Err = ::anyhow::Error;
             fn from_str(s: &str) -> ::std::result::Result<Self, Self::Err> {
-                Ok(Self::from_bytes(::iroh_base::base32::parse_array(s)?))
+                let mut bytes = [0u8; 32];
+                ::hex::decode_to_slice(s, &mut bytes)?;
+                Ok(Self::from_bytes(bytes))
             }
         }
 
@@ -423,7 +425,7 @@ mod test {
     }
 
     #[test]
-    fn base32() {
+    fn hex() {
         #[derive(Eq, PartialEq)]
         struct Id([u8; 32]);
         idbytes_impls!(Id, "Id");
@@ -431,9 +433,12 @@ mod test {
         assert_eq!(id, Id::from_str(&format!("{id}")).unwrap());
         assert_eq!(
             &format!("{id}"),
-            "aeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaq"
+            "0101010101010101010101010101010101010101010101010101010101010101"
         );
-        assert_eq!(&format!("{id:?}"), "Id(aeaqcaibaeaqcaib)");
+        assert_eq!(
+            &format!("{id:?}"),
+            "Id(0101010101010101010101010101010101010101010101010101010101010101)"
+        );
         assert_eq!(id.as_bytes(), &[1u8; 32]);
     }
 

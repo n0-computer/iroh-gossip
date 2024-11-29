@@ -14,7 +14,6 @@ use iroh::{
     key::{PublicKey, SecretKey},
     Endpoint, NodeAddr, RelayMap, RelayMode, RelayUrl,
 };
-use iroh_base::base32;
 use iroh_gossip::{
     net::{Event, Gossip, GossipEvent, GossipReceiver, GOSSIP_ALPN},
     proto::TopicId,
@@ -60,7 +59,7 @@ enum Command {
     ///
     /// If no topic is provided, a new topic will be created.
     Open {
-        /// Optionally set the topic id (32 bytes, as base32 string).
+        /// Optionally set the topic id (64 bytes, as hex string).
         topic: Option<TopicId>,
     },
     /// Join a chat room from a ticket.
@@ -296,7 +295,9 @@ impl Ticket {
 /// Serializes to base32.
 impl fmt::Display for Ticket {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", base32::fmt(self.to_bytes()))
+        let mut text = data_encoding::BASE32_NOPAD.encode(&self.to_bytes()[..]);
+        text.make_ascii_lowercase();
+        write!(f, "{}", text)
     }
 }
 
@@ -304,7 +305,8 @@ impl fmt::Display for Ticket {
 impl FromStr for Ticket {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::from_bytes(&base32::parse_vec(s)?)
+        let bytes = data_encoding::BASE32_NOPAD.decode(s.to_ascii_uppercase().as_bytes())?;
+        Self::from_bytes(&bytes)
     }
 }
 

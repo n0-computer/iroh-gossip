@@ -1911,6 +1911,7 @@ dependencies = [
  "async-channel",
  "bytes",
  "clap",
+ "data-encoding",
  "derive_more",
  "ed25519-dalek",
  "futures-concurrency",
