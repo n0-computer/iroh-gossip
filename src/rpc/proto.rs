@@ -1,7 +1,7 @@
 //! The RPC protocol between client and node
 use std::collections::BTreeSet;
 
-use iroh_net::NodeId;
+use iroh::NodeId;
 use nested_enum_utils::enum_conversions;
 use quic_rpc_derive::rpc_requests;
 use serde::{Deserialize, Serialize};

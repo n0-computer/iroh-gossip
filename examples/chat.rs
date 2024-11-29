@@ -10,13 +10,13 @@ use bytes::Bytes;
 use clap::Parser;
 use ed25519_dalek::Signature;
 use futures_lite::StreamExt;
+use iroh::{
+    key::{PublicKey, SecretKey},
+    Endpoint, NodeAddr, RelayMap, RelayMode, RelayUrl,
+};
 use iroh_gossip::{
     net::{Event, Gossip, GossipEvent, GossipReceiver, GOSSIP_ALPN},
     proto::TopicId,
-};
-use iroh_net::{
-    key::{PublicKey, SecretKey},
-    Endpoint, NodeAddr, RelayMap, RelayMode, RelayUrl,
 };
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -214,12 +214,12 @@ async fn endpoint_loop(endpoint: Endpoint, gossip: Gossip) {
 }
 
 async fn handle_connection(
-    mut conn: iroh_net::endpoint::Connecting,
+    mut conn: iroh::endpoint::Connecting,
     gossip: Gossip,
 ) -> anyhow::Result<()> {
     let alpn = conn.alpn().await?;
     let conn = conn.await?;
-    let peer_id = iroh_net::endpoint::get_remote_node_id(&conn)?;
+    let peer_id = iroh::endpoint::get_remote_node_id(&conn)?;
     match alpn.as_ref() {
         GOSSIP_ALPN => gossip.handle_connection(conn).await.context(format!(
             "connection to {peer_id} with ALPN {} failed",

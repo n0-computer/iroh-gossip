@@ -16,14 +16,14 @@ use futures_concurrency::{
 };
 use futures_lite::{future::Boxed as BoxedFuture, stream::Stream, StreamExt};
 use futures_util::TryFutureExt;
-use iroh_metrics::inc;
-use iroh_net::{
+use iroh::{
     dialer::Dialer,
     endpoint::{get_remote_node_id, Connecting, Connection, DirectAddr},
     key::PublicKey,
+    protocol::ProtocolHandler,
     AddrInfo, Endpoint, NodeAddr, NodeId,
 };
-use iroh_router::ProtocolHandler;
+use iroh_metrics::inc;
 use rand::rngs::StdRng;
 use rand_core::SeedableRng;
 use tokio::{sync::mpsc, task::JoinSet};
@@ -831,7 +831,7 @@ mod test {
 
     use bytes::Bytes;
     use futures_concurrency::future::TryJoin;
-    use iroh_net::{key::SecretKey, RelayMap, RelayMode};
+    use iroh::{key::SecretKey, RelayMap, RelayMode};
     use tokio::{spawn, time::timeout};
     use tokio_util::sync::CancellationToken;
     use tracing::info;
@@ -887,8 +887,7 @@ mod test {
     async fn gossip_net_smoke() {
         let mut rng = rand_chacha::ChaCha12Rng::seed_from_u64(1);
         let _guard = iroh_test::logging::setup();
-        let (relay_map, relay_url, _guard) =
-            iroh_net::test_utils::run_relay_server().await.unwrap();
+        let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
 
         let ep1 = create_endpoint(&mut rng, relay_map.clone()).await.unwrap();
         let ep2 = create_endpoint(&mut rng, relay_map.clone()).await.unwrap();

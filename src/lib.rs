@@ -12,8 +12,17 @@ pub mod metrics;
 #[cfg(feature = "net")]
 #[cfg_attr(iroh_docsrs, doc(cfg(feature = "net")))]
 pub mod net;
+
+#[cfg(feature = "net")]
+#[cfg_attr(iroh_docsrs, doc(cfg(feature = "net")))]
+#[doc(inline)]
+pub use net::GOSSIP_ALPN as ALPN;
+
 pub mod proto;
 
+#[cfg(feature = "cli")]
+#[cfg_attr(iroh_docsrs, doc(cfg(feature = "cli")))]
+pub mod cli;
 #[cfg(feature = "rpc")]
 #[cfg_attr(iroh_docsrs, doc(cfg(feature = "rpc")))]
 pub mod rpc;
