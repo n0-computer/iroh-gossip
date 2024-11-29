@@ -1885,6 +1885,7 @@ dependencies = [
  "serde",
  "serde-error",
  "strum",
+ "testresult",
  "tokio",
  "tokio-util",
  "tracing",
@@ -4159,6 +4160,12 @@ dependencies = [
  "core-foundation-sys",
  "libc",
 ]
+
+[[package]]
+name = "testresult"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "614b328ff036a4ef882c61570f72918f7e9c5bee1da33f8e7f91e01daee7e56c"
 
 [[package]]
 name = "thiserror"

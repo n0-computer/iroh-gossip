@@ -922,6 +922,8 @@ mod test {
         }
     }
 
+    type EndpointHandle = tokio::task::JoinHandle<anyhow::Result<()>>;
+
     impl ManualActorLoop {
         async fn new(mut actor: Actor) -> anyhow::Result<Self> {
             let me = actor.endpoint.node_id().fmt_short();
@@ -962,18 +964,18 @@ mod test {
     }
 
     impl Gossip {
-        /// Creates a gossip instance and its actor without spawning it.
+        /// Creates a testing gossip instance and its actor without spawning it.
         ///
         /// This creates the endpoint and spawns the endpoint loop as well. The handle for the
         /// endpoing task is returned along the gossip instance and actor. Since the actor is not
         /// actually spawned as [`Gossip::from_endpoint`] would, the gossip instance will have a
         /// handle to a dummy task instead.
-        async fn gossip_and_actor(
+        async fn t_new_with_actor(
             rng: &mut rand_chacha::ChaCha12Rng,
             config: proto::Config,
             relay_map: RelayMap,
             cancel: CancellationToken,
-        ) -> anyhow::Result<(Self, Actor, tokio::task::JoinHandle<anyhow::Result<()>>)> {
+        ) -> anyhow::Result<(Self, Actor, EndpointHandle)> {
             let my_addr = AddrInfo {
                 relay_url: relay_map.nodes().next().map(|relay| relay.url.clone()),
                 direct_addresses: Default::default(),
@@ -1001,6 +1003,29 @@ mod test {
             ));
 
             Ok((gossip, actor, endpoing_task))
+        }
+
+        /// Crates a new
+        async fn t_new(
+            rng: &mut rand_chacha::ChaCha12Rng,
+            config: proto::Config,
+            relay_map: RelayMap,
+            cancel: CancellationToken,
+        ) -> anyhow::Result<(Self, Endpoint, EndpointHandle)> {
+            let (mut g, actor, ep_handle) =
+                Gossip::t_new_with_actor(rng, config, relay_map, cancel).await?;
+            let ep = actor.endpoint.clone();
+            let me = ep.node_id().fmt_short();
+            let actor_handle = tokio::spawn(
+                async move {
+                    if let Err(err) = actor.run().await {
+                        warn!("gossip actor closed with error: {err:?}");
+                    }
+                }
+                .instrument(error_span!("gossip", %me)),
+            );
+            g._actor_handle = Arc::new(AbortOnDropHandle::new(actor_handle));
+            Ok((g, ep, ep_handle))
         }
     }
 
@@ -1199,30 +1224,13 @@ mod test {
 
         // create the first node with a manual actor loop
         let (go1, actor, ep1_handle) =
-            Gossip::gossip_and_actor(rng, Default::default(), relay_map.clone(), ct.clone())
+            Gossip::t_new_with_actor(rng, Default::default(), relay_map.clone(), ct.clone())
                 .await?;
         let mut actor = ManualActorLoop::new(actor).await?;
 
         // create the second node with the usual actor loop
-        let (go2, ep2, ep2_handle) = {
-            let (mut g, actor, ep_handle) =
-                Gossip::gossip_and_actor(rng, Default::default(), relay_map.clone(), ct.clone())
-                    .await?;
-            let ep = actor.endpoint.clone();
-            let me = ep.node_id().fmt_short();
-            let actor_handle = tokio::spawn(
-                async move {
-                    if let Err(err) = actor.run().await {
-                        warn!("gossip actor closed with error: {err:?}");
-                    }
-                }
-                .instrument(error_span!("gossip", %me)),
-            );
-            g._actor_handle = Arc::new(AbortOnDropHandle::new(actor_handle));
-            (g, ep, ep_handle)
-        };
-
-        let tasks = [ep1_handle, ep2_handle];
+        let (go2, ep2, ep2_handle) =
+            Gossip::t_new(rng, Default::default(), relay_map, ct.clone()).await?;
 
         let node_id1 = actor.endpoint.node_id();
         let node_id2 = ep2.node_id();
@@ -1237,93 +1245,56 @@ mod test {
         actor.endpoint.add_node_addr(addr2)?;
 
         debug!("----- joining  ----- ");
-        // join the topics
-        go2.join(topic, vec![]).await?;
-        // start the join
+        let ct2 = ct.clone();
+        let go2_task = async move {
+            let (_pub_tx, mut sub_rx) = go2.join(topic, vec![]).await?.split();
+            let subscribe_fut = async {
+                while let Some(ev) = sub_rx.try_next().await? {
+                    match ev {
+                        Event::Lagged => tracing::debug!("missed some messages :("),
+                        Event::Gossip(gm) => match gm {
+                            GossipEvent::Received(_) => unreachable!("test does not send messages"),
+                            other => tracing::debug!(?other, "gs event"),
+                        },
+                    }
+                }
+
+                tracing::debug!("subscribe stream ended");
+                anyhow::Ok(())
+            };
+
+            tokio::select! {
+                _ = ct2.cancelled() => Ok(()),
+                res = subscribe_fut => res,
+            }
+        }
+        .instrument(tracing::debug_span!("node_2", %node_id2));
+
+        // join and check that the topic is now subscribed
         let sub_1a = go1.join(topic, vec![node_id2]);
         actor.step().await?;
-        // let sub
-        //
-        // let [sub_1a, mut sub_1b, mut sub2] = [
-        //     go1.join(topic, vec![node_id2]),
-        //     go1.join(topic, vec![node_id2]),
-        //     go2.join(topic, vec![]),
-        // ]
-        // .try_join()
-        // .await?;
-        //
-        // let (sink1, _stream1) = sub1.split();
-        //
-        // let len = 2;
-        //
-        // // publish messages on node1
-        // let pub1 = spawn(async move {
-        //     for i in 0..len {
-        //         let message = format!("hi{}", i);
-        //         info!("go1 broadcast: {message:?}");
-        //         sink1.broadcast(message.into_bytes().into()).await.unwrap();
-        //         tokio::time::sleep(Duration::from_micros(1)).await;
-        //     }
-        // });
-        //
-        // // wait for messages on node2
-        // let sub2 = spawn(async move {
-        //     let mut recv = vec![];
-        //     loop {
-        //         let ev = sub2.next().await.unwrap().unwrap();
-        //         info!("go2 event: {ev:?}");
-        //         if let Event::Gossip(GossipEvent::Received(msg)) = ev {
-        //             recv.push(msg.content);
-        //         }
-        //         if recv.len() == len {
-        //             return recv;
-        //         }
-        //     }
-        // });
-        //
-        // // wait for messages on node3
-        // let sub3 = spawn(async move {
-        //     let mut recv = vec![];
-        //     loop {
-        //         let ev = sub3.next().await.unwrap().unwrap();
-        //         info!("go3 event: {ev:?}");
-        //         if let Event::Gossip(GossipEvent::Received(msg)) = ev {
-        //             recv.push(msg.content);
-        //         }
-        //         if recv.len() == len {
-        //             return recv;
-        //         }
-        //     }
-        // });
-        //
-        // timeout(Duration::from_secs(10), pub1)
-        //     .await
-        //     .unwrap()
-        //     .unwrap();
-        // let recv2 = timeout(Duration::from_secs(10), sub2)
-        //     .await
-        //     .unwrap()
-        //     .unwrap();
-        // let recv3 = timeout(Duration::from_secs(10), sub3)
-        //     .await
-        //     .unwrap()
-        //     .unwrap();
-        //
-        // let expected: Vec<Bytes> = (0..len)
-        //     .map(|i| Bytes::from(format!("hi{i}").into_bytes()))
-        //     .collect();
-        // assert_eq!(recv2, expected);
-        // assert_eq!(recv3, expected);
-        //
-        // ct.cancel();
-        // for t in tasks {
-        //     timeout(Duration::from_secs(10), t)
-        //         .await
-        //         .unwrap()
-        //         .unwrap()
-        //         .unwrap();
-        // }
-        //
+        let state = actor.topics.get(&topic).context("get registered topic")?;
+        assert!(state.joined);
+
+        // join a second time but let go of the first handle, the topic should remain subscribed
+        let sub_1b = go1.join(topic, vec![node_id2]);
+        drop(sub_1a);
+        actor.step().await?;
+        let state = actor.topics.get(&topic).context("get registered topic")?;
+        assert!(state.joined);
+
+        // drop the second handle, the topic should no longer be susbcribed
+        drop(sub_1b);
+        actor.step().await?;
+        assert!(!actor.topics.contains_key(&topic));
+
+        // cleanup and ensure everything went as expected
+        ct.cancel();
+        let wait = Duration::from_secs(2);
+        timeout(wait, ep1_handle).await???;
+        timeout(wait, ep2_handle).await???;
+        timeout(wait, go2_task).await??;
+
         testresult::TestResult::Ok(())
     }
 }
