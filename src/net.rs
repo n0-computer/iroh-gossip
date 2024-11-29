@@ -465,7 +465,8 @@ impl Actor {
             }
             None => {
                 command_rx_keys.remove(&key);
-                if command_rx_keys.is_empty() && event_senders.is_empty() {
+                tracing::debug!(len = command_rx_keys.len(), "command_rx_keys is_empty");
+                if command_rx_keys.is_empty() {
                     self.quit_queue.push_back(topic);
                     self.process_quit_queue().await?;
                 }
@@ -594,6 +595,7 @@ impl Actor {
 
     async fn process_quit_queue(&mut self) -> anyhow::Result<()> {
         while let Some(topic_id) = self.quit_queue.pop_front() {
+            tracing::debug!(%topic_id, "quit");
             self.handle_in_event_inner(
                 InEvent::Command(topic_id, ProtoCommand::Quit),
                 Instant::now(),
@@ -1316,6 +1318,7 @@ mod test {
 
         // signal to drop the second handle, the topic should no longer be susbcribed
         tx.send(()).await?;
+        actor.step().await?;
         actor.step().await?;
         assert!(!actor.topics.contains_key(&topic));
 
