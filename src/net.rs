@@ -1295,7 +1295,7 @@ mod test {
             tracing::info!("dropping all handles");
             drop(sub_1b);
 
-            // wait for cancelation
+            // wait for cancellation
             ct1.cancelled().await;
             drop(go1);
         }
@@ -1315,7 +1315,7 @@ mod test {
         let state = actor.topics.get(&topic).context("get registered topic")?;
         assert!(state.joined);
 
-        // signal to drop the second handle, the topic should no longer be susbcribed
+        // signal to drop the second handle, the topic should no longer be subscribed
         tx.send(()).await?;
         actor.step().await?;
         actor.step().await?;
