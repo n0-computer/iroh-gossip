@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["metrics","net","proto","rpc"]};
+window.SIDEBAR_ITEMS = {"constant":["ALPN"],"mod":["cli","metrics","net","proto","rpc"]};
