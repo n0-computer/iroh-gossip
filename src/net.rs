@@ -1243,22 +1243,19 @@ mod test {
             "nodes ready"
         );
 
-        return Ok(());
-        // wait to process the home relay event
-        actor.step().await?;
-
-        // create the topic and subscribe:
-        // - first node subscribes twice with the second node as bootstrap
-        // - second node subscribes once without bootstrap
         let topic: TopicId = blake3::hash(b"subscription_cleanup").into();
+        tracing::info!(%topic, "joining");
 
-        let addr2 = NodeAddr::new(node_id2).with_relay_url(relay_url);
-        actor.endpoint.add_node_addr(addr2)?;
+        // create the tasks for each gossip instance:
+        // - second node subscribes once without bootstrap and listens to events
+        // - first node subscribes twice with the second node as bootstrap. This is done on command
+        //   from the main task (this)
 
-        tracing::info!("joining");
+        // second node
         let ct2 = ct.clone();
         let go2_task = async move {
             let (_pub_tx, mut sub_rx) = go2.join(topic, vec![]).await?.split();
+
             let subscribe_fut = async {
                 while let Some(ev) = sub_rx.try_next().await? {
                     match ev {
@@ -1280,22 +1277,52 @@ mod test {
             }
         }
         .instrument(tracing::debug_span!("node_2", %node_id2));
+        let go2_handle = tokio::spawn(go2_task);
+
+        // first node
+        let addr2 = NodeAddr::new(node_id2).with_relay_url(relay_url);
+        actor.endpoint.add_node_addr(addr2)?;
+        // we use a channel to signal advancing steps to the task
+        let (tx, mut rx) = mpsc::channel::<()>(1);
+        let ct1 = ct.clone();
+        let go1_task = async move {
+            // first subscribe we do immediately
+            tracing::info!("subscribing the first time");
+            let sub_1a = go1.join(topic, vec![node_id2]).await;
+
+            // wait for signal to subscribe a second time
+            tracing::info!("subscribing a second time");
+            rx.recv().await.expect("signal for second join");
+            let sub_1b = go1.join(topic, vec![node_id2]).await;
+            drop(sub_1a);
+
+            // wait for signal to drop the second handle as well
+            tracing::info!("dropping all handles");
+            rx.recv().await.expect("signal for second join");
+            drop(sub_1b);
+
+            // wait for cancelation
+            ct1.cancelled().await;
+            drop(go1);
+        }
+        .instrument(tracing::debug_span!("node_1", %node_id2));
+        let go1_handle = tokio::spawn(go1_task);
 
         // join and check that the topic is now subscribed
-        let sub_1a = go1.join(topic, vec![node_id2]);
+        actor.step().await?; // handle our join
+        actor.step().await?; // get peer connection
+        actor.step().await?; // receive the other peer's information for a NeighborUp
+        let state = actor.topics.get(&topic).context("get registered topic")?;
+        assert!(state.joined);
+
+        // signal the second subscribe, we should remain subscribed
+        tx.send(()).await?;
         actor.step().await?;
         let state = actor.topics.get(&topic).context("get registered topic")?;
         assert!(state.joined);
 
-        // join a second time but let go of the first handle, the topic should remain subscribed
-        let sub_1b = go1.join(topic, vec![node_id2]);
-        drop(sub_1a);
-        actor.step().await?;
-        let state = actor.topics.get(&topic).context("get registered topic")?;
-        assert!(state.joined);
-
-        // drop the second handle, the topic should no longer be susbcribed
-        drop(sub_1b);
+        // signal to drop the second handle, the topic should no longer be susbcribed
+        tx.send(()).await?;
         actor.step().await?;
         assert!(!actor.topics.contains_key(&topic));
 
@@ -1304,7 +1331,8 @@ mod test {
         let wait = Duration::from_secs(2);
         timeout(wait, ep1_handle).await???;
         timeout(wait, ep2_handle).await???;
-        timeout(wait, go2_task).await??;
+        timeout(wait, go1_handle).await??;
+        timeout(wait, go2_handle).await??;
 
         testresult::TestResult::Ok(())
     }
