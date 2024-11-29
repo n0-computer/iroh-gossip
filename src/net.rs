@@ -903,8 +903,6 @@ mod test {
     struct ManualActorLoop {
         actor: Actor,
         current_addresses: BTreeSet<DirectAddr>,
-        home_relay_stream: Box<dyn Stream<Item = iroh_net::RelayUrl> + Unpin>,
-        direct_addresses_stream: Box<dyn Stream<Item = BTreeSet<DirectAddr>> + Unpin>,
         step: usize,
     }
 
@@ -927,18 +925,12 @@ mod test {
     impl ManualActorLoop {
         #[instrument(skip_all, fields(me = actor.endpoint.node_id().fmt_short()))]
         async fn new(mut actor: Actor) -> anyhow::Result<Self> {
-            let (current_addresses, home_relay_stream, direct_addresses_stream) =
-                actor.setup().await?;
-            let mut test_rig = Self {
+            let (current_addresses, _, _) = actor.setup().await?;
+            let test_rig = Self {
                 actor,
                 current_addresses,
-                home_relay_stream: Box::new(home_relay_stream),
-                direct_addresses_stream: Box::new(direct_addresses_stream),
                 step: 0,
             };
-
-            // wait for the home relay to be known
-            test_rig.step().await?;
 
             Ok(test_rig)
         }
@@ -948,11 +940,13 @@ mod test {
             let ManualActorLoop {
                 actor,
                 current_addresses,
-                home_relay_stream,
-                direct_addresses_stream,
                 step,
             } = self;
             *step += 1;
+            // ignore updates that change our published address. This gives us better control over
+            // events since the endpoint it no longer emitting changes
+            let home_relay_stream = &mut futures_lite::stream::pending();
+            let direct_addresses_stream = &mut futures_lite::stream::pending();
             actor
                 .event_loop(
                     current_addresses,
@@ -1217,7 +1211,6 @@ mod test {
     ///   dropped
     // NOTE: this is a regression test.
     #[tokio::test]
-    #[allow(dead_code, unused)]
     async fn subscription_cleanup() -> testresult::TestResult {
         let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
         let _guard = iroh_test::logging::setup();
@@ -1286,19 +1279,19 @@ mod test {
         let (tx, mut rx) = mpsc::channel::<()>(1);
         let ct1 = ct.clone();
         let go1_task = async move {
-            // first subscribe we do immediately
+            // first subscribe is done immediately
             tracing::info!("subscribing the first time");
             let sub_1a = go1.join(topic, vec![node_id2]).await;
 
             // wait for signal to subscribe a second time
-            tracing::info!("subscribing a second time");
             rx.recv().await.expect("signal for second join");
+            tracing::info!("subscribing a second time");
             let sub_1b = go1.join(topic, vec![node_id2]).await;
             drop(sub_1a);
 
             // wait for signal to drop the second handle as well
-            tracing::info!("dropping all handles");
             rx.recv().await.expect("signal for second join");
+            tracing::info!("dropping all handles");
             drop(sub_1b);
 
             // wait for cancelation
@@ -1332,7 +1325,7 @@ mod test {
         timeout(wait, ep1_handle).await???;
         timeout(wait, ep2_handle).await???;
         timeout(wait, go1_handle).await??;
-        timeout(wait, go2_handle).await??;
+        timeout(wait, go2_handle).await???;
 
         testresult::TestResult::Ok(())
     }
