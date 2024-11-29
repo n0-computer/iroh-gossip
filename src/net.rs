@@ -319,7 +319,7 @@ impl Actor {
         &mut self,
     ) -> anyhow::Result<(
         BTreeSet<DirectAddr>,
-        impl Stream<Item = iroh_net::RelayUrl> + Unpin,
+        impl Stream<Item = iroh::RelayUrl> + Unpin,
         impl Stream<Item = BTreeSet<DirectAddr>> + Unpin,
     )> {
         // Watch for changes in direct addresses to update our peer data.
@@ -347,7 +347,7 @@ impl Actor {
     async fn event_loop(
         &mut self,
         current_addresses: &mut BTreeSet<DirectAddr>,
-        home_relay_stream: &mut (impl Stream<Item = iroh_net::RelayUrl> + Unpin),
+        home_relay_stream: &mut (impl Stream<Item = iroh::RelayUrl> + Unpin),
         direct_addresses_stream: &mut (impl Stream<Item = BTreeSet<DirectAddr>> + Unpin),
         i: usize,
     ) -> anyhow::Result<Option<()>> {
@@ -447,9 +447,7 @@ impl Actor {
             return Ok(());
         };
         let TopicState {
-            command_rx_keys,
-            event_senders,
-            ..
+            command_rx_keys, ..
         } = state;
         match command {
             Some(command) => {
@@ -1216,8 +1214,7 @@ mod test {
         let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
         let _guard = iroh_test::logging::setup();
         let ct = CancellationToken::new();
-        let (relay_map, relay_url, _guard) =
-            iroh_net::test_utils::run_relay_server().await.unwrap();
+        let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
 
         // create the first node with a manual actor loop
         let (go1, actor, ep1_handle) =
