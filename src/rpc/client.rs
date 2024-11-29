@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use anyhow::Result;
 use futures_lite::{Stream, StreamExt};
 use futures_util::{Sink, SinkExt};
-use iroh_net::NodeId;
+use iroh::NodeId;
 use quic_rpc::{client::BoxedConnector, transport::flume::FlumeConnector};
 
 use crate::{

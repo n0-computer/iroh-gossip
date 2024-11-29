@@ -11,7 +11,7 @@ use std::{
 use anyhow::{anyhow, Context as _, Result};
 use bytes::Bytes;
 use futures_lite::{Stream, StreamExt};
-use iroh_net::NodeId;
+use iroh::NodeId;
 use serde::{Deserialize, Serialize};
 
 use crate::{net::TOPIC_EVENTS_DEFAULT_CAP, proto::DeliveryScope};

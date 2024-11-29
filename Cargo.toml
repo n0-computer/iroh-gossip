@@ -46,11 +46,12 @@ serde = { version = "1.0.164", features = ["derive"] }
 futures-lite = { version = "2.3", optional = true }
 futures-concurrency = { version = "7.6.1", optional = true }
 futures-util = { version = "0.3.30", optional = true }
-iroh-net = { version = "0.28.1", features = ["metrics"], optional = true, default-features = false }
-iroh-router = { version = "0.28.0", optional = true }
+iroh = { version = "0.28.1", features = ["metrics"], optional = true, default-features = false }
 tokio = { version = "1", optional = true, features = ["io-util", "sync", "rt", "macros", "net", "fs"] }
 tokio-util = { version = "0.7.12", optional = true, features = ["codec", "rt"] }
 tracing = "0.1"
+data-encoding = { version = "2.6.0", optional = true }
+hex = "0.4.3"
 
 # rpc dependencies (optional)
 nested_enum_utils = { version = "0.1.0", optional = true }
@@ -59,11 +60,10 @@ quic-rpc-derive = { version = "0.15.0", optional = true }
 strum = { version = "0.26", optional = true }
 serde-error = "0.1.3"
 clap = { version = "4", features = ["derive"], optional = true }
-hex = { version = "0.4.3", optional = true }
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }
-iroh-net = { version = "0.28.1", default-features = false, features = ["metrics", "test-utils"] }
+iroh = { version = "0.28.1", default-features = false, features = ["metrics", "test-utils"] }
 iroh-test = "0.28.0"
 rand_chacha = "0.3.1"
 testresult = "0.4.1"
@@ -74,8 +74,7 @@ url = "2.4.0"
 default = ["net", "rpc"]
 net = [
     "dep:futures-lite",
-    "dep:iroh-net",
-    "dep:iroh-router",
+    "dep:iroh",
     "dep:tokio",
     "dep:tokio-util",
     "dep:async-channel",
@@ -91,17 +90,18 @@ rpc = [
 cli = [
     "rpc",
     "dep:clap",
-    "dep:hex"
 ]
+
+examples = ["net", "dep:data-encoding"]
 
 [[example]]
 name = "chat"
-required-features = ["net"]
+required-features = ["examples"]
 
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "iroh_docsrs"]
 
 [patch.crates-io]
-iroh-net = { git = "https://github.com/n0-computer/iroh", branch = "main" }
-iroh-router = { git = "https://github.com/n0-computer/iroh", branch = "main" }
+iroh = { git = "https://github.com/n0-computer/iroh", branch = "main" }
+iroh-base = { git = "https://github.com/n0-computer/iroh", branch = "main" }

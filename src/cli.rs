@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use clap::{ArgGroup, Subcommand};
 use futures_lite::StreamExt;
 use futures_util::SinkExt;
-use iroh_net::NodeId;
+use iroh::NodeId;
 use tokio::io::AsyncBufReadExt;
 
 use crate::rpc::client::SubscribeOpts;
