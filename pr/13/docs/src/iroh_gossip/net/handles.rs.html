@@ -273,7 +273,6 @@
 <a href="#273" id="273">273</a>
 <a href="#274" id="274">274</a>
 <a href="#275" id="275">275</a>
-<a href="#276" id="276">276</a>
 </pre></div><pre class="rust"><code><span class="doccomment">//! Topic handles for sending and receiving on a gossip topic.
 //!
 //! These are returned from [`super::Gossip`].
@@ -290,9 +289,8 @@
 <span class="kw">use </span>iroh::NodeId;
 <span class="kw">use </span>serde::{Deserialize, Serialize};
 
-<span class="kw">use crate</span>::{net::TOPIC_EVENTS_DEFAULT_CAP, proto::DeliveryScope};
-
 <span class="kw">use </span><span class="kw">super</span>::EventStream;
+<span class="kw">use crate</span>::{net::TOPIC_EVENTS_DEFAULT_CAP, proto::DeliveryScope};
 
 <span class="doccomment">/// Sender for a gossip topic.
 </span><span class="attr">#[derive(Debug)]
