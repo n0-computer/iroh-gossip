@@ -786,8 +786,6 @@ impl Actor {
         if let Entry::Occupied(mut entry) = self.topics.entry(topic) {
             let state = entry.get_mut();
             state.event_senders.remove(&receiver_id);
-            let needed = state.still_needed();
-            debug!(needed, "still needed?");
             if !state.still_needed() {
                 self.quit_queue.push_back(topic);
                 self.process_quit_queue().await?;
