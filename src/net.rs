@@ -372,20 +372,16 @@ impl Actor {
             self.setup().await?;
 
         let mut i = 0;
-        loop {
+        while let Some(()) = self
+            .event_loop(
+                &mut current_addresses,
+                &mut home_relay_stream,
+                &mut direct_addresses_stream,
+                i,
+            )
+            .await?
+        {
             i += 1;
-            let step = self
-                .event_loop(
-                    &mut current_addresses,
-                    &mut home_relay_stream,
-                    &mut direct_addresses_stream,
-                    i,
-                )
-                .await?;
-
-            if let Some(()) = step {
-                break;
-            }
         }
         Ok(())
     }
@@ -422,7 +418,7 @@ impl Actor {
 
     /// One event loop processing step.
     ///
-    /// Some is returned when no further processing should be performed.
+    /// None is returned when no further processing should be performed.
     async fn event_loop(
         &mut self,
         current_addresses: &mut BTreeSet<DirectAddr>,
@@ -440,7 +436,7 @@ impl Actor {
                     Some(msg) => self.handle_to_actor_msg(msg, Instant::now()).await?,
                     None => {
                         debug!("all gossip handles dropped, stop gossip actor");
-                        return Ok(Some(()))
+                        return Ok(None)
                     }
                 }
             },
@@ -501,7 +497,7 @@ impl Actor {
             }
         }
 
-        Ok(None)
+        Ok(Some(()))
     }
 
     async fn handle_addr_update(
@@ -1073,7 +1069,7 @@ mod test {
         }
 
         #[instrument(skip_all, fields(me = %self.endpoint.node_id().fmt_short()))]
-        async fn step(&mut self) -> anyhow::Result<()> {
+        async fn step(&mut self) -> anyhow::Result<Option<()>> {
             let ManualActorLoop {
                 actor,
                 current_addresses,
@@ -1091,14 +1087,18 @@ mod test {
                     direct_addresses_stream,
                     *step,
                 )
-                .await?;
-            Ok(())
+                .await
         }
 
         async fn steps(&mut self, n: usize) -> anyhow::Result<()> {
             for _ in 0..n {
                 self.step().await?;
             }
+            Ok(())
+        }
+
+        async fn finish(mut self) -> anyhow::Result<()> {
+            while self.step().await?.is_some() {}
             Ok(())
         }
     }
@@ -1469,6 +1469,7 @@ mod test {
         timeout(wait, ep2_handle).await???;
         timeout(wait, go1_handle).await??;
         timeout(wait, go2_handle).await???;
+        timeout(wait, actor.finish()).await??;
 
         testresult::TestResult::Ok(())
     }
