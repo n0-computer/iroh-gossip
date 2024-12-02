@@ -723,7 +723,13 @@ impl Default for PeerState {
 struct TopicState {
     joined: bool,
     neighbors: BTreeSet<NodeId>,
+    /// Sender side to report events to a [`GossipReceiver`].
+    ///
+    /// This is the internal counter part of gossip's subscribe public API.
     event_senders: EventSenders,
+    /// Keys identifying [`GossipSender`]s.
+    ///
+    /// This represents the receiver side of gossip's publish public API.
     command_rx_keys: HashSet<stream_group::Key>,
 }
 
