@@ -351,7 +351,6 @@
 <a href="#351" id="351">351</a>
 <a href="#352" id="352">352</a>
 <a href="#353" id="353">353</a>
-<a href="#354" id="354">354</a>
 </pre></div><pre class="rust"><code><span class="doccomment">//! The protocol state of the `iroh-gossip` protocol.
 
 </span><span class="kw">use </span>std::{
@@ -600,7 +599,6 @@
                 }
 
                 <span class="kw">if </span>quit {
-                    <span class="macro">tracing::debug!</span>(<span class="string">"left topic"</span>);
                     <span class="self">self</span>.states.remove(<span class="kw-2">&amp;</span>topic);
                 }
             }

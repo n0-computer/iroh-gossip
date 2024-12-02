@@ -1473,7 +1473,6 @@
 <a href="#1473" id="1473">1473</a>
 <a href="#1474" id="1474">1474</a>
 <a href="#1475" id="1475">1475</a>
-<a href="#1476" id="1476">1476</a>
 </pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
 
 </span><span class="kw">use </span>std::{
@@ -1706,7 +1705,6 @@
 </span><span class="attr">#[derive(derive_more::Debug)]
 </span><span class="kw">pub struct </span>EventStream {
     <span class="doccomment">/// The actual stream polled to return [`Event`]s to the application.
-    </span><span class="comment">// TODO(@divma): this dyn can be removed. why is it here?
     </span><span class="attr">#[debug(<span class="string">"Stream"</span>)]
     </span>inner: Pin&lt;Box&lt;<span class="kw">dyn </span>Stream&lt;Item = <span class="prelude-ty">Result</span>&lt;Event&gt;&gt; + Send + <span class="lifetime">'static</span>&gt;&gt;,
 
@@ -1725,8 +1723,7 @@
     </span>receiver_id: ReceiverId,
 }
 
-<span class="comment">// impl Stream&lt;Item = Result&lt;Event&gt;&gt; + Send + 'static
-</span><span class="kw">impl </span>Stream <span class="kw">for </span>EventStream {
+<span class="kw">impl </span>Stream <span class="kw">for </span>EventStream {
     <span class="kw">type </span>Item = <span class="prelude-ty">Result</span>&lt;Event&gt;;
 
     <span class="kw">fn </span>poll_next(<span class="kw-2">mut </span><span class="self">self</span>: Pin&lt;<span class="kw-2">&amp;mut </span><span class="self">Self</span>&gt;, cx: <span class="kw-2">&amp;mut </span>Context&lt;<span class="lifetime">'_</span>&gt;) -&gt; Poll&lt;<span class="prelude-ty">Option</span>&lt;<span class="self">Self</span>::Item&gt;&gt; {
@@ -1736,8 +1733,7 @@
 
 <span class="kw">impl </span>Drop <span class="kw">for </span>EventStream {
     <span class="kw">fn </span>drop(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
-        <span class="macro">debug!</span>(topic = <span class="question-mark">?</span><span class="self">self</span>.topic, receiver_id = <span class="question-mark">?</span><span class="self">self</span>.receiver_id, <span class="string">"dropping receiver"</span>);
-        <span class="comment">// note: unexpectedly, this works without a tokio runtime, so we leverage that to avoid yet
+        <span class="comment">// NOTE: unexpectedly, this works without a tokio runtime, so we leverage that to avoid yet
         // another spawned task
         </span><span class="kw">if let </span><span class="prelude-val">Err</span>(e) = <span class="self">self</span>.to_actor_tx.try_send(ToActor::ReceiverGone {
             topic: <span class="self">self</span>.topic,
@@ -2398,7 +2394,9 @@
     </span>senders: HashMap&lt;ReceiverId, (async_channel::Sender&lt;<span class="prelude-ty">Result</span>&lt;Event&gt;&gt;, bool)&gt;,
 }
 
-<span class="doccomment">/// Id for a gossip receiver. This is assigned to each [`EventStream`] obtained by the application.
+<span class="doccomment">/// Id for a gossip receiver.
+///
+/// This is assigned to each [`EventStream`] obtained by the application.
 </span><span class="attr">#[derive(derive_more::Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Clone, Copy)]
 </span><span class="kw">struct </span>ReceiverId(usize);
 
@@ -2622,7 +2620,7 @@
             <span class="prelude-val">Ok</span>((gossip, actor, endpoing_task))
         }
 
-        <span class="doccomment">/// Crates a new
+        <span class="doccomment">/// Crates a new testing gossip instance with the normal actor loop.
         </span><span class="kw">async fn </span>t_new(
             rng: <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng,
             config: proto::Config,
@@ -2917,10 +2915,10 @@
             </span>ct1.cancelled().<span class="kw">await</span>;
             drop(go1);
         }
-        .instrument(<span class="macro">tracing::debug_span!</span>(<span class="string">"node_1"</span>, %node_id2));
+        .instrument(<span class="macro">tracing::debug_span!</span>(<span class="string">"node_1"</span>, %node_id1));
         <span class="kw">let </span>go1_handle = tokio::spawn(go1_task);
 
-        <span class="comment">// join and check that the topic is now subscribed
+        <span class="comment">// advance and check that the topic is now subscribed
         </span>actor.steps(<span class="number">3</span>).<span class="kw">await</span><span class="question-mark">?</span>; <span class="comment">// handle our join;
                                // get peer connection;
                                // receive the other peer's information for a NeighborUp
