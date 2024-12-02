@@ -246,7 +246,6 @@ impl<PI: PeerIdentity, R: Rng + Clone> State<PI, R> {
                 }
 
                 if quit {
-                    tracing::debug!("left topic");
                     self.states.remove(&topic);
                 }
             }

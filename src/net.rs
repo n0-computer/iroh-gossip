@@ -230,7 +230,6 @@ impl Gossip {
 #[derive(derive_more::Debug)]
 pub struct EventStream {
     /// The actual stream polled to return [`Event`]s to the application.
-    // TODO(@divma): this dyn can be removed. why is it here?
     #[debug("Stream")]
     inner: Pin<Box<dyn Stream<Item = Result<Event>> + Send + 'static>>,
 
@@ -259,7 +258,7 @@ impl Stream for EventStream {
 
 impl Drop for EventStream {
     fn drop(&mut self) {
-        // note: unexpectedly, this works without a tokio runtime, so we leverage that to avoid yet
+        // NOTE: unexpectedly, this works without a tokio runtime, so we leverage that to avoid yet
         // another spawned task
         if let Err(e) = self.to_actor_tx.try_send(ToActor::ReceiverGone {
             topic: self.topic,
