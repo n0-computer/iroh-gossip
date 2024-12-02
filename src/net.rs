@@ -249,7 +249,6 @@ pub struct EventStream {
     receiver_id: ReceiverId,
 }
 
-// impl Stream<Item = Result<Event>> + Send + 'static
 impl Stream for EventStream {
     type Item = Result<Event>;
 
@@ -260,7 +259,6 @@ impl Stream for EventStream {
 
 impl Drop for EventStream {
     fn drop(&mut self) {
-        debug!(topic = ?self.topic, receiver_id = ?self.receiver_id, "dropping receiver");
         // note: unexpectedly, this works without a tokio runtime, so we leverage that to avoid yet
         // another spawned task
         if let Err(e) = self.to_actor_tx.try_send(ToActor::ReceiverGone {
@@ -922,7 +920,9 @@ struct EventSenders {
     senders: HashMap<ReceiverId, (async_channel::Sender<Result<Event>>, bool)>,
 }
 
-/// Id for a gossip receiver. This is assigned to each [`EventStream`] obtained by the application.
+/// Id for a gossip receiver.
+///
+/// This is assigned to each [`EventStream`] obtained by the application.
 #[derive(derive_more::Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Clone, Copy)]
 struct ReceiverId(usize);
 
@@ -1146,7 +1146,7 @@ mod test {
             Ok((gossip, actor, endpoing_task))
         }
 
-        /// Crates a new
+        /// Crates a new testing gossip instance with the normal actor loop.
         async fn t_new(
             rng: &mut rand_chacha::ChaCha12Rng,
             config: proto::Config,
@@ -1441,10 +1441,10 @@ mod test {
             ct1.cancelled().await;
             drop(go1);
         }
-        .instrument(tracing::debug_span!("node_1", %node_id2));
+        .instrument(tracing::debug_span!("node_1", %node_id1));
         let go1_handle = tokio::spawn(go1_task);
 
-        // join and check that the topic is now subscribed
+        // advance and check that the topic is now subscribed
         actor.steps(3).await?; // handle our join;
                                // get peer connection;
                                // receive the other peer's information for a NeighborUp
