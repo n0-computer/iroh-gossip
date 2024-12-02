@@ -212,6 +212,55 @@ impl Gossip {
     }
 }
 
+/// Stream of events for a topic.
+pub struct EventStream {
+    /// The actual stream polled to return [`Event`]s to the application.
+    // TODO(@divma): this dyn can be removed. why is it here?
+    inner: Pin<Box<dyn Stream<Item = Result<Event>> + Send + 'static>>,
+
+    /// Channel to the actor task.
+    ///
+    /// This is used to handle the receiver being dropped. When all receiver and publishers are
+    /// gone the topic will be desubscribed.
+    to_actor_tx: mpsc::Sender<ToActor>,
+    /// The topic for which this stream is reporting events.
+    ///
+    /// This is sent on drop to the actor to handle the receiver going away.
+    topic: TopicId,
+    /// An Id identifying this specific receiver.
+    ///
+    /// This is sent on drop to the actor to handle the receiver going away.
+    receiver_id: usize,
+}
+
+impl Drop for EventStream {
+    fn drop(&mut self) {
+        // note: unexpectedly, this works without a tokio runtime, so we leverage that to avoid yet
+        // another spawned task
+        if let Err(e) = self.to_actor_tx.try_send(ToActor::ReceiverGone {
+            topic: self.topic,
+            receiver_id: self.receiver_id,
+        }) {
+            match e {
+                mpsc::error::TrySendError::Full(msg) => {
+                    // if we can't immediately inform then try to spawn a task that handles it
+                    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                        let to_actor_tx = self.to_actor_tx.clone();
+                        handle.spawn(async move {
+                            to_actor_tx.send(msg).await;
+                        });
+                    } else {
+                        // full but no runtime oh noes
+                    }
+                }
+                mpsc::error::TrySendError::Closed(_) => {
+                    // we are probably shutting down so ignore the error
+                }
+            }
+        }
+    }
+}
+
 /// Input messages for the gossip [`Actor`].
 #[derive(derive_more::Debug)]
 enum ToActor {
@@ -222,6 +271,10 @@ enum ToActor {
         topic_id: TopicId,
         bootstrap: BTreeSet<NodeId>,
         channels: SubscriberChannels,
+    },
+    ReceiverGone {
+        topic: TopicId,
+        receiver_id: usize,
     },
 }
 
@@ -581,6 +634,9 @@ impl Actor {
                 )
                 .await?;
             }
+            ToActor::ReceiverGone { topic, receiver_id } => {
+                self.handle_receiver_gone(topic, receiver_id).await?;
+            }
         }
         Ok(())
     }
@@ -698,6 +754,10 @@ impl Actor {
         }
         Ok(())
     }
+
+    async fn handle_receiver_gone(&mut self, topic: TopicId, receiver_id: usize) {
+        todo!()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -806,33 +866,42 @@ fn decode_peer_data(peer_data: &PeerData) -> anyhow::Result<AddrInfo> {
 
 #[derive(Debug, Default)]
 struct EventSenders {
-    senders: Vec<(async_channel::Sender<Result<Event>>, bool)>,
+    /// Channels to communicate [`Event`] to [`EventStream`]s.
+    ///
+    /// This is indexed by receiver id. The boolean indicates a lagged channel ([`Event::Lagged`]).
+    senders: HashMap<ReceiverId, (async_channel::Sender<Result<Event>>, bool)>,
 }
+
+/// Id for a gossip receiver. This is assigned to each [`EventStream`] obtained by the application.
+#[derive(derive_more::Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Clone, Copy)]
+struct ReceiverId(usize);
 
 impl EventSenders {
     fn is_empty(&self) -> bool {
         self.senders.is_empty()
     }
 
-    fn push(&mut self, sender: async_channel::Sender<Result<Event>>) {
-        self.senders.push((sender, false));
+    fn push(&mut self, id: ReceiverId, sender: async_channel::Sender<Result<Event>>) {
+        self.senders.insert(id, (sender, false));
     }
 
     /// Send an event to all subscribers.
     ///
     /// This will not wait until the sink is full, but send a `Lagged` response if the sink is almost full.
     fn send(&mut self, event: &GossipEvent) {
-        self.senders.retain_mut(|(send, lagged)| {
+        let mut remove = Vec::new();
+        for (&id, (send, lagged)) in self.senders.iter_mut() {
             // If the stream is disconnected, we don't need to send to it.
             if send.is_closed() {
-                return false;
+                remove.push(id);
+                continue;
             }
 
             // Check if the send buffer is almost full, and send a lagged response if it is.
             let cap = send.capacity().expect("we only use bounded channels");
             let event = if send.len() >= cap - 1 {
                 if *lagged {
-                    return true;
+                    continue;
                 }
                 *lagged = true;
                 Event::Lagged
@@ -840,12 +909,15 @@ impl EventSenders {
                 *lagged = false;
                 Event::Gossip(event.clone())
             };
-            match send.try_send(Ok(event)) {
-                Ok(()) => true,
-                Err(async_channel::TrySendError::Full(_)) => true,
-                Err(async_channel::TrySendError::Closed(_)) => false,
+
+            if let Err(async_channel::TrySendError::Closed(_)) = send.try_send(Ok(event)) {
+                remove.push(id);
             }
-        })
+        }
+
+        for id in remove.into_iter() {
+            self.senders.remove(&id);
+        }
     }
 }
 
