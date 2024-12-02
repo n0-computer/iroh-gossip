@@ -1,9 +1,9 @@
 //! Networking for the `iroh-gossip` protocol
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet, VecDeque},
+    collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
     pin::Pin,
-    sync::Arc,
+    sync::{atomic::AtomicUsize, Arc},
     task::{Context, Poll},
     time::Instant,
 };
@@ -92,6 +92,8 @@ pub struct Gossip {
     to_actor_tx: mpsc::Sender<ToActor>,
     _actor_handle: Arc<AbortOnDropHandle<()>>,
     max_message_size: usize,
+    /// Next [`ReceiverId`] to be assigned when a receiver is registered for a topic.
+    next_receiver_id: Arc<AtomicUsize>,
     #[cfg(feature = "rpc")]
     pub(crate) rpc_handler: Arc<std::sync::OnceLock<crate::rpc::RpcHandler>>,
 }
@@ -121,6 +123,7 @@ impl Gossip {
             to_actor_tx,
             _actor_handle: Arc::new(AbortOnDropHandle::new(actor_handle)),
             max_message_size,
+            next_receiver_id: Default::default(),
             #[cfg(feature = "rpc")]
             rpc_handler: Default::default(),
         }
@@ -177,7 +180,11 @@ impl Gossip {
     ) -> impl Stream<Item = Result<Event>> + Send + 'static {
         let (event_tx, event_rx) = async_channel::bounded(options.subscription_capacity);
         let to_actor_tx = self.to_actor_tx.clone();
+        let receiver_id = self
+            .next_receiver_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let channels = SubscriberChannels {
+            receiver_id: ReceiverId(receiver_id),
             command_rx: updates,
             event_tx,
         };
@@ -230,7 +237,7 @@ pub struct EventStream {
     /// An Id identifying this specific receiver.
     ///
     /// This is sent on drop to the actor to handle the receiver going away.
-    receiver_id: usize,
+    receiver_id: ReceiverId,
 }
 
 impl Drop for EventStream {
@@ -247,7 +254,7 @@ impl Drop for EventStream {
                     if let Ok(handle) = tokio::runtime::Handle::try_current() {
                         let to_actor_tx = self.to_actor_tx.clone();
                         handle.spawn(async move {
-                            to_actor_tx.send(msg).await;
+                            let _ = to_actor_tx.send(msg).await;
                         });
                     } else {
                         // full but no runtime oh noes
@@ -274,7 +281,7 @@ enum ToActor {
     },
     ReceiverGone {
         topic: TopicId,
-        receiver_id: usize,
+        receiver_id: ReceiverId,
     },
 }
 
@@ -499,9 +506,6 @@ impl Actor {
             warn!("received command for unknown topic");
             return Ok(());
         };
-        let TopicState {
-            command_rx_keys, ..
-        } = state;
         match command {
             Some(command) => {
                 let command = match command {
@@ -515,9 +519,8 @@ impl Actor {
                     .await?;
             }
             None => {
-                command_rx_keys.remove(&key);
-                tracing::debug!(len = command_rx_keys.len(), "command_rx_keys is_empty");
-                if command_rx_keys.is_empty() {
+                state.command_rx_keys.remove(&key);
+                if !state.still_needed() {
                     self.quit_queue.push_back(topic);
                     self.process_quit_queue().await?;
                 }
@@ -620,7 +623,7 @@ impl Actor {
                         .ok();
                 }
 
-                event_senders.push(channels.event_tx);
+                event_senders.push(channels.receiver_id, channels.event_tx);
                 let command_rx = TopicCommandStream::new(topic_id, channels.command_rx);
                 let key = self.command_rx.insert(command_rx);
                 command_rx_keys.insert(key);
@@ -755,8 +758,24 @@ impl Actor {
         Ok(())
     }
 
-    async fn handle_receiver_gone(&mut self, topic: TopicId, receiver_id: usize) {
-        todo!()
+    async fn handle_receiver_gone(
+        &mut self,
+        topic: TopicId,
+        receiver_id: ReceiverId,
+    ) -> anyhow::Result<()> {
+        if let Entry::Occupied(mut entry) = self.topics.entry(topic) {
+            let state = entry.get_mut();
+            state.event_senders.remove(&receiver_id);
+            if !state.still_needed() {
+                self.quit_queue.push_back(topic);
+                self.process_quit_queue().await?;
+            }
+        } else {
+            // topic should not have been droped without all receivers being dropped first
+            warn!("receiver gone for missing topic");
+        };
+
+        Ok(())
     }
 }
 
@@ -793,6 +812,13 @@ struct TopicState {
     command_rx_keys: HashSet<stream_group::Key>,
 }
 
+impl TopicState {
+    /// Check if the topic still has any publisher or subscriber.
+    fn still_needed(&self) -> bool {
+        self.event_senders.is_empty() && self.command_rx_keys.is_empty()
+    }
+}
+
 /// Whether a connection is initiated by us (Dial) or by the remote peer (Accept)
 #[derive(Debug, Clone, Copy)]
 enum ConnOrigin {
@@ -801,6 +827,8 @@ enum ConnOrigin {
 }
 #[derive(derive_more::Debug)]
 struct SubscriberChannels {
+    /// Id for the receiver counter part of [`Self::event_tx`].
+    receiver_id: ReceiverId,
     event_tx: async_channel::Sender<Result<Event>>,
     #[debug("CommandStream")]
     command_rx: CommandStream,
@@ -918,6 +946,11 @@ impl EventSenders {
         for id in remove.into_iter() {
             self.senders.remove(&id);
         }
+    }
+
+    /// Removes a sender based on the corresponding receiver's id.
+    fn remove(&mut self, id: &ReceiverId) {
+        self.senders.remove(id);
     }
 }
 
@@ -1066,6 +1099,7 @@ mod test {
                 to_actor_tx,
                 _actor_handle,
                 max_message_size,
+                next_receiver_id: Default::default(),
                 #[cfg(feature = "rpc")]
                 rpc_handler: Default::default(),
             };
