@@ -14,9 +14,8 @@ use futures_lite::{Stream, StreamExt};
 use iroh::NodeId;
 use serde::{Deserialize, Serialize};
 
-use crate::{net::TOPIC_EVENTS_DEFAULT_CAP, proto::DeliveryScope};
-
 use super::EventStream;
+use crate::{net::TOPIC_EVENTS_DEFAULT_CAP, proto::DeliveryScope};
 
 /// Sender for a gossip topic.
 #[derive(Debug)]

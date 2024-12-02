@@ -448,11 +448,11 @@ impl Actor {
                 trace!(?i, "tick: new_endpoints");
                 inc!(Metrics, actor_tick_endpoint);
                 *current_addresses = new_addresses;
-                self.handle_addr_update(&current_addresses).await?;
+                self.handle_addr_update(current_addresses).await?;
             }
             Some(_relay_url) = home_relay_stream.next() => {
                 trace!(?i, "tick: new_home_relay");
-                self.handle_addr_update(&current_addresses).await?;
+                self.handle_addr_update(current_addresses).await?;
             }
             (peer_id, res) = self.dialer.next_conn() => {
                 trace!(?i, "tick: dialer");
@@ -504,7 +504,7 @@ impl Actor {
         &mut self,
         current_addresses: &BTreeSet<DirectAddr>,
     ) -> anyhow::Result<()> {
-        let peer_data = our_peer_data(&self.endpoint, &current_addresses)?;
+        let peer_data = our_peer_data(&self.endpoint, current_addresses)?;
         self.handle_in_event(InEvent::UpdatePeerData(peer_data), Instant::now())
             .await
     }
