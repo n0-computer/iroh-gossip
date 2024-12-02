@@ -276,7 +276,7 @@ impl Drop for EventStream {
                             let _ = to_actor_tx.send(msg).await;
                         });
                     } else {
-                        // full but no runtime oh noes
+                        // full but no runtime oh no
                     }
                 }
                 mpsc::error::TrySendError::Closed(_) => {
@@ -787,7 +787,7 @@ impl Actor {
                 self.process_quit_queue().await?;
             }
         } else {
-            // topic should not have been droped without all receivers being dropped first
+            // topic should not have been dropped without all receivers being dropped first
             warn!("receiver gone for missing topic");
         };
 
