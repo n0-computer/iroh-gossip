@@ -162,7 +162,7 @@ impl Gossip {
         let (command_tx, command_rx) = async_channel::bounded(TOPIC_COMMANDS_DEFAULT_CAP);
         let command_rx: CommandStream = Box::pin(command_rx);
         let event_rx = self.join_with_stream(topic_id, opts, command_rx);
-        GossipTopic::new(command_tx, Box::pin(event_rx))
+        GossipTopic::new(command_tx, event_rx)
     }
 
     /// Join a gossip topic with options and an externally-created update stream.
@@ -177,14 +177,15 @@ impl Gossip {
         topic_id: TopicId,
         options: JoinOptions,
         updates: CommandStream,
-    ) -> impl Stream<Item = Result<Event>> + Send + 'static {
+    ) -> EventStream {
         let (event_tx, event_rx) = async_channel::bounded(options.subscription_capacity);
         let to_actor_tx = self.to_actor_tx.clone();
-        let receiver_id = self
-            .next_receiver_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let receiver_id = ReceiverId(
+            self.next_receiver_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        );
         let channels = SubscriberChannels {
-            receiver_id: ReceiverId(receiver_id),
+            receiver_id,
             command_rx: updates,
             event_tx,
         };
@@ -203,12 +204,18 @@ impl Gossip {
                 .await
                 .map_err(|_| anyhow!("Gossip actor dropped"))
         });
-        async move {
+        let stream = async move {
             task.await
                 .map_err(|err| anyhow!("Task for sending to gossip actor failed: {err:?}"))??;
             Ok(event_rx)
         }
-        .try_flatten_stream()
+        .try_flatten_stream();
+        EventStream {
+            inner: Box::pin(stream),
+            to_actor_tx: self.to_actor_tx.clone(),
+            topic: topic_id,
+            receiver_id,
+        }
     }
 
     async fn send(&self, event: ToActor) -> anyhow::Result<()> {
@@ -220,9 +227,11 @@ impl Gossip {
 }
 
 /// Stream of events for a topic.
+#[derive(derive_more::Debug)]
 pub struct EventStream {
     /// The actual stream polled to return [`Event`]s to the application.
     // TODO(@divma): this dyn can be removed. why is it here?
+    #[debug("Stream")]
     inner: Pin<Box<dyn Stream<Item = Result<Event>> + Send + 'static>>,
 
     /// Channel to the actor task.
@@ -240,8 +249,18 @@ pub struct EventStream {
     receiver_id: ReceiverId,
 }
 
+// impl Stream<Item = Result<Event>> + Send + 'static
+impl Stream for EventStream {
+    type Item = Result<Event>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.inner.poll_next(cx)
+    }
+}
+
 impl Drop for EventStream {
     fn drop(&mut self) {
+        debug!(topic = ?self.topic, receiver_id = ?self.receiver_id, "dropping receiver");
         // note: unexpectedly, this works without a tokio runtime, so we leverage that to avoid yet
         // another spawned task
         if let Err(e) = self.to_actor_tx.try_send(ToActor::ReceiverGone {
@@ -708,7 +727,7 @@ impl Actor {
                         joined,
                         neighbors,
                         event_senders,
-                        command_rx_keys,
+                        ..
                     } = state;
                     let event = if let ProtoEvent::NeighborUp(neighbor) = event {
                         neighbors.insert(neighbor);
@@ -722,7 +741,7 @@ impl Actor {
                         event.into()
                     };
                     event_senders.send(&event);
-                    if event_senders.is_empty() && command_rx_keys.is_empty() {
+                    if !state.still_needed() {
                         self.quit_queue.push_back(topic_id);
                     }
                 }
@@ -766,6 +785,8 @@ impl Actor {
         if let Entry::Occupied(mut entry) = self.topics.entry(topic) {
             let state = entry.get_mut();
             state.event_senders.remove(&receiver_id);
+            let needed = state.still_needed();
+            debug!(needed, "still needed?");
             if !state.still_needed() {
                 self.quit_queue.push_back(topic);
                 self.process_quit_queue().await?;
@@ -815,7 +836,7 @@ struct TopicState {
 impl TopicState {
     /// Check if the topic still has any publisher or subscriber.
     fn still_needed(&self) -> bool {
-        self.event_senders.is_empty() && self.command_rx_keys.is_empty()
+        !self.event_senders.is_empty() || !self.command_rx_keys.is_empty()
     }
 }
 
@@ -853,17 +874,23 @@ async fn connection_loop(
 
     let send_loop = async {
         for msg in queue {
-            write_message(&mut send, &mut send_buf, &msg, max_message_size).await?
+            write_message(&mut send, &mut send_buf, &msg, max_message_size)
+                .await
+                .context("write_message")?
         }
         while let Some(msg) = send_rx.recv().await {
-            write_message(&mut send, &mut send_buf, &msg, max_message_size).await?
+            write_message(&mut send, &mut send_buf, &msg, max_message_size)
+                .await
+                .context("write_message")?
         }
         Ok::<_, anyhow::Error>(())
     };
 
     let recv_loop = async {
         loop {
-            let msg = read_message(&mut recv, &mut recv_buf, max_message_size).await?;
+            let msg = read_message(&mut recv, &mut recv_buf, max_message_size)
+                .await
+                .context("read_message")?;
             match msg {
                 None => break,
                 Some(msg) => in_event_tx.send(InEvent::RecvMessage(from, msg)).await?,
@@ -1034,7 +1061,7 @@ mod test {
     type EndpointHandle = tokio::task::JoinHandle<anyhow::Result<()>>;
 
     impl ManualActorLoop {
-        #[instrument(skip_all, fields(me = actor.endpoint.node_id().fmt_short()))]
+        #[instrument(skip_all, fields(me = %actor.endpoint.node_id().fmt_short()))]
         async fn new(mut actor: Actor) -> anyhow::Result<Self> {
             let (current_addresses, _, _) = actor.setup().await?;
             let test_rig = Self {
@@ -1046,7 +1073,7 @@ mod test {
             Ok(test_rig)
         }
 
-        #[instrument(skip_all, fields(me = self.endpoint.node_id().fmt_short()))]
+        #[instrument(skip_all, fields(me = %self.endpoint.node_id().fmt_short()))]
         async fn step(&mut self) -> anyhow::Result<()> {
             let ManualActorLoop {
                 actor,
@@ -1066,6 +1093,13 @@ mod test {
                     *step,
                 )
                 .await?;
+            Ok(())
+        }
+
+        async fn steps(&mut self, n: usize) -> anyhow::Result<()> {
+            for _ in 0..n {
+                self.step().await?;
+            }
             Ok(())
         }
     }
@@ -1412,22 +1446,21 @@ mod test {
         let go1_handle = tokio::spawn(go1_task);
 
         // join and check that the topic is now subscribed
-        actor.step().await?; // handle our join
-        actor.step().await?; // get peer connection
-        actor.step().await?; // receive the other peer's information for a NeighborUp
+        actor.steps(3).await?; // handle our join;
+                               // get peer connection;
+                               // receive the other peer's information for a NeighborUp
         let state = actor.topics.get(&topic).context("get registered topic")?;
         assert!(state.joined);
 
         // signal the second subscribe, we should remain subscribed
         tx.send(()).await?;
-        actor.step().await?;
+        actor.steps(3).await?; // subscribe; first receiver gone; first sender gone
         let state = actor.topics.get(&topic).context("get registered topic")?;
         assert!(state.joined);
 
         // signal to drop the second handle, the topic should no longer be subscribed
         tx.send(()).await?;
-        actor.step().await?;
-        actor.step().await?;
+        actor.steps(2).await?; // second receiver gone; second sender gone
         assert!(!actor.topics.contains_key(&topic));
 
         // cleanup and ensure everything went as expected

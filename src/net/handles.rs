@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{net::TOPIC_EVENTS_DEFAULT_CAP, proto::DeliveryScope};
 
+use super::EventStream;
+
 /// Sender for a gossip topic.
 #[derive(Debug)]
 pub struct GossipSender(async_channel::Sender<Command>);
@@ -50,8 +52,6 @@ impl GossipSender {
     }
 }
 
-type EventStream = Pin<Box<dyn Stream<Item = Result<Event>> + Send + 'static>>;
-
 /// Subscribed gossip topic.
 ///
 /// This handle is a [`Stream`] of [`Event`]s from the topic, and can be used to send messages.
@@ -67,7 +67,7 @@ impl GossipTopic {
     pub(crate) fn new(sender: async_channel::Sender<Command>, receiver: EventStream) -> Self {
         Self {
             sender: GossipSender::new(sender),
-            receiver: GossipReceiver::new(Box::pin(receiver)),
+            receiver: GossipReceiver::new(receiver),
         }
     }
 
