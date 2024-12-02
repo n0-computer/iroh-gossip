@@ -38,14 +38,6 @@ impl<PI> Message<PI> {
     pub fn kind(&self) -> MessageKind {
         self.message.kind()
     }
-
-    pub(crate) fn is_disconnect(&self) -> bool {
-        // TODO(@divma): unclear if the "respond" matters here
-        matches!(
-            self.message,
-            topic::Message::Swarm(super::hyparview::Message::Disconnect(_))
-        )
-    }
 }
 
 /// Whether this is a control or data message
