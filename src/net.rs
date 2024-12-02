@@ -671,13 +671,14 @@ impl Actor {
 
     async fn process_quit_queue(&mut self) -> anyhow::Result<()> {
         while let Some(topic_id) = self.quit_queue.pop_front() {
-            tracing::debug!(%topic_id, "quit");
             self.handle_in_event_inner(
                 InEvent::Command(topic_id, ProtoCommand::Quit),
                 Instant::now(),
             )
             .await?;
-            self.topics.remove(&topic_id);
+            if self.topics.remove(&topic_id).is_some() {
+                tracing::debug!(%topic_id, "publishers and subscribers gone; unsubscribing");
+            }
         }
         Ok(())
     }
