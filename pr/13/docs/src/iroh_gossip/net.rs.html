@@ -2260,7 +2260,7 @@
             }
         } <span class="kw">else </span>{
             <span class="comment">// topic should not have been dropped without all receivers being dropped first
-            </span><span class="macro">warn!</span>(<span class="string">"receiver gone for missing topic"</span>);
+            </span><span class="macro">warn!</span>(%topic, <span class="string">"receiver gone for missing topic"</span>);
         };
 
         <span class="prelude-val">Ok</span>(())
