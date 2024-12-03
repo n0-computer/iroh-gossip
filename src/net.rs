@@ -785,7 +785,7 @@ impl Actor {
             }
         } else {
             // topic should not have been dropped without all receivers being dropped first
-            warn!("receiver gone for missing topic");
+            warn!(%topic, "receiver gone for missing topic");
         };
 
         Ok(())
