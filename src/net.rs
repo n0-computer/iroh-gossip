@@ -236,7 +236,7 @@ pub struct EventStream {
     /// Channel to the actor task.
     ///
     /// This is used to handle the receiver being dropped. When all receiver and publishers are
-    /// gone the topic will be desubscribed.
+    /// gone the topic will be unsubscribed.
     to_actor_tx: mpsc::Sender<ToActor>,
     /// The topic for which this stream is reporting events.
     ///
