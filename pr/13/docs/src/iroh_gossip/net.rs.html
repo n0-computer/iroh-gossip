@@ -1711,7 +1711,7 @@
     <span class="doccomment">/// Channel to the actor task.
     ///
     /// This is used to handle the receiver being dropped. When all receiver and publishers are
-    /// gone the topic will be desubscribed.
+    /// gone the topic will be unsubscribed.
     </span>to_actor_tx: mpsc::Sender&lt;ToActor&gt;,
     <span class="doccomment">/// The topic for which this stream is reporting events.
     ///
