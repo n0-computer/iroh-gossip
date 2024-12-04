@@ -14,6 +14,7 @@ use futures_lite::{Stream, StreamExt};
 use iroh::NodeId;
 use serde::{Deserialize, Serialize};
 
+use super::EventStream;
 use crate::{net::TOPIC_EVENTS_DEFAULT_CAP, proto::DeliveryScope};
 
 /// Sender for a gossip topic.
@@ -50,8 +51,6 @@ impl GossipSender {
     }
 }
 
-type EventStream = Pin<Box<dyn Stream<Item = Result<Event>> + Send + 'static>>;
-
 /// Subscribed gossip topic.
 ///
 /// This handle is a [`Stream`] of [`Event`]s from the topic, and can be used to send messages.
@@ -67,7 +66,7 @@ impl GossipTopic {
     pub(crate) fn new(sender: async_channel::Sender<Command>, receiver: EventStream) -> Self {
         Self {
             sender: GossipSender::new(sender),
-            receiver: GossipReceiver::new(Box::pin(receiver)),
+            receiver: GossipReceiver::new(receiver),
         }
     }
 

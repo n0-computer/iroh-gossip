@@ -1,9 +1,9 @@
 //! Networking for the `iroh-gossip` protocol
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet, VecDeque},
+    collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
     pin::Pin,
-    sync::Arc,
+    sync::{atomic::AtomicUsize, Arc},
     task::{Context, Poll},
     time::Instant,
 };
@@ -92,6 +92,8 @@ pub struct Gossip {
     to_actor_tx: mpsc::Sender<ToActor>,
     _actor_handle: Arc<AbortOnDropHandle<()>>,
     max_message_size: usize,
+    /// Next [`ReceiverId`] to be assigned when a receiver is registered for a topic.
+    next_receiver_id: Arc<AtomicUsize>,
     #[cfg(feature = "rpc")]
     pub(crate) rpc_handler: Arc<std::sync::OnceLock<crate::rpc::RpcHandler>>,
 }
@@ -105,33 +107,9 @@ impl ProtocolHandler for Gossip {
 impl Gossip {
     /// Spawn a gossip actor and get a handle for it
     pub fn from_endpoint(endpoint: Endpoint, config: proto::Config, my_addr: &AddrInfo) -> Self {
-        let peer_id = endpoint.node_id();
-        let dialer = Dialer::new(endpoint.clone());
-        let state = proto::State::new(
-            peer_id,
-            encode_peer_data(my_addr).unwrap(),
-            config,
-            rand::rngs::StdRng::from_entropy(),
-        );
-        let (to_actor_tx, to_actor_rx) = mpsc::channel(TO_ACTOR_CAP);
-        let (in_event_tx, in_event_rx) = mpsc::channel(IN_EVENT_CAP);
-
-        let me = endpoint.node_id().fmt_short();
-        let max_message_size = state.max_message_size();
-        let actor = Actor {
-            endpoint,
-            state,
-            dialer,
-            to_actor_rx,
-            in_event_rx,
-            in_event_tx,
-            timers: Timers::new(),
-            command_rx: StreamGroup::new().keyed(),
-            peers: Default::default(),
-            topics: Default::default(),
-            quit_queue: Default::default(),
-            connection_tasks: Default::default(),
-        };
+        let (actor, to_actor_tx) = Actor::new(endpoint, config, my_addr);
+        let me = actor.endpoint.node_id().fmt_short();
+        let max_message_size = actor.state.max_message_size();
 
         let actor_handle = tokio::spawn(
             async move {
@@ -145,6 +123,7 @@ impl Gossip {
             to_actor_tx,
             _actor_handle: Arc::new(AbortOnDropHandle::new(actor_handle)),
             max_message_size,
+            next_receiver_id: Default::default(),
             #[cfg(feature = "rpc")]
             rpc_handler: Default::default(),
         }
@@ -183,7 +162,7 @@ impl Gossip {
         let (command_tx, command_rx) = async_channel::bounded(TOPIC_COMMANDS_DEFAULT_CAP);
         let command_rx: CommandStream = Box::pin(command_rx);
         let event_rx = self.join_with_stream(topic_id, opts, command_rx);
-        GossipTopic::new(command_tx, Box::pin(event_rx))
+        GossipTopic::new(command_tx, event_rx)
     }
 
     /// Join a gossip topic with options and an externally-created update stream.
@@ -198,10 +177,15 @@ impl Gossip {
         topic_id: TopicId,
         options: JoinOptions,
         updates: CommandStream,
-    ) -> impl Stream<Item = Result<Event>> + Send + 'static {
+    ) -> EventStream {
         let (event_tx, event_rx) = async_channel::bounded(options.subscription_capacity);
         let to_actor_tx = self.to_actor_tx.clone();
+        let receiver_id = ReceiverId(
+            self.next_receiver_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        );
         let channels = SubscriberChannels {
+            receiver_id,
             command_rx: updates,
             event_tx,
         };
@@ -220,12 +204,18 @@ impl Gossip {
                 .await
                 .map_err(|_| anyhow!("Gossip actor dropped"))
         });
-        async move {
+        let stream = async move {
             task.await
                 .map_err(|err| anyhow!("Task for sending to gossip actor failed: {err:?}"))??;
             Ok(event_rx)
         }
-        .try_flatten_stream()
+        .try_flatten_stream();
+        EventStream {
+            inner: Box::pin(stream),
+            to_actor_tx: self.to_actor_tx.clone(),
+            topic: topic_id,
+            receiver_id,
+        }
     }
 
     async fn send(&self, event: ToActor) -> anyhow::Result<()> {
@@ -233,6 +223,64 @@ impl Gossip {
             .send(event)
             .await
             .map_err(|_| anyhow!("gossip actor dropped"))
+    }
+}
+
+/// Stream of events for a topic.
+#[derive(derive_more::Debug)]
+pub struct EventStream {
+    /// The actual stream polled to return [`Event`]s to the application.
+    #[debug("Stream")]
+    inner: Pin<Box<dyn Stream<Item = Result<Event>> + Send + 'static>>,
+
+    /// Channel to the actor task.
+    ///
+    /// This is used to handle the receiver being dropped. When all receiver and publishers are
+    /// gone the topic will be unsubscribed.
+    to_actor_tx: mpsc::Sender<ToActor>,
+    /// The topic for which this stream is reporting events.
+    ///
+    /// This is sent on drop to the actor to handle the receiver going away.
+    topic: TopicId,
+    /// An Id identifying this specific receiver.
+    ///
+    /// This is sent on drop to the actor to handle the receiver going away.
+    receiver_id: ReceiverId,
+}
+
+impl Stream for EventStream {
+    type Item = Result<Event>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.inner.poll_next(cx)
+    }
+}
+
+impl Drop for EventStream {
+    fn drop(&mut self) {
+        // NOTE: unexpectedly, this works without a tokio runtime, so we leverage that to avoid yet
+        // another spawned task
+        if let Err(e) = self.to_actor_tx.try_send(ToActor::ReceiverGone {
+            topic: self.topic,
+            receiver_id: self.receiver_id,
+        }) {
+            match e {
+                mpsc::error::TrySendError::Full(msg) => {
+                    // if we can't immediately inform then try to spawn a task that handles it
+                    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                        let to_actor_tx = self.to_actor_tx.clone();
+                        handle.spawn(async move {
+                            let _ = to_actor_tx.send(msg).await;
+                        });
+                    } else {
+                        // full but no runtime oh no
+                    }
+                }
+                mpsc::error::TrySendError::Closed(_) => {
+                    // we are probably shutting down so ignore the error
+                }
+            }
+        }
     }
 }
 
@@ -246,6 +294,10 @@ enum ToActor {
         topic_id: TopicId,
         bootstrap: BTreeSet<NodeId>,
         channels: SubscriberChannels,
+    },
+    ReceiverGone {
+        topic: TopicId,
+        receiver_id: ReceiverId,
     },
 }
 
@@ -278,98 +330,180 @@ struct Actor {
 }
 
 impl Actor {
+    fn new(
+        endpoint: Endpoint,
+        config: proto::Config,
+        my_addr: &AddrInfo,
+    ) -> (Self, mpsc::Sender<ToActor>) {
+        let peer_id = endpoint.node_id();
+        let dialer = Dialer::new(endpoint.clone());
+        let state = proto::State::new(
+            peer_id,
+            encode_peer_data(my_addr).unwrap(),
+            config,
+            rand::rngs::StdRng::from_entropy(),
+        );
+        let (to_actor_tx, to_actor_rx) = mpsc::channel(TO_ACTOR_CAP);
+        let (in_event_tx, in_event_rx) = mpsc::channel(IN_EVENT_CAP);
+
+        let actor = Actor {
+            endpoint,
+            state,
+            dialer,
+            to_actor_rx,
+            in_event_rx,
+            in_event_tx,
+            timers: Timers::new(),
+            command_rx: StreamGroup::new().keyed(),
+            peers: Default::default(),
+            topics: Default::default(),
+            quit_queue: Default::default(),
+            connection_tasks: Default::default(),
+        };
+
+        (actor, to_actor_tx)
+    }
+
     pub async fn run(mut self) -> anyhow::Result<()> {
+        let (mut current_addresses, mut home_relay_stream, mut direct_addresses_stream) =
+            self.setup().await?;
+
+        let mut i = 0;
+        while let Some(()) = self
+            .event_loop(
+                &mut current_addresses,
+                &mut home_relay_stream,
+                &mut direct_addresses_stream,
+                i,
+            )
+            .await?
+        {
+            i += 1;
+        }
+        Ok(())
+    }
+
+    /// Performs the initial actor setup to run the [`Actor::event_loop`].
+    ///
+    /// This updates our current address and return it. It also returns the home relay stream and
+    /// direct addr stream.
+    async fn setup(
+        &mut self,
+    ) -> anyhow::Result<(
+        BTreeSet<DirectAddr>,
+        impl Stream<Item = iroh::RelayUrl> + Unpin,
+        impl Stream<Item = BTreeSet<DirectAddr>> + Unpin,
+    )> {
         // Watch for changes in direct addresses to update our peer data.
         let mut direct_addresses_stream = self.endpoint.direct_addresses();
         // Watch for changes of our home relay to update our peer data.
-        let mut home_relay_stream = self.endpoint.watch_home_relay();
+        let home_relay_stream = self.endpoint.watch_home_relay();
 
         // With each gossip message we provide addressing information to reach our node.
         // We wait until at least one direct address is discovered.
-        let mut current_addresses = direct_addresses_stream
+        let current_addresses = direct_addresses_stream
             .next()
             .await
             .ok_or_else(|| anyhow!("Failed to discover direct addresses"))?;
-        let peer_data = our_peer_data(&self.endpoint, &current_addresses)?;
-        self.handle_in_event(InEvent::UpdatePeerData(peer_data), Instant::now())
-            .await?;
+        self.handle_addr_update(&current_addresses).await?;
+        Ok((
+            current_addresses,
+            home_relay_stream,
+            direct_addresses_stream,
+        ))
+    }
 
-        let mut i = 0;
-        loop {
-            i += 1;
-            trace!(?i, "tick");
-            inc!(Metrics, actor_tick_main);
-            tokio::select! {
-                biased;
-                msg = self.to_actor_rx.recv() => {
-                    trace!(?i, "tick: to_actor_rx");
-                    inc!(Metrics, actor_tick_rx);
-                    match msg {
-                        Some(msg) => self.handle_to_actor_msg(msg, Instant::now()).await?,
-                        None => {
-                            debug!("all gossip handles dropped, stop gossip actor");
-                            break;
-                        }
-                    }
-                },
-                Some((key, (topic, command))) = self.command_rx.next(), if !self.command_rx.is_empty() => {
-                    trace!(?i, "tick: command_rx");
-                    self.handle_command(topic, key, command).await?;
-                },
-                Some(new_addresses) = direct_addresses_stream.next() => {
-                    trace!(?i, "tick: new_endpoints");
-                    inc!(Metrics, actor_tick_endpoint);
-                    current_addresses = new_addresses;
-                    let peer_data = our_peer_data(&self.endpoint, &current_addresses)?;
-                    self.handle_in_event(InEvent::UpdatePeerData(peer_data), Instant::now()).await?;
-                }
-                Some(_relay_url) = home_relay_stream.next() => {
-                    let peer_data = our_peer_data(&self.endpoint, &current_addresses)?;
-                    self.handle_in_event(InEvent::UpdatePeerData(peer_data), Instant::now()).await?;
-                }
-                (peer_id, res) = self.dialer.next_conn() => {
-                    trace!(?i, "tick: dialer");
-                    inc!(Metrics, actor_tick_dialer);
-                    match res {
-                        Ok(conn) => {
-                            debug!(peer = ?peer_id, "dial successful");
-                            inc!(Metrics, actor_tick_dialer_success);
-                            self.handle_connection(peer_id, ConnOrigin::Dial, conn);
-                        }
-                        Err(err) => {
-                            warn!(peer = ?peer_id, "dial failed: {err}");
-                            inc!(Metrics, actor_tick_dialer_failure);
-                        }
+    /// One event loop processing step.
+    ///
+    /// None is returned when no further processing should be performed.
+    async fn event_loop(
+        &mut self,
+        current_addresses: &mut BTreeSet<DirectAddr>,
+        home_relay_stream: &mut (impl Stream<Item = iroh::RelayUrl> + Unpin),
+        direct_addresses_stream: &mut (impl Stream<Item = BTreeSet<DirectAddr>> + Unpin),
+        i: usize,
+    ) -> anyhow::Result<Option<()>> {
+        inc!(Metrics, actor_tick_main);
+        tokio::select! {
+            biased;
+            msg = self.to_actor_rx.recv() => {
+                trace!(?i, "tick: to_actor_rx");
+                inc!(Metrics, actor_tick_rx);
+                match msg {
+                    Some(msg) => self.handle_to_actor_msg(msg, Instant::now()).await?,
+                    None => {
+                        debug!("all gossip handles dropped, stop gossip actor");
+                        return Ok(None)
                     }
                 }
-                event = self.in_event_rx.recv() => {
-                    trace!(?i, "tick: in_event_rx");
-                    inc!(Metrics, actor_tick_in_event_rx);
-                    match event {
-                        Some(event) => {
-                            self.handle_in_event(event, Instant::now()).await.context("in_event_rx.recv -> handle_in_event")?;
-                        }
-                        None => unreachable!()
+            },
+            Some((key, (topic, command))) = self.command_rx.next(), if !self.command_rx.is_empty() => {
+                trace!(?i, "tick: command_rx");
+                self.handle_command(topic, key, command).await?;
+            },
+            Some(new_addresses) = direct_addresses_stream.next() => {
+                trace!(?i, "tick: new_endpoints");
+                inc!(Metrics, actor_tick_endpoint);
+                *current_addresses = new_addresses;
+                self.handle_addr_update(current_addresses).await?;
+            }
+            Some(_relay_url) = home_relay_stream.next() => {
+                trace!(?i, "tick: new_home_relay");
+                self.handle_addr_update(current_addresses).await?;
+            }
+            (peer_id, res) = self.dialer.next_conn() => {
+                trace!(?i, "tick: dialer");
+                inc!(Metrics, actor_tick_dialer);
+                match res {
+                    Ok(conn) => {
+                        debug!(peer = ?peer_id, "dial successful");
+                        inc!(Metrics, actor_tick_dialer_success);
+                        self.handle_connection(peer_id, ConnOrigin::Dial, conn);
+                    }
+                    Err(err) => {
+                        warn!(peer = ?peer_id, "dial failed: {err}");
+                        inc!(Metrics, actor_tick_dialer_failure);
                     }
                 }
-                drain = self.timers.wait_and_drain() => {
-                    trace!(?i, "tick: timers");
-                    inc!(Metrics, actor_tick_timers);
-                    let now = Instant::now();
-                    for (_instant, timer) in drain {
-                        self.handle_in_event(InEvent::TimerExpired(timer), now).await.context("timers.drain_expired -> handle_in_event")?;
+            }
+            event = self.in_event_rx.recv() => {
+                trace!(?i, "tick: in_event_rx");
+                inc!(Metrics, actor_tick_in_event_rx);
+                match event {
+                    Some(event) => {
+                        self.handle_in_event(event, Instant::now()).await.context("in_event_rx.recv -> handle_in_event")?;
                     }
+                    None => unreachable!()
                 }
-                Some(res) = self.connection_tasks.join_next(), if !self.connection_tasks.is_empty() => {
-                    if let Err(err) = res {
-                        if !err.is_cancelled() {
-                            warn!("connection task panicked: {err:?}");
-                        }
+            }
+            drain = self.timers.wait_and_drain() => {
+                trace!(?i, "tick: timers");
+                inc!(Metrics, actor_tick_timers);
+                let now = Instant::now();
+                for (_instant, timer) in drain {
+                    self.handle_in_event(InEvent::TimerExpired(timer), now).await.context("timers.drain_expired -> handle_in_event")?;
+                }
+            }
+            Some(res) = self.connection_tasks.join_next(), if !self.connection_tasks.is_empty() => {
+                trace!(?i, "tick: connection_tasks");
+                if let Err(err) = res {
+                    if !err.is_cancelled() {
+                        warn!("connection task panicked: {err:?}");
                     }
                 }
             }
         }
-        Ok(())
+
+        Ok(Some(()))
+    }
+
+    async fn handle_addr_update(
+        &mut self,
+        current_addresses: &BTreeSet<DirectAddr>,
+    ) -> anyhow::Result<()> {
+        let peer_data = our_peer_data(&self.endpoint, current_addresses)?;
+        self.handle_in_event(InEvent::UpdatePeerData(peer_data), Instant::now())
+            .await
     }
 
     async fn handle_command(
@@ -384,11 +518,6 @@ impl Actor {
             warn!("received command for unknown topic");
             return Ok(());
         };
-        let TopicState {
-            command_rx_keys,
-            event_senders,
-            ..
-        } = state;
         match command {
             Some(command) => {
                 let command = match command {
@@ -402,8 +531,8 @@ impl Actor {
                     .await?;
             }
             None => {
-                command_rx_keys.remove(&key);
-                if command_rx_keys.is_empty() && event_senders.is_empty() {
+                state.command_rx_keys.remove(&key);
+                if !state.still_needed() {
                     self.quit_queue.push_back(topic);
                     self.process_quit_queue().await?;
                 }
@@ -506,7 +635,7 @@ impl Actor {
                         .ok();
                 }
 
-                event_senders.push(channels.event_tx);
+                event_senders.push(channels.receiver_id, channels.event_tx);
                 let command_rx = TopicCommandStream::new(topic_id, channels.command_rx);
                 let key = self.command_rx.insert(command_rx);
                 command_rx_keys.insert(key);
@@ -519,6 +648,9 @@ impl Actor {
                     now,
                 )
                 .await?;
+            }
+            ToActor::ReceiverGone { topic, receiver_id } => {
+                self.handle_receiver_gone(topic, receiver_id).await?;
             }
         }
         Ok(())
@@ -537,7 +669,9 @@ impl Actor {
                 Instant::now(),
             )
             .await?;
-            self.topics.remove(&topic_id);
+            if self.topics.remove(&topic_id).is_some() {
+                tracing::debug!(%topic_id, "publishers and subscribers gone; unsubscribing");
+            }
         }
         Ok(())
     }
@@ -587,7 +721,7 @@ impl Actor {
                         joined,
                         neighbors,
                         event_senders,
-                        command_rx_keys,
+                        ..
                     } = state;
                     let event = if let ProtoEvent::NeighborUp(neighbor) = event {
                         neighbors.insert(neighbor);
@@ -601,7 +735,7 @@ impl Actor {
                         event.into()
                     };
                     event_senders.send(&event);
-                    if event_senders.is_empty() && command_rx_keys.is_empty() {
+                    if !state.still_needed() {
                         self.quit_queue.push_back(topic_id);
                     }
                 }
@@ -636,6 +770,26 @@ impl Actor {
         }
         Ok(())
     }
+
+    async fn handle_receiver_gone(
+        &mut self,
+        topic: TopicId,
+        receiver_id: ReceiverId,
+    ) -> anyhow::Result<()> {
+        if let Entry::Occupied(mut entry) = self.topics.entry(topic) {
+            let state = entry.get_mut();
+            state.event_senders.remove(&receiver_id);
+            if !state.still_needed() {
+                self.quit_queue.push_back(topic);
+                self.process_quit_queue().await?;
+            }
+        } else {
+            // topic should not have been dropped without all receivers being dropped first
+            warn!(%topic, "receiver gone for missing topic");
+        };
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -661,8 +815,21 @@ impl Default for PeerState {
 struct TopicState {
     joined: bool,
     neighbors: BTreeSet<NodeId>,
+    /// Sender side to report events to a [`GossipReceiver`].
+    ///
+    /// This is the internal counter part of gossip's subscribe public API.
     event_senders: EventSenders,
+    /// Keys identifying [`GossipSender`]s.
+    ///
+    /// This represents the receiver side of gossip's publish public API.
     command_rx_keys: HashSet<stream_group::Key>,
+}
+
+impl TopicState {
+    /// Check if the topic still has any publisher or subscriber.
+    fn still_needed(&self) -> bool {
+        !self.event_senders.is_empty() || !self.command_rx_keys.is_empty()
+    }
 }
 
 /// Whether a connection is initiated by us (Dial) or by the remote peer (Accept)
@@ -673,6 +840,8 @@ enum ConnOrigin {
 }
 #[derive(derive_more::Debug)]
 struct SubscriberChannels {
+    /// Id for the receiver counter part of [`Self::event_tx`].
+    receiver_id: ReceiverId,
     event_tx: async_channel::Sender<Result<Event>>,
     #[debug("CommandStream")]
     command_rx: CommandStream,
@@ -697,17 +866,23 @@ async fn connection_loop(
 
     let send_loop = async {
         for msg in queue {
-            write_message(&mut send, &mut send_buf, &msg, max_message_size).await?
+            write_message(&mut send, &mut send_buf, &msg, max_message_size)
+                .await
+                .context("write_message")?
         }
         while let Some(msg) = send_rx.recv().await {
-            write_message(&mut send, &mut send_buf, &msg, max_message_size).await?
+            write_message(&mut send, &mut send_buf, &msg, max_message_size)
+                .await
+                .context("write_message")?
         }
         Ok::<_, anyhow::Error>(())
     };
 
     let recv_loop = async {
         loop {
-            let msg = read_message(&mut recv, &mut recv_buf, max_message_size).await?;
+            let msg = read_message(&mut recv, &mut recv_buf, max_message_size)
+                .await
+                .context("read_message")?;
             match msg {
                 None => break,
                 Some(msg) => in_event_tx.send(InEvent::RecvMessage(from, msg)).await?,
@@ -738,33 +913,44 @@ fn decode_peer_data(peer_data: &PeerData) -> anyhow::Result<AddrInfo> {
 
 #[derive(Debug, Default)]
 struct EventSenders {
-    senders: Vec<(async_channel::Sender<Result<Event>>, bool)>,
+    /// Channels to communicate [`Event`] to [`EventStream`]s.
+    ///
+    /// This is indexed by receiver id. The boolean indicates a lagged channel ([`Event::Lagged`]).
+    senders: HashMap<ReceiverId, (async_channel::Sender<Result<Event>>, bool)>,
 }
+
+/// Id for a gossip receiver.
+///
+/// This is assigned to each [`EventStream`] obtained by the application.
+#[derive(derive_more::Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Clone, Copy)]
+struct ReceiverId(usize);
 
 impl EventSenders {
     fn is_empty(&self) -> bool {
         self.senders.is_empty()
     }
 
-    fn push(&mut self, sender: async_channel::Sender<Result<Event>>) {
-        self.senders.push((sender, false));
+    fn push(&mut self, id: ReceiverId, sender: async_channel::Sender<Result<Event>>) {
+        self.senders.insert(id, (sender, false));
     }
 
     /// Send an event to all subscribers.
     ///
     /// This will not wait until the sink is full, but send a `Lagged` response if the sink is almost full.
     fn send(&mut self, event: &GossipEvent) {
-        self.senders.retain_mut(|(send, lagged)| {
+        let mut remove = Vec::new();
+        for (&id, (send, lagged)) in self.senders.iter_mut() {
             // If the stream is disconnected, we don't need to send to it.
             if send.is_closed() {
-                return false;
+                remove.push(id);
+                continue;
             }
 
             // Check if the send buffer is almost full, and send a lagged response if it is.
             let cap = send.capacity().expect("we only use bounded channels");
             let event = if send.len() >= cap - 1 {
                 if *lagged {
-                    return true;
+                    continue;
                 }
                 *lagged = true;
                 Event::Lagged
@@ -772,12 +958,20 @@ impl EventSenders {
                 *lagged = false;
                 Event::Gossip(event.clone())
             };
-            match send.try_send(Ok(event)) {
-                Ok(()) => true,
-                Err(async_channel::TrySendError::Full(_)) => true,
-                Err(async_channel::TrySendError::Closed(_)) => false,
+
+            if let Err(async_channel::TrySendError::Closed(_)) = send.try_send(Ok(event)) {
+                remove.push(id);
             }
-        })
+        }
+
+        for id in remove.into_iter() {
+            self.senders.remove(&id);
+        }
+    }
+
+    /// Removes a sender based on the corresponding receiver's id.
+    fn remove(&mut self, id: &ReceiverId) {
+        self.senders.remove(id);
     }
 }
 
@@ -834,9 +1028,146 @@ mod test {
     use iroh::{key::SecretKey, RelayMap, RelayMode};
     use tokio::{spawn, time::timeout};
     use tokio_util::sync::CancellationToken;
-    use tracing::info;
+    use tracing::{info, instrument};
 
     use super::*;
+
+    struct ManualActorLoop {
+        actor: Actor,
+        current_addresses: BTreeSet<DirectAddr>,
+        step: usize,
+    }
+
+    impl std::ops::Deref for ManualActorLoop {
+        type Target = Actor;
+
+        fn deref(&self) -> &Self::Target {
+            &self.actor
+        }
+    }
+
+    impl std::ops::DerefMut for ManualActorLoop {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.actor
+        }
+    }
+
+    type EndpointHandle = tokio::task::JoinHandle<anyhow::Result<()>>;
+
+    impl ManualActorLoop {
+        #[instrument(skip_all, fields(me = %actor.endpoint.node_id().fmt_short()))]
+        async fn new(mut actor: Actor) -> anyhow::Result<Self> {
+            let (current_addresses, _, _) = actor.setup().await?;
+            let test_rig = Self {
+                actor,
+                current_addresses,
+                step: 0,
+            };
+
+            Ok(test_rig)
+        }
+
+        #[instrument(skip_all, fields(me = %self.endpoint.node_id().fmt_short()))]
+        async fn step(&mut self) -> anyhow::Result<Option<()>> {
+            let ManualActorLoop {
+                actor,
+                current_addresses,
+                step,
+            } = self;
+            *step += 1;
+            // ignore updates that change our published address. This gives us better control over
+            // events since the endpoint it no longer emitting changes
+            let home_relay_stream = &mut futures_lite::stream::pending();
+            let direct_addresses_stream = &mut futures_lite::stream::pending();
+            actor
+                .event_loop(
+                    current_addresses,
+                    home_relay_stream,
+                    direct_addresses_stream,
+                    *step,
+                )
+                .await
+        }
+
+        async fn steps(&mut self, n: usize) -> anyhow::Result<()> {
+            for _ in 0..n {
+                self.step().await?;
+            }
+            Ok(())
+        }
+
+        async fn finish(mut self) -> anyhow::Result<()> {
+            while self.step().await?.is_some() {}
+            Ok(())
+        }
+    }
+
+    impl Gossip {
+        /// Creates a testing gossip instance and its actor without spawning it.
+        ///
+        /// This creates the endpoint and spawns the endpoint loop as well. The handle for the
+        /// endpoing task is returned along the gossip instance and actor. Since the actor is not
+        /// actually spawned as [`Gossip::from_endpoint`] would, the gossip instance will have a
+        /// handle to a dummy task instead.
+        async fn t_new_with_actor(
+            rng: &mut rand_chacha::ChaCha12Rng,
+            config: proto::Config,
+            relay_map: RelayMap,
+            cancel: CancellationToken,
+        ) -> anyhow::Result<(Self, Actor, EndpointHandle)> {
+            let my_addr = AddrInfo {
+                relay_url: relay_map.nodes().next().map(|relay| relay.url.clone()),
+                direct_addresses: Default::default(),
+            };
+            let endpoint = create_endpoint(rng, relay_map).await?;
+
+            let (actor, to_actor_tx) = Actor::new(endpoint, config, &my_addr);
+            let max_message_size = actor.state.max_message_size();
+
+            let _actor_handle = Arc::new(AbortOnDropHandle::new(tokio::spawn(
+                futures_lite::future::pending(),
+            )));
+            let gossip = Self {
+                to_actor_tx,
+                _actor_handle,
+                max_message_size,
+                next_receiver_id: Default::default(),
+                #[cfg(feature = "rpc")]
+                rpc_handler: Default::default(),
+            };
+
+            let endpoing_task = tokio::spawn(endpoint_loop(
+                actor.endpoint.clone(),
+                gossip.clone(),
+                cancel,
+            ));
+
+            Ok((gossip, actor, endpoing_task))
+        }
+
+        /// Crates a new testing gossip instance with the normal actor loop.
+        async fn t_new(
+            rng: &mut rand_chacha::ChaCha12Rng,
+            config: proto::Config,
+            relay_map: RelayMap,
+            cancel: CancellationToken,
+        ) -> anyhow::Result<(Self, Endpoint, EndpointHandle)> {
+            let (mut g, actor, ep_handle) =
+                Gossip::t_new_with_actor(rng, config, relay_map, cancel).await?;
+            let ep = actor.endpoint.clone();
+            let me = ep.node_id().fmt_short();
+            let actor_handle = tokio::spawn(
+                async move {
+                    if let Err(err) = actor.run().await {
+                        warn!("gossip actor closed with error: {err:?}");
+                    }
+                }
+                .instrument(tracing::error_span!("gossip", %me)),
+            );
+            g._actor_handle = Arc::new(AbortOnDropHandle::new(actor_handle));
+            Ok((g, ep, ep_handle))
+        }
+    }
 
     async fn create_endpoint(
         rng: &mut rand_chacha::ChaCha12Rng,
@@ -1011,5 +1342,134 @@ mod test {
                 .unwrap()
                 .unwrap();
         }
+    }
+
+    /// Test that when a gossip topic is no longer needed it's actually unsubscribed.
+    ///
+    /// This test will:
+    /// - Create two endpoints, the first using manual event loop.
+    /// - Subscribe both nodes to the same topic. The first node will subscribe twice and connect
+    ///   to the second node. The second node will subscribe without bootstrap.
+    /// - Ensure that the first node removes the subscription iff all topic handles have been
+    ///   dropped
+    // NOTE: this is a regression test.
+    #[tokio::test]
+    async fn subscription_cleanup() -> testresult::TestResult {
+        let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
+        let _guard = iroh_test::logging::setup();
+        let ct = CancellationToken::new();
+        let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+
+        // create the first node with a manual actor loop
+        let (go1, actor, ep1_handle) =
+            Gossip::t_new_with_actor(rng, Default::default(), relay_map.clone(), ct.clone())
+                .await?;
+        let mut actor = ManualActorLoop::new(actor).await?;
+
+        // create the second node with the usual actor loop
+        let (go2, ep2, ep2_handle) =
+            Gossip::t_new(rng, Default::default(), relay_map, ct.clone()).await?;
+
+        let node_id1 = actor.endpoint.node_id();
+        let node_id2 = ep2.node_id();
+        tracing::info!(
+            node_1 = node_id1.fmt_short(),
+            node_2 = node_id2.fmt_short(),
+            "nodes ready"
+        );
+
+        let topic: TopicId = blake3::hash(b"subscription_cleanup").into();
+        tracing::info!(%topic, "joining");
+
+        // create the tasks for each gossip instance:
+        // - second node subscribes once without bootstrap and listens to events
+        // - first node subscribes twice with the second node as bootstrap. This is done on command
+        //   from the main task (this)
+
+        // second node
+        let ct2 = ct.clone();
+        let go2_task = async move {
+            let (_pub_tx, mut sub_rx) = go2.join(topic, vec![]).await?.split();
+
+            let subscribe_fut = async {
+                while let Some(ev) = sub_rx.try_next().await? {
+                    match ev {
+                        Event::Lagged => tracing::debug!("missed some messages :("),
+                        Event::Gossip(gm) => match gm {
+                            GossipEvent::Received(_) => unreachable!("test does not send messages"),
+                            other => tracing::debug!(?other, "gs event"),
+                        },
+                    }
+                }
+
+                tracing::debug!("subscribe stream ended");
+                anyhow::Ok(())
+            };
+
+            tokio::select! {
+                _ = ct2.cancelled() => Ok(()),
+                res = subscribe_fut => res,
+            }
+        }
+        .instrument(tracing::debug_span!("node_2", %node_id2));
+        let go2_handle = tokio::spawn(go2_task);
+
+        // first node
+        let addr2 = NodeAddr::new(node_id2).with_relay_url(relay_url);
+        actor.endpoint.add_node_addr(addr2)?;
+        // we use a channel to signal advancing steps to the task
+        let (tx, mut rx) = mpsc::channel::<()>(1);
+        let ct1 = ct.clone();
+        let go1_task = async move {
+            // first subscribe is done immediately
+            tracing::info!("subscribing the first time");
+            let sub_1a = go1.join(topic, vec![node_id2]).await;
+
+            // wait for signal to subscribe a second time
+            rx.recv().await.expect("signal for second join");
+            tracing::info!("subscribing a second time");
+            let sub_1b = go1.join(topic, vec![node_id2]).await;
+            drop(sub_1a);
+
+            // wait for signal to drop the second handle as well
+            rx.recv().await.expect("signal for second join");
+            tracing::info!("dropping all handles");
+            drop(sub_1b);
+
+            // wait for cancellation
+            ct1.cancelled().await;
+            drop(go1);
+        }
+        .instrument(tracing::debug_span!("node_1", %node_id1));
+        let go1_handle = tokio::spawn(go1_task);
+
+        // advance and check that the topic is now subscribed
+        actor.steps(3).await?; // handle our join;
+                               // get peer connection;
+                               // receive the other peer's information for a NeighborUp
+        let state = actor.topics.get(&topic).context("get registered topic")?;
+        assert!(state.joined);
+
+        // signal the second subscribe, we should remain subscribed
+        tx.send(()).await?;
+        actor.steps(3).await?; // subscribe; first receiver gone; first sender gone
+        let state = actor.topics.get(&topic).context("get registered topic")?;
+        assert!(state.joined);
+
+        // signal to drop the second handle, the topic should no longer be subscribed
+        tx.send(()).await?;
+        actor.steps(2).await?; // second receiver gone; second sender gone
+        assert!(!actor.topics.contains_key(&topic));
+
+        // cleanup and ensure everything went as expected
+        ct.cancel();
+        let wait = Duration::from_secs(2);
+        timeout(wait, ep1_handle).await???;
+        timeout(wait, ep2_handle).await???;
+        timeout(wait, go1_handle).await??;
+        timeout(wait, go2_handle).await???;
+        timeout(wait, actor.finish()).await??;
+
+        testresult::TestResult::Ok(())
     }
 }

@@ -65,6 +65,7 @@ clap = { version = "4", features = ["derive"] }
 iroh = { version = "0.29", default-features = false, features = ["metrics", "test-utils"] }
 iroh-test = "0.29.0"
 rand_chacha = "0.3.1"
+testresult = "0.4.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2.4.0"
 
