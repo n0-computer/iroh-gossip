@@ -99,8 +99,9 @@ pub struct Gossip {
 }
 
 impl ProtocolHandler for Gossip {
-    fn accept(self: Arc<Self>, conn: Connecting) -> BoxedFuture<Result<()>> {
-        Box::pin(async move { self.handle_connection(conn.await?).await })
+    fn accept(&self, conn: Connecting) -> BoxedFuture<Result<()>> {
+        let this = self.clone();
+        Box::pin(async move { this.handle_connection(conn.await?).await })
     }
 }
 
