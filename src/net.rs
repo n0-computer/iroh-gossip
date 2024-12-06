@@ -33,7 +33,7 @@ use tracing::{debug, error_span, trace, warn, Instrument};
 use self::util::{read_message, write_message, Timers};
 use crate::{
     metrics::Metrics,
-    proto::{self, PeerData, Scope, TopicId},
+    proto::{self, HyparviewConfig, PeerData, PlumtreeConfig, Scope, TopicId},
 };
 
 mod handles;
@@ -105,10 +105,37 @@ impl ProtocolHandler for Gossip {
     }
 }
 
-impl Gossip {
+/// Builder to configure and construct [`Gossip`].
+#[derive(Debug, Clone)]
+pub struct Builder {
+    config: proto::Config,
+}
+
+impl Builder {
+    /// Sets the maximum message size in bytes.
+    /// By default this is `4096` bytes.
+    pub fn max_message_size(mut self, size: usize) -> Self {
+        self.config.max_message_size = size;
+        self
+    }
+
+    /// Set the membership configuration.
+    pub fn membership_config(mut self, config: HyparviewConfig) -> Self {
+        self.config.membership = config;
+        self
+    }
+
+    /// Set the broadcast configuration.
+    pub fn broadcast_config(mut self, config: PlumtreeConfig) -> Self {
+        self.config.broadcast = config;
+        self
+    }
+
     /// Spawn a gossip actor and get a handle for it
-    pub fn from_endpoint(endpoint: Endpoint, config: proto::Config, my_addr: &AddrInfo) -> Self {
-        let (actor, to_actor_tx) = Actor::new(endpoint, config, my_addr);
+    pub async fn spawn(self, endpoint: Endpoint) -> Result<Gossip> {
+        let addr = endpoint.node_addr().await?;
+
+        let (actor, to_actor_tx) = Actor::new(endpoint, self.config, &addr.info);
         let me = actor.endpoint.node_id().fmt_short();
         let max_message_size = actor.state.max_message_size();
 
@@ -120,13 +147,23 @@ impl Gossip {
             }
             .instrument(error_span!("gossip", %me)),
         );
-        Self {
+
+        Ok(Gossip {
             to_actor_tx,
             _actor_handle: Arc::new(AbortOnDropHandle::new(actor_handle)),
             max_message_size,
             next_receiver_id: Default::default(),
             #[cfg(feature = "rpc")]
             rpc_handler: Default::default(),
+        })
+    }
+}
+
+impl Gossip {
+    /// Creates a default `Builder`, with the endpoint set.
+    pub fn builder() -> Builder {
+        Builder {
+            config: Default::default(),
         }
     }
 
@@ -1224,22 +1261,10 @@ mod test {
         let ep1 = create_endpoint(&mut rng, relay_map.clone()).await.unwrap();
         let ep2 = create_endpoint(&mut rng, relay_map.clone()).await.unwrap();
         let ep3 = create_endpoint(&mut rng, relay_map.clone()).await.unwrap();
-        let addr1 = AddrInfo {
-            relay_url: Some(relay_url.clone()),
-            direct_addresses: Default::default(),
-        };
-        let addr2 = AddrInfo {
-            relay_url: Some(relay_url.clone()),
-            direct_addresses: Default::default(),
-        };
-        let addr3 = AddrInfo {
-            relay_url: Some(relay_url.clone()),
-            direct_addresses: Default::default(),
-        };
 
-        let go1 = Gossip::from_endpoint(ep1.clone(), Default::default(), &addr1);
-        let go2 = Gossip::from_endpoint(ep2.clone(), Default::default(), &addr2);
-        let go3 = Gossip::from_endpoint(ep3.clone(), Default::default(), &addr3);
+        let go1 = Gossip::builder().spawn(ep1.clone()).await.unwrap();
+        let go2 = Gossip::builder().spawn(ep2.clone()).await.unwrap();
+        let go3 = Gossip::builder().spawn(ep3.clone()).await.unwrap();
         debug!("peer1 {:?}", ep1.node_id());
         debug!("peer2 {:?}", ep2.node_id());
         debug!("peer3 {:?}", ep3.node_id());
