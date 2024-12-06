@@ -1472,4 +1472,111 @@ mod test {
 
         testresult::TestResult::Ok(())
     }
+
+    /// Tests the handling of multiple connections in the same and opposite directions between two
+    /// nodes.
+    // NOTE: this is a regression test.
+    #[tokio::test]
+    async fn connection_handling() -> testresult::TestResult {
+        // Node A dials Node B twice, only one connection should remain and the second one should
+        // me immediately terminated
+        let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
+        let _guard = iroh_test::logging::setup();
+        let ct = CancellationToken::new();
+        let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+
+        // create the first node with a manual actor loop
+        let (go1, actor, ep1_handle) =
+            Gossip::t_new_with_actor(rng, Default::default(), relay_map.clone(), ct.clone())
+                .await?;
+        let mut actor = ManualActorLoop::new(actor).await?;
+
+        // create the second node with the usual actor loop
+        let (go2, ep2, ep2_handle) =
+            Gossip::t_new(rng, Default::default(), relay_map, ct.clone()).await?;
+
+        let node_id1 = actor.endpoint.node_id();
+        let node_id2 = ep2.node_id();
+        tracing::info!(
+            node_1 = node_id1.fmt_short(),
+            node_2 = node_id2.fmt_short(),
+            "nodes ready"
+        );
+
+        let topic: TopicId = blake3::hash(b"connection_handling").into();
+        tracing::info!(%topic, "joining");
+
+        // second node
+        let ct2 = ct.clone();
+        let go2_task = async move {
+            let (pub_tx, mut sub_rx) = go2.join(topic, vec![]).await?.split();
+
+            let subscribe_fut = async {
+                while let Some(ev) = sub_rx.try_next().await? {
+                    match ev {
+                        Event::Lagged => tracing::debug!("missed some messages :("),
+                        Event::Gossip(gm) => match gm {
+                            GossipEvent::Received(_) => unreachable!("test does not send messages"),
+                            other => tracing::debug!(?other, "gs event"),
+                        },
+                    }
+                }
+
+                tracing::debug!("subscribe stream ended");
+                anyhow::Ok(())
+            };
+
+            let publish_fut = async {
+                pub_tx.broadcast("this is first message");
+            };
+
+            tokio::select! {
+                _ = ct2.cancelled() => Ok(()),
+                res = subscribe_fut => res,
+            }
+        }
+        .instrument(tracing::debug_span!("node_2", %node_id2));
+        let go2_handle = tokio::spawn(go2_task);
+
+        // first node
+        let addr2 = NodeAddr::new(node_id2).with_relay_url(relay_url);
+        let ep1 = actor.endpoint.clone();
+        actor.endpoint.add_node_addr(addr2.clone())?;
+        let ct1 = ct.clone();
+        let go1_task = async move {
+            // first subscribe is done immediately
+            tracing::info!("connecting the first time");
+            let sub_1a = go1.join(topic, vec![node_id2]).await;
+
+            // add a second connection in the same direction
+            let conn = ep1.connect(addr2, GOSSIP_ALPN).await?;
+            tracing::info!("handling second connection");
+            go1.handle_connection(conn).await?;
+
+            // wait for cancellation
+            ct1.cancelled().await;
+            drop(sub_1a);
+            drop(go1);
+            anyhow::Ok(())
+        }
+        .instrument(tracing::debug_span!("node_1", %node_id1));
+        let go1_handle = tokio::spawn(go1_task);
+
+        // establish the connection from node1 to node2
+        actor.steps(3).await?;
+        // receive and reject the second connection
+        actor.steps(1).await?;
+
+        ct.cancel();
+        actor.finish().await?;
+        go2_handle.await??;
+        tracing::info!("go2_handle done");
+        go1_handle.await??;
+        tracing::info!("go1_handle done");
+        ep1_handle.await??;
+        tracing::info!("ep1_handle done");
+        ep2_handle.await??;
+        tracing::info!("ep2_handle done");
+        testresult::TestResult::Ok(())
+    }
 }

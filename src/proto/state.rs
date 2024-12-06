@@ -209,7 +209,7 @@ impl<PI: PeerIdentity, R: Rng + Clone> State<PI, R> {
         event: InEvent<PI>,
         now: Instant,
     ) -> impl Iterator<Item = OutEvent<PI>> + '_ {
-        trace!("gossp event: {event:?}");
+        trace!("gossip event: {event:?}");
         track_in_event(&event);
 
         let event: InEventMapped<PI> = event.into();
