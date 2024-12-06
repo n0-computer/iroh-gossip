@@ -1499,8 +1499,6 @@
 <a href="#1499" id="1499">1499</a>
 <a href="#1500" id="1500">1500</a>
 <a href="#1501" id="1501">1501</a>
-<a href="#1502" id="1502">1502</a>
-<a href="#1503" id="1503">1503</a>
 </pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
 
 </span><span class="kw">use </span>std::{
@@ -1612,7 +1610,6 @@
 </span><span class="attr">#[derive(Debug, Clone)]
 </span><span class="kw">pub struct </span>Builder {
     config: proto::Config,
-    endpoint: Endpoint,
 }
 
 <span class="kw">impl </span>Builder {
@@ -1636,10 +1633,10 @@
     </span>}
 
     <span class="doccomment">/// Spawn a gossip actor and get a handle for it
-    </span><span class="kw">pub async fn </span>spawn(<span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;Gossip&gt; {
-        <span class="kw">let </span>addr = <span class="self">self</span>.endpoint.node_addr().<span class="kw">await</span><span class="question-mark">?</span>;
+    </span><span class="kw">pub async fn </span>spawn(<span class="self">self</span>, endpoint: Endpoint) -&gt; <span class="prelude-ty">Result</span>&lt;Gossip&gt; {
+        <span class="kw">let </span>addr = endpoint.node_addr().<span class="kw">await</span><span class="question-mark">?</span>;
 
-        <span class="kw">let </span>(actor, to_actor_tx) = Actor::new(<span class="self">self</span>.endpoint, <span class="self">self</span>.config, <span class="kw-2">&amp;</span>addr.info);
+        <span class="kw">let </span>(actor, to_actor_tx) = Actor::new(endpoint, <span class="self">self</span>.config, <span class="kw-2">&amp;</span>addr.info);
         <span class="kw">let </span>me = actor.endpoint.node_id().fmt_short();
         <span class="kw">let </span>max_message_size = actor.state.max_message_size();
 
@@ -1665,9 +1662,8 @@
 
 <span class="kw">impl </span>Gossip {
     <span class="doccomment">/// Creates a default `Builder`, with the endpoint set.
-    </span><span class="kw">pub fn </span>builder(endpoint: Endpoint) -&gt; Builder {
+    </span><span class="kw">pub fn </span>builder() -&gt; Builder {
         Builder {
-            endpoint,
             config: Default::default(),
         }
     }
@@ -2767,9 +2763,9 @@
         <span class="kw">let </span>ep2 = create_endpoint(<span class="kw-2">&amp;mut </span>rng, relay_map.clone()).<span class="kw">await</span>.unwrap();
         <span class="kw">let </span>ep3 = create_endpoint(<span class="kw-2">&amp;mut </span>rng, relay_map.clone()).<span class="kw">await</span>.unwrap();
 
-        <span class="kw">let </span>go1 = Gossip::builder(ep1.clone()).spawn().<span class="kw">await</span>.unwrap();
-        <span class="kw">let </span>go2 = Gossip::builder(ep2.clone()).spawn().<span class="kw">await</span>.unwrap();
-        <span class="kw">let </span>go3 = Gossip::builder(ep3.clone()).spawn().<span class="kw">await</span>.unwrap();
+        <span class="kw">let </span>go1 = Gossip::builder().spawn(ep1.clone()).<span class="kw">await</span>.unwrap();
+        <span class="kw">let </span>go2 = Gossip::builder().spawn(ep2.clone()).<span class="kw">await</span>.unwrap();
+        <span class="kw">let </span>go3 = Gossip::builder().spawn(ep3.clone()).<span class="kw">await</span>.unwrap();
         <span class="macro">debug!</span>(<span class="string">"peer1 {:?}"</span>, ep1.node_id());
         <span class="macro">debug!</span>(<span class="string">"peer2 {:?}"</span>, ep2.node_id());
         <span class="macro">debug!</span>(<span class="string">"peer3 {:?}"</span>, ep3.node_id());
