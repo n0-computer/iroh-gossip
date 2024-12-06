@@ -194,11 +194,7 @@ impl Gossip {
     }
 
     /// Join a gossip topic with the default options.
-    pub async fn subscribe(
-        &self,
-        topic_id: TopicId,
-        bootstrap: Vec<NodeId>,
-    ) -> Result<GossipTopic> {
+    pub fn subscribe(&self, topic_id: TopicId, bootstrap: Vec<NodeId>) -> Result<GossipTopic> {
         let sub = self.subscribe_with_opts(topic_id, JoinOptions::with_bootstrap(bootstrap));
 
         Ok(sub)
@@ -1464,7 +1460,7 @@ mod test {
         let go1_task = async move {
             // first subscribe is done immediately
             tracing::info!("subscribing the first time");
-            let sub_1a = go1.subscribe(topic, vec![node_id2]).await;
+            let sub_1a = go1.subscribe_and_join(topic, vec![node_id2]).await;
 
             // wait for signal to subscribe a second time
             rx.recv().await.expect("signal for second subscribe");

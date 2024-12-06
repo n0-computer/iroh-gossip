@@ -49,7 +49,7 @@ impl Gossip {
             Subscribe(msg) => {
                 let this = self.clone();
                 chan.bidi_streaming(msg, this, move |handler, req, updates| {
-                    let stream = handler.join_with_stream(
+                    let stream = handler.subscribe_with_stream(
                         req.topic,
                         crate::net::JoinOptions {
                             bootstrap: req.bootstrap,
