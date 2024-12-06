@@ -5,7 +5,7 @@ use std::{
     str::FromStr,
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use bytes::Bytes;
 use clap::Parser;
 use ed25519_dalek::Signature;
@@ -19,7 +19,6 @@ use iroh_gossip::{
     proto::TopicId,
 };
 use serde::{Deserialize, Serialize};
-use tracing::warn;
 
 /// Chat over iroh-gossip
 ///
@@ -107,7 +106,6 @@ async fn main() -> Result<()> {
     // build our magic endpoint
     let endpoint = Endpoint::builder()
         .secret_key(secret_key)
-        .alpns(vec![GOSSIP_ALPN.to_vec()])
         .relay_mode(relay_mode)
         .bind_addr_v4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))
         .bind()
@@ -125,8 +123,11 @@ async fn main() -> Result<()> {
     };
     println!("> ticket to join us: {ticket}");
 
-    // spawn our endpoint loop that forwards incoming connections to the gossiper
-    tokio::spawn(endpoint_loop(endpoint.clone(), gossip.clone()));
+    // setup router
+    let router = iroh::protocol::Router::builder(endpoint.clone())
+        .accept(GOSSIP_ALPN, gossip.clone())
+        .spawn()
+        .await?;
 
     // join the gossip topic by connecting to known peers, if any
     let peer_ids = peers.iter().map(|p| p.node_id).collect();
@@ -166,6 +167,9 @@ async fn main() -> Result<()> {
         println!("> sent: {text}");
     }
 
+    // shutdown
+    router.shutdown().await?;
+
     Ok(())
 }
 
@@ -188,43 +192,6 @@ async fn subscribe_loop(mut receiver: GossipReceiver) -> Result<()> {
                 }
             }
         }
-    }
-    Ok(())
-}
-
-async fn endpoint_loop(endpoint: Endpoint, gossip: Gossip) {
-    while let Some(incoming) = endpoint.accept().await {
-        let conn = match incoming.accept() {
-            Ok(conn) => conn,
-            Err(err) => {
-                warn!("incoming connection failed: {err:#}");
-                // we can carry on in these cases:
-                // this can be caused by retransmitted datagrams
-                continue;
-            }
-        };
-        let gossip = gossip.clone();
-        tokio::spawn(async move {
-            if let Err(err) = handle_connection(conn, gossip).await {
-                println!("> connection closed: {err}");
-            }
-        });
-    }
-}
-
-async fn handle_connection(
-    mut conn: iroh::endpoint::Connecting,
-    gossip: Gossip,
-) -> anyhow::Result<()> {
-    let alpn = conn.alpn().await?;
-    let conn = conn.await?;
-    let peer_id = iroh::endpoint::get_remote_node_id(&conn)?;
-    match alpn.as_ref() {
-        GOSSIP_ALPN => gossip.handle_connection(conn).await.context(format!(
-            "connection to {peer_id} with ALPN {} failed",
-            String::from_utf8_lossy(&alpn)
-        ))?,
-        _ => println!("> ignoring connection from {peer_id}: unsupported ALPN protocol"),
     }
     Ok(())
 }
