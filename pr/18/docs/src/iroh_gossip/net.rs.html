@@ -1510,6 +1510,8 @@
 <a href="#1510" id="1510">1510</a>
 <a href="#1511" id="1511">1511</a>
 <a href="#1512" id="1512">1512</a>
+<a href="#1513" id="1513">1513</a>
+<a href="#1514" id="1514">1514</a>
 </pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
 
 </span><span class="kw">use </span>std::{
@@ -1706,6 +1708,8 @@
     }
 
     <span class="doccomment">/// Join a gossip topic with the default options.
+    ///
+    /// Note that this will not wait for any bootstrap node to be available. To ensure the topic is connected to at least one node, use [`GossipTopic::joined`] or [`Gossip::subscribe_and_join`]
     </span><span class="kw">pub fn </span>subscribe(<span class="kw-2">&amp;</span><span class="self">self</span>, topic_id: TopicId, bootstrap: Vec&lt;NodeId&gt;) -&gt; <span class="prelude-ty">Result</span>&lt;GossipTopic&gt; {
         <span class="kw">let </span>sub = <span class="self">self</span>.subscribe_with_opts(topic_id, JoinOptions::with_bootstrap(bootstrap));
 
