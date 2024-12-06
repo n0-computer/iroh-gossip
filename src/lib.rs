@@ -1,3 +1,4 @@
+#![doc = include_str!("../README.md")]
 //! Broadcast messages to peers subscribed to a topic
 //!
 //! The crate is designed to be used from the [iroh] crate, which provides a
