@@ -113,7 +113,7 @@ async fn main() -> Result<()> {
     println!("> our node id: {}", endpoint.node_id());
 
     // create the gossip protocol
-    let gossip = Gossip::builder(endpoint.clone()).spawn().await?;
+    let gossip = Gossip::builder().spawn(endpoint.clone()).await?;
 
     // print a ticket that includes our own node id and endpoint addresses
     let ticket = {

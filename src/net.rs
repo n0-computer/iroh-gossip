@@ -109,7 +109,6 @@ impl ProtocolHandler for Gossip {
 #[derive(Debug, Clone)]
 pub struct Builder {
     config: proto::Config,
-    endpoint: Endpoint,
 }
 
 impl Builder {
@@ -133,10 +132,10 @@ impl Builder {
     }
 
     /// Spawn a gossip actor and get a handle for it
-    pub async fn spawn(self) -> Result<Gossip> {
-        let addr = self.endpoint.node_addr().await?;
+    pub async fn spawn(self, endpoint: Endpoint) -> Result<Gossip> {
+        let addr = endpoint.node_addr().await?;
 
-        let (actor, to_actor_tx) = Actor::new(self.endpoint, self.config, &addr.info);
+        let (actor, to_actor_tx) = Actor::new(endpoint, self.config, &addr.info);
         let me = actor.endpoint.node_id().fmt_short();
         let max_message_size = actor.state.max_message_size();
 
@@ -162,9 +161,8 @@ impl Builder {
 
 impl Gossip {
     /// Creates a default `Builder`, with the endpoint set.
-    pub fn builder(endpoint: Endpoint) -> Builder {
+    pub fn builder() -> Builder {
         Builder {
-            endpoint,
             config: Default::default(),
         }
     }
@@ -1264,9 +1262,9 @@ mod test {
         let ep2 = create_endpoint(&mut rng, relay_map.clone()).await.unwrap();
         let ep3 = create_endpoint(&mut rng, relay_map.clone()).await.unwrap();
 
-        let go1 = Gossip::builder(ep1.clone()).spawn().await.unwrap();
-        let go2 = Gossip::builder(ep2.clone()).spawn().await.unwrap();
-        let go3 = Gossip::builder(ep3.clone()).spawn().await.unwrap();
+        let go1 = Gossip::builder().spawn(ep1.clone()).await.unwrap();
+        let go2 = Gossip::builder().spawn(ep2.clone()).await.unwrap();
+        let go3 = Gossip::builder().spawn(ep3.clone()).await.unwrap();
         debug!("peer1 {:?}", ep1.node_id());
         debug!("peer2 {:?}", ep2.node_id());
         debug!("peer3 {:?}", ep3.node_id());
