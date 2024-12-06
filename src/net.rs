@@ -194,6 +194,8 @@ impl Gossip {
     }
 
     /// Join a gossip topic with the default options.
+    ///
+    /// Note that this will not wait for any bootstrap node to be available. To ensure the topic is connected to at least one node, use [`GossipTopic::joined`] or [`Gossip::subscribe_and_join`]
     pub fn subscribe(&self, topic_id: TopicId, bootstrap: Vec<NodeId>) -> Result<GossipTopic> {
         let sub = self.subscribe_with_opts(topic_id, JoinOptions::with_bootstrap(bootstrap));
 
