@@ -140,7 +140,7 @@ async fn main() -> Result<()> {
             endpoint.add_node_addr(peer)?;
         }
     };
-    let (sender, receiver) = gossip.join(topic, peer_ids).await?.split();
+    let (sender, receiver) = gossip.subscribe_and_join(topic, peer_ids).await?.split();
     println!("> connected!");
 
     // broadcast our name, if set
