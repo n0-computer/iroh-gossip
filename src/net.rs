@@ -216,7 +216,7 @@ impl Gossip {
 
     /// Join a gossip topic with options and an externally-created update stream.
     ///
-    /// This method differs from [`Self::join_with_opts`] by letting you pass in a `updates` command stream yourself
+    /// This method differs from [`Self::subscribe_with_opts`] by letting you pass in a `updates` command stream yourself
     /// instead of using a channel created for you.
     ///
     /// It returns a stream of events. If you want to wait for the topic to become active, wait for
