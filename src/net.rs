@@ -105,8 +105,8 @@ pub(crate) struct Inner {
 
 impl ProtocolHandler for Gossip {
     fn accept(&self, conn: Connecting) -> BoxedFuture<Result<()>> {
-        let this = self.clone();
-        Box::pin(async move { this.handle_connection(conn.await?).await })
+        let inner = self.inner.clone();
+        Box::pin(async move { inner.handle_connection(conn.await?).await })
     }
 }
 
@@ -184,10 +184,7 @@ impl Gossip {
     ///
     /// Make sure to check the ALPN protocol yourself before passing the connection.
     pub async fn handle_connection(&self, conn: Connection) -> anyhow::Result<()> {
-        let peer_id = get_remote_node_id(&conn)?;
-        self.send(ToActor::HandleConnection(peer_id, ConnOrigin::Accept, conn))
-            .await?;
-        Ok(())
+        self.inner.handle_connection(conn).await
     }
 
     /// Join a gossip topic with the default options and wait for at least one active connection.
@@ -239,14 +236,6 @@ impl Gossip {
     ) -> EventStream {
         self.inner.subscribe_with_stream(topic_id, options, updates)
     }
-
-    async fn send(&self, event: ToActor) -> anyhow::Result<()> {
-        self.inner
-            .to_actor_tx
-            .send(event)
-            .await
-            .map_err(|_| anyhow!("gossip actor dropped"))
-    }
 }
 
 impl Inner {
@@ -294,6 +283,20 @@ impl Inner {
             topic: topic_id,
             receiver_id,
         }
+    }
+
+    async fn send(&self, event: ToActor) -> anyhow::Result<()> {
+        self.to_actor_tx
+            .send(event)
+            .await
+            .map_err(|_| anyhow!("gossip actor dropped"))
+    }
+
+    async fn handle_connection(&self, conn: Connection) -> anyhow::Result<()> {
+        let peer_id = get_remote_node_id(&conn)?;
+        self.send(ToActor::HandleConnection(peer_id, ConnOrigin::Accept, conn))
+            .await?;
+        Ok(())
     }
 }
 
