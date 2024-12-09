@@ -89,13 +89,18 @@ type ProtoMessage = proto::Message<PublicKey>;
 /// The gossip actor will, however, initiate new connections to other peers by itself.
 #[derive(Debug, Clone)]
 pub struct Gossip {
-    to_actor_tx: mpsc::Sender<ToActor>,
-    _actor_handle: Arc<AbortOnDropHandle<()>>,
-    max_message_size: usize,
-    /// Next [`ReceiverId`] to be assigned when a receiver is registered for a topic.
-    next_receiver_id: Arc<AtomicUsize>,
+    pub(crate) inner: Arc<Inner>,
     #[cfg(feature = "rpc")]
     pub(crate) rpc_handler: Arc<std::sync::OnceLock<crate::rpc::RpcHandler>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct Inner {
+    to_actor_tx: mpsc::Sender<ToActor>,
+    _actor_handle: AbortOnDropHandle<()>,
+    max_message_size: usize,
+    /// Next [`ReceiverId`] to be assigned when a receiver is registered for a topic.
+    next_receiver_id: AtomicUsize,
 }
 
 impl ProtocolHandler for Gossip {
@@ -149,10 +154,13 @@ impl Builder {
         );
 
         Ok(Gossip {
-            to_actor_tx,
-            _actor_handle: Arc::new(AbortOnDropHandle::new(actor_handle)),
-            max_message_size,
-            next_receiver_id: Default::default(),
+            inner: Inner {
+                to_actor_tx,
+                _actor_handle: AbortOnDropHandle::new(actor_handle),
+                max_message_size,
+                next_receiver_id: Default::default(),
+            }
+            .into(),
             #[cfg(feature = "rpc")]
             rpc_handler: Default::default(),
         })
@@ -169,7 +177,7 @@ impl Gossip {
 
     /// Get the maximum message size configured for this gossip actor.
     pub fn max_message_size(&self) -> usize {
-        self.max_message_size
+        self.inner.max_message_size
     }
 
     /// Handle an incoming [`Connection`].
@@ -229,6 +237,25 @@ impl Gossip {
         options: JoinOptions,
         updates: CommandStream,
     ) -> EventStream {
+        self.inner.subscribe_with_stream(topic_id, options, updates)
+    }
+
+    async fn send(&self, event: ToActor) -> anyhow::Result<()> {
+        self.inner
+            .to_actor_tx
+            .send(event)
+            .await
+            .map_err(|_| anyhow!("gossip actor dropped"))
+    }
+}
+
+impl Inner {
+    pub fn subscribe_with_stream(
+        &self,
+        topic_id: TopicId,
+        options: JoinOptions,
+        updates: CommandStream,
+    ) -> EventStream {
         let (event_tx, event_rx) = async_channel::bounded(options.subscription_capacity);
         let to_actor_tx = self.to_actor_tx.clone();
         let receiver_id = ReceiverId(
@@ -267,13 +294,6 @@ impl Gossip {
             topic: topic_id,
             receiver_id,
         }
-    }
-
-    async fn send(&self, event: ToActor) -> anyhow::Result<()> {
-        self.to_actor_tx
-            .send(event)
-            .await
-            .map_err(|_| anyhow!("gossip actor dropped"))
     }
 }
 
@@ -1175,14 +1195,16 @@ mod test {
             let (actor, to_actor_tx) = Actor::new(endpoint, config, &my_addr);
             let max_message_size = actor.state.max_message_size();
 
-            let _actor_handle = Arc::new(AbortOnDropHandle::new(tokio::spawn(
-                futures_lite::future::pending(),
-            )));
+            let _actor_handle =
+                AbortOnDropHandle::new(tokio::spawn(futures_lite::future::pending()));
             let gossip = Self {
-                to_actor_tx,
-                _actor_handle,
-                max_message_size,
-                next_receiver_id: Default::default(),
+                inner: Inner {
+                    to_actor_tx,
+                    _actor_handle,
+                    max_message_size,
+                    next_receiver_id: Default::default(),
+                }
+                .into(),
                 #[cfg(feature = "rpc")]
                 rpc_handler: Default::default(),
             };
@@ -1202,8 +1224,8 @@ mod test {
             config: proto::Config,
             relay_map: RelayMap,
             cancel: CancellationToken,
-        ) -> anyhow::Result<(Self, Endpoint, EndpointHandle)> {
-            let (mut g, actor, ep_handle) =
+        ) -> anyhow::Result<(Self, Endpoint, EndpointHandle, impl Drop)> {
+            let (g, actor, ep_handle) =
                 Gossip::t_new_with_actor(rng, config, relay_map, cancel).await?;
             let ep = actor.endpoint.clone();
             let me = ep.node_id().fmt_short();
@@ -1215,8 +1237,7 @@ mod test {
                 }
                 .instrument(tracing::error_span!("gossip", %me)),
             );
-            g._actor_handle = Arc::new(AbortOnDropHandle::new(actor_handle));
-            Ok((g, ep, ep_handle))
+            Ok((g, ep, ep_handle, AbortOnDropHandle::new(actor_handle)))
         }
     }
 
@@ -1406,7 +1427,7 @@ mod test {
         let mut actor = ManualActorLoop::new(actor).await?;
 
         // create the second node with the usual actor loop
-        let (go2, ep2, ep2_handle) =
+        let (go2, ep2, ep2_handle, _test_actor_handle) =
             Gossip::t_new(rng, Default::default(), relay_map, ct.clone()).await?;
 
         let node_id1 = actor.endpoint.node_id();
