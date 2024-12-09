@@ -371,7 +371,7 @@ struct Actor {
     /// Map of topics to their state.
     topics: HashMap<TopicId, TopicState>,
     /// Map of peers to their state.
-    peers: HashMap<NodeId, PeerInfo>,
+    peers: HashMap<NodeId, PeerState>,
     /// Stream of commands from topic handles.
     command_rx: stream_group::Keyed<TopicCommandStream>,
     /// Internal queue of topic to close because all handles were dropped.
@@ -593,37 +593,26 @@ impl Actor {
     }
 
     fn handle_connection(&mut self, peer_id: NodeId, origin: ConnOrigin, conn: Connection) {
-        // Check that we only keep one connection per peer per direction.
-        if let Some(peer_info) = self.peers.get(&peer_id) {
-            if matches!(origin, ConnOrigin::Dial) && peer_info.conn_dialed.is_some() {
-                warn!(?peer_id, ?origin, "ignoring connection: already accepted");
-                return;
-            }
-            if matches!(origin, ConnOrigin::Accept) && peer_info.conn_accepted.is_some() {
-                warn!(?peer_id, ?origin, "ignoring connection: already accepted");
-                return;
-            }
-        }
+        let (send_tx, send_rx) = mpsc::channel(SEND_QUEUE_CAP);
 
-        let mut peer_info = self.peers.remove(&peer_id).unwrap_or_default();
-
-        // Store the connection so that we can terminate it when the peer is removed.
-        match origin {
-            ConnOrigin::Dial => {
-                peer_info.conn_dialed = Some(conn.clone());
+        let queue = match self.peers.entry(peer_id) {
+            Entry::Occupied(mut occupied_entry) => {
+                let state = occupied_entry.get_mut();
+                let Some(queue) = state.accept_conn(origin, send_tx) else {
+                    return warn!(?peer_id, ?origin, "ignoring connection: already accepted");
+                };
+                queue
             }
-            ConnOrigin::Accept => {
-                peer_info.conn_accepted = Some(conn.clone());
+            Entry::Vacant(vacant_entry) => {
+                vacant_entry.insert(PeerState::Active {
+                    send_tx,
+                    origin,
+                    alt_send_tx: None,
+                });
+                Vec::default()
             }
-        }
-
-        // Extract the queue of pending messages.
-        let queue = match &mut peer_info.state {
-            PeerState::Pending { queue } => std::mem::take(queue),
-            PeerState::Active { .. } => Default::default(),
         };
 
-        let (send_tx, send_rx) = mpsc::channel(SEND_QUEUE_CAP);
         let max_message_size = self.state.max_message_size();
         let in_event_tx = self.in_event_tx.clone();
 
@@ -651,13 +640,6 @@ impl Actor {
             }
             .instrument(error_span!("gossip_conn", peer = %peer_id.fmt_short())),
         );
-
-        peer_info.state = match peer_info.state {
-            PeerState::Pending { .. } => PeerState::Active { send_tx },
-            PeerState::Active { send_tx } => PeerState::Active { send_tx },
-        };
-
-        self.peers.insert(peer_id, peer_info);
     }
 
     async fn handle_to_actor_msg(&mut self, msg: ToActor, now: Instant) -> anyhow::Result<()> {
@@ -745,9 +727,9 @@ impl Actor {
             };
             match event {
                 OutEvent::SendMessage(peer_id, message) => {
-                    let info = self.peers.entry(peer_id).or_default();
-                    match &mut info.state {
-                        PeerState::Active { send_tx } => {
+                    let state = self.peers.entry(peer_id).or_default();
+                    match state {
+                        PeerState::Active { send_tx, .. } => {
                             if let Err(_err) = send_tx.send(message).await {
                                 // Removing the peer is handled by the in_event PeerDisconnected sent
                                 // at the end of the connection task.
@@ -794,15 +776,8 @@ impl Actor {
                     self.timers.insert(now + delay, timer);
                 }
                 OutEvent::DisconnectPeer(peer_id) => {
-                    if let Some(peer) = self.peers.remove(&peer_id) {
-                        if let Some(conn) = peer.conn_dialed {
-                            conn.close(0u8.into(), b"close from disconnect");
-                        }
-                        if let Some(conn) = peer.conn_accepted {
-                            conn.close(0u8.into(), b"close from disconnect");
-                        }
-                        drop(peer.state);
-                    }
+                    // signal disconnection by dropping the senders to the connection
+                    self.peers.remove(&peer_id);
                 }
                 OutEvent::PeerData(node_id, data) => match decode_peer_data(&data) {
                     Err(err) => warn!("Failed to decode {data:?} from {node_id}: {err}"),
@@ -843,17 +818,56 @@ impl Actor {
     }
 }
 
-#[derive(Debug, Default)]
-struct PeerInfo {
-    state: PeerState,
-    conn_dialed: Option<Connection>,
-    conn_accepted: Option<Connection>,
-}
-
 #[derive(Debug)]
 enum PeerState {
-    Pending { queue: Vec<ProtoMessage> },
-    Active { send_tx: mpsc::Sender<ProtoMessage> },
+    Pending {
+        queue: Vec<ProtoMessage>,
+    },
+    Active {
+        send_tx: mpsc::Sender<ProtoMessage>,
+        origin: ConnOrigin,
+        alt_send_tx: Option<mpsc::Sender<ProtoMessage>>,
+    },
+}
+
+impl PeerState {
+    /// Modifies the state to account for a new connection, returning the queue of pending
+    /// messages.
+    ///
+    /// The connection can be rejected if there is already a connection from the same origin.
+    fn accept_conn(
+        &mut self,
+        conn_origin: ConnOrigin,
+        conn_send_tx: mpsc::Sender<ProtoMessage>,
+    ) -> Option<Vec<ProtoMessage>> {
+        match self {
+            PeerState::Pending { queue } => {
+                let queue = std::mem::take(queue);
+                *self = PeerState::Active {
+                    send_tx: conn_send_tx,
+                    origin: conn_origin,
+                    alt_send_tx: None,
+                };
+                Some(queue)
+            }
+            PeerState::Active {
+                origin,
+                alt_send_tx,
+                ..
+            } => {
+                if *origin == conn_origin {
+                    // the new connection has the same origin as the primary connection
+                    None
+                } else if alt_send_tx.is_some() {
+                    // the new connection has the same origin as the secondary connection
+                    None
+                } else {
+                    *alt_send_tx = Some(conn_send_tx);
+                    Some(Default::default())
+                }
+            }
+        }
+    }
 }
 
 impl Default for PeerState {
@@ -884,7 +898,7 @@ impl TopicState {
 }
 
 /// Whether a connection is initiated by us (Dial) or by the remote peer (Accept)
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConnOrigin {
     Accept,
     Dial,
