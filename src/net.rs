@@ -10,10 +10,7 @@ use std::{
 
 use anyhow::{anyhow, Context as _, Result};
 use bytes::BytesMut;
-use futures_concurrency::{
-    future::TryJoin,
-    stream::{stream_group, StreamGroup},
-};
+use futures_concurrency::stream::{stream_group, StreamGroup};
 use futures_lite::{future::Boxed as BoxedFuture, stream::Stream, StreamExt};
 use futures_util::TryFutureExt;
 use iroh::{
@@ -925,12 +922,13 @@ async fn connection_loop(
         ConnOrigin::Accept => conn.accept_bi().await?,
         ConnOrigin::Dial => conn.open_bi().await?,
     };
-    debug!("connection established");
+    debug!(?origin, "connection established");
     let mut send_buf = BytesMut::new();
     let mut recv_buf = BytesMut::new();
 
     let send_loop = async {
         for msg in queue {
+            // TODO(@divma): check if send_rx is closed?
             write_message(&mut send, &mut send_buf, &msg, max_message_size)
                 .await
                 .context("write_message")?
@@ -940,6 +938,13 @@ async fn connection_loop(
                 .await
                 .context("write_message")?
         }
+        // TODO(@divma): according to docs this error is harmless
+        // notify the other node no more data will be sent
+        let _ = send.finish();
+        // wait for the other node to ack all the sent data
+        let _ = send.stopped().await;
+        // bit of a last resort here?
+        conn.close(0u8.into(), b"close from disconnect");
         Ok::<_, anyhow::Error>(())
     };
 
@@ -956,8 +961,7 @@ async fn connection_loop(
         Ok::<_, anyhow::Error>(())
     };
 
-    (send_loop, recv_loop).try_join().await?;
-
+    tokio::join!(send_loop, recv_loop).0?;
     Ok(())
 }
 
