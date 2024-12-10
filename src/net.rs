@@ -1285,7 +1285,7 @@ mod test {
             cancel: &CancellationToken,
         ) -> anyhow::Result<(Self, Endpoint, EndpointHandle)> {
             let (mut g, actor, ep_handle) =
-                Gossip::t_new_with_actor(rng, config, relay_map, &cancel).await?;
+                Gossip::t_new_with_actor(rng, config, relay_map, cancel).await?;
             let ep = actor.endpoint.clone();
             let me = ep.node_id().fmt_short();
             let actor_handle = tokio::spawn(
