@@ -713,6 +713,7 @@ impl Actor {
             debug!(?event, "handle in_event");
         };
         if let InEvent::PeerDisconnected(peer) = &event {
+            // TODO(@divma): here is the issue
             self.peers.remove(peer);
         }
         let out = self.state.handle(event, now);
@@ -727,6 +728,7 @@ impl Actor {
                     let state = self.peers.entry(peer_id).or_default();
                     match state {
                         PeerState::Active { send_tx, .. } => {
+                            trace!("sending to active");
                             if let Err(_err) = send_tx.send(message).await {
                                 // Removing the peer is handled by the in_event PeerDisconnected sent
                                 // at the end of the connection task.
@@ -734,7 +736,9 @@ impl Actor {
                             }
                         }
                         PeerState::Pending { queue } => {
+                            trace!("sending to pending");
                             if queue.is_empty() {
+                                trace!("dialing");
                                 self.dialer.queue_dial(peer_id, GOSSIP_ALPN);
                             }
                             queue.push(message);
@@ -1182,7 +1186,7 @@ mod test {
             rng: &mut rand_chacha::ChaCha12Rng,
             config: proto::Config,
             relay_map: RelayMap,
-            cancel: CancellationToken,
+            cancel: &CancellationToken,
         ) -> anyhow::Result<(Self, Actor, EndpointHandle)> {
             let my_addr = AddrInfo {
                 relay_url: relay_map.nodes().next().map(|relay| relay.url.clone()),
@@ -1208,7 +1212,7 @@ mod test {
             let endpoing_task = tokio::spawn(endpoint_loop(
                 actor.endpoint.clone(),
                 gossip.clone(),
-                cancel,
+                cancel.child_token(),
             ));
 
             Ok((gossip, actor, endpoing_task))
@@ -1219,10 +1223,10 @@ mod test {
             rng: &mut rand_chacha::ChaCha12Rng,
             config: proto::Config,
             relay_map: RelayMap,
-            cancel: CancellationToken,
+            cancel: &CancellationToken,
         ) -> anyhow::Result<(Self, Endpoint, EndpointHandle)> {
             let (mut g, actor, ep_handle) =
-                Gossip::t_new_with_actor(rng, config, relay_map, cancel).await?;
+                Gossip::t_new_with_actor(rng, config, relay_map, &cancel).await?;
             let ep = actor.endpoint.clone();
             let me = ep.node_id().fmt_short();
             let actor_handle = tokio::spawn(
@@ -1419,13 +1423,11 @@ mod test {
 
         // create the first node with a manual actor loop
         let (go1, actor, ep1_handle) =
-            Gossip::t_new_with_actor(rng, Default::default(), relay_map.clone(), ct.clone())
-                .await?;
+            Gossip::t_new_with_actor(rng, Default::default(), relay_map.clone(), &ct).await?;
         let mut actor = ManualActorLoop::new(actor).await?;
 
         // create the second node with the usual actor loop
-        let (go2, ep2, ep2_handle) =
-            Gossip::t_new(rng, Default::default(), relay_map, ct.clone()).await?;
+        let (go2, ep2, ep2_handle) = Gossip::t_new(rng, Default::default(), relay_map, &ct).await?;
 
         let node_id1 = actor.endpoint.node_id();
         let node_id2 = ep2.node_id();
@@ -1480,12 +1482,12 @@ mod test {
         let go1_task = async move {
             // first subscribe is done immediately
             tracing::info!("subscribing the first time");
-            let sub_1a = go1.subscribe_and_join(topic, vec![node_id2]).await;
+            let sub_1a = go1.subscribe_and_join(topic, vec![node_id2]).await?;
 
             // wait for signal to subscribe a second time
             rx.recv().await.expect("signal for second subscribe");
             tracing::info!("subscribing a second time");
-            let sub_1b = go1.subscribe_and_join(topic, vec![node_id2]).await;
+            let sub_1b = go1.subscribe_and_join(topic, vec![node_id2]).await?;
             drop(sub_1a);
 
             // wait for signal to drop the second handle as well
@@ -1496,6 +1498,8 @@ mod test {
             // wait for cancellation
             ct1.cancelled().await;
             drop(go1);
+
+            anyhow::Ok(())
         }
         .instrument(tracing::debug_span!("node_1", %node_id1));
         let go1_handle = tokio::spawn(go1_task);
@@ -1523,9 +1527,99 @@ mod test {
         let wait = Duration::from_secs(2);
         timeout(wait, ep1_handle).await???;
         timeout(wait, ep2_handle).await???;
-        timeout(wait, go1_handle).await??;
+        timeout(wait, go1_handle).await???;
         timeout(wait, go2_handle).await???;
         timeout(wait, actor.finish()).await??;
+
+        testresult::TestResult::Ok(())
+    }
+
+    #[tokio::test]
+    async fn can_reconnect() -> testresult::TestResult {
+        let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
+        let _guard = iroh_test::logging::setup();
+        let ct = CancellationToken::new();
+        let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+
+        // create the first node with a manual actor loop
+        let (go1, ep1, ep1_handle) =
+            Gossip::t_new(rng, Default::default(), relay_map.clone(), &ct).await?;
+
+        // create the second node with the usual actor loop
+        let (go2, ep2, ep2_handle) = Gossip::t_new(rng, Default::default(), relay_map, &ct).await?;
+
+        let node_id1 = ep1.node_id();
+        let node_id2 = ep2.node_id();
+        tracing::info!(
+            node_1 = node_id1.fmt_short(),
+            node_2 = node_id2.fmt_short(),
+            "nodes ready"
+        );
+
+        let topic: TopicId = blake3::hash(b"can_reconnect").into();
+        tracing::info!(%topic, "joining");
+
+        let ct2 = ct.child_token();
+        let (tx, mut rx) = mpsc::channel::<()>(1);
+
+        let addr1 = NodeAddr::new(node_id1).with_relay_url(relay_url.clone());
+        ep2.add_node_addr(addr1)?;
+        let go2_task = async move {
+            let mut sub = go2.subscribe(topic, Vec::new())?;
+            sub.joined().await?;
+
+            rx.recv().await.expect("signal to unsubscribe");
+            tracing::info!("unsubscribing");
+            drop(sub);
+
+            rx.recv().await.expect("signal to subscribe again");
+            tracing::info!("resubscribing");
+            let mut sub = go2.subscribe(topic, vec![node_id1])?;
+
+            sub.joined().await?;
+            tracing::info!("subscription successful!");
+
+            ct2.cancelled().await;
+
+            anyhow::Ok(())
+        }
+        .instrument(tracing::debug_span!("node_2", %node_id2));
+        let go2_handle = tokio::spawn(go2_task);
+
+        let addr2 = NodeAddr::new(node_id2).with_relay_url(relay_url);
+        ep1.add_node_addr(addr2)?;
+
+        let mut sub = go1.subscribe(topic, vec![node_id2])?;
+        // wait for subscribed notification
+        sub.joined().await?;
+
+        // signal node_2 to unsubscribe
+        tx.send(()).await?;
+
+        // we should receive a Neighbor down event
+        let conn_timeout = Duration::from_millis(500);
+        let ev = timeout(conn_timeout, sub.try_next()).await??;
+        assert_eq!(ev, Some(Event::Gossip(GossipEvent::NeighborDown(node_id2))));
+        tracing::info!("node 2 left");
+
+        // signal node_2 to subscribe again
+        tx.send(()).await?;
+
+        // let x = sub.try_next().await?;
+        // joined?
+        // tracing::info!(?x, "node 1 ev");
+
+        // let x = sub.try_next().await?;
+        // joined?
+        // tracing::info!(?x, "node 1 ev");
+
+        // cleanup and ensure everything went as expected
+        ct.cancel();
+        let wait = Duration::from_secs(2);
+        timeout(wait, ep1_handle).await???;
+        timeout(wait, ep2_handle).await???;
+        // timeout(wait, go1_handle).await???;
+        timeout(wait, go2_handle).await???;
 
         testresult::TestResult::Ok(())
     }
