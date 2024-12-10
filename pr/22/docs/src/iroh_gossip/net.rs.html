@@ -2966,7 +2966,7 @@
             cancel: <span class="kw-2">&amp;</span>CancellationToken,
         ) -&gt; anyhow::Result&lt;(<span class="self">Self</span>, Endpoint, EndpointHandle)&gt; {
             <span class="kw">let </span>(<span class="kw-2">mut </span>g, actor, ep_handle) =
-                Gossip::t_new_with_actor(rng, config, relay_map, <span class="kw-2">&amp;</span>cancel).<span class="kw">await</span><span class="question-mark">?</span>;
+                Gossip::t_new_with_actor(rng, config, relay_map, cancel).<span class="kw">await</span><span class="question-mark">?</span>;
             <span class="kw">let </span>ep = actor.endpoint.clone();
             <span class="kw">let </span>me = ep.node_id().fmt_short();
             <span class="kw">let </span>actor_handle = tokio::spawn(
