@@ -14,7 +14,6 @@ use futures_concurrency::stream::{stream_group, StreamGroup};
 use futures_lite::{future::Boxed as BoxedFuture, stream::Stream, StreamExt};
 use futures_util::TryFutureExt;
 use iroh::{
-    dialer::Dialer,
     endpoint::{get_remote_node_id, Connecting, Connection, DirectAddr},
     key::PublicKey,
     protocol::ProtocolHandler,
@@ -24,8 +23,8 @@ use iroh_metrics::inc;
 use rand::rngs::StdRng;
 use rand_core::SeedableRng;
 use tokio::{sync::mpsc, task::JoinSet};
-use tokio_util::task::AbortOnDropHandle;
-use tracing::{debug, error_span, trace, warn, Instrument};
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
+use tracing::{debug, error, error_span, trace, warn, Instrument};
 
 use self::util::{read_message, write_message, Timers};
 use crate::{
@@ -1087,6 +1086,73 @@ fn our_peer_data(endpoint: &Endpoint, direct_addresses: &BTreeSet<DirectAddr>) -
         direct_addresses.iter().map(|x| x.addr),
     );
     encode_peer_data(&addr.info)
+}
+
+#[derive(Debug)]
+struct Dialer {
+    endpoint: Endpoint,
+    pending: JoinSet<(NodeId, anyhow::Result<Connection>)>,
+    pending_dials: HashMap<NodeId, CancellationToken>,
+}
+
+impl Dialer {
+    /// Create a new dialer for a [`Endpoint`]
+    fn new(endpoint: Endpoint) -> Self {
+        Self {
+            endpoint,
+            pending: Default::default(),
+            pending_dials: Default::default(),
+        }
+    }
+
+    /// Starts to dial a node by [`NodeId`].
+    fn queue_dial(&mut self, node_id: NodeId, alpn: &'static [u8]) {
+        if self.is_pending(node_id) {
+            return;
+        }
+        let cancel = CancellationToken::new();
+        self.pending_dials.insert(node_id, cancel.clone());
+        let endpoint = self.endpoint.clone();
+        self.pending.spawn(async move {
+            let res = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => Err(anyhow!("Cancelled")),
+                res = endpoint.connect(node_id, alpn) => res
+            };
+            (node_id, res)
+        });
+    }
+
+    /// Checks if a node is currently being dialed.
+    fn is_pending(&self, node: NodeId) -> bool {
+        self.pending_dials.contains_key(&node)
+    }
+
+    /// Waits for the next dial operation to complete.
+    async fn next_conn(&mut self) -> (NodeId, anyhow::Result<Connection>) {
+        match self.pending_dials.is_empty() {
+            false => {
+                let (node_id, res) = loop {
+                    match self.pending.join_next().await {
+                        Some(Ok((node_id, res))) => {
+                            self.pending_dials.remove(&node_id);
+                            break (node_id, res);
+                        }
+                        Some(Err(e)) => {
+                            error!("next conn error: {:?}", e);
+                        }
+                        None => {
+                            error!("no more pending conns available");
+                            std::future::pending().await
+                        }
+                    }
+                };
+
+                (node_id, res)
+            }
+            true => std::future::pending().await,
+        }
+    }
 }
 
 #[cfg(test)]
