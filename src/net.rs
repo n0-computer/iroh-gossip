@@ -537,6 +537,11 @@ impl Actor {
                 if let Err(err) = res {
                     if !err.is_cancelled() {
                         warn!("connection task panicked: {err:?}");
+                        // NOTE: this is very bad because the notification of which peer
+                        // disconnected is never received. Gossip will be in a inconsistent state
+                        // here both in the old and new code. An alternative would be to somehow
+                        // keep info of the task's node_id, but what to do with the fact that up to
+                        // two connections are in fact kept
                     }
                 }
             }
@@ -630,10 +635,6 @@ impl Actor {
                     Ok(()) => debug!("connection closed without error"),
                     Err(err) => warn!("connection closed: {err:?}"),
                 }
-                in_event_tx
-                    .send(InEvent::PeerDisconnected(peer_id))
-                    .await
-                    .ok();
             }
             .instrument(error_span!("gossip_conn", peer = %peer_id.fmt_short())),
         );
@@ -712,10 +713,6 @@ impl Actor {
         } else {
             debug!(?event, "handle in_event");
         };
-        if let InEvent::PeerDisconnected(peer) = &event {
-            // TODO(@divma): here is the issue
-            self.peers.remove(peer);
-        }
         let out = self.state.handle(event, now);
         for event in out {
             if matches!(event, OutEvent::ScheduleTimer(_, _)) {
@@ -1605,13 +1602,10 @@ mod test {
         // signal node_2 to subscribe again
         tx.send(()).await?;
 
-        // let x = sub.try_next().await?;
-        // joined?
-        // tracing::info!(?x, "node 1 ev");
-
-        // let x = sub.try_next().await?;
-        // joined?
-        // tracing::info!(?x, "node 1 ev");
+        let conn_timeout = Duration::from_millis(500);
+        let ev = timeout(conn_timeout, sub.try_next()).await??;
+        assert_eq!(ev, Some(Event::Gossip(GossipEvent::NeighborUp(node_id2))));
+        tracing::info!("node 2 rejoined!");
 
         // cleanup and ensure everything went as expected
         ct.cancel();
