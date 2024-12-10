@@ -536,11 +536,6 @@ impl Actor {
                 if let Err(err) = res {
                     if !err.is_cancelled() {
                         warn!("connection task panicked: {err:?}");
-                        // NOTE: this is very bad because the notification of which peer
-                        // disconnected is never received. Gossip will be in a inconsistent state
-                        // here both in the old and new code. An alternative would be to somehow
-                        // keep info of the task's node_id, but what to do with the fact that up to
-                        // two connections are in fact kept
                     }
                 }
             }
@@ -634,6 +629,10 @@ impl Actor {
                     Ok(()) => debug!("connection closed without error"),
                     Err(err) => warn!("connection closed: {err:?}"),
                 }
+                in_event_tx
+                    .send(InEvent::PeerDisconnected(peer_id))
+                    .await
+                    .ok();
             }
             .instrument(error_span!("gossip_conn", peer = %peer_id.fmt_short())),
         );
@@ -724,7 +723,6 @@ impl Actor {
                     let state = self.peers.entry(peer_id).or_default();
                     match state {
                         PeerState::Active { send_tx, .. } => {
-                            trace!("sending to active");
                             if let Err(_err) = send_tx.send(message).await {
                                 // Removing the peer is handled by the in_event PeerDisconnected sent
                                 // at the end of the connection task.
@@ -732,9 +730,7 @@ impl Actor {
                             }
                         }
                         PeerState::Pending { queue } => {
-                            trace!("sending to pending");
                             if queue.is_empty() {
-                                trace!("dialing");
                                 self.dialer.queue_dial(peer_id, GOSSIP_ALPN);
                             }
                             queue.push(message);
@@ -1678,7 +1674,6 @@ mod test {
         let wait = Duration::from_secs(2);
         timeout(wait, ep1_handle).await???;
         timeout(wait, ep2_handle).await???;
-        // timeout(wait, go1_handle).await???;
         timeout(wait, go2_handle).await???;
 
         testresult::TestResult::Ok(())
