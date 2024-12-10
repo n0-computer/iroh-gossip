@@ -1243,7 +1243,7 @@ mod test {
         ///
         /// This creates the endpoint and spawns the endpoint loop as well. The handle for the
         /// endpoing task is returned along the gossip instance and actor. Since the actor is not
-        /// actually spawned as [`Gossip::from_endpoint`] would, the gossip instance will have a
+        /// actually spawned as [`Builder::spawn`] would, the gossip instance will have a
         /// handle to a dummy task instead.
         async fn t_new_with_actor(
             rng: &mut rand_chacha::ChaCha12Rng,
