@@ -18,26 +18,25 @@ Iroh provides a [`Router`](https://docs.rs/iroh/latest/iroh/protocol/struct.Rout
 
 Here is a basic example of how to set up `iroh-gossip` with `iroh`:
 ```rust
-
 use iroh::{protocol::Router, Endpoint};
 use iroh_gossip::{net::Gossip, ALPN};
 
 #[tokio::main]
-async fn main() -> Result<(), std::fmt::Error> {
+async fn main() -> anyhow::Result<()> {
     // create an iroh endpoint that includes the standard discovery mechanisms
     // we've built at number0
-    let endpoint = Endpoint::builder().discovery_n0().bind().await.unwrap();
+    let endpoint = Endpoint::builder().discovery_n0().bind().await?;
 
     // build gossip protocol
-    let gossip = Gossip::builder().spawn(endpoint.clone()).await.unwrap();
+    let gossip = Gossip::builder().spawn(endpoint.clone()).await?;
 
     // setup router
     let router = Router::builder(endpoint.clone())
         .accept(ALPN, gossip.clone())
         .spawn()
-        .await
-        .unwrap();
+        .await?;
     // do fun stuff with the gossip protocol
+    router.shutdown().await?;
     Ok(())
 }
 ```
