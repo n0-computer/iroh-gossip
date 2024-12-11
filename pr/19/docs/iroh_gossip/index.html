@@ -11,27 +11,26 @@ The <code>net</code> module connects the protocol to the networking stack from <
 <p>Iroh provides a <a href="https://docs.rs/iroh/latest/iroh/protocol/struct.Router.html"><code>Router</code></a> that takes an <a href="https://docs.rs/iroh/latest/iroh/endpoint/struct.Endpoint.html"><code>Endpoint</code></a> and any protocols needed for the application. Similar to a router in webserver library, it runs a loop accepting incoming connections and routes them to the specific protocol handler, based on <code>ALPN</code>.</p>
 <p>Here is a basic example of how to set up <code>iroh-gossip</code> with <code>iroh</code>:</p>
 
-<div class="example-wrap"><pre class="rust rust-example-rendered"><code>
-<span class="kw">use </span>iroh::{protocol::Router, Endpoint};
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>iroh::{protocol::Router, Endpoint};
 <span class="kw">use </span>iroh_gossip::{net::Gossip, ALPN};
 
 <span class="attr">#[tokio::main]
-</span><span class="kw">async fn </span>main() -&gt; <span class="prelude-ty">Result</span>&lt;(), std::fmt::Error&gt; {
+</span><span class="kw">async fn </span>main() -&gt; anyhow::Result&lt;()&gt; {
     <span class="comment">// create an iroh endpoint that includes the standard discovery mechanisms
     // we've built at number0
-    </span><span class="kw">let </span>endpoint = Endpoint::builder().discovery_n0().bind().<span class="kw">await</span>.unwrap();
+    </span><span class="kw">let </span>endpoint = Endpoint::builder().discovery_n0().bind().<span class="kw">await</span><span class="question-mark">?</span>;
 
     <span class="comment">// build gossip protocol
-    </span><span class="kw">let </span>gossip = Gossip::builder().spawn(endpoint.clone()).<span class="kw">await</span>.unwrap();
+    </span><span class="kw">let </span>gossip = Gossip::builder().spawn(endpoint.clone()).<span class="kw">await</span><span class="question-mark">?</span>;
 
     <span class="comment">// setup router
     </span><span class="kw">let </span>router = Router::builder(endpoint.clone())
         .accept(ALPN, gossip.clone())
         .spawn()
-        .<span class="kw">await
-        </span>.unwrap();
+        .<span class="kw">await</span><span class="question-mark">?</span>;
     <span class="comment">// do fun stuff with the gossip protocol
-    </span><span class="prelude-val">Ok</span>(())
+    </span>router.shutdown().<span class="kw">await</span><span class="question-mark">?</span>;
+    <span class="prelude-val">Ok</span>(())
 }</code></pre></div>
 <h2 id="license"><a class="doc-anchor" href="#license">§</a>License</h2>
 <p>This project is licensed under either of</p>
