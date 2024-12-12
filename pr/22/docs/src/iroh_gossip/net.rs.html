@@ -1679,6 +1679,7 @@
 <a href="#1679" id="1679">1679</a>
 <a href="#1680" id="1680">1680</a>
 <a href="#1681" id="1681">1681</a>
+<a href="#1682" id="1682">1682</a>
 </pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
 
 </span><span class="kw">use </span>std::{
@@ -2605,8 +2606,7 @@
 
     <span class="kw">let </span>send_loop = <span class="kw">async </span>{
         <span class="kw">for </span>msg <span class="kw">in </span>queue {
-            <span class="comment">// TODO(@divma): check if send_rx is closed?
-            </span>write_message(<span class="kw-2">&amp;mut </span>send, <span class="kw-2">&amp;mut </span>send_buf, <span class="kw-2">&amp;</span>msg, max_message_size)
+            write_message(<span class="kw-2">&amp;mut </span>send, <span class="kw-2">&amp;mut </span>send_buf, <span class="kw-2">&amp;</span>msg, max_message_size)
                 .<span class="kw">await
                 </span>.context(<span class="string">"write_message"</span>)<span class="question-mark">?
         </span>}
@@ -2615,13 +2615,11 @@
                 .<span class="kw">await
                 </span>.context(<span class="string">"write_message"</span>)<span class="question-mark">?
         </span>}
-        <span class="comment">// TODO(@divma): according to docs this error is harmless
-        // notify the other node no more data will be sent
+        <span class="comment">// notify the other node no more data will be sent
         </span><span class="kw">let _ </span>= send.finish();
         <span class="comment">// wait for the other node to ack all the sent data
         </span><span class="kw">let _ </span>= send.stopped().<span class="kw">await</span>;
-        <span class="comment">// bit of a last resort here?
-        </span>conn.close(<span class="number">0u8</span>.into(), <span class="string">b"close from disconnect"</span>);
+        conn.close(<span class="number">0u8</span>.into(), <span class="string">b"close from disconnect"</span>);
         <span class="prelude-val">Ok</span>::&lt;<span class="kw">_</span>, anyhow::Error&gt;(())
     };
 
@@ -3274,19 +3272,23 @@
         testresult::TestResult::Ok(())
     }
 
-    <span class="attr">#[tokio::test]
+    <span class="doccomment">/// Test that nodes can reconnect to each other.
+    ///
+    /// This test will create two nodes subscribed to the same topic. The second node will
+    /// unsubscribe and then resubscribe and connection between the nodes should succeed both
+    /// times.
+    </span><span class="comment">// NOTE: This is a regression test
+    </span><span class="attr">#[tokio::test]
     </span><span class="kw">async fn </span>can_reconnect() -&gt; testresult::TestResult {
         <span class="kw">let </span>rng = <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
         <span class="kw">let </span>_guard = iroh_test::logging::setup();
         <span class="kw">let </span>ct = CancellationToken::new();
         <span class="kw">let </span>(relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().<span class="kw">await</span>.unwrap();
 
-        <span class="comment">// create the first node with a manual actor loop
-        </span><span class="kw">let </span>(go1, ep1, ep1_handle) =
+        <span class="kw">let </span>(go1, ep1, ep1_handle) =
             Gossip::t_new(rng, Default::default(), relay_map.clone(), <span class="kw-2">&amp;</span>ct).<span class="kw">await</span><span class="question-mark">?</span>;
 
-        <span class="comment">// create the second node with the usual actor loop
-        </span><span class="kw">let </span>(go2, ep2, ep2_handle) = Gossip::t_new(rng, Default::default(), relay_map, <span class="kw-2">&amp;</span>ct).<span class="kw">await</span><span class="question-mark">?</span>;
+        <span class="kw">let </span>(go2, ep2, ep2_handle) = Gossip::t_new(rng, Default::default(), relay_map, <span class="kw-2">&amp;</span>ct).<span class="kw">await</span><span class="question-mark">?</span>;
 
         <span class="kw">let </span>node_id1 = ep1.node_id();
         <span class="kw">let </span>node_id2 = ep2.node_id();
@@ -3300,8 +3302,8 @@
         <span class="macro">tracing::info!</span>(%topic, <span class="string">"joining"</span>);
 
         <span class="kw">let </span>ct2 = ct.child_token();
-        <span class="kw">let </span>(tx, <span class="kw-2">mut </span>rx) = mpsc::channel::&lt;()&gt;(<span class="number">1</span>);
-
+        <span class="comment">// channel used to signal the second gossip instance to advance the test
+        </span><span class="kw">let </span>(tx, <span class="kw-2">mut </span>rx) = mpsc::channel::&lt;()&gt;(<span class="number">1</span>);
         <span class="kw">let </span>addr1 = NodeAddr::new(node_id1).with_relay_url(relay_url.clone());
         ep2.add_node_addr(addr1)<span class="question-mark">?</span>;
         <span class="kw">let </span>go2_task = <span class="kw">async move </span>{
