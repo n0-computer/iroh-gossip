@@ -924,7 +924,6 @@ async fn connection_loop(
 
     let send_loop = async {
         for msg in queue {
-            // TODO(@divma): check if send_rx is closed?
             write_message(&mut send, &mut send_buf, &msg, max_message_size)
                 .await
                 .context("write_message")?
@@ -934,12 +933,10 @@ async fn connection_loop(
                 .await
                 .context("write_message")?
         }
-        // TODO(@divma): according to docs this error is harmless
         // notify the other node no more data will be sent
         let _ = send.finish();
         // wait for the other node to ack all the sent data
         let _ = send.stopped().await;
-        // bit of a last resort here?
         conn.close(0u8.into(), b"close from disconnect");
         Ok::<_, anyhow::Error>(())
     };
@@ -1593,6 +1590,12 @@ mod test {
         testresult::TestResult::Ok(())
     }
 
+    /// Test that nodes can reconnect to each other.
+    ///
+    /// This test will create two nodes subscribed to the same topic. The second node will
+    /// unsubscribe and then resubscribe and connection between the nodes should succeed both
+    /// times.
+    // NOTE: This is a regression test
     #[tokio::test]
     async fn can_reconnect() -> testresult::TestResult {
         let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
@@ -1600,11 +1603,9 @@ mod test {
         let ct = CancellationToken::new();
         let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
 
-        // create the first node with a manual actor loop
         let (go1, ep1, ep1_handle) =
             Gossip::t_new(rng, Default::default(), relay_map.clone(), &ct).await?;
 
-        // create the second node with the usual actor loop
         let (go2, ep2, ep2_handle) = Gossip::t_new(rng, Default::default(), relay_map, &ct).await?;
 
         let node_id1 = ep1.node_id();
@@ -1619,8 +1620,8 @@ mod test {
         tracing::info!(%topic, "joining");
 
         let ct2 = ct.child_token();
+        // channel used to signal the second gossip instance to advance the test
         let (tx, mut rx) = mpsc::channel::<()>(1);
-
         let addr1 = NodeAddr::new(node_id1).with_relay_url(relay_url.clone());
         ep2.add_node_addr(addr1)?;
         let go2_task = async move {
