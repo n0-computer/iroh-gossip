@@ -85,19 +85,24 @@ type ProtoMessage = proto::Message<PublicKey>;
 /// The gossip actor will, however, initiate new connections to other peers by itself.
 #[derive(Debug, Clone)]
 pub struct Gossip {
-    to_actor_tx: mpsc::Sender<ToActor>,
-    _actor_handle: Arc<AbortOnDropHandle<()>>,
-    max_message_size: usize,
-    /// Next [`ReceiverId`] to be assigned when a receiver is registered for a topic.
-    next_receiver_id: Arc<AtomicUsize>,
+    pub(crate) inner: Arc<Inner>,
     #[cfg(feature = "rpc")]
     pub(crate) rpc_handler: Arc<std::sync::OnceLock<crate::rpc::RpcHandler>>,
 }
 
+#[derive(Debug)]
+pub(crate) struct Inner {
+    to_actor_tx: mpsc::Sender<ToActor>,
+    _actor_handle: AbortOnDropHandle<()>,
+    max_message_size: usize,
+    /// Next [`ReceiverId`] to be assigned when a receiver is registered for a topic.
+    next_receiver_id: AtomicUsize,
+}
+
 impl ProtocolHandler for Gossip {
     fn accept(&self, conn: Connecting) -> BoxedFuture<Result<()>> {
-        let this = self.clone();
-        Box::pin(async move { this.handle_connection(conn.await?).await })
+        let inner = self.inner.clone();
+        Box::pin(async move { inner.handle_connection(conn.await?).await })
     }
 }
 
@@ -145,10 +150,13 @@ impl Builder {
         );
 
         Ok(Gossip {
-            to_actor_tx,
-            _actor_handle: Arc::new(AbortOnDropHandle::new(actor_handle)),
-            max_message_size,
-            next_receiver_id: Default::default(),
+            inner: Inner {
+                to_actor_tx,
+                _actor_handle: AbortOnDropHandle::new(actor_handle),
+                max_message_size,
+                next_receiver_id: Default::default(),
+            }
+            .into(),
             #[cfg(feature = "rpc")]
             rpc_handler: Default::default(),
         })
@@ -165,17 +173,14 @@ impl Gossip {
 
     /// Get the maximum message size configured for this gossip actor.
     pub fn max_message_size(&self) -> usize {
-        self.max_message_size
+        self.inner.max_message_size
     }
 
     /// Handle an incoming [`Connection`].
     ///
     /// Make sure to check the ALPN protocol yourself before passing the connection.
     pub async fn handle_connection(&self, conn: Connection) -> anyhow::Result<()> {
-        let peer_id = get_remote_node_id(&conn)?;
-        self.send(ToActor::HandleConnection(peer_id, ConnOrigin::Accept, conn))
-            .await?;
-        Ok(())
+        self.inner.handle_connection(conn).await
     }
 
     /// Join a gossip topic with the default options and wait for at least one active connection.
@@ -219,6 +224,17 @@ impl Gossip {
     ///
     /// It returns a stream of events. If you want to wait for the topic to become active, wait for
     /// the [`GossipEvent::Joined`] event.
+    pub fn subscribe_with_stream(
+        &self,
+        topic_id: TopicId,
+        options: JoinOptions,
+        updates: CommandStream,
+    ) -> EventStream {
+        self.inner.subscribe_with_stream(topic_id, options, updates)
+    }
+}
+
+impl Inner {
     pub fn subscribe_with_stream(
         &self,
         topic_id: TopicId,
@@ -270,6 +286,13 @@ impl Gossip {
             .send(event)
             .await
             .map_err(|_| anyhow!("gossip actor dropped"))
+    }
+
+    async fn handle_connection(&self, conn: Connection) -> anyhow::Result<()> {
+        let peer_id = get_remote_node_id(&conn)?;
+        self.send(ToActor::HandleConnection(peer_id, ConnOrigin::Accept, conn))
+            .await?;
+        Ok(())
     }
 }
 
@@ -1253,14 +1276,16 @@ mod test {
             let (actor, to_actor_tx) = Actor::new(endpoint, config, &my_addr);
             let max_message_size = actor.state.max_message_size();
 
-            let _actor_handle = Arc::new(AbortOnDropHandle::new(tokio::spawn(
-                futures_lite::future::pending(),
-            )));
+            let _actor_handle =
+                AbortOnDropHandle::new(tokio::spawn(futures_lite::future::pending()));
             let gossip = Self {
-                to_actor_tx,
-                _actor_handle,
-                max_message_size,
-                next_receiver_id: Default::default(),
+                inner: Inner {
+                    to_actor_tx,
+                    _actor_handle,
+                    max_message_size,
+                    next_receiver_id: Default::default(),
+                }
+                .into(),
                 #[cfg(feature = "rpc")]
                 rpc_handler: Default::default(),
             };
@@ -1280,8 +1305,8 @@ mod test {
             config: proto::Config,
             relay_map: RelayMap,
             cancel: &CancellationToken,
-        ) -> anyhow::Result<(Self, Endpoint, EndpointHandle)> {
-            let (mut g, actor, ep_handle) =
+        ) -> anyhow::Result<(Self, Endpoint, EndpointHandle, impl Drop)> {
+            let (g, actor, ep_handle) =
                 Gossip::t_new_with_actor(rng, config, relay_map, cancel).await?;
             let ep = actor.endpoint.clone();
             let me = ep.node_id().fmt_short();
@@ -1293,8 +1318,7 @@ mod test {
                 }
                 .instrument(tracing::error_span!("gossip", %me)),
             );
-            g._actor_handle = Arc::new(AbortOnDropHandle::new(actor_handle));
-            Ok((g, ep, ep_handle))
+            Ok((g, ep, ep_handle, AbortOnDropHandle::new(actor_handle)))
         }
     }
 
@@ -1483,7 +1507,8 @@ mod test {
         let mut actor = ManualActorLoop::new(actor).await?;
 
         // create the second node with the usual actor loop
-        let (go2, ep2, ep2_handle) = Gossip::t_new(rng, Default::default(), relay_map, &ct).await?;
+        let (go2, ep2, ep2_handle, _test_actor_handle) =
+            Gossip::t_new(rng, Default::default(), relay_map, &ct).await?;
 
         let node_id1 = actor.endpoint.node_id();
         let node_id2 = ep2.node_id();
@@ -1603,10 +1628,11 @@ mod test {
         let ct = CancellationToken::new();
         let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
 
-        let (go1, ep1, ep1_handle) =
+        let (go1, ep1, ep1_handle, _test_actor_handle1) =
             Gossip::t_new(rng, Default::default(), relay_map.clone(), &ct).await?;
 
-        let (go2, ep2, ep2_handle) = Gossip::t_new(rng, Default::default(), relay_map, &ct).await?;
+        let (go2, ep2, ep2_handle, _test_actor_handle2) =
+            Gossip::t_new(rng, Default::default(), relay_map, &ct).await?;
 
         let node_id1 = ep1.node_id();
         let node_id2 = ep2.node_id();
