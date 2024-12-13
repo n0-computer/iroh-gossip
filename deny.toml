@@ -33,6 +33,7 @@ license-files = [
 [advisories]
 ignore = [
       "RUSTSEC-2024-0384", # unmaintained, no upgrade available
+      "RUSTSEC-2024-0421", # todo: remove when iroh gets updated
 ]
 
 [sources]
