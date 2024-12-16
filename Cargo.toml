@@ -35,7 +35,7 @@ bytes = { version = "1.7", features = ["serde"] }
 derive_more = { version = "1.0.0", features = ["add", "debug", "deref", "display", "from", "try_into", "into"] }
 ed25519-dalek = { version = "2.0.0", features = ["serde", "rand_core"] }
 indexmap = "2.0"
-iroh-metrics = "0.29.0"
+iroh-metrics = "0.30.0"
 postcard = { version = "1", default-features = false, features = ["alloc", "use-std", "experimental-derive"] }
 rand = { version = "0.8.5", features = ["std_rng"] }
 rand_core = "0.6.4"
