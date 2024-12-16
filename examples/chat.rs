@@ -10,10 +10,7 @@ use bytes::Bytes;
 use clap::Parser;
 use ed25519_dalek::Signature;
 use futures_lite::StreamExt;
-use iroh::{
-    key::{PublicKey, SecretKey},
-    Endpoint, NodeAddr, RelayMap, RelayMode, RelayUrl,
-};
+use iroh::{Endpoint, NodeAddr, PublicKey, RelayMap, RelayMode, RelayUrl, SecretKey};
 use iroh_gossip::{
     net::{Event, Gossip, GossipEvent, GossipReceiver, GOSSIP_ALPN},
     proto::TopicId,
@@ -89,7 +86,7 @@ async fn main() -> Result<()> {
 
     // parse or generate our secret key
     let secret_key = match args.secret_key {
-        None => SecretKey::generate(),
+        None => SecretKey::generate(rand::rngs::OsRng),
         Some(key) => key.parse()?,
     };
     println!("> our secret key: {secret_key}");

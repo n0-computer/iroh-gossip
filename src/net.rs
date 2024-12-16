@@ -2,6 +2,7 @@
 
 use std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
+    net::SocketAddr,
     pin::Pin,
     sync::{atomic::AtomicUsize, Arc},
     task::{Context, Poll},
@@ -15,13 +16,13 @@ use futures_lite::{future::Boxed as BoxedFuture, stream::Stream, StreamExt};
 use futures_util::TryFutureExt;
 use iroh::{
     endpoint::{get_remote_node_id, Connecting, Connection, DirectAddr},
-    key::PublicKey,
     protocol::ProtocolHandler,
-    AddrInfo, Endpoint, NodeAddr, NodeId,
+    Endpoint, NodeAddr, NodeId, PublicKey, RelayUrl,
 };
 use iroh_metrics::inc;
 use rand::rngs::StdRng;
 use rand_core::SeedableRng;
+use serde::{Deserialize, Serialize};
 use tokio::{sync::mpsc, task::JoinSet};
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use tracing::{debug, error, error_span, trace, warn, Instrument};
@@ -136,7 +137,7 @@ impl Builder {
     pub async fn spawn(self, endpoint: Endpoint) -> Result<Gossip> {
         let addr = endpoint.node_addr().await?;
 
-        let (actor, to_actor_tx) = Actor::new(endpoint, self.config, &addr.info);
+        let (actor, to_actor_tx) = Actor::new(endpoint, self.config, &addr.into());
         let me = actor.endpoint.node_id().fmt_short();
         let max_message_size = actor.state.max_message_size();
 
@@ -467,14 +468,12 @@ impl Actor {
         // Watch for changes in direct addresses to update our peer data.
         let mut direct_addresses_stream = self.endpoint.direct_addresses();
         // Watch for changes of our home relay to update our peer data.
-        let home_relay_stream = self.endpoint.watch_home_relay();
+        let home_relay_stream = self.endpoint.home_relay().stream().filter_map(|i| i);
 
         // With each gossip message we provide addressing information to reach our node.
         // We wait until at least one direct address is discovered.
-        let current_addresses = direct_addresses_stream
-            .next()
-            .await
-            .ok_or_else(|| anyhow!("Failed to discover direct addresses"))?;
+        let current_addresses = direct_addresses_stream.initialized().await?;
+        let direct_addresses_stream = direct_addresses_stream.stream().filter_map(|i| i);
         self.handle_addr_update(&current_addresses).await?;
         Ok((
             current_addresses,
@@ -799,7 +798,15 @@ impl Actor {
                     Err(err) => warn!("Failed to decode {data:?} from {node_id}: {err}"),
                     Ok(info) => {
                         debug!(peer = ?node_id, "add known addrs: {info:?}");
-                        let node_addr = NodeAddr { node_id, info };
+                        let AddrInfo {
+                            relay_url,
+                            direct_addresses,
+                        } = info;
+                        let node_addr = NodeAddr {
+                            node_id,
+                            relay_url,
+                            direct_addresses,
+                        };
                         if let Err(err) = self
                             .endpoint
                             .add_node_addr_with_source(node_addr, SOURCE_NAME)
@@ -981,6 +988,26 @@ async fn connection_loop(
     Ok(())
 }
 
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+struct AddrInfo {
+    relay_url: Option<RelayUrl>,
+    direct_addresses: BTreeSet<SocketAddr>,
+}
+impl From<NodeAddr> for AddrInfo {
+    fn from(
+        NodeAddr {
+            relay_url,
+            direct_addresses,
+            ..
+        }: NodeAddr,
+    ) -> Self {
+        Self {
+            relay_url,
+            direct_addresses,
+        }
+    }
+}
+
 fn encode_peer_data(info: &AddrInfo) -> anyhow::Result<PeerData> {
     let bytes = postcard::to_stdvec(info)?;
     anyhow::ensure!(!bytes.is_empty(), "encoding empty peer data: {:?}", info);
@@ -1096,12 +1123,10 @@ impl Stream for TopicCommandStream {
 }
 
 fn our_peer_data(endpoint: &Endpoint, direct_addresses: &BTreeSet<DirectAddr>) -> Result<PeerData> {
-    let addr = NodeAddr::from_parts(
-        endpoint.node_id(),
-        endpoint.home_relay(),
-        direct_addresses.iter().map(|x| x.addr),
-    );
-    encode_peer_data(&addr.info)
+    encode_peer_data(&AddrInfo {
+        relay_url: endpoint.home_relay().get().ok().flatten(),
+        direct_addresses: direct_addresses.iter().map(|x| x.addr).collect(),
+    })
 }
 
 #[derive(Debug)]
@@ -1177,7 +1202,7 @@ mod test {
 
     use bytes::Bytes;
     use futures_concurrency::future::TryJoin;
-    use iroh::{key::SecretKey, RelayMap, RelayMode};
+    use iroh::{RelayMap, RelayMode, SecretKey};
     use tokio::{spawn, time::timeout};
     use tokio_util::sync::CancellationToken;
     use tracing::{info, instrument};
@@ -1327,14 +1352,14 @@ mod test {
         relay_map: RelayMap,
     ) -> anyhow::Result<Endpoint> {
         let ep = Endpoint::builder()
-            .secret_key(SecretKey::generate_with_rng(rng))
+            .secret_key(SecretKey::generate(rng))
             .alpns(vec![GOSSIP_ALPN.to_vec()])
             .relay_mode(RelayMode::Custom(relay_map))
             .insecure_skip_relay_cert_verify(true)
             .bind()
             .await?;
 
-        ep.watch_home_relay().next().await;
+        ep.home_relay().initialized().await?;
         Ok(ep)
     }
 
