@@ -2,6 +2,12 @@
 
 All notable changes to iroh-gossip will be documented in this file.
 
+## [0.30.1](https://github.com/n0-computer/iroh-gossip/compare/v0.30.0..0.30.1) - 2024-12-20
+
+### 🐛 Bug Fixes
+
+- Add missing Sync bound to EventStream's inner - ([d7039c4](https://github.com/n0-computer/iroh-gossip/commit/d7039c4684e0072bce1c1fe4bce7d39ba42e8390))
+
 ## [0.30.0](https://github.com/n0-computer/iroh-gossip/compare/v0.29.0..0.30.0) - 2024-12-17
 
 ### ⛰️  Features
