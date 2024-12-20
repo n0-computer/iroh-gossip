@@ -13,16 +13,17 @@ use bytes::Bytes;
 use futures_lite::{Stream, StreamExt};
 use iroh::NodeId;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 
 use super::EventStream;
 use crate::{net::TOPIC_EVENTS_DEFAULT_CAP, proto::DeliveryScope};
 
 /// Sender for a gossip topic.
 #[derive(Debug)]
-pub struct GossipSender(async_channel::Sender<Command>);
+pub struct GossipSender(mpsc::Sender<Command>);
 
 impl GossipSender {
-    pub(crate) fn new(sender: async_channel::Sender<Command>) -> Self {
+    pub(crate) fn new(sender: mpsc::Sender<Command>) -> Self {
         Self(sender)
     }
 
@@ -63,7 +64,7 @@ pub struct GossipTopic {
 }
 
 impl GossipTopic {
-    pub(crate) fn new(sender: async_channel::Sender<Command>, receiver: EventStream) -> Self {
+    pub(crate) fn new(sender: mpsc::Sender<Command>, receiver: EventStream) -> Self {
         Self {
             sender: GossipSender::new(sender),
             receiver: GossipReceiver::new(receiver),
@@ -99,7 +100,7 @@ impl GossipTopic {
 impl Stream for GossipTopic {
     type Item = Result<Event>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.receiver.poll_next(cx)
+        self.receiver.stream.inner.poll_next(cx)
     }
 }
 

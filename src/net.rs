@@ -23,6 +23,7 @@ use rand::rngs::StdRng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 use tokio::{sync::mpsc, task::JoinSet};
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use tracing::{debug, error, error_span, trace, warn, Instrument};
 
@@ -223,8 +224,8 @@ impl Gossip {
         topic_id: TopicId,
         opts: JoinOptions,
     ) -> Result<GossipTopic> {
-        let (command_tx, command_rx) = async_channel::bounded(TOPIC_COMMANDS_DEFAULT_CAP);
-        let command_rx: CommandStream = Box::pin(command_rx);
+        let (command_tx, command_rx) = mpsc::channel(TOPIC_COMMANDS_DEFAULT_CAP);
+        let command_rx: CommandStream = Box::pin(ReceiverStream::new(command_rx));
         let event_rx = self
             .subscribe_with_stream(topic_id, opts, command_rx)
             .await?;
@@ -257,7 +258,7 @@ impl Inner {
         options: JoinOptions,
         updates: CommandStream,
     ) -> Result<EventStream> {
-        let (event_tx, event_rx) = async_channel::bounded(options.subscription_capacity);
+        let (event_tx, event_rx) = mpsc::channel(options.subscription_capacity);
         let to_actor_tx = self.to_actor_tx.clone();
         let receiver_id = ReceiverId(
             self.next_receiver_id
@@ -279,7 +280,7 @@ impl Inner {
             .map_err(|_| anyhow!("Gossip actor dropped"))?;
 
         Ok(EventStream {
-            inner: Box::pin(event_rx),
+            inner: ReceiverStream::new(event_rx),
             to_actor_tx: self.to_actor_tx.clone(),
             topic: topic_id,
             receiver_id,
@@ -302,11 +303,10 @@ impl Inner {
 }
 
 /// Stream of events for a topic.
-#[derive(derive_more::Debug)]
+#[derive(Debug)]
 pub struct EventStream {
     /// The actual stream polled to return [`Event`]s to the application.
-    #[debug("Stream")]
-    inner: Pin<Box<async_channel::Receiver<Result<Event>>>>,
+    inner: ReceiverStream<Result<Event>>,
 
     /// Channel to the actor task.
     ///
@@ -934,7 +934,7 @@ enum ConnOrigin {
 struct SubscriberChannels {
     /// Id for the receiver counter part of [`Self::event_tx`].
     receiver_id: ReceiverId,
-    event_tx: async_channel::Sender<Result<Event>>,
+    event_tx: mpsc::Sender<Result<Event>>,
     #[debug("CommandStream")]
     command_rx: CommandStream,
 }
@@ -1032,7 +1032,7 @@ struct EventSenders {
     /// Channels to communicate [`Event`] to [`EventStream`]s.
     ///
     /// This is indexed by receiver id. The boolean indicates a lagged channel ([`Event::Lagged`]).
-    senders: HashMap<ReceiverId, (async_channel::Sender<Result<Event>>, bool)>,
+    senders: HashMap<ReceiverId, (mpsc::Sender<Result<Event>>, bool)>,
 }
 
 /// Id for a gossip receiver.
@@ -1046,7 +1046,7 @@ impl EventSenders {
         self.senders.is_empty()
     }
 
-    fn push(&mut self, id: ReceiverId, sender: async_channel::Sender<Result<Event>>) {
+    fn push(&mut self, id: ReceiverId, sender: mpsc::Sender<Result<Event>>) {
         self.senders.insert(id, (sender, false));
     }
 
@@ -1054,35 +1054,36 @@ impl EventSenders {
     ///
     /// This will not wait until the sink is full, but send a `Lagged` response if the sink is almost full.
     fn send(&mut self, event: &GossipEvent) {
-        let mut remove = Vec::new();
-        for (&id, (send, lagged)) in self.senders.iter_mut() {
+        self.senders.retain(|_id, (send, lagged)| {
             // If the stream is disconnected, we don't need to send to it.
             if send.is_closed() {
-                remove.push(id);
-                continue;
+                return false;
             }
 
+            // TODO:
             // Check if the send buffer is almost full, and send a lagged response if it is.
-            let cap = send.capacity().expect("we only use bounded channels");
-            let event = if send.len() >= cap - 1 {
-                if *lagged {
-                    continue;
+            // let cap = send.capacity();
+            // let event = if send.len() >= cap - 1 {
+            //     if *lagged {
+            //         continue;
+            //     }
+            //     *lagged = true;
+            //     Event::Lagged
+            // } else {
+            //     *lagged = false;
+            //     Event::Gossip(event.clone())
+            // };
+            let event = Event::Gossip(event.clone());
+
+            match send.try_send(Ok(event)) {
+                Ok(()) => true,
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    *lagged = true;
+                    true
                 }
-                *lagged = true;
-                Event::Lagged
-            } else {
-                *lagged = false;
-                Event::Gossip(event.clone())
-            };
-
-            if let Err(async_channel::TrySendError::Closed(_)) = send.try_send(Ok(event)) {
-                remove.push(id);
+                Err(mpsc::error::TrySendError::Closed(_)) => false,
             }
-        }
-
-        for id in remove.into_iter() {
-            self.senders.remove(&id);
-        }
+        });
     }
 
     /// Removes a sender based on the corresponding receiver's id.
