@@ -1735,7 +1735,8 @@
 <a href="#1734" id="1734">1734</a>
 <a href="#1735" id="1735">1735</a>
 <a href="#1736" id="1736">1736</a>
-<a href="#1737" id="1737">1737</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
+<a href="#1737" id="1737">1737</a>
+<a href="#1738" id="1738">1738</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
@@ -1760,6 +1761,7 @@
 <span class="kw">use </span>rand_core::SeedableRng;
 <span class="kw">use </span>serde::{Deserialize, Serialize};
 <span class="kw">use </span>tokio::{sync::mpsc, task::JoinSet};
+<span class="kw">use </span>tokio_stream::wrappers::ReceiverStream;
 <span class="kw">use </span>tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 <span class="kw">use </span>tracing::{debug, error, error_span, trace, warn, Instrument};
 
@@ -1960,8 +1962,8 @@
         topic_id: TopicId,
         opts: JoinOptions,
     ) -&gt; <span class="prelude-ty">Result</span>&lt;GossipTopic&gt; {
-        <span class="kw">let </span>(command_tx, command_rx) = async_channel::bounded(TOPIC_COMMANDS_DEFAULT_CAP);
-        <span class="kw">let </span>command_rx: CommandStream = Box::pin(command_rx);
+        <span class="kw">let </span>(command_tx, command_rx) = mpsc::channel(TOPIC_COMMANDS_DEFAULT_CAP);
+        <span class="kw">let </span>command_rx: CommandStream = Box::pin(ReceiverStream::new(command_rx));
         <span class="kw">let </span>event_rx = <span class="self">self
             </span>.subscribe_with_stream(topic_id, opts, command_rx)
             .<span class="kw">await</span><span class="question-mark">?</span>;
@@ -1994,7 +1996,7 @@
         options: JoinOptions,
         updates: CommandStream,
     ) -&gt; <span class="prelude-ty">Result</span>&lt;EventStream&gt; {
-        <span class="kw">let </span>(event_tx, event_rx) = async_channel::bounded(options.subscription_capacity);
+        <span class="kw">let </span>(event_tx, event_rx) = mpsc::channel(options.subscription_capacity);
         <span class="kw">let </span>to_actor_tx = <span class="self">self</span>.to_actor_tx.clone();
         <span class="kw">let </span>receiver_id = ReceiverId(
             <span class="self">self</span>.next_receiver_id
@@ -2016,7 +2018,7 @@
             </span>.map_err(|<span class="kw">_</span>| <span class="macro">anyhow!</span>(<span class="string">"Gossip actor dropped"</span>))<span class="question-mark">?</span>;
 
         <span class="prelude-val">Ok</span>(EventStream {
-            inner: Box::pin(event_rx),
+            inner: ReceiverStream::new(event_rx),
             to_actor_tx: <span class="self">self</span>.to_actor_tx.clone(),
             topic: topic_id,
             receiver_id,
@@ -2039,11 +2041,10 @@
 }
 
 <span class="doccomment">/// Stream of events for a topic.
-</span><span class="attr">#[derive(derive_more::Debug)]
+</span><span class="attr">#[derive(Debug)]
 </span><span class="kw">pub struct </span>EventStream {
     <span class="doccomment">/// The actual stream polled to return [`Event`]s to the application.
-    </span><span class="attr">#[debug(<span class="string">"Stream"</span>)]
-    </span>inner: Pin&lt;Box&lt;async_channel::Receiver&lt;<span class="prelude-ty">Result</span>&lt;Event&gt;&gt;&gt;&gt;,
+    </span>inner: ReceiverStream&lt;<span class="prelude-ty">Result</span>&lt;Event&gt;&gt;,
 
     <span class="doccomment">/// Channel to the actor task.
     ///
@@ -2671,7 +2672,7 @@
 </span><span class="kw">struct </span>SubscriberChannels {
     <span class="doccomment">/// Id for the receiver counter part of [`Self::event_tx`].
     </span>receiver_id: ReceiverId,
-    event_tx: async_channel::Sender&lt;<span class="prelude-ty">Result</span>&lt;Event&gt;&gt;,
+    event_tx: mpsc::Sender&lt;<span class="prelude-ty">Result</span>&lt;Event&gt;&gt;,
     <span class="attr">#[debug(<span class="string">"CommandStream"</span>)]
     </span>command_rx: CommandStream,
 }
@@ -2769,7 +2770,7 @@
     <span class="doccomment">/// Channels to communicate [`Event`] to [`EventStream`]s.
     ///
     /// This is indexed by receiver id. The boolean indicates a lagged channel ([`Event::Lagged`]).
-    </span>senders: HashMap&lt;ReceiverId, (async_channel::Sender&lt;<span class="prelude-ty">Result</span>&lt;Event&gt;&gt;, bool)&gt;,
+    </span>senders: HashMap&lt;ReceiverId, (mpsc::Sender&lt;<span class="prelude-ty">Result</span>&lt;Event&gt;&gt;, bool)&gt;,
 }
 
 <span class="doccomment">/// Id for a gossip receiver.
@@ -2783,7 +2784,7 @@
         <span class="self">self</span>.senders.is_empty()
     }
 
-    <span class="kw">fn </span>push(<span class="kw-2">&amp;mut </span><span class="self">self</span>, id: ReceiverId, sender: async_channel::Sender&lt;<span class="prelude-ty">Result</span>&lt;Event&gt;&gt;) {
+    <span class="kw">fn </span>push(<span class="kw-2">&amp;mut </span><span class="self">self</span>, id: ReceiverId, sender: mpsc::Sender&lt;<span class="prelude-ty">Result</span>&lt;Event&gt;&gt;) {
         <span class="self">self</span>.senders.insert(id, (sender, <span class="bool-val">false</span>));
     }
 
@@ -2791,35 +2792,36 @@
     ///
     /// This will not wait until the sink is full, but send a `Lagged` response if the sink is almost full.
     </span><span class="kw">fn </span>send(<span class="kw-2">&amp;mut </span><span class="self">self</span>, event: <span class="kw-2">&amp;</span>GossipEvent) {
-        <span class="kw">let </span><span class="kw-2">mut </span>remove = Vec::new();
-        <span class="kw">for </span>(<span class="kw-2">&amp;</span>id, (send, lagged)) <span class="kw">in </span><span class="self">self</span>.senders.iter_mut() {
+        <span class="self">self</span>.senders.retain(|_id, (send, lagged)| {
             <span class="comment">// If the stream is disconnected, we don't need to send to it.
             </span><span class="kw">if </span>send.is_closed() {
-                remove.push(id);
-                <span class="kw">continue</span>;
+                <span class="kw">return </span><span class="bool-val">false</span>;
             }
 
-            <span class="comment">// Check if the send buffer is almost full, and send a lagged response if it is.
-            </span><span class="kw">let </span>cap = send.capacity().expect(<span class="string">"we only use bounded channels"</span>);
-            <span class="kw">let </span>event = <span class="kw">if </span>send.len() &gt;= cap - <span class="number">1 </span>{
-                <span class="kw">if </span><span class="kw-2">*</span>lagged {
-                    <span class="kw">continue</span>;
-                }
-                <span class="kw-2">*</span>lagged = <span class="bool-val">true</span>;
-                Event::Lagged
-            } <span class="kw">else </span>{
-                <span class="kw-2">*</span>lagged = <span class="bool-val">false</span>;
-                Event::Gossip(event.clone())
-            };
+            <span class="comment">// TODO:
+            // Check if the send buffer is almost full, and send a lagged response if it is.
+            // let cap = send.capacity();
+            // let event = if send.len() &gt;= cap - 1 {
+            //     if *lagged {
+            //         continue;
+            //     }
+            //     *lagged = true;
+            //     Event::Lagged
+            // } else {
+            //     *lagged = false;
+            //     Event::Gossip(event.clone())
+            // };
+            </span><span class="kw">let </span>event = Event::Gossip(event.clone());
 
-            <span class="kw">if let </span><span class="prelude-val">Err</span>(async_channel::TrySendError::Closed(<span class="kw">_</span>)) = send.try_send(<span class="prelude-val">Ok</span>(event)) {
-                remove.push(id);
+            <span class="kw">match </span>send.try_send(<span class="prelude-val">Ok</span>(event)) {
+                <span class="prelude-val">Ok</span>(()) =&gt; <span class="bool-val">true</span>,
+                <span class="prelude-val">Err</span>(mpsc::error::TrySendError::Full(<span class="kw">_</span>)) =&gt; {
+                    <span class="kw-2">*</span>lagged = <span class="bool-val">true</span>;
+                    <span class="bool-val">true
+                </span>}
+                <span class="prelude-val">Err</span>(mpsc::error::TrySendError::Closed(<span class="kw">_</span>)) =&gt; <span class="bool-val">false</span>,
             }
-        }
-
-        <span class="kw">for </span>id <span class="kw">in </span>remove.into_iter() {
-            <span class="self">self</span>.senders.remove(<span class="kw-2">&amp;</span>id);
-        }
+        });
     }
 
     <span class="doccomment">/// Removes a sender based on the corresponding receiver's id.

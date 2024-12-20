@@ -274,7 +274,8 @@
 <a href="#273" id="273">273</a>
 <a href="#274" id="274">274</a>
 <a href="#275" id="275">275</a>
-<a href="#276" id="276">276</a></pre></div><pre class="rust"><code><span class="doccomment">//! Topic handles for sending and receiving on a gossip topic.
+<a href="#276" id="276">276</a>
+<a href="#277" id="277">277</a></pre></div><pre class="rust"><code><span class="doccomment">//! Topic handles for sending and receiving on a gossip topic.
 //!
 //! These are returned from [`super::Gossip`].
 
@@ -289,16 +290,17 @@
 <span class="kw">use </span>futures_lite::{Stream, StreamExt};
 <span class="kw">use </span>iroh::NodeId;
 <span class="kw">use </span>serde::{Deserialize, Serialize};
+<span class="kw">use </span>tokio::sync::mpsc;
 
 <span class="kw">use </span><span class="kw">super</span>::EventStream;
 <span class="kw">use crate</span>::{net::TOPIC_EVENTS_DEFAULT_CAP, proto::DeliveryScope};
 
 <span class="doccomment">/// Sender for a gossip topic.
 </span><span class="attr">#[derive(Debug)]
-</span><span class="kw">pub struct </span>GossipSender(async_channel::Sender&lt;Command&gt;);
+</span><span class="kw">pub struct </span>GossipSender(mpsc::Sender&lt;Command&gt;);
 
 <span class="kw">impl </span>GossipSender {
-    <span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>new(sender: async_channel::Sender&lt;Command&gt;) -&gt; <span class="self">Self </span>{
+    <span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>new(sender: mpsc::Sender&lt;Command&gt;) -&gt; <span class="self">Self </span>{
         <span class="self">Self</span>(sender)
     }
 
@@ -339,7 +341,7 @@
 }
 
 <span class="kw">impl </span>GossipTopic {
-    <span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>new(sender: async_channel::Sender&lt;Command&gt;, receiver: EventStream) -&gt; <span class="self">Self </span>{
+    <span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>new(sender: mpsc::Sender&lt;Command&gt;, receiver: EventStream) -&gt; <span class="self">Self </span>{
         <span class="self">Self </span>{
             sender: GossipSender::new(sender),
             receiver: GossipReceiver::new(receiver),
@@ -375,7 +377,7 @@
 <span class="kw">impl </span>Stream <span class="kw">for </span>GossipTopic {
     <span class="kw">type </span>Item = <span class="prelude-ty">Result</span>&lt;Event&gt;;
     <span class="kw">fn </span>poll_next(<span class="kw-2">mut </span><span class="self">self</span>: Pin&lt;<span class="kw-2">&amp;mut </span><span class="self">Self</span>&gt;, cx: <span class="kw-2">&amp;mut </span>Context&lt;<span class="lifetime">'_</span>&gt;) -&gt; Poll&lt;<span class="prelude-ty">Option</span>&lt;<span class="self">Self</span>::Item&gt;&gt; {
-        <span class="self">self</span>.receiver.poll_next(cx)
+        <span class="self">self</span>.receiver.stream.inner.poll_next(cx)
     }
 }
 
