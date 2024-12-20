@@ -302,7 +302,7 @@ impl Inner {
 pub struct EventStream {
     /// The actual stream polled to return [`Event`]s to the application.
     #[debug("Stream")]
-    inner: Pin<Box<dyn Stream<Item = Result<Event>> + Send + 'static>>,
+    inner: Pin<Box<dyn Stream<Item = Result<Event>> + Send + Sync + 'static>>,
 
     /// Channel to the actor task.
     ///
