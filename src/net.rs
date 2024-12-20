@@ -13,7 +13,6 @@ use anyhow::{anyhow, Context as _, Result};
 use bytes::BytesMut;
 use futures_concurrency::stream::{stream_group, StreamGroup};
 use futures_lite::{future::Boxed as BoxedFuture, stream::Stream, StreamExt};
-use futures_util::TryFutureExt;
 use iroh::{
     endpoint::{get_remote_node_id, Connecting, Connection, DirectAddr},
     protocol::ProtocolHandler,
@@ -190,7 +189,9 @@ impl Gossip {
         topic_id: TopicId,
         bootstrap: Vec<NodeId>,
     ) -> Result<GossipTopic> {
-        let mut sub = self.subscribe_with_opts(topic_id, JoinOptions::with_bootstrap(bootstrap));
+        let mut sub = self
+            .subscribe_with_opts(topic_id, JoinOptions::with_bootstrap(bootstrap))
+            .await?;
         sub.joined().await?;
         Ok(sub)
     }
@@ -198,8 +199,14 @@ impl Gossip {
     /// Join a gossip topic with the default options.
     ///
     /// Note that this will not wait for any bootstrap node to be available. To ensure the topic is connected to at least one node, use [`GossipTopic::joined`] or [`Gossip::subscribe_and_join`]
-    pub fn subscribe(&self, topic_id: TopicId, bootstrap: Vec<NodeId>) -> Result<GossipTopic> {
-        let sub = self.subscribe_with_opts(topic_id, JoinOptions::with_bootstrap(bootstrap));
+    pub async fn subscribe(
+        &self,
+        topic_id: TopicId,
+        bootstrap: Vec<NodeId>,
+    ) -> Result<GossipTopic> {
+        let sub = self
+            .subscribe_with_opts(topic_id, JoinOptions::with_bootstrap(bootstrap))
+            .await?;
 
         Ok(sub)
     }
@@ -211,11 +218,17 @@ impl Gossip {
     ///
     /// Messages will be queued until a first connection is available. If the internal channel becomes full,
     /// the oldest messages will be dropped from the channel.
-    pub fn subscribe_with_opts(&self, topic_id: TopicId, opts: JoinOptions) -> GossipTopic {
+    pub async fn subscribe_with_opts(
+        &self,
+        topic_id: TopicId,
+        opts: JoinOptions,
+    ) -> Result<GossipTopic> {
         let (command_tx, command_rx) = async_channel::bounded(TOPIC_COMMANDS_DEFAULT_CAP);
         let command_rx: CommandStream = Box::pin(command_rx);
-        let event_rx = self.subscribe_with_stream(topic_id, opts, command_rx);
-        GossipTopic::new(command_tx, event_rx)
+        let event_rx = self
+            .subscribe_with_stream(topic_id, opts, command_rx)
+            .await?;
+        Ok(GossipTopic::new(command_tx, event_rx))
     }
 
     /// Join a gossip topic with options and an externally-created update stream.
@@ -225,23 +238,25 @@ impl Gossip {
     ///
     /// It returns a stream of events. If you want to wait for the topic to become active, wait for
     /// the [`GossipEvent::Joined`] event.
-    pub fn subscribe_with_stream(
+    pub async fn subscribe_with_stream(
         &self,
         topic_id: TopicId,
         options: JoinOptions,
         updates: CommandStream,
-    ) -> EventStream {
-        self.inner.subscribe_with_stream(topic_id, options, updates)
+    ) -> Result<EventStream> {
+        self.inner
+            .subscribe_with_stream(topic_id, options, updates)
+            .await
     }
 }
 
 impl Inner {
-    pub fn subscribe_with_stream(
+    pub async fn subscribe_with_stream(
         &self,
         topic_id: TopicId,
         options: JoinOptions,
         updates: CommandStream,
-    ) -> EventStream {
+    ) -> Result<EventStream> {
         let (event_tx, event_rx) = async_channel::bounded(options.subscription_capacity);
         let to_actor_tx = self.to_actor_tx.clone();
         let receiver_id = ReceiverId(
@@ -253,33 +268,22 @@ impl Inner {
             command_rx: updates,
             event_tx,
         };
-        // We spawn a task to send the subscribe action to the actor, because we want the send to
-        // succeed even if the returned stream is dropped right away without being polled, because
-        // it is legit to keep only the `updates` stream and drop the event stream. This situation
-        // is handled fine within the actor, but we have to make sure that the message reaches the
-        // actor.
-        let task = tokio::task::spawn(async move {
-            to_actor_tx
-                .send(ToActor::Join {
-                    topic_id,
-                    bootstrap: options.bootstrap,
-                    channels,
-                })
-                .await
-                .map_err(|_| anyhow!("Gossip actor dropped"))
-        });
-        let stream = async move {
-            task.await
-                .map_err(|err| anyhow!("Task for sending to gossip actor failed: {err:?}"))??;
-            Ok(event_rx)
-        }
-        .try_flatten_stream();
-        EventStream {
-            inner: Box::pin(stream),
+
+        to_actor_tx
+            .send(ToActor::Join {
+                topic_id,
+                bootstrap: options.bootstrap,
+                channels,
+            })
+            .await
+            .map_err(|_| anyhow!("Gossip actor dropped"))?;
+
+        Ok(EventStream {
+            inner: Box::pin(event_rx),
             to_actor_tx: self.to_actor_tx.clone(),
             topic: topic_id,
             receiver_id,
-        }
+        })
     }
 
     async fn send(&self, event: ToActor) -> anyhow::Result<()> {
@@ -302,7 +306,7 @@ impl Inner {
 pub struct EventStream {
     /// The actual stream polled to return [`Event`]s to the application.
     #[debug("Stream")]
-    inner: Pin<Box<dyn Stream<Item = Result<Event>> + Send + 'static>>,
+    inner: Pin<Box<async_channel::Receiver<Result<Event>>>>,
 
     /// Channel to the actor task.
     ///
@@ -323,7 +327,7 @@ impl Stream for EventStream {
     type Item = Result<Event>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.inner.poll_next(cx)
+        Pin::new(&mut self.inner).poll_next(cx)
     }
 }
 
@@ -1676,7 +1680,7 @@ mod test {
         let addr1 = NodeAddr::new(node_id1).with_relay_url(relay_url.clone());
         ep2.add_node_addr(addr1)?;
         let go2_task = async move {
-            let mut sub = go2.subscribe(topic, Vec::new())?;
+            let mut sub = go2.subscribe(topic, Vec::new()).await?;
             sub.joined().await?;
 
             rx.recv().await.expect("signal to unsubscribe");
@@ -1685,7 +1689,7 @@ mod test {
 
             rx.recv().await.expect("signal to subscribe again");
             tracing::info!("resubscribing");
-            let mut sub = go2.subscribe(topic, vec![node_id1])?;
+            let mut sub = go2.subscribe(topic, vec![node_id1]).await?;
 
             sub.joined().await?;
             tracing::info!("subscription successful!");
@@ -1700,7 +1704,7 @@ mod test {
         let addr2 = NodeAddr::new(node_id2).with_relay_url(relay_url);
         ep1.add_node_addr(addr2)?;
 
-        let mut sub = go1.subscribe(topic, vec![node_id2])?;
+        let mut sub = go1.subscribe(topic, vec![node_id2]).await?;
         // wait for subscribed notification
         sub.joined().await?;
 

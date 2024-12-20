@@ -99,7 +99,7 @@ impl GossipTopic {
 impl Stream for GossipTopic {
     type Item = Result<Event>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.receiver).poll_next(cx)
+        self.receiver.poll_next(cx)
     }
 }
 
@@ -157,8 +157,9 @@ impl GossipReceiver {
 
 impl Stream for GossipReceiver {
     type Item = Result<Event>;
+
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let item = std::task::ready!(Pin::new(&mut self.stream).poll_next(cx));
+        let item = std::task::ready!(self.stream.poll_next(cx));
         if let Some(Ok(item)) = &item {
             match item {
                 Event::Gossip(GossipEvent::Joined(neighbors)) => {
