@@ -1733,10 +1733,7 @@
 <a href="#1732" id="1732">1732</a>
 <a href="#1733" id="1733">1733</a>
 <a href="#1734" id="1734">1734</a>
-<a href="#1735" id="1735">1735</a>
-<a href="#1736" id="1736">1736</a>
-<a href="#1737" id="1737">1737</a>
-<a href="#1738" id="1738">1738</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
+<a href="#1735" id="1735">1735</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
@@ -2798,20 +2795,17 @@
                 <span class="kw">return </span><span class="bool-val">false</span>;
             }
 
-            <span class="comment">// TODO:
-            // Check if the send buffer is almost full, and send a lagged response if it is.
-            // let cap = send.capacity();
-            // let event = if send.len() &gt;= cap - 1 {
-            //     if *lagged {
-            //         continue;
-            //     }
-            //     *lagged = true;
-            //     Event::Lagged
-            // } else {
-            //     *lagged = false;
-            //     Event::Gossip(event.clone())
-            // };
-            </span><span class="kw">let </span>event = Event::Gossip(event.clone());
+            <span class="comment">// Check if the send buffer is almost full, and send a lagged response if it is.
+            </span><span class="kw">let </span>event = <span class="kw">if </span>send.capacity() &lt;= <span class="number">1 </span>{
+                <span class="kw">if </span><span class="kw-2">*</span>lagged {
+                    <span class="kw">return </span><span class="bool-val">true</span>;
+                }
+                <span class="kw-2">*</span>lagged = <span class="bool-val">true</span>;
+                Event::Lagged
+            } <span class="kw">else </span>{
+                <span class="kw-2">*</span>lagged = <span class="bool-val">false</span>;
+                Event::Gossip(event.clone())
+            };
 
             <span class="kw">match </span>send.try_send(<span class="prelude-val">Ok</span>(event)) {
                 <span class="prelude-val">Ok</span>(()) =&gt; <span class="bool-val">true</span>,
