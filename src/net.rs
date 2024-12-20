@@ -1060,20 +1060,17 @@ impl EventSenders {
                 return false;
             }
 
-            // TODO:
             // Check if the send buffer is almost full, and send a lagged response if it is.
-            // let cap = send.capacity();
-            // let event = if send.len() >= cap - 1 {
-            //     if *lagged {
-            //         continue;
-            //     }
-            //     *lagged = true;
-            //     Event::Lagged
-            // } else {
-            //     *lagged = false;
-            //     Event::Gossip(event.clone())
-            // };
-            let event = Event::Gossip(event.clone());
+            let event = if send.capacity() <= 1 {
+                if *lagged {
+                    return true;
+                }
+                *lagged = true;
+                Event::Lagged
+            } else {
+                *lagged = false;
+                Event::Gossip(event.clone())
+            };
 
             match send.try_send(Ok(event)) {
                 Ok(()) => true,
