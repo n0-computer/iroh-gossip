@@ -45,7 +45,7 @@ serde = { version = "1.0.164", features = ["derive"] }
 futures-lite = { version = "2.3", optional = true }
 futures-concurrency = { version = "7.6.1", optional = true }
 futures-util = { version = "0.3.30", optional = true }
-iroh = { version = "0.30", features = ["metrics"], optional = true, default-features = false }
+iroh = { version = "0.31", features = ["metrics"], optional = true, default-features = false }
 tokio = { version = "1", optional = true, features = ["io-util", "sync", "rt", "macros", "net", "fs"] }
 tokio-util = { version = "0.7.12", optional = true, features = ["codec", "rt"] }
 tracing = "0.1"
@@ -62,8 +62,8 @@ clap = { version = "4", features = ["derive"], optional = true }
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }
-iroh = { version = "0.30", default-features = false, features = ["metrics", "test-utils"] }
-iroh-test = "0.30"
+iroh = { version = "0.31", default-features = false, features = ["metrics", "test-utils"] }
+iroh-test = "0.31"
 rand_chacha = "0.3.1"
 testresult = "0.4.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -100,7 +100,3 @@ required-features = ["examples"]
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "iroh_docsrs"]
-
-[patch.crates-io]
-iroh = { git = "https://github.com/n0-computer/iroh.git", branch = "iroh-0-31-0" }
-iroh-test = { git = "https://github.com/n0-computer/iroh.git", branch = "iroh-0-31-0" }
