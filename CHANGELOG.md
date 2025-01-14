@@ -2,6 +2,13 @@
 
 All notable changes to iroh-gossip will be documented in this file.
 
+## [0.31.0](https://github.com/n0-computer/iroh-gossip/compare/v0.30.1..0.31.0) - 2025-01-14
+
+### ⚙️ Miscellaneous Tasks
+
+- Add project tracking ([#28](https://github.com/n0-computer/iroh-gossip/issues/28)) - ([bf89c85](https://github.com/n0-computer/iroh-gossip/commit/bf89c85c3ffa78fea462d5ad7c7bae10f828d7b0))
+- Upgrade to `iroh@v0.31.0` ([#30](https://github.com/n0-computer/iroh-gossip/issues/30)) - ([60f371e](https://github.com/n0-computer/iroh-gossip/commit/60f371ec61992889c390d64611e907a491812b96))
+
 ## [0.30.1](https://github.com/n0-computer/iroh-gossip/compare/v0.30.0..0.30.1) - 2024-12-20
 
 ### 🐛 Bug Fixes
