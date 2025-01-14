@@ -35,7 +35,7 @@ bytes = { version = "1.7", features = ["serde"] }
 derive_more = { version = "1.0.0", features = ["add", "debug", "deref", "display", "from", "try_into", "into"] }
 ed25519-dalek = { version = "2.0.0", features = ["serde", "rand_core"] }
 indexmap = "2.0"
-iroh-metrics = "0.30.0"
+iroh-metrics = "0.31"
 postcard = { version = "1", default-features = false, features = ["alloc", "use-std", "experimental-derive"] }
 rand = { version = "0.8.5", features = ["std_rng"] }
 rand_core = "0.6.4"
@@ -45,7 +45,7 @@ serde = { version = "1.0.164", features = ["derive"] }
 futures-lite = { version = "2.3", optional = true }
 futures-concurrency = { version = "7.6.1", optional = true }
 futures-util = { version = "0.3.30", optional = true }
-iroh = { version = "0.30", features = ["metrics"], optional = true, default-features = false }
+iroh = { version = "0.31", features = ["metrics"], optional = true, default-features = false }
 tokio = { version = "1", optional = true, features = ["io-util", "sync", "rt", "macros", "net", "fs"] }
 tokio-util = { version = "0.7.12", optional = true, features = ["codec", "rt"] }
 tracing = "0.1"
@@ -62,8 +62,8 @@ clap = { version = "4", features = ["derive"], optional = true }
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }
-iroh = { version = "0.30", default-features = false, features = ["metrics", "test-utils"] }
-iroh-test = "0.30"
+iroh = { version = "0.31", default-features = false, features = ["metrics", "test-utils"] }
+iroh-test = "0.31"
 rand_chacha = "0.3.1"
 testresult = "0.4.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
