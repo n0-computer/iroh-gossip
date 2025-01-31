@@ -2,7 +2,6 @@
 
 use std::{io, pin::Pin, time::Instant};
 
-use anyhow::{bail, ensure, Context, Result};
 use bytes::{Bytes, BytesMut};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -12,15 +11,32 @@ use tokio::{
 use super::ProtoMessage;
 use crate::proto::util::TimerMap;
 
+/// Errors related to message writing
+#[derive(Debug, thiserror::Error)]
+pub enum WriteError {
+    /// <TODO>
+    #[error(transparent)]
+    Ser(#[from] postcard::Error),
+    /// <TODO>
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    /// <TODO>
+    #[error("message too large")]
+    TooLarge,
+}
+
 /// Write a `ProtoMessage` as a length-prefixed, postcard-encoded message.
 pub async fn write_message<W: AsyncWrite + Unpin>(
     writer: &mut W,
     buffer: &mut BytesMut,
     frame: &ProtoMessage,
     max_message_size: usize,
-) -> Result<()> {
+) -> Result<(), WriteError> {
     let len = postcard::experimental::serialized_size(&frame)?;
-    ensure!(len < max_message_size);
+    if len >= max_message_size {
+        return Err(WriteError::TooLarge);
+    }
+
     buffer.clear();
     buffer.resize(len, 0u8);
     let slice = postcard::to_slice(&frame, buffer)?;
@@ -29,12 +45,26 @@ pub async fn write_message<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
+/// Errors related to message reading
+#[derive(Debug, thiserror::Error)]
+pub enum ReadError {
+    /// <TODO>
+    #[error(transparent)]
+    Ser(#[from] postcard::Error),
+    /// <TODO>
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    /// <TODO>
+    #[error("message too large")]
+    TooLarge,
+}
+
 /// Read a length-prefixed message and decode as `ProtoMessage`;
 pub async fn read_message(
     reader: impl AsyncRead + Unpin,
     buffer: &mut BytesMut,
     max_message_size: usize,
-) -> Result<Option<ProtoMessage>> {
+) -> Result<Option<ProtoMessage>, ReadError> {
     match read_lp(reader, buffer, max_message_size).await? {
         None => Ok(None),
         Some(data) => {
@@ -54,16 +84,16 @@ pub async fn read_lp(
     mut reader: impl AsyncRead + Unpin,
     buffer: &mut BytesMut,
     max_message_size: usize,
-) -> Result<Option<Bytes>> {
+) -> Result<Option<Bytes>, ReadError> {
     let size = match reader.read_u32().await {
         Ok(size) => size,
         Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(err) => return Err(err.into()),
     };
     let mut reader = reader.take(size as u64);
-    let size = usize::try_from(size).context("frame larger than usize")?;
+    let size = usize::try_from(size).map_err(|_| ReadError::TooLarge)?;
     if size > max_message_size {
-        bail!("Incoming message exceeds the maximum message size of {max_message_size} bytes");
+        return Err(ReadError::TooLarge);
     }
     buffer.reserve(size);
     loop {
