@@ -1863,37 +1863,37 @@
 <span class="doccomment">/// Net related errors
 </span><span class="attr">#[derive(Debug, thiserror::Error)]
 </span><span class="kw">pub enum </span>Error {
-    <span class="doccomment">/// &lt;TODO&gt;
-    </span><span class="attr">#[error(<span class="string">"Actor dropped"</span>)]
+    <span class="doccomment">/// The gossip actor is closed, and cannot receive new messages
+    </span><span class="attr">#[error(<span class="string">"Actor closed"</span>)]
     </span>ActorClosed,
-    <span class="doccomment">/// &lt;TODO&gt;
+    <span class="doccomment">/// First event received that was not `Joined`
     </span><span class="attr">#[error(<span class="string">"Joined event to be the first event received"</span>)]
     </span>UnexpectedEvent,
-    <span class="doccomment">/// &lt;TODO&gt;
+    <span class="doccomment">/// The gossip message receiver closed
     </span><span class="attr">#[error(<span class="string">"Receiver closed"</span>)]
     </span>ReceiverClosed,
-    <span class="doccomment">/// &lt;TODO&gt;
+    <span class="doccomment">/// Ser/De error
     </span><span class="attr">#[error(<span class="string">"Ser/De {0}"</span>)]
     </span>SerDe(<span class="attr">#[from] </span>postcard::Error),
-    <span class="doccomment">/// &lt;TODO&gt;
+    <span class="doccomment">/// Tried to construct empty peer data
     </span><span class="attr">#[error(<span class="string">"empty peer data"</span>)]
     </span>EmptyPeerData,
-    <span class="doccomment">/// &lt;TODO&gt;
+    <span class="doccomment">/// Writing a message to the network
     </span><span class="attr">#[error(<span class="string">"write {0}"</span>)]
     </span>Write(<span class="attr">#[from] </span>util::WriteError),
-    <span class="doccomment">/// &lt;TODO&gt;
+    <span class="doccomment">/// Reading a message from the network
     </span><span class="attr">#[error(<span class="string">"read {0}"</span>)]
     </span>Read(<span class="attr">#[from] </span>util::ReadError),
-    <span class="doccomment">/// &lt;TODO&gt;
+    <span class="doccomment">/// A watchable disconnected.
     </span><span class="attr">#[error(transparent)]
     </span>WatchableDisconnected(<span class="attr">#[from] </span>iroh::watchable::Disconnected),
-    <span class="doccomment">/// &lt;TODO&gt;
+    <span class="doccomment">/// Iroh connection error
     </span><span class="attr">#[error(transparent)]
-    </span>Connection(<span class="attr">#[from] </span>iroh::endpoint::ConnectionError),
-    <span class="doccomment">/// &lt;TODO&gt;
+    </span>IrohConnection(<span class="attr">#[from] </span>iroh::endpoint::ConnectionError),
+    <span class="doccomment">/// Errors coming from `iroh`
     </span><span class="attr">#[error(transparent)]
-    </span>Other(<span class="attr">#[from] </span>anyhow::Error),
-    <span class="doccomment">/// &lt;TODO&gt;
+    </span>Iroh(<span class="attr">#[from] </span>anyhow::Error),
+    <span class="doccomment">/// Task join failure
     </span><span class="attr">#[error(<span class="string">"join"</span>)]
     </span>Join(<span class="attr">#[from] </span>tokio::task::JoinError),
 }

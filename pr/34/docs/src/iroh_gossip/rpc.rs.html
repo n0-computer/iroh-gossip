@@ -133,7 +133,7 @@
                         },
                         Box::pin(updates),
                     );
-                    futures_util::TryStreamExt::map_err(stream, |e| serde_error::Error::new(<span class="kw-2">&amp;*</span>e))
+                    futures_util::TryStreamExt::map_err(stream, |e| serde_error::Error::new(<span class="kw-2">&amp;</span>e))
                 })
                 .<span class="kw">await
             </span>}

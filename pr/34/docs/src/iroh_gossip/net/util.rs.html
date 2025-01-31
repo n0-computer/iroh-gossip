@@ -172,13 +172,13 @@
 <span class="doccomment">/// Errors related to message writing
 </span><span class="attr">#[derive(Debug, thiserror::Error)]
 </span><span class="kw">pub enum </span>WriteError {
-    <span class="doccomment">/// &lt;TODO&gt;
+    <span class="doccomment">/// Serialization failed
     </span><span class="attr">#[error(transparent)]
     </span>Ser(<span class="attr">#[from] </span>postcard::Error),
-    <span class="doccomment">/// &lt;TODO&gt;
+    <span class="doccomment">/// IO error
     </span><span class="attr">#[error(transparent)]
     </span>Io(<span class="attr">#[from] </span>std::io::Error),
-    <span class="doccomment">/// &lt;TODO&gt;
+    <span class="doccomment">/// Message was larger than the configured maximum message size
     </span><span class="attr">#[error(<span class="string">"message too large"</span>)]
     </span>TooLarge,
 }
@@ -206,13 +206,13 @@
 <span class="doccomment">/// Errors related to message reading
 </span><span class="attr">#[derive(Debug, thiserror::Error)]
 </span><span class="kw">pub enum </span>ReadError {
-    <span class="doccomment">/// &lt;TODO&gt;
+    <span class="doccomment">/// Deserialization failed
     </span><span class="attr">#[error(transparent)]
-    </span>Ser(<span class="attr">#[from] </span>postcard::Error),
-    <span class="doccomment">/// &lt;TODO&gt;
+    </span>De(<span class="attr">#[from] </span>postcard::Error),
+    <span class="doccomment">/// IO error
     </span><span class="attr">#[error(transparent)]
     </span>Io(<span class="attr">#[from] </span>std::io::Error),
-    <span class="doccomment">/// &lt;TODO&gt;
+    <span class="doccomment">/// Message was larger than the configured maximum message size
     </span><span class="attr">#[error(<span class="string">"message too large"</span>)]
     </span>TooLarge,
 }
