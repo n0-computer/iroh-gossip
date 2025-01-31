@@ -14,13 +14,13 @@ use crate::proto::util::TimerMap;
 /// Errors related to message writing
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {
-    /// <TODO>
+    /// Serialization failed
     #[error(transparent)]
     Ser(#[from] postcard::Error),
-    /// <TODO>
+    /// IO error
     #[error(transparent)]
     Io(#[from] std::io::Error),
-    /// <TODO>
+    /// Message was larger than the configured maximum message size
     #[error("message too large")]
     TooLarge,
 }
@@ -48,13 +48,13 @@ pub async fn write_message<W: AsyncWrite + Unpin>(
 /// Errors related to message reading
 #[derive(Debug, thiserror::Error)]
 pub enum ReadError {
-    /// <TODO>
+    /// Deserialization failed
     #[error(transparent)]
-    Ser(#[from] postcard::Error),
-    /// <TODO>
+    De(#[from] postcard::Error),
+    /// IO error
     #[error(transparent)]
     Io(#[from] std::io::Error),
-    /// <TODO>
+    /// Message was larger than the configured maximum message size
     #[error("message too large")]
     TooLarge,
 }

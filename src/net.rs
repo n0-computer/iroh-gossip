@@ -68,37 +68,37 @@ type ProtoMessage = proto::Message<PublicKey>;
 /// Net related errors
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// <TODO>
-    #[error("Actor dropped")]
+    /// The gossip actor is closed, and cannot receive new messages
+    #[error("Actor closed")]
     ActorClosed,
-    /// <TODO>
+    /// First event received that was not `Joined`
     #[error("Joined event to be the first event received")]
     UnexpectedEvent,
-    /// <TODO>
+    /// The gossip message receiver closed
     #[error("Receiver closed")]
     ReceiverClosed,
-    /// <TODO>
+    /// Ser/De error
     #[error("Ser/De {0}")]
     SerDe(#[from] postcard::Error),
-    /// <TODO>
+    /// Tried to construct empty peer data
     #[error("empty peer data")]
     EmptyPeerData,
-    /// <TODO>
+    /// Writing a message to the network
     #[error("write {0}")]
     Write(#[from] util::WriteError),
-    /// <TODO>
+    /// Reading a message from the network
     #[error("read {0}")]
     Read(#[from] util::ReadError),
-    /// <TODO>
+    /// A watchable disconnected.
     #[error(transparent)]
     WatchableDisconnected(#[from] iroh::watchable::Disconnected),
-    /// <TODO>
+    /// Iroh connection error
     #[error(transparent)]
-    Connection(#[from] iroh::endpoint::ConnectionError),
-    /// <TODO>
+    IrohConnection(#[from] iroh::endpoint::ConnectionError),
+    /// Errors coming from `iroh`
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
-    /// <TODO>
+    Iroh(#[from] anyhow::Error),
+    /// Task join failure
     #[error("join")]
     Join(#[from] tokio::task::JoinError),
 }
