@@ -1825,6 +1825,7 @@ dependencies = [
  "serde-error",
  "strum",
  "testresult",
+ "thiserror 2.0.11",
  "tokio",
  "tokio-util",
  "tracing",

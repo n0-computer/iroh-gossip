@@ -45,7 +45,7 @@ macro_rules! idbytes_impls {
         }
 
         impl ::std::str::FromStr for $ty {
-            type Err = ::anyhow::Error;
+            type Err = ::hex::FromHexError;
             fn from_str(s: &str) -> ::std::result::Result<Self, Self::Err> {
                 let mut bytes = [0u8; 32];
                 ::hex::decode_to_slice(s, &mut bytes)?;

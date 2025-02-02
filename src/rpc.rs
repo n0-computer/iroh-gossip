@@ -52,7 +52,7 @@ impl Inner {
                         },
                         Box::pin(updates),
                     );
-                    futures_util::TryStreamExt::map_err(stream, |e| serde_error::Error::new(&*e))
+                    futures_util::TryStreamExt::map_err(stream, |e| serde_error::Error::new(&e))
                 })
                 .await
             }

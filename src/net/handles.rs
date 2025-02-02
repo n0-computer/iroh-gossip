@@ -8,13 +8,12 @@ use std::{
     task::{Context, Poll},
 };
 
-use anyhow::{anyhow, Context as _, Result};
 use bytes::Bytes;
 use futures_lite::{Stream, StreamExt};
 use iroh::NodeId;
 use serde::{Deserialize, Serialize};
 
-use super::EventStream;
+use super::{Error, EventStream};
 use crate::{net::TOPIC_EVENTS_DEFAULT_CAP, proto::DeliveryScope};
 
 /// Sender for a gossip topic.
@@ -27,27 +26,21 @@ impl GossipSender {
     }
 
     /// Broadcast a message to all nodes.
-    pub async fn broadcast(&self, message: Bytes) -> anyhow::Result<()> {
-        self.0
-            .send(Command::Broadcast(message))
-            .await
-            .map_err(|_| anyhow!("Gossip actor dropped"))
+    pub async fn broadcast(&self, message: Bytes) -> Result<(), Error> {
+        self.0.send(Command::Broadcast(message)).await?;
+        Ok(())
     }
 
     /// Broadcast a message to our direct neighbors.
-    pub async fn broadcast_neighbors(&self, message: Bytes) -> anyhow::Result<()> {
-        self.0
-            .send(Command::BroadcastNeighbors(message))
-            .await
-            .map_err(|_| anyhow!("Gossip actor dropped"))
+    pub async fn broadcast_neighbors(&self, message: Bytes) -> Result<(), Error> {
+        self.0.send(Command::BroadcastNeighbors(message)).await?;
+        Ok(())
     }
 
     /// Join a set of peers.
-    pub async fn join_peers(&self, peers: Vec<NodeId>) -> anyhow::Result<()> {
-        self.0
-            .send(Command::JoinPeers(peers))
-            .await
-            .map_err(|_| anyhow!("Gossip actor dropped"))
+    pub async fn join_peers(&self, peers: Vec<NodeId>) -> Result<(), Error> {
+        self.0.send(Command::JoinPeers(peers)).await?;
+        Ok(())
     }
 }
 
@@ -76,17 +69,17 @@ impl GossipTopic {
     }
 
     /// Sends a message to all peers.
-    pub async fn broadcast(&self, message: Bytes) -> anyhow::Result<()> {
+    pub async fn broadcast(&self, message: Bytes) -> Result<(), Error> {
         self.sender.broadcast(message).await
     }
 
     /// Sends a message to our direct neighbors in the swarm.
-    pub async fn broadcast_neighbors(&self, message: Bytes) -> anyhow::Result<()> {
+    pub async fn broadcast_neighbors(&self, message: Bytes) -> Result<(), Error> {
         self.sender.broadcast_neighbors(message).await
     }
 
     /// Waits until we are connected to at least one node.
-    pub async fn joined(&mut self) -> Result<()> {
+    pub async fn joined(&mut self) -> Result<(), Error> {
         self.receiver.joined().await
     }
 
@@ -97,7 +90,8 @@ impl GossipTopic {
 }
 
 impl Stream for GossipTopic {
-    type Item = Result<Event>;
+    type Item = Result<Event, Error>;
+
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Pin::new(&mut self.receiver).poll_next(cx)
     }
@@ -135,15 +129,13 @@ impl GossipReceiver {
     ///
     /// Note that this consumes the [`GossipEvent::Joined`] event. If you want to act on these
     /// initial neighbors, use [`Self::neighbors`] after awaiting [`Self::joined`].
-    pub async fn joined(&mut self) -> Result<()> {
+    pub async fn joined(&mut self) -> Result<(), Error> {
         if !self.joined {
-            match self
-                .try_next()
-                .await?
-                .context("Gossip receiver closed before Joined event was received.")?
-            {
+            match self.next().await.ok_or(Error::ReceiverClosed)?? {
                 Event::Gossip(GossipEvent::Joined(_)) => {}
-                _ => anyhow::bail!("Expected Joined event to be the first event received."),
+                _ => {
+                    return Err(Error::UnexpectedEvent);
+                }
             }
         }
         Ok(())
@@ -156,7 +148,8 @@ impl GossipReceiver {
 }
 
 impl Stream for GossipReceiver {
-    type Item = Result<Event>;
+    type Item = Result<Event, Error>;
+
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let item = std::task::ready!(Pin::new(&mut self.stream).poll_next(cx));
         if let Some(Ok(item)) = &item {
