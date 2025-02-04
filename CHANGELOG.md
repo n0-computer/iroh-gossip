@@ -2,6 +2,18 @@
 
 All notable changes to iroh-gossip will be documented in this file.
 
+## [0.32.0](https://github.com/n0-computer/iroh-gossip/compare/v0.31.0..0.32.0) - 2025-02-04
+
+### ⛰️  Features
+
+- [**breaking**] Use explicit errors ([#34](https://github.com/n0-computer/iroh-gossip/issues/34)) - ([534f010](https://github.com/n0-computer/iroh-gossip/commit/534f01046332a21f6356d189c686f7c6c17af3c2))
+
+### ⚙️ Miscellaneous Tasks
+
+- Pin nextest version ([#29](https://github.com/n0-computer/iroh-gossip/issues/29)) - ([72b32d2](https://github.com/n0-computer/iroh-gossip/commit/72b32d25e8a810011456a2740581b3b3802f1cab))
+- Remove individual repo project tracking ([#31](https://github.com/n0-computer/iroh-gossip/issues/31)) - ([8a79db6](https://github.com/n0-computer/iroh-gossip/commit/8a79db65a928ae0610d85301b009d3ec13b0fbe1))
+- Update dependencies ([#35](https://github.com/n0-computer/iroh-gossip/issues/35)) - ([3c257a1](https://github.com/n0-computer/iroh-gossip/commit/3c257a1db9ea0ade0c35b060a28b1287321a532a))
+
 ## [0.31.0](https://github.com/n0-computer/iroh-gossip/compare/v0.30.1..0.31.0) - 2025-01-14
 
 ### ⚙️ Miscellaneous Tasks
