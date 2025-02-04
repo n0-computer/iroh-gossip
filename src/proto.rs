@@ -122,6 +122,7 @@ mod test {
     use std::{collections::HashSet, env, time::Instant};
 
     use rand::SeedableRng;
+    use tracing_test::traced_test;
 
     use super::{Command, Config, Event, State};
     use crate::proto::{
@@ -133,8 +134,8 @@ mod test {
     };
 
     #[test]
+    #[traced_test]
     fn hyparview_smoke() {
-        let _guard = iroh_test::logging::setup();
         // Create a network with 4 nodes and active_view_capacity 2
         let mut config = Config::default();
         config.membership.active_view_capacity = 2;
@@ -206,8 +207,8 @@ mod test {
     }
 
     #[test]
+    #[traced_test]
     fn plumtree_smoke() {
-        let _guard = iroh_test::logging::setup();
         let config = Config::default();
         let mut network = Network::new(Instant::now());
         let broadcast_ticks = 12;
@@ -272,8 +273,8 @@ mod test {
     }
 
     #[test]
+    #[traced_test]
     fn big_multiple_sender() {
-        let _guard = iroh_test::logging::setup();
         let mut gossip_config = Config::default();
         gossip_config.broadcast.optimization_threshold = (read_var("OPTIM", 7) as u16).into();
         let config = SimulatorConfig {
@@ -293,8 +294,8 @@ mod test {
     }
 
     #[test]
+    #[traced_test]
     fn big_single_sender() {
-        let _guard = iroh_test::logging::setup();
         let mut gossip_config = Config::default();
         gossip_config.broadcast.optimization_threshold = (read_var("OPTIM", 7) as u16).into();
         let config = SimulatorConfig {
@@ -314,8 +315,8 @@ mod test {
     }
 
     #[test]
+    #[traced_test]
     fn quit() {
-        let _guard = iroh_test::logging::setup();
         // Create a network with 4 nodes and active_view_capacity 2
         let mut config = Config::default();
         config.membership.active_view_capacity = 2;
