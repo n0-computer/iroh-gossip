@@ -14,7 +14,7 @@ use futures_concurrency::stream::{stream_group, StreamGroup};
 use futures_lite::{future::Boxed as BoxedFuture, stream::Stream, StreamExt};
 use futures_util::TryFutureExt;
 use iroh::{
-    endpoint::{get_remote_node_id, Connecting, Connection, DirectAddr},
+    endpoint::{Connecting, Connection, DirectAddr},
     protocol::ProtocolHandler,
     Endpoint, NodeAddr, NodeId, PublicKey, RelayUrl,
 };
@@ -343,8 +343,8 @@ impl Inner {
     }
 
     async fn handle_connection(&self, conn: Connection) -> Result<(), Error> {
-        let peer_id = get_remote_node_id(&conn)?;
-        self.send(ToActor::HandleConnection(peer_id, ConnOrigin::Accept, conn))
+        let node_id = conn.remote_node_id()?;
+        self.send(ToActor::HandleConnection(node_id, ConnOrigin::Accept, conn))
             .await?;
         Ok(())
     }
@@ -1268,6 +1268,7 @@ mod test {
     use tokio::{spawn, time::timeout};
     use tokio_util::sync::CancellationToken;
     use tracing::{info, instrument};
+    use tracing_test::traced_test;
 
     use super::*;
 
@@ -1455,9 +1456,9 @@ mod test {
     }
 
     #[tokio::test]
+    #[traced_test]
     async fn gossip_net_smoke() {
         let mut rng = rand_chacha::ChaCha12Rng::seed_from_u64(1);
-        let _guard = iroh_test::logging::setup();
         let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
 
         let ep1 = create_endpoint(&mut rng, relay_map.clone()).await.unwrap();
@@ -1582,9 +1583,9 @@ mod test {
     ///   dropped
     // NOTE: this is a regression test.
     #[tokio::test]
+    #[traced_test]
     async fn subscription_cleanup() -> testresult::TestResult {
         let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
-        let _guard = iroh_test::logging::setup();
         let ct = CancellationToken::new();
         let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
 
@@ -1709,9 +1710,9 @@ mod test {
     /// times.
     // NOTE: This is a regression test
     #[tokio::test]
+    #[traced_test]
     async fn can_reconnect() -> testresult::TestResult {
         let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
-        let _guard = iroh_test::logging::setup();
         let ct = CancellationToken::new();
         let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
 
