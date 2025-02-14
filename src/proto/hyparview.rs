@@ -6,10 +6,8 @@
 //! [paper]: https://asc.di.fct.unl.pt/~jleitao/pdf/dsn07-leitao.pdf
 //! [impl]: https://gist.github.com/Horusiath/84fac596101b197da0546d1697580d99
 
-use std::{
-    collections::{HashMap, HashSet},
-    time::{Duration, Instant},
-};
+use n0_future::time::{Duration, Instant};
+use std::collections::{HashMap, HashSet};
 
 use derive_more::{From, Sub};
 use rand::{rngs::ThreadRng, Rng};

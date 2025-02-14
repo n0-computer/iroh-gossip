@@ -1,9 +1,9 @@
 //! Utilities used in the protocol implementation
 
+use n0_future::time::{Duration, Instant};
 use std::{
     collections::{BTreeMap, HashMap},
     hash::Hash,
-    time::{Duration, Instant},
 };
 
 use rand::{
@@ -343,10 +343,9 @@ impl<K: Hash + Eq + Clone, V> TimeBoundCache<K, V> {
 
 #[cfg(test)]
 mod test {
-    use std::{
-        str::FromStr,
-        time::{Duration, Instant},
-    };
+    use std::str::FromStr;
+
+    use n0_future::time::{Duration, Instant};
 
     use rand_core::SeedableRng;
 

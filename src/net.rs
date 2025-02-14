@@ -6,24 +6,28 @@ use std::{
     pin::Pin,
     sync::{atomic::AtomicUsize, Arc},
     task::{Context, Poll},
-    time::Instant,
 };
 
 use bytes::BytesMut;
 use futures_concurrency::stream::{stream_group, StreamGroup};
-use futures_lite::{future::Boxed as BoxedFuture, stream::Stream, StreamExt};
-use futures_util::TryFutureExt;
+use futures_util::FutureExt as _;
 use iroh::{
     endpoint::{Connecting, Connection, DirectAddr},
     protocol::ProtocolHandler,
     Endpoint, NodeAddr, NodeId, PublicKey, RelayUrl,
 };
 use iroh_metrics::inc;
+use n0_future::{
+    boxed::BoxFuture,
+    task::{self, AbortOnDropHandle, JoinSet},
+    time::Instant,
+    Stream, StreamExt as _, TryFutureExt as _,
+};
 use rand::rngs::StdRng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
-use tokio::{sync::mpsc, task::JoinSet};
-use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, error_span, trace, warn, Instrument};
 
 use self::util::{read_message, write_message, Timers};
@@ -100,7 +104,7 @@ pub enum Error {
     Iroh(#[from] anyhow::Error),
     /// Task join failure
     #[error("join")]
-    Join(#[from] tokio::task::JoinError),
+    Join(#[from] task::JoinError),
 }
 
 impl<T> From<async_channel::SendError<T>> for Error {
@@ -150,13 +154,20 @@ pub(crate) struct Inner {
 }
 
 impl ProtocolHandler for Gossip {
-    fn accept(&self, conn: Connecting) -> BoxedFuture<anyhow::Result<()>> {
+    fn accept(&self, conn: Connecting) -> BoxFuture<anyhow::Result<()>> {
         let inner = self.inner.clone();
         Box::pin(async move {
             inner.handle_connection(conn.await?).await?;
             Ok(())
         })
     }
+    // fn accept(&self, conn: Connecting) -> BoxedFuture<anyhow::Result<()>> {
+    //     let inner = self.inner.clone();
+    //     Box::pin(async move {
+    //         inner.handle_connection(conn.await?).await?;
+    //         Ok(())
+    //     })
+    // }
 }
 
 /// Builder to configure and construct [`Gossip`].
@@ -187,13 +198,30 @@ impl Builder {
 
     /// Spawn a gossip actor and get a handle for it
     pub async fn spawn(self, endpoint: Endpoint) -> Result<Gossip, Error> {
-        let addr = endpoint.node_addr().await?;
+        tracing::info!("waiting for addr");
+
+        // let addr = endpoint.node_addr().await?;
+        // this line does not complete in the browser because `node_addr` waits for direct addresses,
+        // which we never get.
+        // TODO: upstream to iroh
+        let addr = {
+            n0_future::future::race(
+                endpoint.direct_addresses().initialized().map(|_| ()),
+                endpoint.home_relay().initialized().map(|_| ()),
+            )
+            .await;
+            let addrs = endpoint.direct_addresses().get()?.unwrap_or_default();
+            let addrs = addrs.into_iter().map(|x| x.addr);
+            let home_relay = endpoint.home_relay().get()?;
+            NodeAddr::from_parts(endpoint.node_id(), home_relay, addrs)
+        };
+        tracing::info!("got addr {addr:?}");
 
         let (actor, to_actor_tx) = Actor::new(endpoint, self.config, &addr.into());
         let me = actor.endpoint.node_id().fmt_short();
         let max_message_size = actor.state.max_message_size();
 
-        let actor_handle = tokio::spawn(
+        let actor_handle = task::spawn(
             async move {
                 if let Err(err) = actor.run().await {
                     warn!("gossip actor closed with error: {err:?}");
@@ -314,7 +342,7 @@ impl Inner {
         // it is legit to keep only the `updates` stream and drop the event stream. This situation
         // is handled fine within the actor, but we have to make sure that the message reaches the
         // actor.
-        let task = tokio::task::spawn(async move {
+        let task = task::spawn(async move {
             to_actor_tx
                 .send(ToActor::Join {
                     topic_id,
@@ -522,13 +550,14 @@ impl Actor {
         Error,
     > {
         // Watch for changes in direct addresses to update our peer data.
-        let mut direct_addresses_stream = self.endpoint.direct_addresses();
+        let direct_addresses_stream = self.endpoint.direct_addresses();
         // Watch for changes of our home relay to update our peer data.
         let home_relay_stream = self.endpoint.home_relay().stream().filter_map(|i| i);
 
         // With each gossip message we provide addressing information to reach our node.
         // We wait until at least one direct address is discovered.
-        let current_addresses = direct_addresses_stream.initialized().await?;
+        // let current_addresses = direct_addresses_stream.initialized().await?;
+        let current_addresses = direct_addresses_stream.get()?.unwrap_or_default();
         let direct_addresses_stream = direct_addresses_stream.stream().filter_map(|i| i);
         self.handle_addr_update(&current_addresses).await?;
         Ok((
@@ -1365,7 +1394,7 @@ mod test {
             let max_message_size = actor.state.max_message_size();
 
             let _actor_handle =
-                AbortOnDropHandle::new(tokio::spawn(futures_lite::future::pending()));
+                AbortOnDropHandle::new(task::spawn(futures_lite::future::pending()));
             let gossip = Self {
                 inner: Inner {
                     to_actor_tx,
@@ -1378,7 +1407,7 @@ mod test {
                 rpc_handler: Default::default(),
             };
 
-            let endpoing_task = tokio::spawn(endpoint_loop(
+            let endpoing_task = task::spawn(endpoint_loop(
                 actor.endpoint.clone(),
                 gossip.clone(),
                 cancel.child_token(),
@@ -1398,7 +1427,7 @@ mod test {
                 Gossip::t_new_with_actor(rng, config, relay_map, cancel).await?;
             let ep = actor.endpoint.clone();
             let me = ep.node_id().fmt_short();
-            let actor_handle = tokio::spawn(
+            let actor_handle = task::spawn(
                 async move {
                     if let Err(err) = actor.run().await {
                         warn!("gossip actor closed with error: {err:?}");
@@ -1640,7 +1669,7 @@ mod test {
             }
         }
         .instrument(tracing::debug_span!("node_2", %node_id2));
-        let go2_handle = tokio::spawn(go2_task);
+        let go2_handle = task::spawn(go2_task);
 
         // first node
         let addr2 = NodeAddr::new(node_id2).with_relay_url(relay_url);
@@ -1671,7 +1700,7 @@ mod test {
             anyhow::Ok(())
         }
         .instrument(tracing::debug_span!("node_1", %node_id1));
-        let go1_handle = tokio::spawn(go1_task);
+        let go1_handle = task::spawn(go1_task);
 
         // advance and check that the topic is now subscribed
         actor.steps(3).await?; // handle our subscribe;
@@ -1758,7 +1787,7 @@ mod test {
             anyhow::Ok(())
         }
         .instrument(tracing::debug_span!("node_2", %node_id2));
-        let go2_handle = tokio::spawn(go2_task);
+        let go2_handle = task::spawn(go2_task);
 
         let addr2 = NodeAddr::new(node_id2).with_relay_url(relay_url);
         ep1.add_node_addr(addr2)?;

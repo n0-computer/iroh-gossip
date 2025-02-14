@@ -17,7 +17,7 @@ use super::{Error, EventStream};
 use crate::{net::TOPIC_EVENTS_DEFAULT_CAP, proto::DeliveryScope};
 
 /// Sender for a gossip topic.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GossipSender(async_channel::Sender<Command>);
 
 impl GossipSender {

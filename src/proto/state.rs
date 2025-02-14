@@ -1,9 +1,7 @@
 //! The protocol state of the `iroh-gossip` protocol.
 
-use std::{
-    collections::{hash_map, HashMap, HashSet},
-    time::{Duration, Instant},
-};
+use n0_future::time::{Duration, Instant};
+use std::collections::{hash_map, HashMap, HashSet};
 
 use iroh_metrics::{inc, inc_by};
 use rand::Rng;

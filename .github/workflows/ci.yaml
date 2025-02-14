@@ -147,6 +147,32 @@ jobs:
       env:
         RUST_LOG: ${{ runner.debug && 'TRACE' || 'DEBUG' }}
 
+  wasm_build:
+      name: Build wasm32
+      runs-on: ubuntu-latest
+      steps:
+        - name: Checkout sources
+          uses: actions/checkout@v4
+  
+        - name: Install stable toolchain
+          uses: dtolnay/rust-toolchain@stable
+  
+        - name: Add wasm target
+          run: rustup target add wasm32-unknown-unknown
+  
+        - name: Install wasm-tools
+          uses: bytecodealliance/actions/wasm-tools/setup@v1
+  
+        - name: wasm32 build
+          run: cargo build --target wasm32-unknown-unknown
+  
+        # If the Wasm file contains any 'import "env"' declarations, then
+        # some non-Wasm-compatible code made it into the final code.
+        - name: Ensure no 'import "env"' in iroh-relay Wasm
+          run: |
+            ! wasm-tools print --skeleton target/wasm32-unknown-unknown/debug/iroh_relay.wasm | grep 'import "env"'
+        
+
   check_semver:
     runs-on: ubuntu-latest
     env:

@@ -15,6 +15,7 @@ use iroh_gossip::{
     net::{Event, Gossip, GossipEvent, GossipReceiver, GOSSIP_ALPN},
     proto::TopicId,
 };
+use n0_future::task;
 use serde::{Deserialize, Serialize};
 
 /// Chat over iroh-gossip
@@ -148,7 +149,7 @@ async fn main() -> Result<()> {
     }
 
     // subscribe and print loop
-    tokio::spawn(subscribe_loop(receiver));
+    task::spawn(subscribe_loop(receiver));
 
     // spawn an input thread that reads stdin
     // not using tokio here because they recommend this for "technical reasons"

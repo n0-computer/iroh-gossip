@@ -1,9 +1,7 @@
 //! This module contains the implementation of the gossiping protocol for an individual topic
 
-use std::{
-    collections::VecDeque,
-    time::{Duration, Instant},
-};
+use n0_future::time::{Duration, Instant};
+use std::collections::VecDeque;
 
 use bytes::Bytes;
 use derive_more::From;

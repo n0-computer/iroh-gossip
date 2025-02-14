@@ -1,9 +1,7 @@
 //! Simulation framework for testing the protocol implementation
 
-use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
-    time::{Duration, Instant},
-};
+use n0_future::time::{Duration, Instant};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use bytes::Bytes;
 use rand::Rng;

@@ -119,7 +119,8 @@ impl<PI> From<(PI, Option<PeerData>)> for PeerInfo<PI> {
 #[cfg(test)]
 mod test {
 
-    use std::{collections::HashSet, env, time::Instant};
+    use n0_future::time::Instant;
+    use std::{collections::HashSet, env};
 
     use rand::SeedableRng;
     use tracing_test::traced_test;
