@@ -154,14 +154,12 @@
 <a href="#153" id="153">153</a>
 <a href="#154" id="154">154</a>
 <a href="#155" id="155">155</a>
-<a href="#156" id="156">156</a>
-<a href="#157" id="157">157</a></pre></div><pre class="rust"><code><span class="doccomment">//! Utilities for iroh-gossip networking
+<a href="#156" id="156">156</a></pre></div><pre class="rust"><code><span class="doccomment">//! Utilities for iroh-gossip networking
 
-</span><span class="kw">use </span>n0_future::time::Instant;
-<span class="kw">use </span>std::{io, pin::Pin};
+</span><span class="kw">use </span>std::{io, pin::Pin};
 
 <span class="kw">use </span>bytes::{Bytes, BytesMut};
-<span class="kw">use </span>n0_future::time::{sleep_until, Sleep};
+<span class="kw">use </span>n0_future::time::{sleep_until, Instant, Sleep};
 <span class="kw">use </span>tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 <span class="kw">use </span><span class="kw">super</span>::ProtoMessage;
