@@ -6,7 +6,6 @@
 //! [paper]: https://asc.di.fct.unl.pt/~jleitao/pdf/srds07-leitao.pdf
 //! [impl]: https://gist.github.com/Horusiath/84fac596101b197da0546d1697580d99
 
-use n0_future::time::{Duration, Instant};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     hash::Hash,
@@ -14,6 +13,7 @@ use std::{
 
 use bytes::Bytes;
 use derive_more::{Add, From, Sub};
+use n0_future::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 

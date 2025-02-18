@@ -1,10 +1,9 @@
 //! Utilities for iroh-gossip networking
 
-use n0_future::time::Instant;
 use std::{io, pin::Pin};
 
 use bytes::{Bytes, BytesMut};
-use n0_future::time::{sleep_until, Sleep};
+use n0_future::time::{sleep_until, Instant, Sleep};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::ProtoMessage;

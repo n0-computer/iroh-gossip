@@ -1,11 +1,11 @@
 //! Utilities used in the protocol implementation
 
-use n0_future::time::{Duration, Instant};
 use std::{
     collections::{BTreeMap, HashMap},
     hash::Hash,
 };
 
+use n0_future::time::{Duration, Instant};
 use rand::{
     seq::{IteratorRandom, SliceRandom},
     Rng,
@@ -346,7 +346,6 @@ mod test {
     use std::str::FromStr;
 
     use n0_future::time::{Duration, Instant};
-
     use rand_core::SeedableRng;
 
     use super::{IndexSet, TimeBoundCache, TimerMap};
