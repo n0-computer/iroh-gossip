@@ -7,10 +7,13 @@ description = "gossip messages over broadcast trees"
 license = "MIT/Apache-2.0"
 authors = ["n0 team"]
 repository = "https://github.com/n0-computer/iroh-gossip"
-resolver =  "2"
+resolver = "2"
 
 # Sadly this also needs to be updated in .github/workflows/ci.yml
 rust-version = "1.81"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
 
 [lints.rust]
 missing_debug_implementations = "warn"
