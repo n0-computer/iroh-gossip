@@ -51,7 +51,7 @@ anyhow = { version = "1", optional = true }
 futures-lite = { version = "2.3", optional = true }
 futures-concurrency = { version = "7.6.1", optional = true }
 futures-util = { version = "0.3.30", optional = true }
-iroh = { git = "https://github.com/n0-computer/iroh.git", branch = "matheus23/iroh-browser", version = "0.31", default-features = false, optional = true }
+iroh = { git = "https://github.com/n0-computer/iroh.git", branch = "matheus23/browser", version = "0.32", default-features = false, optional = true }
 tokio = { version = "1", optional = true, features = ["io-util", "sync"] }
 tokio-util = { version = "0.7.12", optional = true, features = ["codec"] }
 tracing = "0.1"
@@ -71,7 +71,7 @@ n0-future = "0.1.2"
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util", "sync", "rt", "macros", "net", "fs"] }
 clap = { version = "4", features = ["derive"] }
-iroh = { git = "https://github.com/n0-computer/iroh.git", branch = "matheus23/iroh-browser", version = "0.31", default-features = false, features = ["metrics", "test-utils"] }
+iroh = { git = "https://github.com/n0-computer/iroh.git", branch = "matheus23/browser", version = "0.32", default-features = false, features = ["metrics", "test-utils"] }
 rand_chacha = "0.3.1"
 testresult = "0.4.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
