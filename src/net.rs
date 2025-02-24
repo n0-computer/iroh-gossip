@@ -161,13 +161,6 @@ impl ProtocolHandler for Gossip {
             Ok(())
         })
     }
-    // fn accept(&self, conn: Connecting) -> BoxedFuture<anyhow::Result<()>> {
-    //     let inner = self.inner.clone();
-    //     Box::pin(async move {
-    //         inner.handle_connection(conn.await?).await?;
-    //         Ok(())
-    //     })
-    // }
 }
 
 /// Builder to configure and construct [`Gossip`].
@@ -198,12 +191,13 @@ impl Builder {
 
     /// Spawn a gossip actor and get a handle for it
     pub async fn spawn(self, endpoint: Endpoint) -> Result<Gossip, Error> {
-        tracing::info!("waiting for addr");
-
-        // let addr = endpoint.node_addr().await?;
-        // this line does not complete in the browser because `node_addr` waits for direct addresses,
-        // which we never get.
-        // TODO: upstream to iroh
+        // We want to wait for our endpoint to be addressable by other nodes before launching gossip,
+        // because otherwise our Join messages, which will be forwarded into the swarm through a random
+        // walk, might not include an address to talk back to us.
+        // `Endpoint::node_addr` always waits for direct addresses to be available, which never completes
+        // when running as WASM in browser. Therefore, we instead race the futures that wait for the direct
+        // addresses or the home relay to be initialized, and construct our node address from that.
+        // TODO: Make `Endpoint` provide a more straightforward API for that.
         let addr = {
             n0_future::future::race(
                 endpoint.direct_addresses().initialized().map(|_| ()),
@@ -215,7 +209,6 @@ impl Builder {
             let home_relay = endpoint.home_relay().get()?;
             NodeAddr::from_parts(endpoint.node_id(), home_relay, addrs)
         };
-        tracing::info!("got addr {addr:?}");
 
         let (actor, to_actor_tx) = Actor::new(endpoint, self.config, &addr.into());
         let me = actor.endpoint.node_id().fmt_short();
@@ -550,15 +543,12 @@ impl Actor {
         Error,
     > {
         // Watch for changes in direct addresses to update our peer data.
-        let direct_addresses_stream = self.endpoint.direct_addresses();
+        let direct_addresses_stream = self.endpoint.direct_addresses().stream().filter_map(|i| i);
         // Watch for changes of our home relay to update our peer data.
         let home_relay_stream = self.endpoint.home_relay().stream().filter_map(|i| i);
-
         // With each gossip message we provide addressing information to reach our node.
-        // We wait until at least one direct address is discovered.
-        // let current_addresses = direct_addresses_stream.initialized().await?;
-        let current_addresses = direct_addresses_stream.get()?.unwrap_or_default();
-        let direct_addresses_stream = direct_addresses_stream.stream().filter_map(|i| i);
+        let current_addresses = self.endpoint.direct_addresses().get()?.unwrap_or_default();
+
         self.handle_addr_update(&current_addresses).await?;
         Ok((
             current_addresses,
