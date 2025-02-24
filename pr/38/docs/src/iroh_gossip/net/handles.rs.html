@@ -285,7 +285,7 @@
 <span class="kw">use crate</span>::{net::TOPIC_EVENTS_DEFAULT_CAP, proto::DeliveryScope};
 
 <span class="doccomment">/// Sender for a gossip topic.
-</span><span class="attr">#[derive(Debug)]
+</span><span class="attr">#[derive(Debug, Clone)]
 </span><span class="kw">pub struct </span>GossipSender(async_channel::Sender&lt;Command&gt;);
 
 <span class="kw">impl </span>GossipSender {

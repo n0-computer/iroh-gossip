@@ -154,17 +154,13 @@
 <a href="#153" id="153">153</a>
 <a href="#154" id="154">154</a>
 <a href="#155" id="155">155</a>
-<a href="#156" id="156">156</a>
-<a href="#157" id="157">157</a>
-<a href="#158" id="158">158</a></pre></div><pre class="rust"><code><span class="doccomment">//! Utilities for iroh-gossip networking
+<a href="#156" id="156">156</a></pre></div><pre class="rust"><code><span class="doccomment">//! Utilities for iroh-gossip networking
 
-</span><span class="kw">use </span>std::{io, pin::Pin, time::Instant};
+</span><span class="kw">use </span>std::{io, pin::Pin};
 
 <span class="kw">use </span>bytes::{Bytes, BytesMut};
-<span class="kw">use </span>tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    time::{sleep_until, Sleep},
-};
+<span class="kw">use </span>n0_future::time::{sleep_until, Instant, Sleep};
+<span class="kw">use </span>tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 <span class="kw">use </span><span class="kw">super</span>::ProtoMessage;
 <span class="kw">use </span><span class="kw">crate</span>::proto::util::TimerMap;
@@ -294,7 +290,7 @@
         <span class="self">self</span>.next = <span class="self">self
             </span>.map
             .first()
-            .map(|(instant, <span class="kw">_</span>)| (<span class="kw-2">*</span>instant, Box::pin(sleep_until((<span class="kw-2">*</span>instant).into()))))
+            .map(|(instant, <span class="kw">_</span>)| (<span class="kw-2">*</span>instant, Box::pin(sleep_until(<span class="kw-2">*</span>instant))))
     }
 
     <span class="doccomment">/// Wait for the next timer to expire and return an iterator of all expired timers

@@ -1794,7 +1794,31 @@
 <a href="#1793" id="1793">1793</a>
 <a href="#1794" id="1794">1794</a>
 <a href="#1795" id="1795">1795</a>
-<a href="#1796" id="1796">1796</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
+<a href="#1796" id="1796">1796</a>
+<a href="#1797" id="1797">1797</a>
+<a href="#1798" id="1798">1798</a>
+<a href="#1799" id="1799">1799</a>
+<a href="#1800" id="1800">1800</a>
+<a href="#1801" id="1801">1801</a>
+<a href="#1802" id="1802">1802</a>
+<a href="#1803" id="1803">1803</a>
+<a href="#1804" id="1804">1804</a>
+<a href="#1805" id="1805">1805</a>
+<a href="#1806" id="1806">1806</a>
+<a href="#1807" id="1807">1807</a>
+<a href="#1808" id="1808">1808</a>
+<a href="#1809" id="1809">1809</a>
+<a href="#1810" id="1810">1810</a>
+<a href="#1811" id="1811">1811</a>
+<a href="#1812" id="1812">1812</a>
+<a href="#1813" id="1813">1813</a>
+<a href="#1814" id="1814">1814</a>
+<a href="#1815" id="1815">1815</a>
+<a href="#1816" id="1816">1816</a>
+<a href="#1817" id="1817">1817</a>
+<a href="#1818" id="1818">1818</a>
+<a href="#1819" id="1819">1819</a>
+<a href="#1820" id="1820">1820</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
@@ -1802,24 +1826,28 @@
     pin::Pin,
     sync::{atomic::AtomicUsize, Arc},
     task::{Context, Poll},
-    time::Instant,
 };
 
 <span class="kw">use </span>bytes::BytesMut;
 <span class="kw">use </span>futures_concurrency::stream::{stream_group, StreamGroup};
-<span class="kw">use </span>futures_lite::{future::Boxed <span class="kw">as </span>BoxedFuture, stream::Stream, StreamExt};
-<span class="kw">use </span>futures_util::TryFutureExt;
+<span class="kw">use </span>futures_util::FutureExt <span class="kw">as _</span>;
 <span class="kw">use </span>iroh::{
     endpoint::{Connecting, Connection, DirectAddr},
     protocol::ProtocolHandler,
     Endpoint, NodeAddr, NodeId, PublicKey, RelayUrl,
 };
 <span class="kw">use </span>iroh_metrics::inc;
+<span class="kw">use </span>n0_future::{
+    boxed::BoxFuture,
+    task::{<span class="self">self</span>, AbortOnDropHandle, JoinSet},
+    time::Instant,
+    Stream, StreamExt <span class="kw">as _</span>, TryFutureExt <span class="kw">as _</span>,
+};
 <span class="kw">use </span>rand::rngs::StdRng;
 <span class="kw">use </span>rand_core::SeedableRng;
 <span class="kw">use </span>serde::{Deserialize, Serialize};
-<span class="kw">use </span>tokio::{sync::mpsc, task::JoinSet};
-<span class="kw">use </span>tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
+<span class="kw">use </span>tokio::sync::mpsc;
+<span class="kw">use </span>tokio_util::sync::CancellationToken;
 <span class="kw">use </span>tracing::{debug, error, error_span, trace, warn, Instrument};
 
 <span class="kw">use </span><span class="self">self</span>::util::{read_message, write_message, Timers};
@@ -1896,7 +1924,7 @@
     </span>Iroh(<span class="attr">#[from] </span>anyhow::Error),
     <span class="doccomment">/// Task join failure
     </span><span class="attr">#[error(<span class="string">"join"</span>)]
-    </span>Join(<span class="attr">#[from] </span>tokio::task::JoinError),
+    </span>Join(<span class="attr">#[from] </span>task::JoinError),
 }
 
 <span class="kw">impl</span>&lt;T&gt; From&lt;async_channel::SendError&lt;T&gt;&gt; <span class="kw">for </span>Error {
@@ -1946,7 +1974,7 @@
 }
 
 <span class="kw">impl </span>ProtocolHandler <span class="kw">for </span>Gossip {
-    <span class="kw">fn </span>accept(<span class="kw-2">&amp;</span><span class="self">self</span>, conn: Connecting) -&gt; BoxedFuture&lt;anyhow::Result&lt;()&gt;&gt; {
+    <span class="kw">fn </span>accept(<span class="kw-2">&amp;</span><span class="self">self</span>, conn: Connecting) -&gt; BoxFuture&lt;anyhow::Result&lt;()&gt;&gt; {
         <span class="kw">let </span>inner = <span class="self">self</span>.inner.clone();
         Box::pin(<span class="kw">async move </span>{
             inner.handle_connection(conn.<span class="kw">await</span><span class="question-mark">?</span>).<span class="kw">await</span><span class="question-mark">?</span>;
@@ -1983,13 +2011,35 @@
 
     <span class="doccomment">/// Spawn a gossip actor and get a handle for it
     </span><span class="kw">pub async fn </span>spawn(<span class="self">self</span>, endpoint: Endpoint) -&gt; <span class="prelude-ty">Result</span>&lt;Gossip, Error&gt; {
-        <span class="kw">let </span>addr = endpoint.node_addr().<span class="kw">await</span><span class="question-mark">?</span>;
+        <span class="comment">// We want to wait for our endpoint to be addressable by other nodes before launching gossip,
+        // because otherwise our Join messages, which will be forwarded into the swarm through a random
+        // walk, might not include an address to talk back to us.
+        // `Endpoint::node_addr` always waits for direct addresses to be available, which never completes
+        // when running as WASM in browser. Therefore, we instead race the futures that wait for the direct
+        // addresses or the home relay to be initialized, and construct our node address from that.
+        // TODO: Make `Endpoint` provide a more straightforward API for that.
+        </span><span class="kw">let </span>addr = {
+            n0_future::future::race(
+                endpoint.direct_addresses().initialized().map(|<span class="kw">_</span>| ()),
+                endpoint.home_relay().initialized().map(|<span class="kw">_</span>| ()),
+            )
+            .<span class="kw">await</span>;
+            <span class="kw">let </span>addrs = endpoint
+                .direct_addresses()
+                .get()
+                .expect(<span class="string">"endpoint alive"</span>)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|x| x.addr);
+            <span class="kw">let </span>home_relay = endpoint.home_relay().get().expect(<span class="string">"endpoint alive"</span>);
+            NodeAddr::from_parts(endpoint.node_id(), home_relay, addrs)
+        };
 
         <span class="kw">let </span>(actor, to_actor_tx) = Actor::new(endpoint, <span class="self">self</span>.config, <span class="kw-2">&amp;</span>addr.into());
         <span class="kw">let </span>me = actor.endpoint.node_id().fmt_short();
         <span class="kw">let </span>max_message_size = actor.state.max_message_size();
 
-        <span class="kw">let </span>actor_handle = tokio::spawn(
+        <span class="kw">let </span>actor_handle = task::spawn(
             <span class="kw">async move </span>{
                 <span class="kw">if let </span><span class="prelude-val">Err</span>(err) = actor.run().<span class="kw">await </span>{
                     <span class="macro">warn!</span>(<span class="string">"gossip actor closed with error: {err:?}"</span>);
@@ -2110,7 +2160,7 @@
         // it is legit to keep only the `updates` stream and drop the event stream. This situation
         // is handled fine within the actor, but we have to make sure that the message reaches the
         // actor.
-        </span><span class="kw">let </span>task = tokio::task::spawn(<span class="kw">async move </span>{
+        </span><span class="kw">let </span>task = task::spawn(<span class="kw">async move </span>{
             to_actor_tx
                 .send(ToActor::Join {
                     topic_id,
@@ -2318,14 +2368,12 @@
         Error,
     &gt; {
         <span class="comment">// Watch for changes in direct addresses to update our peer data.
-        </span><span class="kw">let </span><span class="kw-2">mut </span>direct_addresses_stream = <span class="self">self</span>.endpoint.direct_addresses();
+        </span><span class="kw">let </span>direct_addresses_stream = <span class="self">self</span>.endpoint.direct_addresses().stream().filter_map(|i| i);
         <span class="comment">// Watch for changes of our home relay to update our peer data.
         </span><span class="kw">let </span>home_relay_stream = <span class="self">self</span>.endpoint.home_relay().stream().filter_map(|i| i);
-
         <span class="comment">// With each gossip message we provide addressing information to reach our node.
-        // We wait until at least one direct address is discovered.
-        </span><span class="kw">let </span>current_addresses = direct_addresses_stream.initialized().<span class="kw">await</span><span class="question-mark">?</span>;
-        <span class="kw">let </span>direct_addresses_stream = direct_addresses_stream.stream().filter_map(|i| i);
+        </span><span class="kw">let </span>current_addresses = <span class="self">self</span>.endpoint.direct_addresses().get()<span class="question-mark">?</span>.unwrap_or_default();
+
         <span class="self">self</span>.handle_addr_update(<span class="kw-2">&amp;</span>current_addresses).<span class="kw">await</span><span class="question-mark">?</span>;
         <span class="prelude-val">Ok</span>((
             current_addresses,
@@ -3161,7 +3209,7 @@
             <span class="kw">let </span>max_message_size = actor.state.max_message_size();
 
             <span class="kw">let </span>_actor_handle =
-                AbortOnDropHandle::new(tokio::spawn(futures_lite::future::pending()));
+                AbortOnDropHandle::new(task::spawn(futures_lite::future::pending()));
             <span class="kw">let </span>gossip = <span class="self">Self </span>{
                 inner: Inner {
                     to_actor_tx,
@@ -3174,7 +3222,7 @@
                 </span>rpc_handler: Default::default(),
             };
 
-            <span class="kw">let </span>endpoing_task = tokio::spawn(endpoint_loop(
+            <span class="kw">let </span>endpoing_task = task::spawn(endpoint_loop(
                 actor.endpoint.clone(),
                 gossip.clone(),
                 cancel.child_token(),
@@ -3194,7 +3242,7 @@
                 Gossip::t_new_with_actor(rng, config, relay_map, cancel).<span class="kw">await</span><span class="question-mark">?</span>;
             <span class="kw">let </span>ep = actor.endpoint.clone();
             <span class="kw">let </span>me = ep.node_id().fmt_short();
-            <span class="kw">let </span>actor_handle = tokio::spawn(
+            <span class="kw">let </span>actor_handle = task::spawn(
                 <span class="kw">async move </span>{
                     <span class="kw">if let </span><span class="prelude-val">Err</span>(err) = actor.run().<span class="kw">await </span>{
                         <span class="macro">warn!</span>(<span class="string">"gossip actor closed with error: {err:?}"</span>);
@@ -3436,7 +3484,7 @@
             }
         }
         .instrument(<span class="macro">tracing::debug_span!</span>(<span class="string">"node_2"</span>, %node_id2));
-        <span class="kw">let </span>go2_handle = tokio::spawn(go2_task);
+        <span class="kw">let </span>go2_handle = task::spawn(go2_task);
 
         <span class="comment">// first node
         </span><span class="kw">let </span>addr2 = NodeAddr::new(node_id2).with_relay_url(relay_url);
@@ -3467,7 +3515,7 @@
             anyhow::Ok(())
         }
         .instrument(<span class="macro">tracing::debug_span!</span>(<span class="string">"node_1"</span>, %node_id1));
-        <span class="kw">let </span>go1_handle = tokio::spawn(go1_task);
+        <span class="kw">let </span>go1_handle = task::spawn(go1_task);
 
         <span class="comment">// advance and check that the topic is now subscribed
         </span>actor.steps(<span class="number">3</span>).<span class="kw">await</span><span class="question-mark">?</span>; <span class="comment">// handle our subscribe;
@@ -3554,7 +3602,7 @@
             anyhow::Ok(())
         }
         .instrument(<span class="macro">tracing::debug_span!</span>(<span class="string">"node_2"</span>, %node_id2));
-        <span class="kw">let </span>go2_handle = tokio::spawn(go2_task);
+        <span class="kw">let </span>go2_handle = task::spawn(go2_task);
 
         <span class="kw">let </span>addr2 = NodeAddr::new(node_id2).with_relay_url(relay_url);
         ep1.add_node_addr(addr2)<span class="question-mark">?</span>;
