@@ -3,9 +3,9 @@
 use std::{
     collections::{BTreeMap, HashMap},
     hash::Hash,
-    time::{Duration, Instant},
 };
 
+use n0_future::time::{Duration, Instant};
 use rand::{
     seq::{IteratorRandom, SliceRandom},
     Rng,
@@ -343,11 +343,9 @@ impl<K: Hash + Eq + Clone, V> TimeBoundCache<K, V> {
 
 #[cfg(test)]
 mod test {
-    use std::{
-        str::FromStr,
-        time::{Duration, Instant},
-    };
+    use std::str::FromStr;
 
+    use n0_future::time::{Duration, Instant};
     use rand_core::SeedableRng;
 
     use super::{IndexSet, TimeBoundCache, TimerMap};

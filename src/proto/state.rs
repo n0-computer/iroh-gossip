@@ -1,11 +1,9 @@
 //! The protocol state of the `iroh-gossip` protocol.
 
-use std::{
-    collections::{hash_map, HashMap, HashSet},
-    time::{Duration, Instant},
-};
+use std::collections::{hash_map, HashMap, HashSet};
 
 use iroh_metrics::{inc, inc_by};
+use n0_future::time::{Duration, Instant};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tracing::trace;

@@ -1,12 +1,10 @@
 //! Utilities for iroh-gossip networking
 
-use std::{io, pin::Pin, time::Instant};
+use std::{io, pin::Pin};
 
 use bytes::{Bytes, BytesMut};
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    time::{sleep_until, Sleep},
-};
+use n0_future::time::{sleep_until, Instant, Sleep};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::ProtoMessage;
 use crate::proto::util::TimerMap;
@@ -136,7 +134,7 @@ impl<T> Timers<T> {
         self.next = self
             .map
             .first()
-            .map(|(instant, _)| (*instant, Box::pin(sleep_until((*instant).into()))))
+            .map(|(instant, _)| (*instant, Box::pin(sleep_until(*instant))))
     }
 
     /// Wait for the next timer to expire and return an iterator of all expired timers

@@ -9,11 +9,11 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     hash::Hash,
-    time::{Duration, Instant},
 };
 
 use bytes::Bytes;
 use derive_more::{Add, From, Sub};
+use n0_future::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
