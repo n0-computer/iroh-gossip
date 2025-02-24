@@ -1813,7 +1813,12 @@
 <a href="#1812" id="1812">1812</a>
 <a href="#1813" id="1813">1813</a>
 <a href="#1814" id="1814">1814</a>
-<a href="#1815" id="1815">1815</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
+<a href="#1815" id="1815">1815</a>
+<a href="#1816" id="1816">1816</a>
+<a href="#1817" id="1817">1817</a>
+<a href="#1818" id="1818">1818</a>
+<a href="#1819" id="1819">1819</a>
+<a href="#1820" id="1820">1820</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
@@ -2019,9 +2024,14 @@
                 endpoint.home_relay().initialized().map(|<span class="kw">_</span>| ()),
             )
             .<span class="kw">await</span>;
-            <span class="kw">let </span>addrs = endpoint.direct_addresses().get()<span class="question-mark">?</span>.unwrap_or_default();
-            <span class="kw">let </span>addrs = addrs.into_iter().map(|x| x.addr);
-            <span class="kw">let </span>home_relay = endpoint.home_relay().get()<span class="question-mark">?</span>;
+            <span class="kw">let </span>addrs = endpoint
+                .direct_addresses()
+                .get()
+                .expect(<span class="string">"endpoint alive"</span>)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|x| x.addr);
+            <span class="kw">let </span>home_relay = endpoint.home_relay().get().expect(<span class="string">"endpoint alive"</span>);
             NodeAddr::from_parts(endpoint.node_id(), home_relay, addrs)
         };
 
