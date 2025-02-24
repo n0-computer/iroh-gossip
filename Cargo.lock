@@ -1727,7 +1727,7 @@ checksum = "ddc24109865250148c2e0f3d25d4f0f479571723792d3802153c60922a4fb708"
 [[package]]
 name = "iroh"
 version = "0.32.1"
-source = "git+https://github.com/n0-computer/iroh.git?branch=matheus23/browser#d2a5ca69b3c0b60f97ecbbc855a07c6d085e45c1"
+source = "git+https://github.com/n0-computer/iroh.git?branch=main#247b89191da6d2f46fb25859c9bf83edef44337d"
 dependencies = [
  "aead",
  "anyhow",
@@ -1786,7 +1786,7 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "0.32.0"
-source = "git+https://github.com/n0-computer/iroh.git?branch=matheus23/browser#d2a5ca69b3c0b60f97ecbbc855a07c6d085e45c1"
+source = "git+https://github.com/n0-computer/iroh.git?branch=main#247b89191da6d2f46fb25859c9bf83edef44337d"
 dependencies = [
  "curve25519-dalek",
  "data-encoding",
@@ -1875,7 +1875,7 @@ dependencies = [
 [[package]]
 name = "iroh-net-report"
 version = "0.32.0"
-source = "git+https://github.com/n0-computer/iroh.git?branch=matheus23/browser#d2a5ca69b3c0b60f97ecbbc855a07c6d085e45c1"
+source = "git+https://github.com/n0-computer/iroh.git?branch=main#247b89191da6d2f46fb25859c9bf83edef44337d"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1958,7 +1958,7 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "0.32.0"
-source = "git+https://github.com/n0-computer/iroh.git?branch=matheus23/browser#d2a5ca69b3c0b60f97ecbbc855a07c6d085e45c1"
+source = "git+https://github.com/n0-computer/iroh.git?branch=main#247b89191da6d2f46fb25859c9bf83edef44337d"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2925,8 +2925,7 @@ dependencies = [
 [[package]]
 name = "quic-rpc"
 version = "0.18.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09b61cd874b52a79146069fc15456f5cf7abafea818e2fdd828598456349d6a4"
+source = "git+https://github.com/n0-computer/quic-rpc.git?branch=main#90db0aef7c1fe2245286f52270f39b505560acb3"
 dependencies = [
  "anyhow",
  "document-features",
@@ -4103,6 +4102,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
