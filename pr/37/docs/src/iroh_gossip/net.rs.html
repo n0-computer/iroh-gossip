@@ -1813,17 +1813,7 @@
 <a href="#1812" id="1812">1812</a>
 <a href="#1813" id="1813">1813</a>
 <a href="#1814" id="1814">1814</a>
-<a href="#1815" id="1815">1815</a>
-<a href="#1816" id="1816">1816</a>
-<a href="#1817" id="1817">1817</a>
-<a href="#1818" id="1818">1818</a>
-<a href="#1819" id="1819">1819</a>
-<a href="#1820" id="1820">1820</a>
-<a href="#1821" id="1821">1821</a>
-<a href="#1822" id="1822">1822</a>
-<a href="#1823" id="1823">1823</a>
-<a href="#1824" id="1824">1824</a>
-<a href="#1825" id="1825">1825</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
+<a href="#1815" id="1815">1815</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
@@ -1986,14 +1976,7 @@
             <span class="prelude-val">Ok</span>(())
         })
     }
-    <span class="comment">// fn accept(&amp;self, conn: Connecting) -&gt; BoxedFuture&lt;anyhow::Result&lt;()&gt;&gt; {
-    //     let inner = self.inner.clone();
-    //     Box::pin(async move {
-    //         inner.handle_connection(conn.await?).await?;
-    //         Ok(())
-    //     })
-    // }
-</span>}
+}
 
 <span class="doccomment">/// Builder to configure and construct [`Gossip`].
 </span><span class="attr">#[derive(Debug, Clone)]
@@ -2023,12 +2006,13 @@
 
     <span class="doccomment">/// Spawn a gossip actor and get a handle for it
     </span><span class="kw">pub async fn </span>spawn(<span class="self">self</span>, endpoint: Endpoint) -&gt; <span class="prelude-ty">Result</span>&lt;Gossip, Error&gt; {
-        <span class="macro">tracing::info!</span>(<span class="string">"waiting for addr"</span>);
-
-        <span class="comment">// let addr = endpoint.node_addr().await?;
-        // this line does not complete in the browser because `node_addr` waits for direct addresses,
-        // which we never get.
-        // TODO: upstream to iroh
+        <span class="comment">// We want to wait for our endpoint to be addressable by other nodes before launching gossip,
+        // because otherwise our Join messages, which will be forwarded into the swarm through a random
+        // walk, might not include an address to talk back to us.
+        // `Endpoint::node_addr` always waits for direct addresses to be available, which never completes
+        // when running as WASM in browser. Therefore, we instead race the futures that wait for the direct
+        // addresses or the home relay to be initialized, and construct our node address from that.
+        // TODO: Make `Endpoint` provide a more straightforward API for that.
         </span><span class="kw">let </span>addr = {
             n0_future::future::race(
                 endpoint.direct_addresses().initialized().map(|<span class="kw">_</span>| ()),
@@ -2040,7 +2024,6 @@
             <span class="kw">let </span>home_relay = endpoint.home_relay().get()<span class="question-mark">?</span>;
             NodeAddr::from_parts(endpoint.node_id(), home_relay, addrs)
         };
-        <span class="macro">tracing::info!</span>(<span class="string">"got addr {addr:?}"</span>);
 
         <span class="kw">let </span>(actor, to_actor_tx) = Actor::new(endpoint, <span class="self">self</span>.config, <span class="kw-2">&amp;</span>addr.into());
         <span class="kw">let </span>me = actor.endpoint.node_id().fmt_short();
@@ -2375,15 +2358,12 @@
         Error,
     &gt; {
         <span class="comment">// Watch for changes in direct addresses to update our peer data.
-        </span><span class="kw">let </span>direct_addresses_stream = <span class="self">self</span>.endpoint.direct_addresses();
+        </span><span class="kw">let </span>direct_addresses_stream = <span class="self">self</span>.endpoint.direct_addresses().stream().filter_map(|i| i);
         <span class="comment">// Watch for changes of our home relay to update our peer data.
         </span><span class="kw">let </span>home_relay_stream = <span class="self">self</span>.endpoint.home_relay().stream().filter_map(|i| i);
-
         <span class="comment">// With each gossip message we provide addressing information to reach our node.
-        // We wait until at least one direct address is discovered.
-        // let current_addresses = direct_addresses_stream.initialized().await?;
-        </span><span class="kw">let </span>current_addresses = direct_addresses_stream.get()<span class="question-mark">?</span>.unwrap_or_default();
-        <span class="kw">let </span>direct_addresses_stream = direct_addresses_stream.stream().filter_map(|i| i);
+        </span><span class="kw">let </span>current_addresses = <span class="self">self</span>.endpoint.direct_addresses().get()<span class="question-mark">?</span>.unwrap_or_default();
+
         <span class="self">self</span>.handle_addr_update(<span class="kw-2">&amp;</span>current_addresses).<span class="kw">await</span><span class="question-mark">?</span>;
         <span class="prelude-val">Ok</span>((
             current_addresses,
