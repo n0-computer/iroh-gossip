@@ -290,7 +290,7 @@
         <span class="self">self</span>.next = <span class="self">self
             </span>.map
             .first()
-            .map(|(instant, <span class="kw">_</span>)| (<span class="kw-2">*</span>instant, Box::pin(sleep_until((<span class="kw-2">*</span>instant).into()))))
+            .map(|(instant, <span class="kw">_</span>)| (<span class="kw-2">*</span>instant, Box::pin(sleep_until(<span class="kw-2">*</span>instant))))
     }
 
     <span class="doccomment">/// Wait for the next timer to expire and return an iterator of all expired timers
