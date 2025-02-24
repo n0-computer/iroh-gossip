@@ -134,7 +134,7 @@ impl<T> Timers<T> {
         self.next = self
             .map
             .first()
-            .map(|(instant, _)| (*instant, Box::pin(sleep_until((*instant).into()))))
+            .map(|(instant, _)| (*instant, Box::pin(sleep_until(*instant))))
     }
 
     /// Wait for the next timer to expire and return an iterator of all expired timers
