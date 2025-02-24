@@ -37,7 +37,6 @@ blake3 = { package = "iroh-blake3", version = "1.4.5"}
 bytes = { version = "1.7", features = ["serde"] }
 derive_more = { version = "1.0.0", features = ["add", "debug", "deref", "display", "from", "try_into", "into"] }
 ed25519-dalek = { version = "2.0.0", features = ["serde", "rand_core"] }
-getrandom = { version = "0.2", default-features = false }
 hex = "0.4.3"
 indexmap = "2.0"
 iroh-metrics = { version = "0.31", default-features = false }

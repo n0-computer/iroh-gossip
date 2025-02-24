@@ -1826,7 +1826,6 @@ dependencies = [
  "futures-concurrency",
  "futures-lite 2.6.0",
  "futures-util",
- "getrandom 0.2.15",
  "hex",
  "indexmap",
  "iroh",

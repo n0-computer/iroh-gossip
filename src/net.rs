@@ -204,9 +204,14 @@ impl Builder {
                 endpoint.home_relay().initialized().map(|_| ()),
             )
             .await;
-            let addrs = endpoint.direct_addresses().get()?.unwrap_or_default();
-            let addrs = addrs.into_iter().map(|x| x.addr);
-            let home_relay = endpoint.home_relay().get()?;
+            let addrs = endpoint
+                .direct_addresses()
+                .get()
+                .expect("endpoint alive")
+                .unwrap_or_default()
+                .into_iter()
+                .map(|x| x.addr);
+            let home_relay = endpoint.home_relay().get().expect("endpoint alive");
             NodeAddr::from_parts(endpoint.node_id(), home_relay, addrs)
         };
 
