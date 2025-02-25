@@ -2,6 +2,17 @@
 
 All notable changes to iroh-gossip will be documented in this file.
 
+## [0.33.0](https://github.com/n0-computer/iroh-gossip/compare/v0.32.0..0.33.0) - 2025-02-25
+
+### ⛰️  Features
+
+- Compile to wasm and run in browsers ([#37](https://github.com/n0-computer/iroh-gossip/issues/37)) - ([8f99f7d](https://github.com/n0-computer/iroh-gossip/commit/8f99f7d85fd8c410512b430a4ee2efd014828550))
+
+### ⚙️ Miscellaneous Tasks
+
+- Patch to use main branch of iroh dependencies ([#36](https://github.com/n0-computer/iroh-gossip/issues/36)) - ([7e16be8](https://github.com/n0-computer/iroh-gossip/commit/7e16be85dbf52af721aa8bb4c68723c029ce4bd2))
+- Upgrade to latest `iroh` and `quic-rpc` ([#39](https://github.com/n0-computer/iroh-gossip/issues/39)) - ([a2ef813](https://github.com/n0-computer/iroh-gossip/commit/a2ef813c6033f1683162bb09d50f1f988f774cbe))
+
 ## [0.32.0](https://github.com/n0-computer/iroh-gossip/compare/v0.31.0..0.32.0) - 2025-02-04
 
 ### ⛰️  Features
