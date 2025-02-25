@@ -113,3 +113,7 @@ required-features = ["examples"]
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "iroh_docsrs"]
+
+[patch.crates-io]
+iroh = { git = "https://github.com/n0-computer/iroh.git", branch = "main" }
+quic-rpc = { git = "https://github.com/n0-computer/quic-rpc.git", branch = "main" }
