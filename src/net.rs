@@ -12,7 +12,7 @@ use bytes::BytesMut;
 use futures_concurrency::stream::{stream_group, StreamGroup};
 use futures_util::FutureExt as _;
 use iroh::{
-    endpoint::{Connecting, Connection, DirectAddr},
+    endpoint::{Connection, DirectAddr},
     protocol::ProtocolHandler,
     Endpoint, NodeAddr, NodeId, PublicKey, RelayUrl,
 };
@@ -154,10 +154,10 @@ pub(crate) struct Inner {
 }
 
 impl ProtocolHandler for Gossip {
-    fn accept(&self, conn: Connecting) -> BoxFuture<anyhow::Result<()>> {
+    fn accept(&self, conn: Connection) -> BoxFuture<anyhow::Result<()>> {
         let inner = self.inner.clone();
         Box::pin(async move {
-            inner.handle_connection(conn.await?).await?;
+            inner.handle_connection(conn).await?;
             Ok(())
         })
     }
