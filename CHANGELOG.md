@@ -2,6 +2,17 @@
 
 All notable changes to iroh-gossip will be documented in this file.
 
+## [0.34.0](https://github.com/n0-computer/iroh-gossip/compare/v0.33.0..0.34.0) - 2025-03-18
+
+### 🐛 Bug Fixes
+
+- Repo link for flaky tests ([#38](https://github.com/n0-computer/iroh-gossip/issues/38)) - ([0a03543](https://github.com/n0-computer/iroh-gossip/commit/0a03543db6aaedb7ac403e38360d5a1afc88b3f4))
+
+### ⚙️ Miscellaneous Tasks
+
+- Patch to use main branch of iroh dependencies ([#40](https://github.com/n0-computer/iroh-gossip/issues/40)) - ([d76305d](https://github.com/n0-computer/iroh-gossip/commit/d76305da7d75639638efcd537a1ffb13d07ef1ee))
+- Update to latest iroh ([#42](https://github.com/n0-computer/iroh-gossip/issues/42)) - ([129e2e8](https://github.com/n0-computer/iroh-gossip/commit/129e2e80ec7a6efd29606fcdaf0202791a25778f))
+
 ## [0.33.0](https://github.com/n0-computer/iroh-gossip/compare/v0.32.0..0.33.0) - 2025-02-25
 
 ### ⛰️  Features
