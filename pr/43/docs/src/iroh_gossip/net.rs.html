@@ -2468,7 +2468,7 @@
                 }
                 conns.retain(|x| x.stable_id() != conn.stable_id());
                 <span class="kw">if </span>conns.is_empty() {
-                    <span class="macro">debug!</span>(peer=%peer_id.fmt_short(), <span class="string">"all conneections closed, notify state of disconnnect"</span>);
+                    <span class="macro">debug!</span>(peer=%peer_id.fmt_short(), <span class="string">"all connections closed, notify state of discnnnect"</span>);
                     <span class="self">self</span>.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now()).<span class="kw">await</span><span class="question-mark">?</span>;
                 }
             }
@@ -2543,7 +2543,7 @@
                         conns,
                     } =&gt; {
                         <span class="comment">// We already have an active connection. We keep the old connection intact,
-                        // but only use the new connetion for sending from now on.
+                        // but only use the new connection for sending from now on.
                         // By dropping the `send_tx` of the old connection, the send loop part of
                         // the `connection_loop` of the old connection will terminate, which will also
                         // notify the peer that the old connection may be dropped.
