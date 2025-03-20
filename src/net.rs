@@ -605,16 +605,16 @@ impl Actor {
                 inc!(Metrics, actor_tick_dialer);
                 match res {
                     Some(Ok(conn)) => {
-                        debug!(peer = ?peer_id, "dial successful");
+                        debug!(peer = %peer_id.fmt_short(), "dial successful");
                         inc!(Metrics, actor_tick_dialer_success);
                         self.handle_connection(peer_id, ConnOrigin::Dial, conn);
                     }
                     Some(Err(err)) => {
-                        warn!(peer = ?peer_id, "dial failed: {err}");
+                        warn!(peer = %peer_id.fmt_short(), "dial failed: {err}");
                         inc!(Metrics, actor_tick_dialer_failure);
                     }
                     None => {
-                        warn!(peer = ?peer_id, "dial disconnected");
+                        warn!(peer = %peer_id.fmt_short(), "dial disconnected");
                         inc!(Metrics, actor_tick_dialer_failure);
                     }
                 }
@@ -639,11 +639,7 @@ impl Actor {
             }
             Some(res) = self.connection_tasks.join_next(), if !self.connection_tasks.is_empty() => {
                 trace!(?i, "tick: connection_tasks");
-                let (peer_id, conn)= res.expect("connection task panicked");
-                let Some(PeerState::Active { conns, .. }) = self.peers.get_mut(&peer_id) else {
-                    warn!("connection closed for missing peer");
-                    return Ok(Some(()));
-                };
+                let (peer_id, conn) = res.expect("connection task panicked");
                 match conn.close_reason() {
                     Some(reason) => {
                         debug!(peer=%peer_id.fmt_short(), "connection closed (reason: {reason:?})");
@@ -653,10 +649,20 @@ impl Actor {
                         conn.close(0u32.into(), b"close from disconnect");
                     }
                 }
-                conns.retain(|x| x.stable_id() != conn.stable_id());
-                if conns.is_empty() {
-                    debug!(peer=%peer_id.fmt_short(), "all connections closed, notify state of discnnnect");
-                    self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now()).await?;
+                match self.peers.get_mut(&peer_id) {
+                    None => {
+                        debug!(peer=%peer_id.fmt_short(), "connection task closed but peer already dropped");
+                    }
+                    Some(PeerState::Pending { .. })=> {
+                        debug!(peer=%peer_id.fmt_short(), "connection task closed but peer in pending state");
+                    }
+                    Some(PeerState::Active { conns, .. }) => {
+                        conns.retain(|x| x.stable_id() != conn.stable_id());
+                        if conns.is_empty() {
+                            debug!(peer=%peer_id.fmt_short(), "all connections closed, notify state of discnnnect");
+                            self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now()).await?;
+                        }
+                    },
                 }
             }
         }
@@ -909,6 +915,7 @@ impl Actor {
                 }
                 OutEvent::DisconnectPeer(peer_id) => {
                     // signal disconnection by dropping the senders to the connection
+                    debug!(peer=%peer_id.fmt_short(), "gossip state indicates disconnect: drop peer");
                     self.peers.remove(&peer_id);
                 }
                 OutEvent::PeerData(node_id, data) => match decode_peer_data(&data) {
