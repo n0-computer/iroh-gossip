@@ -1810,7 +1810,14 @@
 <a href="#1809" id="1809">1809</a>
 <a href="#1810" id="1810">1810</a>
 <a href="#1811" id="1811">1811</a>
-<a href="#1812" id="1812">1812</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
+<a href="#1812" id="1812">1812</a>
+<a href="#1813" id="1813">1813</a>
+<a href="#1814" id="1814">1814</a>
+<a href="#1815" id="1815">1815</a>
+<a href="#1816" id="1816">1816</a>
+<a href="#1817" id="1817">1817</a>
+<a href="#1818" id="1818">1818</a>
+<a href="#1819" id="1819">1819</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
@@ -2451,11 +2458,7 @@
             }
             <span class="prelude-val">Some</span>(res) = <span class="self">self</span>.connection_tasks.join_next(), <span class="kw">if </span>!<span class="self">self</span>.connection_tasks.is_empty() =&gt; {
                 <span class="macro">trace!</span>(<span class="question-mark">?</span>i, <span class="string">"tick: connection_tasks"</span>);
-                <span class="kw">let </span>(peer_id, conn)= res.expect(<span class="string">"connection task panicked"</span>);
-                <span class="kw">let </span><span class="prelude-val">Some</span>(PeerState::Active { conns, .. }) = <span class="self">self</span>.peers.get_mut(<span class="kw-2">&amp;</span>peer_id) <span class="kw">else </span>{
-                    <span class="macro">warn!</span>(<span class="string">"connection closed for missing peer"</span>);
-                    <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(()));
-                };
+                <span class="kw">let </span>(peer_id, conn) = res.expect(<span class="string">"connection task panicked"</span>);
                 <span class="kw">match </span>conn.close_reason() {
                     <span class="prelude-val">Some</span>(reason) =&gt; {
                         <span class="macro">debug!</span>(peer=%peer_id.fmt_short(), <span class="string">"connection closed (reason: {reason:?})"</span>);
@@ -2465,10 +2468,20 @@
                         conn.close(<span class="number">0u32</span>.into(), <span class="string">b"close from disconnect"</span>);
                     }
                 }
-                conns.retain(|x| x.stable_id() != conn.stable_id());
-                <span class="kw">if </span>conns.is_empty() {
-                    <span class="macro">debug!</span>(peer=%peer_id.fmt_short(), <span class="string">"all connections closed, notify state of discnnnect"</span>);
-                    <span class="self">self</span>.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now()).<span class="kw">await</span><span class="question-mark">?</span>;
+                <span class="kw">match </span><span class="self">self</span>.peers.get_mut(<span class="kw-2">&amp;</span>peer_id) {
+                    <span class="prelude-val">None </span>=&gt; {
+                        <span class="macro">debug!</span>(peer=%peer_id.fmt_short(), <span class="string">"connection task closed but peer already dropped"</span>);
+                    }
+                    <span class="prelude-val">Some</span>(PeerState::Pending { .. })=&gt; {
+                        <span class="macro">debug!</span>(peer=%peer_id.fmt_short(), <span class="string">"connection task closed but peer in pending state"</span>);
+                    }
+                    <span class="prelude-val">Some</span>(PeerState::Active { conns, .. }) =&gt; {
+                        conns.retain(|x| x.stable_id() != conn.stable_id());
+                        <span class="kw">if </span>conns.is_empty() {
+                            <span class="macro">debug!</span>(peer=%peer_id.fmt_short(), <span class="string">"all connections closed, notify state of discnnnect"</span>);
+                            <span class="self">self</span>.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now()).<span class="kw">await</span><span class="question-mark">?</span>;
+                        }
+                    },
                 }
             }
         }
@@ -2721,7 +2734,8 @@
                 }
                 OutEvent::DisconnectPeer(peer_id) =&gt; {
                     <span class="comment">// signal disconnection by dropping the senders to the connection
-                    </span><span class="self">self</span>.peers.remove(<span class="kw-2">&amp;</span>peer_id);
+                    </span><span class="macro">debug!</span>(peer=%peer_id.fmt_short(), <span class="string">"gossip state indicates disconnect: drop peer"</span>);
+                    <span class="self">self</span>.peers.remove(<span class="kw-2">&amp;</span>peer_id);
                 }
                 OutEvent::PeerData(node_id, data) =&gt; <span class="kw">match </span>decode_peer_data(<span class="kw-2">&amp;</span>data) {
                     <span class="prelude-val">Err</span>(err) =&gt; <span class="macro">warn!</span>(<span class="string">"Failed to decode {data:?} from {node_id}: {err}"</span>),
