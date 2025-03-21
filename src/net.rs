@@ -1288,7 +1288,8 @@ mod test {
 
     use bytes::Bytes;
     use futures_concurrency::future::TryJoin;
-    use iroh::{RelayMap, RelayMode, SecretKey};
+    use iroh::{protocol::Router, RelayMap, RelayMode, SecretKey};
+    use rand::Rng;
     use tokio::{spawn, time::timeout};
     use tokio_util::sync::CancellationToken;
     use tracing::{info, instrument};
@@ -1816,5 +1817,134 @@ mod test {
         timeout(wait, go2_handle).await???;
 
         testresult::TestResult::Ok(())
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn can_die_and_reconnect() -> testresult::TestResult {
+        /// Runs a future in a separate runtime on a separate thread, cancelling everything
+        /// abruptly once `cancel` is invoked.
+        fn run_in_thread<T: Send + 'static>(
+            cancel: CancellationToken,
+            fut: impl std::future::Future<Output = T> + Send + 'static,
+        ) -> std::thread::JoinHandle<Option<T>> {
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async move { cancel.run_until_cancelled(fut).await })
+            })
+        }
+
+        /// Spawns a new endpoint and gossip instance.
+        async fn spawn_gossip(
+            secret_key: SecretKey,
+            relay_map: RelayMap,
+        ) -> anyhow::Result<(Router, Gossip)> {
+            let ep = Endpoint::builder()
+                .secret_key(secret_key)
+                .relay_mode(RelayMode::Custom(relay_map))
+                .insecure_skip_relay_cert_verify(true)
+                .bind()
+                .await?;
+            let gossip = Gossip::builder().spawn(ep.clone()).await?;
+            let router = Router::builder(ep.clone())
+                .accept(GOSSIP_ALPN, gossip.clone())
+                .spawn()
+                .await?;
+            Ok((router, gossip))
+        }
+
+        /// Spawns a gossip node, and broadcasts a single message, then sleep until cancelled externally.
+        async fn broadcast_once(
+            secret_key: SecretKey,
+            relay_map: RelayMap,
+            bootstrap: NodeAddr,
+            topic_id: TopicId,
+            message: String,
+        ) -> anyhow::Result<()> {
+            let (router, gossip) = spawn_gossip(secret_key, relay_map).await?;
+            let node_id = bootstrap.node_id;
+            router.endpoint().add_node_addr(bootstrap)?;
+            let topic = gossip.subscribe_and_join(topic_id, vec![node_id]).await?;
+            topic.broadcast(message.as_bytes().to_vec().into()).await?;
+            std::future::pending::<()>().await;
+            Ok(())
+        }
+
+        let (relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+        let mut rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
+        let topic_id = TopicId::from_bytes(rng.gen());
+
+        // spawn a gossip node, send the node's address on addr_tx,
+        // then wait to receive `count` messages, and terminate.
+        let (addr_tx, addr_rx) = tokio::sync::oneshot::channel();
+        let (msgs_recv_tx, mut msgs_recv_rx) = tokio::sync::mpsc::channel(3);
+        let recv_task = tokio::task::spawn({
+            let relay_map = relay_map.clone();
+            let secret_key = SecretKey::generate(&mut rng);
+            async move {
+                let (router, gossip) = spawn_gossip(secret_key, relay_map).await?;
+                let addr = router.endpoint().node_addr().await?;
+                addr_tx.send(addr).unwrap();
+                let mut topic = gossip.subscribe_and_join(topic_id, vec![]).await?;
+                while let Some(event) = topic.try_next().await.unwrap() {
+                    if let Event::Gossip(GossipEvent::Received(message)) = event {
+                        let message = std::str::from_utf8(&message.content)?.to_string();
+                        msgs_recv_tx.send(message).await?;
+                    }
+                }
+                anyhow::Ok(())
+            }
+        });
+
+        let node0_addr = addr_rx.await?;
+        info!("n0: node addr {node0_addr:?}");
+
+        let max_wait = Duration::from_secs(5);
+
+        // spawn a node, send a message, and then abruptly terminate the node ungracefully
+        // after the message was received on our receiver node.
+        let cancel = CancellationToken::new();
+        let secret = SecretKey::generate(&mut rng);
+        let join_handle_1 = run_in_thread(
+            cancel.clone(),
+            broadcast_once(
+                secret.clone(),
+                relay_map.clone(),
+                node0_addr.clone(),
+                topic_id,
+                "msg1".to_string(),
+            ),
+        );
+        // assert that we received the message on the receiver node.
+        let msg = timeout(max_wait, msgs_recv_rx.recv()).await?.unwrap();
+        assert_eq!(&msg, "msg1");
+        cancel.cancel();
+
+        // spawns the node again with the same node id, and send another message
+        let cancel = CancellationToken::new();
+        let join_handle_2 = run_in_thread(
+            cancel.clone(),
+            broadcast_once(
+                secret.clone(),
+                relay_map.clone(),
+                node0_addr.clone(),
+                topic_id,
+                "msg2".to_string(),
+            ),
+        );
+        // assert that we received the message on the receiver node.
+        // this means that the reconnect with the same node id worked.
+        let msg = timeout(max_wait, msgs_recv_rx.recv()).await?.unwrap();
+        assert_eq!(&msg, "msg2");
+        cancel.cancel();
+
+        recv_task.abort();
+        assert!(join_handle_1.join().unwrap().is_none());
+        assert!(join_handle_2.join().unwrap().is_none());
+
+        Ok(())
     }
 }
