@@ -476,7 +476,7 @@ struct Actor {
     /// Internal queue of topic to close because all handles were dropped.
     quit_queue: VecDeque<TopicId>,
     /// Tasks for the connection loops, to keep track of panics.
-    connection_tasks: JoinSet<()>,
+    connection_tasks: JoinSet<(NodeId, Connection)>,
 }
 
 impl Actor {
@@ -605,16 +605,16 @@ impl Actor {
                 inc!(Metrics, actor_tick_dialer);
                 match res {
                     Some(Ok(conn)) => {
-                        debug!(peer = ?peer_id, "dial successful");
+                        debug!(peer = %peer_id.fmt_short(), "dial successful");
                         inc!(Metrics, actor_tick_dialer_success);
                         self.handle_connection(peer_id, ConnOrigin::Dial, conn);
                     }
                     Some(Err(err)) => {
-                        warn!(peer = ?peer_id, "dial failed: {err}");
+                        warn!(peer = %peer_id.fmt_short(), "dial failed: {err}");
                         inc!(Metrics, actor_tick_dialer_failure);
                     }
                     None => {
-                        warn!(peer = ?peer_id, "dial disconnected");
+                        warn!(peer = %peer_id.fmt_short(), "dial disconnected");
                         inc!(Metrics, actor_tick_dialer_failure);
                     }
                 }
@@ -639,10 +639,30 @@ impl Actor {
             }
             Some(res) = self.connection_tasks.join_next(), if !self.connection_tasks.is_empty() => {
                 trace!(?i, "tick: connection_tasks");
-                if let Err(err) = res {
-                    if !err.is_cancelled() {
-                        warn!("connection task panicked: {err:?}");
+                let (peer_id, conn) = res.expect("connection task panicked");
+                match conn.close_reason() {
+                    Some(reason) => {
+                        debug!(peer=%peer_id.fmt_short(), "connection closed (reason: {reason:?})");
                     }
+                    None => {
+                        debug!(peer=%peer_id.fmt_short(), "connection closed (by us)");
+                        conn.close(0u32.into(), b"close from disconnect");
+                    }
+                }
+                match self.peers.get_mut(&peer_id) {
+                    None => {
+                        debug!(peer=%peer_id.fmt_short(), "connection task closed but peer already dropped");
+                    }
+                    Some(PeerState::Pending { .. })=> {
+                        debug!(peer=%peer_id.fmt_short(), "connection task closed but peer in pending state");
+                    }
+                    Some(PeerState::Active { conns, .. }) => {
+                        conns.retain(|x| x.stable_id() != conn.stable_id());
+                        if conns.is_empty() {
+                            debug!(peer=%peer_id.fmt_short(), "all connections closed, notify state of discnnnect");
+                            self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now()).await?;
+                        }
+                    },
                 }
             }
         }
@@ -700,16 +720,38 @@ impl Actor {
         let queue = match self.peers.entry(peer_id) {
             Entry::Occupied(mut occupied_entry) => {
                 let state = occupied_entry.get_mut();
-                let Some(queue) = state.accept_conn(origin, send_tx) else {
-                    return warn!(?peer_id, ?origin, "ignoring connection: already accepted");
-                };
-                queue
+                match state {
+                    PeerState::Pending { queue } => {
+                        let queue = std::mem::take(queue);
+                        *state = PeerState::Active {
+                            send_tx,
+                            origin,
+                            conns: vec![conn.clone()],
+                        };
+                        queue
+                    }
+                    PeerState::Active {
+                        send_tx: active_send_tx,
+                        origin: active_origin,
+                        conns,
+                    } => {
+                        // We already have an active connection. We keep the old connection intact,
+                        // but only use the new connection for sending from now on.
+                        // By dropping the `send_tx` of the old connection, the send loop part of
+                        // the `connection_loop` of the old connection will terminate, which will also
+                        // notify the peer that the old connection may be dropped.
+                        *active_send_tx = send_tx;
+                        *active_origin = origin;
+                        conns.push(conn.clone());
+                        Default::default()
+                    }
+                }
             }
             Entry::Vacant(vacant_entry) => {
                 vacant_entry.insert(PeerState::Active {
                     send_tx,
                     origin,
-                    alt_send_tx: None,
+                    conns: vec![conn.clone()],
                 });
                 Vec::default()
             }
@@ -723,7 +765,7 @@ impl Actor {
             async move {
                 match connection_loop(
                     peer_id,
-                    conn,
+                    conn.clone(),
                     origin,
                     send_rx,
                     &in_event_tx,
@@ -735,10 +777,7 @@ impl Actor {
                     Ok(()) => debug!("connection closed without error"),
                     Err(err) => warn!("connection closed: {err:?}"),
                 }
-                in_event_tx
-                    .send(InEvent::PeerDisconnected(peer_id))
-                    .await
-                    .ok();
+                (peer_id, conn)
             }
             .instrument(error_span!("gossip_conn", peer = %peer_id.fmt_short())),
         );
@@ -876,6 +915,7 @@ impl Actor {
                 }
                 OutEvent::DisconnectPeer(peer_id) => {
                     // signal disconnection by dropping the senders to the connection
+                    debug!(peer=%peer_id.fmt_short(), "gossip state indicates disconnect: drop peer");
                     self.peers.remove(&peer_id);
                 }
                 OutEvent::PeerData(node_id, data) => match decode_peer_data(&data) {
@@ -933,48 +973,8 @@ enum PeerState {
     Active {
         send_tx: mpsc::Sender<ProtoMessage>,
         origin: ConnOrigin,
-        alt_send_tx: Option<mpsc::Sender<ProtoMessage>>,
+        conns: Vec<Connection>,
     },
-}
-
-impl PeerState {
-    /// Modifies the state to account for a new connection, returning the queue of pending
-    /// messages.
-    ///
-    /// The connection can be rejected if there is already a connection from the same origin.
-    fn accept_conn(
-        &mut self,
-        conn_origin: ConnOrigin,
-        conn_send_tx: mpsc::Sender<ProtoMessage>,
-    ) -> Option<Vec<ProtoMessage>> {
-        match self {
-            PeerState::Pending { queue } => {
-                let queue = std::mem::take(queue);
-                *self = PeerState::Active {
-                    send_tx: conn_send_tx,
-                    origin: conn_origin,
-                    alt_send_tx: None,
-                };
-                Some(queue)
-            }
-            PeerState::Active {
-                origin,
-                alt_send_tx,
-                ..
-            } => {
-                if *origin == conn_origin {
-                    // the new connection has the same origin as the primary connection
-                    None
-                } else if alt_send_tx.is_some() {
-                    // the new connection has the same origin as the secondary connection
-                    None
-                } else {
-                    *alt_send_tx = Some(conn_send_tx);
-                    Some(Default::default())
-                }
-            }
-        }
-    }
 }
 
 impl Default for PeerState {
@@ -1047,7 +1047,6 @@ async fn connection_loop(
         let _ = send.finish();
         // wait for the other node to ack all the sent data
         let _ = send.stopped().await;
-        conn.close(0u8.into(), b"close from disconnect");
         Ok::<_, Error>(())
     };
 
@@ -1288,7 +1287,8 @@ mod test {
 
     use bytes::Bytes;
     use futures_concurrency::future::TryJoin;
-    use iroh::{RelayMap, RelayMode, SecretKey};
+    use iroh::{protocol::Router, RelayMap, RelayMode, SecretKey};
+    use rand::Rng;
     use tokio::{spawn, time::timeout};
     use tokio_util::sync::CancellationToken;
     use tracing::{info, instrument};
@@ -1816,5 +1816,134 @@ mod test {
         timeout(wait, go2_handle).await???;
 
         testresult::TestResult::Ok(())
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn can_die_and_reconnect() -> testresult::TestResult {
+        /// Runs a future in a separate runtime on a separate thread, cancelling everything
+        /// abruptly once `cancel` is invoked.
+        fn run_in_thread<T: Send + 'static>(
+            cancel: CancellationToken,
+            fut: impl std::future::Future<Output = T> + Send + 'static,
+        ) -> std::thread::JoinHandle<Option<T>> {
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async move { cancel.run_until_cancelled(fut).await })
+            })
+        }
+
+        /// Spawns a new endpoint and gossip instance.
+        async fn spawn_gossip(
+            secret_key: SecretKey,
+            relay_map: RelayMap,
+        ) -> anyhow::Result<(Router, Gossip)> {
+            let ep = Endpoint::builder()
+                .secret_key(secret_key)
+                .relay_mode(RelayMode::Custom(relay_map))
+                .insecure_skip_relay_cert_verify(true)
+                .bind()
+                .await?;
+            let gossip = Gossip::builder().spawn(ep.clone()).await?;
+            let router = Router::builder(ep.clone())
+                .accept(GOSSIP_ALPN, gossip.clone())
+                .spawn()
+                .await?;
+            Ok((router, gossip))
+        }
+
+        /// Spawns a gossip node, and broadcasts a single message, then sleep until cancelled externally.
+        async fn broadcast_once(
+            secret_key: SecretKey,
+            relay_map: RelayMap,
+            bootstrap: NodeAddr,
+            topic_id: TopicId,
+            message: String,
+        ) -> anyhow::Result<()> {
+            let (router, gossip) = spawn_gossip(secret_key, relay_map).await?;
+            let node_id = bootstrap.node_id;
+            router.endpoint().add_node_addr(bootstrap)?;
+            let topic = gossip.subscribe_and_join(topic_id, vec![node_id]).await?;
+            topic.broadcast(message.as_bytes().to_vec().into()).await?;
+            std::future::pending::<()>().await;
+            Ok(())
+        }
+
+        let (relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+        let mut rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
+        let topic_id = TopicId::from_bytes(rng.gen());
+
+        // spawn a gossip node, send the node's address on addr_tx,
+        // then wait to receive `count` messages, and terminate.
+        let (addr_tx, addr_rx) = tokio::sync::oneshot::channel();
+        let (msgs_recv_tx, mut msgs_recv_rx) = tokio::sync::mpsc::channel(3);
+        let recv_task = tokio::task::spawn({
+            let relay_map = relay_map.clone();
+            let secret_key = SecretKey::generate(&mut rng);
+            async move {
+                let (router, gossip) = spawn_gossip(secret_key, relay_map).await?;
+                let addr = router.endpoint().node_addr().await?;
+                addr_tx.send(addr).unwrap();
+                let mut topic = gossip.subscribe_and_join(topic_id, vec![]).await?;
+                while let Some(event) = topic.try_next().await.unwrap() {
+                    if let Event::Gossip(GossipEvent::Received(message)) = event {
+                        let message = std::str::from_utf8(&message.content)?.to_string();
+                        msgs_recv_tx.send(message).await?;
+                    }
+                }
+                anyhow::Ok(())
+            }
+        });
+
+        let node0_addr = addr_rx.await?;
+        info!("n0: node addr {node0_addr:?}");
+
+        let max_wait = Duration::from_secs(5);
+
+        // spawn a node, send a message, and then abruptly terminate the node ungracefully
+        // after the message was received on our receiver node.
+        let cancel = CancellationToken::new();
+        let secret = SecretKey::generate(&mut rng);
+        let join_handle_1 = run_in_thread(
+            cancel.clone(),
+            broadcast_once(
+                secret.clone(),
+                relay_map.clone(),
+                node0_addr.clone(),
+                topic_id,
+                "msg1".to_string(),
+            ),
+        );
+        // assert that we received the message on the receiver node.
+        let msg = timeout(max_wait, msgs_recv_rx.recv()).await?.unwrap();
+        assert_eq!(&msg, "msg1");
+        cancel.cancel();
+
+        // spawns the node again with the same node id, and send another message
+        let cancel = CancellationToken::new();
+        let join_handle_2 = run_in_thread(
+            cancel.clone(),
+            broadcast_once(
+                secret.clone(),
+                relay_map.clone(),
+                node0_addr.clone(),
+                topic_id,
+                "msg2".to_string(),
+            ),
+        );
+        // assert that we received the message on the receiver node.
+        // this means that the reconnect with the same node id worked.
+        let msg = timeout(max_wait, msgs_recv_rx.recv()).await?.unwrap();
+        assert_eq!(&msg, "msg2");
+        cancel.cancel();
+
+        recv_task.abort();
+        assert!(join_handle_1.join().unwrap().is_none());
+        assert!(join_handle_2.join().unwrap().is_none());
+
+        Ok(())
     }
 }
