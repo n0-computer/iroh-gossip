@@ -714,7 +714,17 @@
 <a href="#713" id="713">713</a>
 <a href="#714" id="714">714</a>
 <a href="#715" id="715">715</a>
-<a href="#716" id="716">716</a></pre></div><pre class="rust"><code><span class="doccomment">//! Implementation of the HyParView membership protocol
+<a href="#716" id="716">716</a>
+<a href="#717" id="717">717</a>
+<a href="#718" id="718">718</a>
+<a href="#719" id="719">719</a>
+<a href="#720" id="720">720</a>
+<a href="#721" id="721">721</a>
+<a href="#722" id="722">722</a>
+<a href="#723" id="723">723</a>
+<a href="#724" id="724">724</a>
+<a href="#725" id="725">725</a>
+<a href="#726" id="726">726</a></pre></div><pre class="rust"><code><span class="doccomment">//! Implementation of the HyParView membership protocol
 //!
 //! The implementation is based on [this paper][paper] by Joao Leitao, Jose Pereira, Luıs Rodrigues
 //! and the [example implementation][impl] by Bartosz Sypytkowski
@@ -1076,12 +1086,14 @@
         <span class="comment">// If the peer is already in our active view, there's nothing to do.
         </span><span class="kw">if </span><span class="self">self</span>.active_view.contains(<span class="kw-2">&amp;</span>peer) {
             <span class="comment">// .. but we still update the peer data.
-            </span><span class="self">self</span>.insert_peer_info((peer, data).into(), io);
-            <span class="kw">return</span>;
+            </span><span class="self">self</span>.insert_peer_info((peer, data.clone()).into(), io);
+            <span class="comment">// .. and we reply to the peer with a `Neighbor` message, renewing our neighbor relationship
+            </span><span class="self">self</span>.send_neighbor(peer, Priority::High, io);
+        } <span class="kw">else </span>{
+            <span class="comment">// "A node that receives a join request will start by adding the new
+            // node to its active view, even if it has to drop a random node from it. (6)"
+            </span><span class="self">self</span>.add_active(peer, data.clone(), Priority::High, now, io);
         }
-        <span class="comment">// "A node that receives a join request will start by adding the new
-        // node to its active view, even if it has to drop a random node from it. (6)"
-        </span><span class="self">self</span>.add_active(peer, data.clone(), Priority::High, now, io);
         <span class="comment">// "The contact node c will then send to all other nodes in its active view a ForwardJoin
         // request containing the new node identifier. Associated to the join procedure,
         // there are two configuration parameters, named Active Random Walk Length (ARWL),
@@ -1107,9 +1119,13 @@
         now: Instant,
         io: <span class="kw-2">&amp;mut </span><span class="kw">impl </span>IO&lt;PI&gt;,
     ) {
+        <span class="comment">// If the peer is already in our active view, we renew our neighbor relationship.
+        </span><span class="kw">if </span><span class="self">self</span>.active_view.contains(<span class="kw-2">&amp;</span>message.peer.id) {
+            <span class="self">self</span>.send_neighbor(message.peer.id, Priority::High, io);
+        }
         <span class="comment">// "i) If the time to live is equal to zero or if the number of nodes in p’s active view is equal to one,
         // it will add the new node to its active view (7)"
-        </span><span class="kw">if </span>message.ttl.expired() || <span class="self">self</span>.active_view.len() &lt;= <span class="number">1 </span>{
+        </span><span class="kw">else if </span>message.ttl.expired() || <span class="self">self</span>.active_view.len() &lt;= <span class="number">1 </span>{
             <span class="self">self</span>.add_active(
                 message.peer.id,
                 message.peer.data.clone(),
@@ -1416,12 +1432,16 @@
         <span class="self">self</span>.active_view.insert(peer);
         <span class="macro">debug!</span>(other = <span class="question-mark">?</span>peer, <span class="string">"add to active view"</span>);
 
+        <span class="self">self</span>.send_neighbor(peer, priority, io);
+        io.push(OutEvent::EmitEvent(Event::NeighborUp(peer)));
+    }
+
+    <span class="kw">fn </span>send_neighbor(<span class="kw-2">&amp;mut </span><span class="self">self</span>, peer: PI, priority: Priority, io: <span class="kw-2">&amp;mut </span><span class="kw">impl </span>IO&lt;PI&gt;) {
         <span class="kw">let </span>message = Message::Neighbor(Neighbor {
             priority,
             data: <span class="self">self</span>.me_data.clone(),
         });
         io.push(OutEvent::SendMessage(peer, message));
-        io.push(OutEvent::EmitEvent(Event::NeighborUp(peer)));
     }
 }
 
