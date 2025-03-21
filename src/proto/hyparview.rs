@@ -360,12 +360,14 @@ where
         // If the peer is already in our active view, there's nothing to do.
         if self.active_view.contains(&peer) {
             // .. but we still update the peer data.
-            self.insert_peer_info((peer, data).into(), io);
-            return;
+            self.insert_peer_info((peer, data.clone()).into(), io);
+            // .. and we reply to the peer with a `Neighbor` message, renewing our neighbor relationship
+            self.send_neighbor(peer, Priority::High, io);
+        } else {
+            // "A node that receives a join request will start by adding the new
+            // node to its active view, even if it has to drop a random node from it. (6)"
+            self.add_active(peer, data.clone(), Priority::High, now, io);
         }
-        // "A node that receives a join request will start by adding the new
-        // node to its active view, even if it has to drop a random node from it. (6)"
-        self.add_active(peer, data.clone(), Priority::High, now, io);
         // "The contact node c will then send to all other nodes in its active view a ForwardJoin
         // request containing the new node identifier. Associated to the join procedure,
         // there are two configuration parameters, named Active Random Walk Length (ARWL),
@@ -391,9 +393,13 @@ where
         now: Instant,
         io: &mut impl IO<PI>,
     ) {
+        // If the peer is already in our active view, we renew our neighbor relationship.
+        if self.active_view.contains(&message.peer.id) {
+            self.send_neighbor(message.peer.id, Priority::High, io);
+        }
         // "i) If the time to live is equal to zero or if the number of nodes in p’s active view is equal to one,
         // it will add the new node to its active view (7)"
-        if message.ttl.expired() || self.active_view.len() <= 1 {
+        else if message.ttl.expired() || self.active_view.len() <= 1 {
             self.add_active(
                 message.peer.id,
                 message.peer.data.clone(),
@@ -700,12 +706,16 @@ where
         self.active_view.insert(peer);
         debug!(other = ?peer, "add to active view");
 
+        self.send_neighbor(peer, priority, io);
+        io.push(OutEvent::EmitEvent(Event::NeighborUp(peer)));
+    }
+
+    fn send_neighbor(&mut self, peer: PI, priority: Priority, io: &mut impl IO<PI>) {
         let message = Message::Neighbor(Neighbor {
             priority,
             data: self.me_data.clone(),
         });
         io.push(OutEvent::SendMessage(peer, message));
-        io.push(OutEvent::EmitEvent(Event::NeighborUp(peer)));
     }
 }
 
