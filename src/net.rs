@@ -641,7 +641,7 @@ impl Actor {
             Some(res) = self.connection_tasks.join_next(), if !self.connection_tasks.is_empty() => {
                 trace!(?i, "tick: connection_tasks");
                 let (peer_id, conn, result) = res.expect("connection task panicked");
-                self.handle_connection_closed(peer_id, conn, result).await?;
+                self.handle_connection_task_finished(peer_id, conn, result).await?;
             }
         }
 
@@ -702,8 +702,9 @@ impl Actor {
             }
             Entry::Vacant(vacant_entry) => {
                 vacant_entry.insert(PeerState::Active {
-                    send_tx,
-                    conns: vec![conn.stable_id()],
+                    active_send_tx: send_tx,
+                    active_conn_id: conn.stable_id(),
+                    other_conns: vec![],
                 });
                 Vec::default()
             }
@@ -732,7 +733,7 @@ impl Actor {
     }
 
     #[tracing::instrument(name = "conn", skip_all, fields(peer = %peer_id.fmt_short()))]
-    async fn handle_connection_closed(
+    async fn handle_connection_task_finished(
         &mut self,
         peer_id: NodeId,
         conn: Connection,
@@ -741,17 +742,22 @@ impl Actor {
         if conn.close_reason().is_none() {
             conn.close(0u32.into(), b"close from disconnect");
         }
-        let error = task_result.err();
         let reason = conn.close_reason().expect("just closed");
+        let error = task_result.err();
         debug!(%reason, ?error, "connection closed");
-        if let Some(PeerState::Active { conns, .. }) = self.peers.get_mut(&peer_id) {
-            conns.retain(|x| *x != conn.stable_id());
-            if conns.is_empty() {
-                debug!("no other remaining connections, drop peer");
+        if let Some(PeerState::Active {
+            active_conn_id,
+            other_conns,
+            ..
+        }) = self.peers.get_mut(&peer_id)
+        {
+            if conn.stable_id() == *active_conn_id {
+                debug!("active send connection closed, mark peer as disconnected");
                 self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
                     .await?;
             } else {
-                debug!("remaining {} other connections", conns.len());
+                other_conns.retain(|x| *x != conn.stable_id());
+                debug!("remaining {} other connections", other_conns.len() + 1);
             }
         } else {
             debug!("peer already marked as disconnected");
@@ -843,15 +849,19 @@ impl Actor {
                 OutEvent::SendMessage(peer_id, message) => {
                     let state = self.peers.entry(peer_id).or_default();
                     match state {
-                        PeerState::Active { send_tx, .. } => {
+                        PeerState::Active {
+                            active_send_tx: send_tx,
+                            ..
+                        } => {
                             if let Err(_err) = send_tx.send(message).await {
                                 // Removing the peer is handled by the in_event PeerDisconnected sent
                                 // at the end of the connection task.
-                                warn!("connection loop for {peer_id:?} dropped");
+                                warn!("connection loop for {} dropped", peer_id.fmt_short());
                             }
                         }
                         PeerState::Pending { queue } => {
                             if queue.is_empty() {
+                                debug!(peer = %peer_id.fmt_short(), "start to dial");
                                 self.dialer.queue_dial(peer_id, GOSSIP_ALPN);
                             }
                             queue.push(message);
@@ -949,8 +959,9 @@ enum PeerState {
         queue: Vec<ProtoMessage>,
     },
     Active {
-        send_tx: mpsc::Sender<ProtoMessage>,
-        conns: Vec<ConnId>,
+        active_send_tx: mpsc::Sender<ProtoMessage>,
+        active_conn_id: ConnId,
+        other_conns: Vec<ConnId>,
     },
 }
 
@@ -964,22 +975,25 @@ impl PeerState {
             PeerState::Pending { queue } => {
                 let queue = std::mem::take(queue);
                 *self = PeerState::Active {
-                    send_tx,
-                    conns: vec![conn_id],
+                    active_send_tx: send_tx,
+                    active_conn_id: conn_id,
+                    other_conns: vec![],
                 };
                 queue
             }
             PeerState::Active {
-                send_tx: active_send_tx,
-                conns,
+                active_send_tx,
+                active_conn_id,
+                other_conns,
             } => {
                 // We already have an active connection. We keep the old connection intact,
                 // but only use the new connection for sending from now on.
                 // By dropping the `send_tx` of the old connection, the send loop part of
                 // the `connection_loop` of the old connection will terminate, which will also
                 // notify the peer that the old connection may be dropped.
+                other_conns.push(*active_conn_id);
                 *active_send_tx = send_tx;
-                conns.push(conn_id);
+                *active_conn_id = conn_id;
                 Vec::default()
             }
         }
@@ -1868,14 +1882,15 @@ mod test {
         async fn broadcast_once(
             secret_key: SecretKey,
             relay_map: RelayMap,
-            bootstrap: NodeAddr,
+            bootstrap_addr: NodeAddr,
             topic_id: TopicId,
             message: String,
         ) -> anyhow::Result<()> {
             let (router, gossip) = spawn_gossip(secret_key, relay_map).await?;
-            let node_id = bootstrap.node_id;
-            router.endpoint().add_node_addr(bootstrap)?;
-            let topic = gossip.subscribe_and_join(topic_id, vec![node_id]).await?;
+            info!(node_id = %router.endpoint().node_id().fmt_short(), "broadcast node spawned");
+            let bootstrap = vec![bootstrap_addr.node_id];
+            router.endpoint().add_node_addr(bootstrap_addr)?;
+            let topic = gossip.subscribe_and_join(topic_id, bootstrap).await?;
             topic.broadcast(message.as_bytes().to_vec().into()).await?;
             std::future::pending::<()>().await;
             Ok(())
@@ -1895,6 +1910,7 @@ mod test {
             async move {
                 let (router, gossip) = spawn_gossip(secret_key, relay_map).await?;
                 let addr = router.endpoint().node_addr().await?;
+                info!(node_id = %addr.node_id.fmt_short(), "recv node spawned");
                 addr_tx.send(addr).unwrap();
                 let mut topic = gossip.subscribe_and_join(topic_id, vec![]).await?;
                 while let Some(event) = topic.try_next().await.unwrap() {
@@ -1908,8 +1924,6 @@ mod test {
         });
 
         let node0_addr = addr_rx.await?;
-        info!("n0: node addr {node0_addr:?}");
-
         let max_wait = Duration::from_secs(5);
 
         // spawn a node, send a message, and then abruptly terminate the node ungracefully
@@ -1929,6 +1943,7 @@ mod test {
         // assert that we received the message on the receiver node.
         let msg = timeout(max_wait, msgs_recv_rx.recv()).await?.unwrap();
         assert_eq!(&msg, "msg1");
+        info!("kill broadcast node");
         cancel.cancel();
 
         // spawns the node again with the same node id, and send another message
@@ -1947,8 +1962,10 @@ mod test {
         // this means that the reconnect with the same node id worked.
         let msg = timeout(max_wait, msgs_recv_rx.recv()).await?.unwrap();
         assert_eq!(&msg, "msg2");
+        info!("kill broadcast node");
         cancel.cancel();
 
+        info!("kill recv node");
         recv_task.abort();
         assert!(join_handle_1.join().unwrap().is_none());
         assert!(join_handle_2.join().unwrap().is_none());
