@@ -1963,17 +1963,7 @@
 <a href="#1962" id="1962">1962</a>
 <a href="#1963" id="1963">1963</a>
 <a href="#1964" id="1964">1964</a>
-<a href="#1965" id="1965">1965</a>
-<a href="#1966" id="1966">1966</a>
-<a href="#1967" id="1967">1967</a>
-<a href="#1968" id="1968">1968</a>
-<a href="#1969" id="1969">1969</a>
-<a href="#1970" id="1970">1970</a>
-<a href="#1971" id="1971">1971</a>
-<a href="#1972" id="1972">1972</a>
-<a href="#1973" id="1973">1973</a>
-<a href="#1974" id="1974">1974</a>
-<a href="#1975" id="1975">1975</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
+<a href="#1965" id="1965">1965</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
@@ -2598,12 +2588,8 @@
             event = <span class="self">self</span>.in_event_rx.recv() =&gt; {
                 <span class="macro">trace!</span>(<span class="question-mark">?</span>i, <span class="string">"tick: in_event_rx"</span>);
                 <span class="macro">inc!</span>(Metrics, actor_tick_in_event_rx);
-                <span class="kw">match </span>event {
-                    <span class="prelude-val">Some</span>(event) =&gt; {
-                        <span class="self">self</span>.handle_in_event(event, Instant::now()).<span class="kw">await</span><span class="question-mark">?</span>;
-                    }
-                    <span class="prelude-val">None </span>=&gt; <span class="macro">unreachable!</span>()
-                }
+                <span class="kw">let </span>event = event.expect(<span class="string">"unreachable: in_event_tx is never dropped before receiver"</span>);
+                <span class="self">self</span>.handle_in_event(event, Instant::now()).<span class="kw">await</span><span class="question-mark">?</span>;
             }
             drain = <span class="self">self</span>.timers.wait_and_drain() =&gt; {
                 <span class="macro">trace!</span>(<span class="question-mark">?</span>i, <span class="string">"tick: timers"</span>);
@@ -2669,19 +2655,17 @@
 
     <span class="kw">fn </span>handle_connection(<span class="kw-2">&amp;mut </span><span class="self">self</span>, peer_id: NodeId, origin: ConnOrigin, conn: Connection) {
         <span class="kw">let </span>(send_tx, send_rx) = mpsc::channel(SEND_QUEUE_CAP);
+        <span class="kw">let </span>conn_id = conn.stable_id();
 
         <span class="kw">let </span>queue = <span class="kw">match </span><span class="self">self</span>.peers.entry(peer_id) {
-            Entry::Occupied(<span class="kw-2">mut </span>occupied_entry) =&gt; {
-                <span class="kw">let </span>state = occupied_entry.get_mut();
-                state.accept_conn(send_tx, conn.stable_id())
-            }
-            Entry::Vacant(vacant_entry) =&gt; {
-                vacant_entry.insert(PeerState::Active {
+            Entry::Occupied(<span class="kw-2">mut </span>entry) =&gt; entry.get_mut().accept_conn(send_tx, conn_id),
+            Entry::Vacant(entry) =&gt; {
+                entry.insert(PeerState::Active {
                     active_send_tx: send_tx,
-                    active_conn_id: conn.stable_id(),
-                    other_conns: <span class="macro">vec!</span>[],
+                    active_conn_id: conn_id,
+                    other_conns: Vec::new(),
                 });
-                Vec::default()
+                Vec::new()
             }
         };
 
@@ -2824,14 +2808,14 @@
                 OutEvent::SendMessage(peer_id, message) =&gt; {
                     <span class="kw">let </span>state = <span class="self">self</span>.peers.entry(peer_id).or_default();
                     <span class="kw">match </span>state {
-                        PeerState::Active {
-                            active_send_tx: send_tx,
-                            ..
-                        } =&gt; {
-                            <span class="kw">if let </span><span class="prelude-val">Err</span>(_err) = send_tx.send(message).<span class="kw">await </span>{
+                        PeerState::Active { active_send_tx, .. } =&gt; {
+                            <span class="kw">if let </span><span class="prelude-val">Err</span>(_err) = active_send_tx.send(message).<span class="kw">await </span>{
                                 <span class="comment">// Removing the peer is handled by the in_event PeerDisconnected sent
-                                // at the end of the connection task.
-                                </span><span class="macro">warn!</span>(<span class="string">"connection loop for {} dropped"</span>, peer_id.fmt_short());
+                                // in [`Self::handle_connection_task_finished`].
+                                </span><span class="macro">warn!</span>(
+                                    peer = %peer_id.fmt_short(),
+                                    <span class="string">"failed to send: connection task send loop terminated"</span>,
+                                );
                             }
                         }
                         PeerState::Pending { queue } =&gt; {
@@ -2883,14 +2867,10 @@
                     <span class="prelude-val">Err</span>(err) =&gt; <span class="macro">warn!</span>(<span class="string">"Failed to decode {data:?} from {node_id}: {err}"</span>),
                     <span class="prelude-val">Ok</span>(info) =&gt; {
                         <span class="macro">debug!</span>(peer = <span class="question-mark">?</span>node_id, <span class="string">"add known addrs: {info:?}"</span>);
-                        <span class="kw">let </span>AddrInfo {
-                            relay_url,
-                            direct_addresses,
-                        } = info;
                         <span class="kw">let </span>node_addr = NodeAddr {
                             node_id,
-                            relay_url,
-                            direct_addresses,
+                            relay_url: info.relay_url,
+                            direct_addresses: info.direct_addresses,
                         };
                         <span class="kw">if let </span><span class="prelude-val">Err</span>(err) = <span class="self">self
                             </span>.endpoint
@@ -2910,8 +2890,7 @@
         topic: TopicId,
         receiver_id: ReceiverId,
     ) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
-        <span class="kw">if let </span>Entry::Occupied(<span class="kw-2">mut </span>entry) = <span class="self">self</span>.topics.entry(topic) {
-            <span class="kw">let </span>state = entry.get_mut();
+        <span class="kw">if let </span><span class="prelude-val">Some</span>(state) = <span class="self">self</span>.topics.get_mut(<span class="kw-2">&amp;</span>topic) {
             state.event_senders.remove(<span class="kw-2">&amp;</span>receiver_id);
             <span class="kw">if </span>!state.still_needed() {
                 <span class="self">self</span>.quit_queue.push_back(topic);
@@ -2952,7 +2931,7 @@
                 <span class="kw-2">*</span><span class="self">self </span>= PeerState::Active {
                     active_send_tx: send_tx,
                     active_conn_id: conn_id,
-                    other_conns: <span class="macro">vec!</span>[],
+                    other_conns: Vec::new(),
                 };
                 queue
             }
@@ -2969,7 +2948,7 @@
                 </span>other_conns.push(<span class="kw-2">*</span>active_conn_id);
                 <span class="kw-2">*</span>active_send_tx = send_tx;
                 <span class="kw-2">*</span>active_conn_id = conn_id;
-                Vec::default()
+                Vec::new()
             }
         }
     }
@@ -3069,6 +3048,7 @@
     relay_url: <span class="prelude-ty">Option</span>&lt;RelayUrl&gt;,
     direct_addresses: BTreeSet&lt;SocketAddr&gt;,
 }
+
 <span class="kw">impl </span>From&lt;NodeAddr&gt; <span class="kw">for </span>AddrInfo {
     <span class="kw">fn </span>from(
         NodeAddr {
