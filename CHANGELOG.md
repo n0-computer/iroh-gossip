@@ -2,6 +2,12 @@
 
 All notable changes to iroh-gossip will be documented in this file.
 
+## [0.34.1](https://github.com/n0-computer/iroh-gossip/compare/v0.34.0..0.34.1) - 2025-03-24
+
+### 🐛 Bug Fixes
+
+- Allow instant reconnects, and always prefer newest connection ([#43](https://github.com/n0-computer/iroh-gossip/issues/43)) - ([ea1c773](https://github.com/n0-computer/iroh-gossip/commit/ea1c773659f88d7eed776b6b15cc0e559267afea))
+
 ## [0.34.0](https://github.com/n0-computer/iroh-gossip/compare/v0.33.0..0.34.0) - 2025-03-18
 
 ### 🐛 Bug Fixes
