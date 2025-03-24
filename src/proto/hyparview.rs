@@ -84,8 +84,6 @@ pub enum Message<PI> {
     /// Request to disconnect from a peer.
     /// If [`Disconnect::alive`] is true, the other peer is not shutting down, so it should be
     /// added to the passive set.
-    /// If [`Disconnect::respond`] is true, the peer should answer the disconnect request
-    /// before shutting down the connection.
     Disconnect(Disconnect),
 }
 
@@ -165,9 +163,9 @@ pub struct Neighbor {
 pub struct Disconnect {
     /// Whether we are actually shutting down or closing the connection only because our limits are
     /// reached.
-    alive: Alive,
-    /// Whether we should reply to the peer with a Disconnect message.
-    respond: Respond,
+    alive: bool,
+    /// Obsolete field (kept in the struct to not break wire compatibility).
+    _respond: bool,
 }
 
 /// Configuration for the swarm membership layer
@@ -222,9 +220,6 @@ impl Default for Config {
     }
 }
 
-pub type Respond = bool;
-pub type Alive = bool;
-
 #[derive(Default, Debug, Clone)]
 pub struct Stats {
     total_connections: usize,
@@ -253,6 +248,8 @@ pub struct State<PI, RG = ThreadRng> {
     pending_neighbor_requests: HashSet<PI>,
     /// The opaque user peer data we received for other peers
     peer_data: HashMap<PI, PeerData>,
+    /// List of peers that are disconnecting, but which we want to keep in the passive set once the connection closes
+    alive_disconnect_peers: HashSet<PI>,
 }
 
 impl<PI, RG> State<PI, RG>
@@ -272,6 +269,7 @@ where
             stats: Stats::default(),
             pending_neighbor_requests: Default::default(),
             peer_data: Default::default(),
+            alive_disconnect_peers: Default::default(),
         }
     }
 
@@ -282,7 +280,7 @@ where
                 Timer::DoShuffle => self.handle_shuffle_timer(io),
                 Timer::PendingNeighborRequest(peer) => self.handle_pending_neighbor_timer(peer, io),
             },
-            InEvent::PeerDisconnected(peer) => self.handle_disconnect(peer, io),
+            InEvent::PeerDisconnected(peer) => self.handle_connection_closed(peer, io),
             InEvent::RequestJoin(peer) => self.handle_join(peer, io),
             InEvent::UpdatePeerData(data) => {
                 self.me_data = Some(data);
@@ -333,28 +331,39 @@ where
         ));
     }
 
-    fn handle_disconnect(&mut self, peer: PI, io: &mut impl IO<PI>) {
-        self.on_disconnect(
-            peer,
-            Disconnect {
-                alive: true,
-                respond: false,
-            },
-            io,
-        );
+    fn on_disconnect(&mut self, peer: PI, details: Disconnect, io: &mut impl IO<PI>) {
+        self.pending_neighbor_requests.remove(&peer);
+        if self.active_view.contains(&peer) {
+            self.remove_active(&peer, RemovalReason::DisconnectReceived(details.alive), io);
+        } else if details.alive && self.passive_view.contains(&peer) {
+            self.alive_disconnect_peers.insert(peer);
+        }
+    }
+
+    fn handle_connection_closed(&mut self, peer: PI, io: &mut impl IO<PI>) {
+        self.pending_neighbor_requests.remove(&peer);
+        if self.active_view.contains(&peer) {
+            self.remove_active(&peer, RemovalReason::ConnectionClosed, io);
+        } else if !self.alive_disconnect_peers.remove(&peer) {
+            self.passive_view.remove(&peer);
+            self.peer_data.remove(&peer);
+        }
     }
 
     fn handle_quit(&mut self, io: &mut impl IO<PI>) {
         for peer in self.active_view.clone().into_iter() {
-            self.on_disconnect(
-                peer,
-                Disconnect {
-                    alive: false,
-                    respond: true,
-                },
-                io,
-            );
+            self.active_view.remove(&peer);
+            self.send_disconnect(peer, false, io);
         }
+    }
+
+    fn send_disconnect(&self, peer: PI, alive: bool, io: &mut impl IO<PI>) {
+        let message = Message::Disconnect(Disconnect {
+            alive,
+            _respond: false,
+        });
+        io.push(OutEvent::SendMessage(peer, message));
+        io.push(OutEvent::DisconnectPeer(peer));
     }
 
     fn on_join(&mut self, peer: PI, data: Option<PeerData>, now: Instant, io: &mut impl IO<PI>) {
@@ -511,18 +520,6 @@ where
         }
     }
 
-    fn on_disconnect(&mut self, peer: PI, details: Disconnect, io: &mut impl IO<PI>) {
-        self.pending_neighbor_requests.remove(&peer);
-        self.remove_active(&peer, details.respond, io);
-        if details.alive {
-            if let Some(data) = self.peer_data.remove(&peer) {
-                self.add_passive(peer, Some(data), io);
-            }
-        } else {
-            self.passive_view.remove(&peer);
-        }
-    }
-
     fn handle_shuffle_timer(&mut self, io: &mut impl IO<PI>) {
         if let Some(node) = self.active_view.pick_random(&mut self.rng) {
             let active = self.active_view.shuffled_without_and_capped(
@@ -579,16 +576,11 @@ where
     /// Remove a peer from the active view.
     ///
     /// If respond is true, a Disconnect message will be sent to the peer.
-    fn remove_active(&mut self, peer: &PI, respond: Respond, io: &mut impl IO<PI>) -> Option<PI> {
-        self.active_view.get_index_of(peer).map(|idx| {
-            let removed_peer = self
-                .remove_active_by_index(idx, respond, RemovalReason::Disconnect, io)
-                .unwrap();
-
+    fn remove_active(&mut self, peer: &PI, reason: RemovalReason, io: &mut impl IO<PI>) {
+        if let Some(idx) = self.active_view.get_index_of(peer) {
+            let removed_peer = self.remove_active_by_index(idx, reason, io).unwrap();
             self.refill_active_from_passive(&[&removed_peer], io);
-
-            removed_peer
-        })
+        }
     }
 
     fn refill_active_from_passive(&mut self, skip_peers: &[&PI], io: &mut impl IO<PI>) {
@@ -639,22 +631,38 @@ where
     fn remove_active_by_index(
         &mut self,
         peer_index: usize,
-        respond: Respond,
         reason: RemovalReason,
         io: &mut impl IO<PI>,
     ) -> Option<PI> {
         if let Some(peer) = self.active_view.remove_index(peer_index) {
-            if respond {
-                let message = Message::Disconnect(Disconnect {
-                    alive: true,
-                    respond: false,
-                });
-                io.push(OutEvent::SendMessage(peer, message));
-            }
-            io.push(OutEvent::DisconnectPeer(peer));
             io.push(OutEvent::EmitEvent(Event::NeighborDown(peer)));
-            let data = self.peer_data.remove(&peer);
-            self.add_passive(peer, data, io);
+
+            match reason {
+                // send a disconnect message, then close connection.
+                RemovalReason::Random => self.send_disconnect(peer, true, io),
+                // close connection without sending anything further.
+                RemovalReason::DisconnectReceived(_) => io.push(OutEvent::DisconnectPeer(peer)),
+                // do nothing, connection already closed.
+                RemovalReason::ConnectionClosed => {}
+            }
+
+            let keep_alive_as_passive = match reason {
+                // keep alive if previously marked as alive.
+                RemovalReason::ConnectionClosed => self.alive_disconnect_peers.remove(&peer),
+                // keep alive if other peer said to be still alive.
+                RemovalReason::DisconnectReceived(alive) => alive,
+                // keep alive (only we are removing for now)
+                RemovalReason::Random => true,
+            };
+
+            if keep_alive_as_passive {
+                let data = self.peer_data.remove(&peer);
+                self.add_passive(peer, data, io);
+                // mark peer as alive, so it doesn't get removed from the passive view if the conn closes.
+                if !matches!(reason, RemovalReason::ConnectionClosed) {
+                    self.alive_disconnect_peers.insert(peer);
+                }
+            }
             debug!(other = ?peer, "removed from active view, reason: {reason:?}");
             Some(peer)
         } else {
@@ -665,7 +673,7 @@ where
     /// Remove a random peer from the active view.
     fn free_random_slot_in_active_view(&mut self, io: &mut impl IO<PI>) {
         if let Some(index) = self.active_view.pick_random_index(&mut self.rng) {
-            self.remove_active_by_index(index, true, RemovalReason::Random, io);
+            self.remove_active_by_index(index, RemovalReason::Random, io);
         }
     }
 
@@ -722,6 +730,7 @@ where
 
 #[derive(Debug)]
 enum RemovalReason {
-    Disconnect,
+    ConnectionClosed,
+    DisconnectReceived(bool),
     Random,
 }
