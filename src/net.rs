@@ -623,12 +623,8 @@ impl Actor {
             event = self.in_event_rx.recv() => {
                 trace!(?i, "tick: in_event_rx");
                 inc!(Metrics, actor_tick_in_event_rx);
-                match event {
-                    Some(event) => {
-                        self.handle_in_event(event, Instant::now()).await?;
-                    }
-                    None => unreachable!()
-                }
+                let event = event.expect("unreachable: in_event_tx is never dropped before receiver");
+                self.handle_in_event(event, Instant::now()).await?;
             }
             drain = self.timers.wait_and_drain() => {
                 trace!(?i, "tick: timers");
@@ -694,19 +690,17 @@ impl Actor {
 
     fn handle_connection(&mut self, peer_id: NodeId, origin: ConnOrigin, conn: Connection) {
         let (send_tx, send_rx) = mpsc::channel(SEND_QUEUE_CAP);
+        let conn_id = conn.stable_id();
 
         let queue = match self.peers.entry(peer_id) {
-            Entry::Occupied(mut occupied_entry) => {
-                let state = occupied_entry.get_mut();
-                state.accept_conn(send_tx, conn.stable_id())
-            }
-            Entry::Vacant(vacant_entry) => {
-                vacant_entry.insert(PeerState::Active {
+            Entry::Occupied(mut entry) => entry.get_mut().accept_conn(send_tx, conn_id),
+            Entry::Vacant(entry) => {
+                entry.insert(PeerState::Active {
                     active_send_tx: send_tx,
-                    active_conn_id: conn.stable_id(),
-                    other_conns: vec![],
+                    active_conn_id: conn_id,
+                    other_conns: Vec::new(),
                 });
-                Vec::default()
+                Vec::new()
             }
         };
 
@@ -849,14 +843,14 @@ impl Actor {
                 OutEvent::SendMessage(peer_id, message) => {
                     let state = self.peers.entry(peer_id).or_default();
                     match state {
-                        PeerState::Active {
-                            active_send_tx: send_tx,
-                            ..
-                        } => {
-                            if let Err(_err) = send_tx.send(message).await {
+                        PeerState::Active { active_send_tx, .. } => {
+                            if let Err(_err) = active_send_tx.send(message).await {
                                 // Removing the peer is handled by the in_event PeerDisconnected sent
-                                // at the end of the connection task.
-                                warn!("connection loop for {} dropped", peer_id.fmt_short());
+                                // in [`Self::handle_connection_task_finished`].
+                                warn!(
+                                    peer = %peer_id.fmt_short(),
+                                    "failed to send: connection task send loop terminated",
+                                );
                             }
                         }
                         PeerState::Pending { queue } => {
@@ -908,14 +902,10 @@ impl Actor {
                     Err(err) => warn!("Failed to decode {data:?} from {node_id}: {err}"),
                     Ok(info) => {
                         debug!(peer = ?node_id, "add known addrs: {info:?}");
-                        let AddrInfo {
-                            relay_url,
-                            direct_addresses,
-                        } = info;
                         let node_addr = NodeAddr {
                             node_id,
-                            relay_url,
-                            direct_addresses,
+                            relay_url: info.relay_url,
+                            direct_addresses: info.direct_addresses,
                         };
                         if let Err(err) = self
                             .endpoint
@@ -935,8 +925,7 @@ impl Actor {
         topic: TopicId,
         receiver_id: ReceiverId,
     ) -> Result<(), Error> {
-        if let Entry::Occupied(mut entry) = self.topics.entry(topic) {
-            let state = entry.get_mut();
+        if let Some(state) = self.topics.get_mut(&topic) {
             state.event_senders.remove(&receiver_id);
             if !state.still_needed() {
                 self.quit_queue.push_back(topic);
@@ -977,7 +966,7 @@ impl PeerState {
                 *self = PeerState::Active {
                     active_send_tx: send_tx,
                     active_conn_id: conn_id,
-                    other_conns: vec![],
+                    other_conns: Vec::new(),
                 };
                 queue
             }
@@ -994,7 +983,7 @@ impl PeerState {
                 other_conns.push(*active_conn_id);
                 *active_send_tx = send_tx;
                 *active_conn_id = conn_id;
-                Vec::default()
+                Vec::new()
             }
         }
     }
@@ -1094,6 +1083,7 @@ struct AddrInfo {
     relay_url: Option<RelayUrl>,
     direct_addresses: BTreeSet<SocketAddr>,
 }
+
 impl From<NodeAddr> for AddrInfo {
     fn from(
         NodeAddr {
