@@ -1832,7 +1832,7 @@
 <span class="kw">use </span>futures_concurrency::stream::{stream_group, StreamGroup};
 <span class="kw">use </span>futures_util::FutureExt <span class="kw">as _</span>;
 <span class="kw">use </span>iroh::{
-    endpoint::{Connecting, Connection, DirectAddr},
+    endpoint::{Connection, DirectAddr},
     protocol::ProtocolHandler,
     Endpoint, NodeAddr, NodeId, PublicKey, RelayUrl,
 };
@@ -1974,10 +1974,10 @@
 }
 
 <span class="kw">impl </span>ProtocolHandler <span class="kw">for </span>Gossip {
-    <span class="kw">fn </span>accept(<span class="kw-2">&amp;</span><span class="self">self</span>, conn: Connecting) -&gt; BoxFuture&lt;anyhow::Result&lt;()&gt;&gt; {
+    <span class="kw">fn </span>accept(<span class="kw-2">&amp;</span><span class="self">self</span>, conn: Connection) -&gt; BoxFuture&lt;anyhow::Result&lt;()&gt;&gt; {
         <span class="kw">let </span>inner = <span class="self">self</span>.inner.clone();
         Box::pin(<span class="kw">async move </span>{
-            inner.handle_connection(conn.<span class="kw">await</span><span class="question-mark">?</span>).<span class="kw">await</span><span class="question-mark">?</span>;
+            inner.handle_connection(conn).<span class="kw">await</span><span class="question-mark">?</span>;
             <span class="prelude-val">Ok</span>(())
         })
     }
