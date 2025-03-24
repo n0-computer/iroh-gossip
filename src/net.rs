@@ -8,6 +8,7 @@ use std::{
     task::{Context, Poll},
 };
 
+use anyhow::Context as _;
 use bytes::BytesMut;
 use futures_concurrency::stream::{stream_group, StreamGroup};
 use futures_util::FutureExt as _;
@@ -476,7 +477,7 @@ struct Actor {
     /// Internal queue of topic to close because all handles were dropped.
     quit_queue: VecDeque<TopicId>,
     /// Tasks for the connection loops, to keep track of panics.
-    connection_tasks: JoinSet<(NodeId, Connection)>,
+    connection_tasks: JoinSet<(NodeId, Connection, anyhow::Result<()>)>,
 }
 
 impl Actor {
@@ -639,31 +640,8 @@ impl Actor {
             }
             Some(res) = self.connection_tasks.join_next(), if !self.connection_tasks.is_empty() => {
                 trace!(?i, "tick: connection_tasks");
-                let (peer_id, conn) = res.expect("connection task panicked");
-                match conn.close_reason() {
-                    Some(reason) => {
-                        debug!(peer=%peer_id.fmt_short(), "connection closed (reason: {reason:?})");
-                    }
-                    None => {
-                        debug!(peer=%peer_id.fmt_short(), "connection closed (by us)");
-                        conn.close(0u32.into(), b"close from disconnect");
-                    }
-                }
-                match self.peers.get_mut(&peer_id) {
-                    None => {
-                        debug!(peer=%peer_id.fmt_short(), "connection task closed but peer already dropped");
-                    }
-                    Some(PeerState::Pending { .. })=> {
-                        debug!(peer=%peer_id.fmt_short(), "connection task closed but peer in pending state");
-                    }
-                    Some(PeerState::Active { conns, .. }) => {
-                        conns.retain(|x| x.stable_id() != conn.stable_id());
-                        if conns.is_empty() {
-                            debug!(peer=%peer_id.fmt_short(), "all connections closed, notify state of discnnnect");
-                            self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now()).await?;
-                        }
-                    },
-                }
+                let (peer_id, conn, result) = res.expect("connection task panicked");
+                self.handle_connection_closed(peer_id, conn, result).await?;
             }
         }
 
@@ -720,38 +698,12 @@ impl Actor {
         let queue = match self.peers.entry(peer_id) {
             Entry::Occupied(mut occupied_entry) => {
                 let state = occupied_entry.get_mut();
-                match state {
-                    PeerState::Pending { queue } => {
-                        let queue = std::mem::take(queue);
-                        *state = PeerState::Active {
-                            send_tx,
-                            origin,
-                            conns: vec![conn.clone()],
-                        };
-                        queue
-                    }
-                    PeerState::Active {
-                        send_tx: active_send_tx,
-                        origin: active_origin,
-                        conns,
-                    } => {
-                        // We already have an active connection. We keep the old connection intact,
-                        // but only use the new connection for sending from now on.
-                        // By dropping the `send_tx` of the old connection, the send loop part of
-                        // the `connection_loop` of the old connection will terminate, which will also
-                        // notify the peer that the old connection may be dropped.
-                        *active_send_tx = send_tx;
-                        *active_origin = origin;
-                        conns.push(conn.clone());
-                        Default::default()
-                    }
-                }
+                state.accept_conn(send_tx, conn.stable_id())
             }
             Entry::Vacant(vacant_entry) => {
                 vacant_entry.insert(PeerState::Active {
                     send_tx,
-                    origin,
-                    conns: vec![conn.clone()],
+                    conns: vec![conn.stable_id()],
                 });
                 Vec::default()
             }
@@ -763,24 +715,48 @@ impl Actor {
         // Spawn a task for this connection
         self.connection_tasks.spawn(
             async move {
-                match connection_loop(
+                let res = connection_loop(
                     peer_id,
-                    conn.clone(),
+                    &conn,
                     origin,
                     send_rx,
                     &in_event_tx,
                     max_message_size,
                     queue,
                 )
-                .await
-                {
-                    Ok(()) => debug!("connection closed without error"),
-                    Err(err) => warn!("connection closed: {err:?}"),
-                }
-                (peer_id, conn)
+                .await;
+                (peer_id, conn, res)
             }
-            .instrument(error_span!("gossip_conn", peer = %peer_id.fmt_short())),
+            .instrument(error_span!("conn", peer = %peer_id.fmt_short())),
         );
+    }
+
+    #[tracing::instrument(name = "conn", skip_all, fields(peer = %peer_id.fmt_short()))]
+    async fn handle_connection_closed(
+        &mut self,
+        peer_id: NodeId,
+        conn: Connection,
+        task_result: anyhow::Result<()>,
+    ) -> Result<(), Error> {
+        if conn.close_reason().is_none() {
+            conn.close(0u32.into(), b"close from disconnect");
+        }
+        let error = task_result.err();
+        let reason = conn.close_reason().expect("just closed");
+        debug!(%reason, ?error, "connection closed");
+        if let Some(PeerState::Active { conns, .. }) = self.peers.get_mut(&peer_id) {
+            conns.retain(|x| *x != conn.stable_id());
+            if conns.is_empty() {
+                debug!("no other remaining connections, drop peer");
+                self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
+                    .await?;
+            } else {
+                debug!("remaining {} other connections", conns.len());
+            }
+        } else {
+            debug!("peer already marked as disconnected");
+        }
+        Ok(())
     }
 
     async fn handle_to_actor_msg(&mut self, msg: ToActor, now: Instant) -> Result<(), Error> {
@@ -965,6 +941,8 @@ impl Actor {
     }
 }
 
+type ConnId = usize;
+
 #[derive(Debug)]
 enum PeerState {
     Pending {
@@ -972,9 +950,40 @@ enum PeerState {
     },
     Active {
         send_tx: mpsc::Sender<ProtoMessage>,
-        origin: ConnOrigin,
-        conns: Vec<Connection>,
+        conns: Vec<ConnId>,
     },
+}
+
+impl PeerState {
+    fn accept_conn(
+        &mut self,
+        send_tx: mpsc::Sender<ProtoMessage>,
+        conn_id: ConnId,
+    ) -> Vec<ProtoMessage> {
+        match self {
+            PeerState::Pending { queue } => {
+                let queue = std::mem::take(queue);
+                *self = PeerState::Active {
+                    send_tx,
+                    conns: vec![conn_id],
+                };
+                queue
+            }
+            PeerState::Active {
+                send_tx: active_send_tx,
+                conns,
+            } => {
+                // We already have an active connection. We keep the old connection intact,
+                // but only use the new connection for sending from now on.
+                // By dropping the `send_tx` of the old connection, the send loop part of
+                // the `connection_loop` of the old connection will terminate, which will also
+                // notify the peer that the old connection may be dropped.
+                *active_send_tx = send_tx;
+                conns.push(conn_id);
+                Vec::default()
+            }
+        }
+    }
 }
 
 impl Default for PeerState {
@@ -1021,13 +1030,13 @@ struct SubscriberChannels {
 
 async fn connection_loop(
     from: PublicKey,
-    conn: Connection,
+    conn: &Connection,
     origin: ConnOrigin,
     mut send_rx: mpsc::Receiver<ProtoMessage>,
     in_event_tx: &mpsc::Sender<InEvent>,
     max_message_size: usize,
     queue: Vec<ProtoMessage>,
-) -> Result<(), Error> {
+) -> anyhow::Result<()> {
     let (mut send, mut recv) = match origin {
         ConnOrigin::Accept => conn.accept_bi().await?,
         ConnOrigin::Dial => conn.open_bi().await?,
@@ -1047,7 +1056,7 @@ async fn connection_loop(
         let _ = send.finish();
         // wait for the other node to ack all the sent data
         let _ = send.stopped().await;
-        Ok::<_, Error>(())
+        anyhow::Ok(())
     };
 
     let recv_loop = async {
@@ -1059,11 +1068,11 @@ async fn connection_loop(
                 Some(msg) => in_event_tx.send(InEvent::RecvMessage(from, msg)).await?,
             }
         }
-        Ok::<_, Error>(())
+        anyhow::Ok(())
     };
 
-    tokio::join!(send_loop, recv_loop).0?;
-    Ok(())
+    let res = tokio::join!(send_loop, recv_loop);
+    res.0.context("send_loop").and(res.1.context("recv_loop"))
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
