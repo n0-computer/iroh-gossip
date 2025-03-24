@@ -732,7 +732,8 @@
 <a href="#731" id="731">731</a>
 <a href="#732" id="732">732</a>
 <a href="#733" id="733">733</a>
-<a href="#734" id="734">734</a></pre></div><pre class="rust"><code><span class="doccomment">//! Implementation of the HyParView membership protocol
+<a href="#734" id="734">734</a>
+<a href="#735" id="735">735</a></pre></div><pre class="rust"><code><span class="doccomment">//! Implementation of the HyParView membership protocol
 //!
 //! The implementation is based on [this paper][paper] by Joao Leitao, Jose Pereira, Luıs Rodrigues
 //! and the [example implementation][impl] by Bartosz Sypytkowski
@@ -981,7 +982,8 @@
     </span>pending_neighbor_requests: HashSet&lt;PI&gt;,
     <span class="doccomment">/// The opaque user peer data we received for other peers
     </span>peer_data: HashMap&lt;PI, PeerData&gt;,
-    alive_disconnect_peers: HashSet&lt;PI&gt;,
+    <span class="doccomment">/// List of peers that are disconnecting, but which we want to keep in the passive set once the connection closes
+    </span>alive_disconnect_peers: HashSet&lt;PI&gt;,
 }
 
 <span class="kw">impl</span>&lt;PI, RG&gt; State&lt;PI, RG&gt;
