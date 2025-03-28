@@ -785,14 +785,14 @@ impl Actor {
                     neighbors,
                     event_senders,
                     command_rx_keys,
-                    joined,
                 } = state;
-                if *joined {
-                    let neighbors = neighbors.iter().copied().collect();
-                    channels
-                        .event_tx
-                        .try_send(Ok(Event::Gossip(GossipEvent::Joined(neighbors))))
-                        .ok();
+                if !neighbors.is_empty() {
+                    for neighbor in neighbors.iter() {
+                        channels
+                            .event_tx
+                            .try_send(Ok(Event::Gossip(GossipEvent::NeighborUp(*neighbor))))
+                            .ok();
+                    }
                 }
 
                 event_senders.push(channels.receiver_id, channels.event_tx);
@@ -879,22 +879,20 @@ impl Actor {
                         continue;
                     };
                     let TopicState {
-                        joined,
                         neighbors,
                         event_senders,
                         ..
                     } = state;
-                    let event = if let ProtoEvent::NeighborUp(neighbor) = event {
-                        neighbors.insert(neighbor);
-                        if !*joined {
-                            *joined = true;
-                            GossipEvent::Joined(vec![neighbor])
-                        } else {
-                            GossipEvent::NeighborUp(neighbor)
+                    match &event {
+                        ProtoEvent::NeighborUp(neighbor) => {
+                            neighbors.insert(*neighbor);
                         }
-                    } else {
-                        event.into()
-                    };
+                        ProtoEvent::NeighborDown(neighbor) => {
+                            neighbors.remove(neighbor);
+                        }
+                        _ => {}
+                    }
+                    let event: GossipEvent = event.into();
                     event_senders.send(&event);
                     if !state.still_needed() {
                         self.quit_queue.push_back(topic_id);
@@ -1007,7 +1005,6 @@ impl Default for PeerState {
 
 #[derive(Debug, Default)]
 struct TopicState {
-    joined: bool,
     neighbors: BTreeSet<NodeId>,
     /// Sender side to report events to a [`GossipReceiver`].
     ///
@@ -1023,6 +1020,11 @@ impl TopicState {
     /// Check if the topic still has any publisher or subscriber.
     fn still_needed(&self) -> bool {
         !self.event_senders.is_empty() || !self.command_rx_keys.is_empty()
+    }
+
+    #[cfg(test)]
+    fn joined(&self) -> bool {
+        !self.neighbors.is_empty()
     }
 }
 
@@ -1727,13 +1729,13 @@ mod test {
                                // get peer connection;
                                // receive the other peer's information for a NeighborUp
         let state = actor.topics.get(&topic).expect("get registered topic");
-        assert!(state.joined);
+        assert!(state.joined());
 
         // signal the second subscribe, we should remain subscribed
         tx.send(()).await?;
         actor.steps(3).await?; // subscribe; first receiver gone; first sender gone
         let state = actor.topics.get(&topic).expect("get registered topic");
-        assert!(state.joined);
+        assert!(state.joined());
 
         // signal to drop the second handle, the topic should no longer be subscribed
         tx.send(()).await?;

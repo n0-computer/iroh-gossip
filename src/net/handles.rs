@@ -105,7 +105,6 @@ pub struct GossipReceiver {
     #[debug("EventStream")]
     stream: EventStream,
     neighbors: HashSet<NodeId>,
-    joined: bool,
 }
 
 impl GossipReceiver {
@@ -113,7 +112,6 @@ impl GossipReceiver {
         Self {
             stream: events_rx,
             neighbors: Default::default(),
-            joined: false,
         }
     }
 
@@ -130,13 +128,8 @@ impl GossipReceiver {
     /// Note that this consumes the [`GossipEvent::Joined`] event. If you want to act on these
     /// initial neighbors, use [`Self::neighbors`] after awaiting [`Self::joined`].
     pub async fn joined(&mut self) -> Result<(), Error> {
-        if !self.joined {
-            match self.next().await.ok_or(Error::ReceiverClosed)?? {
-                Event::Gossip(GossipEvent::Joined(_)) => {}
-                _ => {
-                    return Err(Error::UnexpectedEvent);
-                }
-            }
+        while !self.is_joined() {
+            let _event = self.next().await.ok_or(Error::ReceiverClosed)??;
         }
         Ok(())
     }
@@ -154,10 +147,6 @@ impl Stream for GossipReceiver {
         let item = std::task::ready!(Pin::new(&mut self.stream).poll_next(cx));
         if let Some(Ok(item)) = &item {
             match item {
-                Event::Gossip(GossipEvent::Joined(neighbors)) => {
-                    self.joined = true;
-                    self.neighbors.extend(neighbors.iter().copied());
-                }
                 Event::Gossip(GossipEvent::NeighborUp(node_id)) => {
                     self.neighbors.insert(*node_id);
                 }
@@ -188,10 +177,6 @@ pub enum Event {
 /// These are the events emitted from a [`GossipReceiver`], wrapped in [`Event::Gossip`].
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum GossipEvent {
-    /// We joined the topic with at least one peer.
-    ///
-    /// This is the first event on a [`GossipReceiver`] and will only be emitted once.
-    Joined(Vec<NodeId>),
     /// We have a new, direct neighbor in the swarm membership layer for this topic.
     NeighborUp(NodeId),
     /// We dropped direct neighbor in the swarm membership layer for this topic.
