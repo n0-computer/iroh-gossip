@@ -101,6 +101,11 @@ impl PeerData {
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
+
+    /// Returns true if the peer data is empty.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 /// PeerInfo contains a peer's identifier and the opaque peer data as provided by the implementer.

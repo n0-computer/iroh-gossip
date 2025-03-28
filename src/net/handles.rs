@@ -92,6 +92,11 @@ impl GossipTopic {
     pub fn is_joined(&self) -> bool {
         self.receiver.is_joined()
     }
+
+    /// Returns an iterator of the current neighbors in the gossip swarm.
+    pub fn neighbors(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.receiver.neighbors()
+    }
 }
 
 impl Stream for GossipTopic {

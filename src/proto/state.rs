@@ -134,7 +134,7 @@ impl<PI> From<InEvent<PI>> for InEventMapped<PI> {
 #[derive(Debug)]
 pub struct State<PI, R> {
     me: PI,
-    me_data: PeerData,
+    me_data: Option<PeerData>,
     config: Config,
     rng: R,
     states: HashMap<TopicId, topic::State<PI, R>>,
@@ -149,7 +149,7 @@ impl<PI: PeerIdentity, R: Rng + Clone> State<PI, R> {
     /// (which can be updated over time).
     /// For the protocol to perform as recommended in the papers, the [`Config`] should be
     /// identical for all nodes in the network.
-    pub fn new(me: PI, me_data: PeerData, config: Config, rng: R) -> Self {
+    pub fn new(me: PI, me_data: Option<PeerData>, config: Config, rng: R) -> Self {
         Self {
             me,
             me_data,
@@ -219,7 +219,7 @@ impl<PI: PeerIdentity, R: Rng + Clone> State<PI, R> {
                     if let hash_map::Entry::Vacant(e) = self.states.entry(topic) {
                         e.insert(topic::State::with_rng(
                             self.me,
-                            Some(self.me_data.clone()),
+                            self.me_data.clone(),
                             self.config.clone(),
                             self.rng.clone(),
                         ));
@@ -250,7 +250,7 @@ impl<PI: PeerIdentity, R: Rng + Clone> State<PI, R> {
             // when a peer disconnected on the network level, forward event to all states
             InEventMapped::All(event) => {
                 if let topic::InEvent::UpdatePeerData(data) = &event {
-                    self.me_data = data.clone();
+                    self.me_data = Some(data.clone());
                 }
                 for (topic, state) in self.states.iter_mut() {
                     let out = state.handle(event.clone(), now);
