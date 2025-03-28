@@ -204,8 +204,8 @@ impl Builder {
         self
     }
 
-    /// Spawn a gossip actor and get a handle for it
-    pub async fn spawn(self, endpoint: Endpoint) -> Result<Gossip, Error> {
+    /// Spawns a gossip actor and returns the [`Gossip`] handle.
+    pub fn spawn(self, endpoint: Endpoint) -> Gossip {
         let me = endpoint.node_id().fmt_short();
         let max_message_size = self.config.max_message_size;
         let (actor, to_actor_tx) = Actor::new(endpoint, self.config, self.discovery);
@@ -218,7 +218,7 @@ impl Builder {
             .instrument(error_span!("gossip", %me)),
         );
 
-        Ok(Gossip {
+        Gossip {
             inner: Inner {
                 to_actor_tx,
                 _actor_handle: AbortOnDropHandle::new(actor_handle),
@@ -228,7 +228,7 @@ impl Builder {
             .into(),
             #[cfg(feature = "rpc")]
             rpc_handler: Default::default(),
-        })
+        }
     }
 }
 
@@ -241,19 +241,19 @@ impl Gossip {
         }
     }
 
-    /// Get the maximum message size configured for this gossip actor.
+    /// Returns the maximum message size configured for this gossip actor.
     pub fn max_message_size(&self) -> usize {
         self.inner.max_message_size
     }
 
-    /// Handle an incoming [`Connection`].
+    /// Handles an incoming [`Connection`].
     ///
     /// Make sure to check the ALPN protocol yourself before passing the connection.
     pub async fn handle_connection(&self, conn: Connection) -> Result<(), Error> {
         self.inner.handle_connection(conn).await
     }
 
-    /// Join a gossip topic with the default options and wait for at least one active connection.
+    /// Joins a gossip topic with the default options and waits for at least one active connection to be established.
     pub async fn subscribe_and_join(
         &self,
         topic_id: TopicId,
@@ -264,9 +264,10 @@ impl Gossip {
         Ok(sub)
     }
 
-    /// Join a gossip topic with the default options.
+    /// Joins a gossip topic with the default options.
     ///
-    /// Note that this will not wait for any bootstrap node to be available. To ensure the topic is connected to at least one node, use [`GossipTopic::joined`] or [`Gossip::subscribe_and_join`]
+    /// Note that this will not wait for any bootstrap node to be available.
+    /// To ensure the topic is connected to at least one node, use [`GossipTopic::joined`] or [`Gossip::subscribe_and_join`]
     pub fn subscribe(
         &self,
         topic_id: TopicId,
@@ -277,7 +278,7 @@ impl Gossip {
         Ok(sub)
     }
 
-    /// Join a gossip topic with options.
+    /// Joins a gossip topic with options.
     ///
     /// Returns a [`GossipTopic`] instantly. To wait for at least one connection to be established,
     /// you can await [`GossipTopic::joined`].
@@ -291,7 +292,7 @@ impl Gossip {
         GossipTopic::new(command_tx, event_rx)
     }
 
-    /// Join a gossip topic with options and an externally-created update stream.
+    /// Joins a gossip topic with options and an externally-created update stream.
     ///
     /// This method differs from [`Self::subscribe_with_opts`] by letting you pass in a `updates` command stream yourself
     /// instead of using a channel created for you.
@@ -309,7 +310,7 @@ impl Gossip {
 }
 
 impl Inner {
-    pub fn subscribe_with_stream(
+    fn subscribe_with_stream(
         &self,
         topic_id: TopicId,
         options: JoinOptions,
@@ -759,23 +760,16 @@ impl Actor {
                     event_senders,
                     command_rx_keys,
                 } = state;
-                let mut sender_dead = false;
                 if !neighbors.is_empty() {
                     for neighbor in neighbors.iter() {
-                        if let Err(_err) = channels
+                        channels
                             .event_tx
-                            .send(Ok(Event::Gossip(GossipEvent::NeighborUp(*neighbor))))
-                            .await
-                        {
-                            sender_dead = true;
-                            break;
-                        }
+                            .try_send(Ok(Event::Gossip(GossipEvent::NeighborUp(*neighbor))))
+                            .ok();
                     }
                 }
 
-                if !sender_dead {
-                    event_senders.push(channels.receiver_id, channels.event_tx);
-                }
+                event_senders.push(channels.receiver_id, channels.event_tx);
                 let command_rx = TopicCommandStream::new(topic_id, channels.command_rx);
                 let key = self.command_rx.insert(command_rx);
                 command_rx_keys.insert(key);
@@ -1473,9 +1467,9 @@ mod test {
         let ep2 = create_endpoint(&mut rng, relay_map.clone()).await.unwrap();
         let ep3 = create_endpoint(&mut rng, relay_map.clone()).await.unwrap();
 
-        let go1 = Gossip::builder().spawn(ep1.clone()).await.unwrap();
-        let go2 = Gossip::builder().spawn(ep2.clone()).await.unwrap();
-        let go3 = Gossip::builder().spawn(ep3.clone()).await.unwrap();
+        let go1 = Gossip::builder().spawn(ep1.clone());
+        let go2 = Gossip::builder().spawn(ep2.clone());
+        let go3 = Gossip::builder().spawn(ep3.clone());
         debug!("peer1 {:?}", ep1.node_id());
         debug!("peer2 {:?}", ep2.node_id());
         debug!("peer3 {:?}", ep3.node_id());
@@ -1831,7 +1825,7 @@ mod test {
                 .insecure_skip_relay_cert_verify(true)
                 .bind()
                 .await?;
-            let gossip = Gossip::builder().spawn(ep.clone()).await?;
+            let gossip = Gossip::builder().spawn(ep.clone());
             let router = Router::builder(ep.clone())
                 .accept(GOSSIP_ALPN, gossip.clone())
                 .spawn()
@@ -1906,6 +1900,7 @@ mod test {
         assert_eq!(&msg, "msg1");
         info!("kill broadcast node");
         cancel.cancel();
+        assert!(join_handle_1.join().unwrap().is_none());
 
         // spawns the node again with the same node id, and send another message
         let cancel = CancellationToken::new();
@@ -1925,16 +1920,16 @@ mod test {
         assert_eq!(&msg, "msg2");
         info!("kill broadcast node");
         cancel.cancel();
+        assert!(join_handle_2.join().unwrap().is_none());
 
         info!("kill recv node");
         recv_task.abort();
-        assert!(join_handle_1.join().unwrap().is_none());
-        assert!(join_handle_2.join().unwrap().is_none());
 
         Ok(())
     }
 
     #[tokio::test]
+    #[traced_test]
     async fn gossip_discovery() -> TestResult {
         /// Spawns a new endpoint and gossip instance.
         async fn spawn_gossip(
@@ -1942,7 +1937,7 @@ mod test {
             relay_map: RelayMap,
             use_discovery: bool,
         ) -> anyhow::Result<(Router, Gossip)> {
-            let discovery = use_discovery.then(|| GossipDiscovery::default());
+            let discovery = use_discovery.then(GossipDiscovery::default);
             let mut ep_builder = Endpoint::builder()
                 .secret_key(secret_key)
                 .relay_mode(RelayMode::Custom(relay_map))
@@ -1955,7 +1950,7 @@ mod test {
             if let Some(discovery) = discovery {
                 gossip_builder = gossip_builder.use_gossip_for_discovery(discovery)
             }
-            let gossip = gossip_builder.spawn(ep.clone()).await?;
+            let gossip = gossip_builder.spawn(ep.clone());
             let router = Router::builder(ep.clone())
                 .accept(GOSSIP_ALPN, gossip.clone())
                 .spawn()

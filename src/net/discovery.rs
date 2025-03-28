@@ -1,8 +1,10 @@
+use anyhow::Result;
 use iroh::{
-    discovery::{static_provider::StaticProvider, Discovery},
+    discovery::{static_provider::StaticProvider, Discovery, DiscoveryItem},
     watchable::Watchable,
     NodeAddr,
 };
+use n0_future::boxed::BoxStream;
 
 use super::AddrInfo;
 
@@ -60,7 +62,7 @@ impl Discovery for GossipDiscovery {
         &self,
         endpoint: iroh::Endpoint,
         node_id: iroh::NodeId,
-    ) -> Option<n0_future::stream::Boxed<anyhow::Result<iroh::discovery::DiscoveryItem>>> {
+    ) -> Option<BoxStream<Result<DiscoveryItem>>> {
         self.inner.resolve(endpoint, node_id)
     }
 }
