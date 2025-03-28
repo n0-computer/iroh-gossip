@@ -776,16 +776,23 @@ impl Actor {
                     event_senders,
                     command_rx_keys,
                 } = state;
+                let mut sender_dead = false;
                 if !neighbors.is_empty() {
                     for neighbor in neighbors.iter() {
-                        channels
+                        if let Err(_err) = channels
                             .event_tx
-                            .try_send(Ok(Event::Gossip(GossipEvent::NeighborUp(*neighbor))))
-                            .ok();
+                            .send(Ok(Event::Gossip(GossipEvent::NeighborUp(*neighbor))))
+                            .await
+                        {
+                            sender_dead = true;
+                            break;
+                        }
                     }
                 }
 
-                event_senders.push(channels.receiver_id, channels.event_tx);
+                if !sender_dead {
+                    event_senders.push(channels.receiver_id, channels.event_tx);
+                }
                 let command_rx = TopicCommandStream::new(topic_id, channels.command_rx);
                 let key = self.command_rx.insert(command_rx);
                 command_rx_keys.insert(key);
