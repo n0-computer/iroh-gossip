@@ -1073,7 +1073,7 @@ struct AddrInfo {
     direct_addresses: BTreeSet<SocketAddr>,
 }
 
-impl<'a> From<&'a NodeData> for AddrInfo {
+impl From<&NodeData> for AddrInfo {
     fn from(value: &NodeData) -> Self {
         Self {
             relay_url: value.relay_url().cloned(),
@@ -1852,7 +1852,7 @@ mod test {
         }
 
         let (relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
-        let mut rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
+        let mut rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(183187);
         let topic_id = TopicId::from_bytes(rng.gen());
 
         // spawn a gossip node, send the node's address on addr_tx,
