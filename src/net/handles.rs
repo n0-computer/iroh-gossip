@@ -25,19 +25,19 @@ impl GossipSender {
         Self(sender)
     }
 
-    /// Broadcast a message to all nodes.
+    /// Broadcasts a message to all nodes.
     pub async fn broadcast(&self, message: Bytes) -> Result<(), Error> {
         self.0.send(Command::Broadcast(message)).await?;
         Ok(())
     }
 
-    /// Broadcast a message to our direct neighbors.
+    /// Broadcasts a message to our direct neighbors.
     pub async fn broadcast_neighbors(&self, message: Bytes) -> Result<(), Error> {
         self.0.send(Command::BroadcastNeighbors(message)).await?;
         Ok(())
     }
 
-    /// Join a set of peers.
+    /// Joins a set of peers.
     pub async fn join_peers(&self, peers: Vec<NodeId>) -> Result<(), Error> {
         self.0.send(Command::JoinPeers(peers)).await?;
         Ok(())
@@ -48,7 +48,10 @@ impl GossipSender {
 ///
 /// This handle is a [`Stream`] of [`Event`]s from the topic, and can be used to send messages.
 ///
-/// It may be split into sender and receiver parts with [`Self::split`].
+/// Once the [`GossipTopic`] is dropped, the network actor will leave the gossip topic.
+///
+/// It may be split into sender and receiver parts with [`Self::split`]. In this case, the topic will
+/// be left once both the [`GossipSender`] and [`GossipReceiver`] halves are dropped.
 #[derive(Debug)]
 pub struct GossipTopic {
     sender: GossipSender,
@@ -79,11 +82,13 @@ impl GossipTopic {
     }
 
     /// Waits until we are connected to at least one node.
+    ///
+    /// See [`Receiver::joined`] for details.
     pub async fn joined(&mut self) -> Result<(), Error> {
         self.receiver.joined().await
     }
 
-    /// Returns true if we are connected to at least one node.
+    /// Returns `true` if we are connected to at least one node.
     pub fn is_joined(&self) -> bool {
         self.receiver.is_joined()
     }
@@ -122,11 +127,11 @@ impl GossipReceiver {
 
     /// Waits until we are connected to at least one node.
     ///
-    /// This progresses the stream until we received [`GossipEvent::Joined`], which is the first
-    /// item emitted on the stream.
+    /// Progresses the event stream to the first [`NeighborUp`] event.
     ///
-    /// Note that this consumes the [`GossipEvent::Joined`] event. If you want to act on these
-    /// initial neighbors, use [`Self::neighbors`] after awaiting [`Self::joined`].
+    /// Note that this consumes this initial [`NeighborUp`] event. If you want to track
+    /// neighbors, use [`Self::neighbors`] after awaiting [`Self::joined`], and then
+    /// continue to track [`NeighborUp`] events on the event stream.
     pub async fn joined(&mut self) -> Result<(), Error> {
         while !self.is_joined() {
             let _event = self.next().await.ok_or(Error::ReceiverClosed)??;
@@ -134,7 +139,7 @@ impl GossipReceiver {
         Ok(())
     }
 
-    /// Returns true if we are connected to at least one node.
+    /// Returns `true` if we are connected to at least one node.
     pub fn is_joined(&self) -> bool {
         !self.neighbors.is_empty()
     }
@@ -215,21 +220,21 @@ pub struct Message {
 /// A stream of commands for a gossip subscription.
 pub type CommandStream = Pin<Box<dyn Stream<Item = Command> + Send + Sync + 'static>>;
 
-/// Send a gossip message
+/// Command for a gossip topic.
 #[derive(Serialize, Deserialize, derive_more::Debug)]
 pub enum Command {
-    /// Broadcast a message to all nodes in the swarm
+    /// Broadcasts a message to all nodes in the swarm.
     Broadcast(#[debug("Bytes({})", _0.len())] Bytes),
-    /// Broadcast a message to all direct neighbors
+    /// Broadcasts a message to all direct neighbors.
     BroadcastNeighbors(#[debug("Bytes({})", _0.len())] Bytes),
-    /// Connect to a set of peers
+    /// Connects to a set of peers.
     JoinPeers(Vec<NodeId>),
 }
 
 /// Options for joining a gossip topic.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct JoinOptions {
-    /// The initial bootstrap nodes
+    /// The initial bootstrap nodes.
     pub bootstrap: BTreeSet<NodeId>,
     /// The maximum number of messages that can be buffered in a subscription.
     ///
