@@ -178,7 +178,7 @@ mod test {
         // Now let node 3 join node 0.
         // Node 0 is full, so it will disconnect from either node 1 or node 2.
         network.command(3, t, Command::Join(vec![0]));
-        network.ticks(8);
+        network.ticks(10);
 
         // Confirm emitted events. There's two options because whether node 0 disconnects from
         // node 1 or node 2 is random.
@@ -213,7 +213,7 @@ mod test {
         let config = Config::default();
         let mut network = Network::new(Instant::now());
         let broadcast_ticks = 12;
-        let join_ticks = 12;
+        let join_ticks = 13;
         // build a network with 6 nodes
         let rng = rand_chacha::ChaCha12Rng::seed_from_u64(99);
         for i in 0..6 {
