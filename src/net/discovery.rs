@@ -26,6 +26,9 @@ impl GossipDiscovery {
     /// By adding this to both an [`Endpoint`] and a [`Gossip`], this will both make address info
     /// retrieved from other nodes available to the endpoint, and make our address info available to
     /// other nodes.
+    ///
+    /// [`Endpoint`]: iroh::Endpoint
+    /// [`Gossip`]: crate::net::Gossip
     pub fn new() -> Self {
         Self {
             inner: Default::default(),
@@ -38,6 +41,9 @@ impl GossipDiscovery {
     /// By adding this to both an [`Endpoint`] and a [`Gossip`], this will make address info
     /// retrieved from other nodes available to the endpoint, but does not publish our address
     /// info to other nodes.
+    ///
+    /// [`Endpoint`]: iroh::Endpoint
+    /// [`Gossip`]: crate::net::Gossip
     pub fn without_publish() -> Self {
         Self {
             inner: Default::default(),
