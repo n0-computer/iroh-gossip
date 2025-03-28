@@ -83,7 +83,7 @@ impl GossipTopic {
 
     /// Waits until we are connected to at least one node.
     ///
-    /// See [`Receiver::joined`] for details.
+    /// See [`GossipReceiver::joined`] for details.
     pub async fn joined(&mut self) -> Result<(), Error> {
         self.receiver.joined().await
     }
@@ -127,11 +127,11 @@ impl GossipReceiver {
 
     /// Waits until we are connected to at least one node.
     ///
-    /// Progresses the event stream to the first [`NeighborUp`] event.
+    /// Progresses the event stream to the first [`GossipEvent::NeighborUp`] event.
     ///
-    /// Note that this consumes this initial [`NeighborUp`] event. If you want to track
+    /// Note that this consumes this initial `NeighborUp` event. If you want to track
     /// neighbors, use [`Self::neighbors`] after awaiting [`Self::joined`], and then
-    /// continue to track [`NeighborUp`] events on the event stream.
+    /// continue to track `NeighborUp` events on the event stream.
     pub async fn joined(&mut self) -> Result<(), Error> {
         while !self.is_joined() {
             let _event = self.next().await.ok_or(Error::ReceiverClosed)??;

@@ -309,7 +309,7 @@ impl Gossip {
     /// instead of using a channel created for you.
     ///
     /// It returns a stream of events. If you want to wait for the topic to become active, wait for
-    /// the [`GossipEvent::Joined`] event.
+    /// the first [`GossipEvent::NeighborUp`].
     pub fn subscribe_with_stream(
         &self,
         topic_id: TopicId,
