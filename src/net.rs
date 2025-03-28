@@ -310,7 +310,7 @@ impl Gossip {
 }
 
 impl Inner {
-    fn subscribe_with_stream(
+    pub(crate) fn subscribe_with_stream(
         &self,
         topic_id: TopicId,
         options: JoinOptions,
