@@ -6,7 +6,7 @@ use bytes::Bytes;
 use n0_future::time::{Duration, Instant};
 use rand::Rng;
 use rand_core::SeedableRng;
-use tracing::{debug, warn};
+use tracing::{debug, trace_span, warn};
 
 use super::{
     util::TimerMap, Command, Config, Event, InEvent, OutEvent, PeerIdentity, State, Timer, TopicId,
@@ -62,7 +62,7 @@ fn push_back<PI: Eq + std::hash::Hash>(
     inqueues.get_mut(peer_pos).unwrap().push_back(event);
 }
 
-impl<PI: PeerIdentity + Ord, R: Rng + Clone> Network<PI, R> {
+impl<PI: PeerIdentity + Ord + std::fmt::Display, R: Rng + Clone> Network<PI, R> {
     pub fn push(&mut self, peer: State<PI, R>) {
         let idx = self.inqueues.len();
         self.inqueues.push(VecDeque::new());
@@ -98,6 +98,8 @@ impl<PI: PeerIdentity + Ord, R: Rng + Clone> Network<PI, R> {
 
     pub fn tick(&mut self) {
         self.time += self.tick_duration;
+        let tick =
+            self.time.duration_since(self.start).as_millis() / self.tick_duration.as_millis();
 
         // process timers
         for (_time, (idx, timer)) in self.timers.drain_until(&self.time) {
@@ -114,14 +116,14 @@ impl<PI: PeerIdentity + Ord, R: Rng + Clone> Network<PI, R> {
         for (idx, queue) in self.inqueues.iter_mut().enumerate() {
             let state = self.peers.get_mut(idx).unwrap();
             let peer = *state.me();
+            let span = trace_span!("tick", node = %peer, %tick);
+            let _guard = span.enter();
             while let Some(event) = queue.pop_front() {
                 if let InEvent::RecvMessage(from, _message) = &event {
                     self.conns.insert((*from, peer).into());
                 }
-                debug!(peer = ?peer, "IN  {event:?}");
                 let out = state.handle(event, self.time);
                 for event in out {
-                    debug!(peer = ?peer, "OUT {event:?}");
                     match event {
                         OutEvent::SendMessage(to, message) => {
                             let to_idx = *self.peers_by_address.get(&to).unwrap();

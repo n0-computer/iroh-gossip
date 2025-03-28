@@ -390,46 +390,50 @@ where
         &mut self,
         sender: PI,
         message: ForwardJoin<PI>,
-        now: Instant,
+        _now: Instant,
         io: &mut impl IO<PI>,
     ) {
+        let peer_id = message.peer.id;
         // If the peer is already in our active view, we renew our neighbor relationship.
-        if self.active_view.contains(&message.peer.id) {
-            self.send_neighbor(message.peer.id, Priority::High, io);
+        if self.active_view.contains(&peer_id) {
+            self.insert_peer_info(message.peer, io);
+            self.send_neighbor(peer_id, Priority::High, io);
         }
         // "i) If the time to live is equal to zero or if the number of nodes in p’s active view is equal to one,
         // it will add the new node to its active view (7)"
         else if message.ttl.expired() || self.active_view.len() <= 1 {
-            self.add_active(
-                message.peer.id,
-                message.peer.data.clone(),
-                Priority::High,
-                now,
-                io,
-            );
-        }
-        // "ii) If the time to live is equal to PRWL, p will insert the new node into its passive view"
-        else if message.ttl == self.config.passive_random_walk_length {
-            self.add_passive(message.peer.id, message.peer.data.clone(), io);
-        }
-        // "iii) The time to live field is decremented."
-        // "iv) If, at this point, n has not been inserted
-        // in p’s active view, p will forward the request to a random node in its active view
-        // (different from the one from which the request was received)."
-        if !self.active_view.contains(&message.peer.id) {
-            match self
-                .active_view
-                .pick_random_without(&[&sender], &mut self.rng)
+            self.insert_peer_info(message.peer, io);
+            // Modification from paper: Instead of adding the peer directly to our active view,
+            // we only send the Neighbor message. We will add the peer to our active view once we receive a
+            // reply from our neighbor.
+            // This prevents us adding unreachable peers to our active view.
+            self.send_neighbor(peer_id, Priority::High, io);
+        } else {
+            // "ii) If the time to live is equal to PRWL, p will insert the new node into its passive view"
+            if message.ttl == self.config.passive_random_walk_length {
+                self.add_passive(peer_id, message.peer.data.clone(), io);
+            }
+            // "iii) The time to live field is decremented."
+            // "iv) If, at this point, n has not been inserted
+            // in p’s active view, p will forward the request to a random node in its active view
+            // (different from the one from which the request was received)."
+            if !self.active_view.contains(&peer_id)
+                && !self.pending_neighbor_requests.contains(&peer_id)
             {
-                None => {
-                    unreachable!("if the peer was not added, there are at least two peers in our active view.");
-                }
-                Some(next) => {
-                    let message = Message::ForwardJoin(ForwardJoin {
-                        peer: message.peer,
-                        ttl: message.ttl.next(),
-                    });
-                    io.push(OutEvent::SendMessage(*next, message));
+                match self
+                    .active_view
+                    .pick_random_without(&[&sender], &mut self.rng)
+                {
+                    None => {
+                        unreachable!("if the peer was not added, there are at least two peers in our active view.");
+                    }
+                    Some(next) => {
+                        let message = Message::ForwardJoin(ForwardJoin {
+                            peer: message.peer,
+                            ttl: message.ttl.next(),
+                        });
+                        io.push(OutEvent::SendMessage(*next, message));
+                    }
                 }
             }
         }
@@ -441,14 +445,15 @@ where
         // if it has to drop a random member from its active view (again, the member that is dropped will
         // receive a Disconnect notification). If a node q receives a low priority Neighbor request, it will
         // only accept the request if it has a free slot in its active view, otherwise it will refuse the request."
-        match details.priority {
-            Priority::High => {
-                self.add_active(from, details.data, Priority::High, now, io);
-            }
+        let new_neighbor = match details.priority {
+            Priority::High => self.add_active(from, details.data, Priority::High, now, io),
             Priority::Low if !self.active_is_full() => {
-                self.add_active(from, details.data, Priority::Low, now, io);
+                self.add_active(from, details.data, Priority::Low, now, io)
             }
-            _ => {}
+            _ => false,
+        };
+        if new_neighbor {
+            io.push(OutEvent::EmitEvent(Event::NeighborUp(from)));
         }
     }
 
@@ -608,23 +613,19 @@ where
         if let Some(node) = self
             .passive_view
             .pick_random_without(&skip_peers, &mut self.rng)
+            .copied()
         {
             let priority = match self.active_view.is_empty() {
                 true => Priority::High,
                 false => Priority::Low,
             };
-            let message = Message::Neighbor(Neighbor {
-                priority,
-                data: self.me_data.clone(),
-            });
-            io.push(OutEvent::SendMessage(*node, message));
+            self.send_neighbor(node, priority, io);
             // schedule a timer that checks if the node replied with a neighbor message,
             // otherwise try again with another passive node.
             io.push(OutEvent::ScheduleTimer(
                 self.config.neighbor_request_timeout,
-                Timer::PendingNeighborRequest(*node),
+                Timer::PendingNeighborRequest(node),
             ));
-            self.pending_neighbor_requests.insert(*node);
         };
     }
 
@@ -707,15 +708,16 @@ where
         debug!(other = ?peer, "add to active view");
 
         self.send_neighbor(peer, priority, io);
-        io.push(OutEvent::EmitEvent(Event::NeighborUp(peer)));
     }
 
     fn send_neighbor(&mut self, peer: PI, priority: Priority, io: &mut impl IO<PI>) {
-        let message = Message::Neighbor(Neighbor {
-            priority,
-            data: self.me_data.clone(),
-        });
-        io.push(OutEvent::SendMessage(peer, message));
+        if self.pending_neighbor_requests.insert(peer) {
+            let message = Message::Neighbor(Neighbor {
+                priority,
+                data: self.me_data.clone(),
+            });
+            io.push(OutEvent::SendMessage(peer, message));
+        }
     }
 }
 
