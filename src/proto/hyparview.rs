@@ -238,6 +238,7 @@ pub struct State<PI, RG = ThreadRng> {
     me_data: Option<PeerData>,
     /// The active view, i.e. peers we are connected to
     pub(crate) active_view: IndexSet<PI>,
+    active_view_confirmed: HashSet<PI>,
     /// The passive view, i.e. peers we know about but are not connected to at the moment
     pub(crate) passive_view: IndexSet<PI>,
     /// Protocol configuration (cannot change at runtime)
@@ -264,6 +265,7 @@ where
             me,
             me_data,
             active_view: IndexSet::new(),
+            active_view_confirmed: HashSet::new(),
             passive_view: IndexSet::new(),
             config,
             shuffle_scheduled: false,
@@ -441,14 +443,16 @@ where
         // if it has to drop a random member from its active view (again, the member that is dropped will
         // receive a Disconnect notification). If a node q receives a low priority Neighbor request, it will
         // only accept the request if it has a free slot in its active view, otherwise it will refuse the request."
-        match details.priority {
-            Priority::High => {
-                self.add_active(from, details.data, Priority::High, now, io);
-            }
+        let new_neighbor = match details.priority {
+            Priority::High => self.add_active(from, details.data, Priority::High, now, io),
             Priority::Low if !self.active_is_full() => {
-                self.add_active(from, details.data, Priority::Low, now, io);
+                self.add_active(from, details.data, Priority::Low, now, io)
             }
-            _ => {}
+            _ => false,
+        };
+        if new_neighbor {
+            self.active_view_confirmed.insert(from);
+            io.push(OutEvent::EmitEvent(Event::NeighborUp(from)));
         }
     }
 
@@ -651,7 +655,9 @@ where
                 io.push(OutEvent::SendMessage(peer, message));
             }
             io.push(OutEvent::DisconnectPeer(peer));
-            io.push(OutEvent::EmitEvent(Event::NeighborDown(peer)));
+            if self.active_view_confirmed.remove(&peer) {
+                io.push(OutEvent::EmitEvent(Event::NeighborDown(peer)));
+            }
             let data = self.peer_data.remove(&peer);
             self.add_passive(peer, data, io);
             debug!(other = ?peer, "removed from active view, reason: {reason:?}");
@@ -707,7 +713,6 @@ where
         debug!(other = ?peer, "add to active view");
 
         self.send_neighbor(peer, priority, io);
-        io.push(OutEvent::EmitEvent(Event::NeighborUp(peer)));
     }
 
     fn send_neighbor(&mut self, peer: PI, priority: Priority, io: &mut impl IO<PI>) {

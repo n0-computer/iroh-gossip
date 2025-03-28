@@ -613,6 +613,12 @@ impl Actor {
                     Some(Err(err)) => {
                         warn!(peer = %peer_id.fmt_short(), "dial failed: {err}");
                         inc!(Metrics, actor_tick_dialer_failure);
+                        let peer_state = self.peers.get(&peer_id);
+                        let is_active = matches!(peer_state, Some(PeerState::Active { .. }));
+                        if !is_active {
+                            self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
+                                .await?;
+                        }
                     }
                     None => {
                         warn!(peer = %peer_id.fmt_short(), "dial disconnected");
