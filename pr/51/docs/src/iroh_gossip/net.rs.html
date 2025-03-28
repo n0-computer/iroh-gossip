@@ -2341,7 +2341,7 @@
 }
 
 <span class="kw">impl </span>Inner {
-    <span class="kw">fn </span>subscribe_with_stream(
+    <span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>subscribe_with_stream(
         <span class="kw-2">&amp;</span><span class="self">self</span>,
         topic_id: TopicId,
         options: JoinOptions,
