@@ -349,7 +349,8 @@
 <a href="#348" id="348">348</a>
 <a href="#349" id="349">349</a>
 <a href="#350" id="350">350</a>
-<a href="#351" id="351">351</a></pre></div><pre class="rust"><code><span class="doccomment">//! The protocol state of the `iroh-gossip` protocol.
+<a href="#351" id="351">351</a>
+<a href="#352" id="352">352</a></pre></div><pre class="rust"><code><span class="doccomment">//! The protocol state of the `iroh-gossip` protocol.
 
 </span><span class="kw">use </span>std::collections::{hash_map, HashMap, HashSet};
 
@@ -558,7 +559,7 @@
         event: InEvent&lt;PI&gt;,
         now: Instant,
     ) -&gt; <span class="kw">impl </span>Iterator&lt;Item = OutEvent&lt;PI&gt;&gt; + <span class="lifetime">'_ </span>{
-        <span class="macro">trace!</span>(<span class="string">"gossp event: {event:?}"</span>);
+        <span class="macro">trace!</span>(<span class="string">"in_event: {event:?}"</span>);
         track_in_event(<span class="kw-2">&amp;</span>event);
 
         <span class="kw">let </span>event: InEventMapped&lt;PI&gt; = event.into();
@@ -625,6 +626,7 @@
     conns: <span class="kw-2">&amp;mut </span>ConnsMap&lt;PI&gt;,
     outbox: <span class="kw-2">&amp;mut </span>Outbox&lt;PI&gt;,
 ) {
+    <span class="macro">trace!</span>(<span class="string">"out_event: {event:?}"</span>);
     <span class="kw">match </span>event {
         topic::OutEvent::SendMessage(to, message) =&gt; {
             outbox.push(OutEvent::SendMessage(to, Message { topic, message }))

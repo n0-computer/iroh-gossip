@@ -1818,7 +1818,152 @@
 <a href="#1817" id="1817">1817</a>
 <a href="#1818" id="1818">1818</a>
 <a href="#1819" id="1819">1819</a>
-<a href="#1820" id="1820">1820</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
+<a href="#1820" id="1820">1820</a>
+<a href="#1821" id="1821">1821</a>
+<a href="#1822" id="1822">1822</a>
+<a href="#1823" id="1823">1823</a>
+<a href="#1824" id="1824">1824</a>
+<a href="#1825" id="1825">1825</a>
+<a href="#1826" id="1826">1826</a>
+<a href="#1827" id="1827">1827</a>
+<a href="#1828" id="1828">1828</a>
+<a href="#1829" id="1829">1829</a>
+<a href="#1830" id="1830">1830</a>
+<a href="#1831" id="1831">1831</a>
+<a href="#1832" id="1832">1832</a>
+<a href="#1833" id="1833">1833</a>
+<a href="#1834" id="1834">1834</a>
+<a href="#1835" id="1835">1835</a>
+<a href="#1836" id="1836">1836</a>
+<a href="#1837" id="1837">1837</a>
+<a href="#1838" id="1838">1838</a>
+<a href="#1839" id="1839">1839</a>
+<a href="#1840" id="1840">1840</a>
+<a href="#1841" id="1841">1841</a>
+<a href="#1842" id="1842">1842</a>
+<a href="#1843" id="1843">1843</a>
+<a href="#1844" id="1844">1844</a>
+<a href="#1845" id="1845">1845</a>
+<a href="#1846" id="1846">1846</a>
+<a href="#1847" id="1847">1847</a>
+<a href="#1848" id="1848">1848</a>
+<a href="#1849" id="1849">1849</a>
+<a href="#1850" id="1850">1850</a>
+<a href="#1851" id="1851">1851</a>
+<a href="#1852" id="1852">1852</a>
+<a href="#1853" id="1853">1853</a>
+<a href="#1854" id="1854">1854</a>
+<a href="#1855" id="1855">1855</a>
+<a href="#1856" id="1856">1856</a>
+<a href="#1857" id="1857">1857</a>
+<a href="#1858" id="1858">1858</a>
+<a href="#1859" id="1859">1859</a>
+<a href="#1860" id="1860">1860</a>
+<a href="#1861" id="1861">1861</a>
+<a href="#1862" id="1862">1862</a>
+<a href="#1863" id="1863">1863</a>
+<a href="#1864" id="1864">1864</a>
+<a href="#1865" id="1865">1865</a>
+<a href="#1866" id="1866">1866</a>
+<a href="#1867" id="1867">1867</a>
+<a href="#1868" id="1868">1868</a>
+<a href="#1869" id="1869">1869</a>
+<a href="#1870" id="1870">1870</a>
+<a href="#1871" id="1871">1871</a>
+<a href="#1872" id="1872">1872</a>
+<a href="#1873" id="1873">1873</a>
+<a href="#1874" id="1874">1874</a>
+<a href="#1875" id="1875">1875</a>
+<a href="#1876" id="1876">1876</a>
+<a href="#1877" id="1877">1877</a>
+<a href="#1878" id="1878">1878</a>
+<a href="#1879" id="1879">1879</a>
+<a href="#1880" id="1880">1880</a>
+<a href="#1881" id="1881">1881</a>
+<a href="#1882" id="1882">1882</a>
+<a href="#1883" id="1883">1883</a>
+<a href="#1884" id="1884">1884</a>
+<a href="#1885" id="1885">1885</a>
+<a href="#1886" id="1886">1886</a>
+<a href="#1887" id="1887">1887</a>
+<a href="#1888" id="1888">1888</a>
+<a href="#1889" id="1889">1889</a>
+<a href="#1890" id="1890">1890</a>
+<a href="#1891" id="1891">1891</a>
+<a href="#1892" id="1892">1892</a>
+<a href="#1893" id="1893">1893</a>
+<a href="#1894" id="1894">1894</a>
+<a href="#1895" id="1895">1895</a>
+<a href="#1896" id="1896">1896</a>
+<a href="#1897" id="1897">1897</a>
+<a href="#1898" id="1898">1898</a>
+<a href="#1899" id="1899">1899</a>
+<a href="#1900" id="1900">1900</a>
+<a href="#1901" id="1901">1901</a>
+<a href="#1902" id="1902">1902</a>
+<a href="#1903" id="1903">1903</a>
+<a href="#1904" id="1904">1904</a>
+<a href="#1905" id="1905">1905</a>
+<a href="#1906" id="1906">1906</a>
+<a href="#1907" id="1907">1907</a>
+<a href="#1908" id="1908">1908</a>
+<a href="#1909" id="1909">1909</a>
+<a href="#1910" id="1910">1910</a>
+<a href="#1911" id="1911">1911</a>
+<a href="#1912" id="1912">1912</a>
+<a href="#1913" id="1913">1913</a>
+<a href="#1914" id="1914">1914</a>
+<a href="#1915" id="1915">1915</a>
+<a href="#1916" id="1916">1916</a>
+<a href="#1917" id="1917">1917</a>
+<a href="#1918" id="1918">1918</a>
+<a href="#1919" id="1919">1919</a>
+<a href="#1920" id="1920">1920</a>
+<a href="#1921" id="1921">1921</a>
+<a href="#1922" id="1922">1922</a>
+<a href="#1923" id="1923">1923</a>
+<a href="#1924" id="1924">1924</a>
+<a href="#1925" id="1925">1925</a>
+<a href="#1926" id="1926">1926</a>
+<a href="#1927" id="1927">1927</a>
+<a href="#1928" id="1928">1928</a>
+<a href="#1929" id="1929">1929</a>
+<a href="#1930" id="1930">1930</a>
+<a href="#1931" id="1931">1931</a>
+<a href="#1932" id="1932">1932</a>
+<a href="#1933" id="1933">1933</a>
+<a href="#1934" id="1934">1934</a>
+<a href="#1935" id="1935">1935</a>
+<a href="#1936" id="1936">1936</a>
+<a href="#1937" id="1937">1937</a>
+<a href="#1938" id="1938">1938</a>
+<a href="#1939" id="1939">1939</a>
+<a href="#1940" id="1940">1940</a>
+<a href="#1941" id="1941">1941</a>
+<a href="#1942" id="1942">1942</a>
+<a href="#1943" id="1943">1943</a>
+<a href="#1944" id="1944">1944</a>
+<a href="#1945" id="1945">1945</a>
+<a href="#1946" id="1946">1946</a>
+<a href="#1947" id="1947">1947</a>
+<a href="#1948" id="1948">1948</a>
+<a href="#1949" id="1949">1949</a>
+<a href="#1950" id="1950">1950</a>
+<a href="#1951" id="1951">1951</a>
+<a href="#1952" id="1952">1952</a>
+<a href="#1953" id="1953">1953</a>
+<a href="#1954" id="1954">1954</a>
+<a href="#1955" id="1955">1955</a>
+<a href="#1956" id="1956">1956</a>
+<a href="#1957" id="1957">1957</a>
+<a href="#1958" id="1958">1958</a>
+<a href="#1959" id="1959">1959</a>
+<a href="#1960" id="1960">1960</a>
+<a href="#1961" id="1961">1961</a>
+<a href="#1962" id="1962">1962</a>
+<a href="#1963" id="1963">1963</a>
+<a href="#1964" id="1964">1964</a>
+<a href="#1965" id="1965">1965</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
@@ -1828,6 +1973,7 @@
     task::{Context, Poll},
 };
 
+<span class="kw">use </span>anyhow::Context <span class="kw">as _</span>;
 <span class="kw">use </span>bytes::BytesMut;
 <span class="kw">use </span>futures_concurrency::stream::{stream_group, StreamGroup};
 <span class="kw">use </span>futures_util::FutureExt <span class="kw">as _</span>;
@@ -2296,7 +2442,7 @@
     <span class="doccomment">/// Internal queue of topic to close because all handles were dropped.
     </span>quit_queue: VecDeque&lt;TopicId&gt;,
     <span class="doccomment">/// Tasks for the connection loops, to keep track of panics.
-    </span>connection_tasks: JoinSet&lt;()&gt;,
+    </span>connection_tasks: JoinSet&lt;(NodeId, Connection, anyhow::Result&lt;()&gt;)&gt;,
 }
 
 <span class="kw">impl </span>Actor {
@@ -2425,16 +2571,16 @@
                 <span class="macro">inc!</span>(Metrics, actor_tick_dialer);
                 <span class="kw">match </span>res {
                     <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(conn)) =&gt; {
-                        <span class="macro">debug!</span>(peer = <span class="question-mark">?</span>peer_id, <span class="string">"dial successful"</span>);
+                        <span class="macro">debug!</span>(peer = %peer_id.fmt_short(), <span class="string">"dial successful"</span>);
                         <span class="macro">inc!</span>(Metrics, actor_tick_dialer_success);
                         <span class="self">self</span>.handle_connection(peer_id, ConnOrigin::Dial, conn);
                     }
                     <span class="prelude-val">Some</span>(<span class="prelude-val">Err</span>(err)) =&gt; {
-                        <span class="macro">warn!</span>(peer = <span class="question-mark">?</span>peer_id, <span class="string">"dial failed: {err}"</span>);
+                        <span class="macro">warn!</span>(peer = %peer_id.fmt_short(), <span class="string">"dial failed: {err}"</span>);
                         <span class="macro">inc!</span>(Metrics, actor_tick_dialer_failure);
                     }
                     <span class="prelude-val">None </span>=&gt; {
-                        <span class="macro">warn!</span>(peer = <span class="question-mark">?</span>peer_id, <span class="string">"dial disconnected"</span>);
+                        <span class="macro">warn!</span>(peer = %peer_id.fmt_short(), <span class="string">"dial disconnected"</span>);
                         <span class="macro">inc!</span>(Metrics, actor_tick_dialer_failure);
                     }
                 }
@@ -2442,12 +2588,8 @@
             event = <span class="self">self</span>.in_event_rx.recv() =&gt; {
                 <span class="macro">trace!</span>(<span class="question-mark">?</span>i, <span class="string">"tick: in_event_rx"</span>);
                 <span class="macro">inc!</span>(Metrics, actor_tick_in_event_rx);
-                <span class="kw">match </span>event {
-                    <span class="prelude-val">Some</span>(event) =&gt; {
-                        <span class="self">self</span>.handle_in_event(event, Instant::now()).<span class="kw">await</span><span class="question-mark">?</span>;
-                    }
-                    <span class="prelude-val">None </span>=&gt; <span class="macro">unreachable!</span>()
-                }
+                <span class="kw">let </span>event = event.expect(<span class="string">"unreachable: in_event_tx is never dropped before receiver"</span>);
+                <span class="self">self</span>.handle_in_event(event, Instant::now()).<span class="kw">await</span><span class="question-mark">?</span>;
             }
             drain = <span class="self">self</span>.timers.wait_and_drain() =&gt; {
                 <span class="macro">trace!</span>(<span class="question-mark">?</span>i, <span class="string">"tick: timers"</span>);
@@ -2459,11 +2601,8 @@
             }
             <span class="prelude-val">Some</span>(res) = <span class="self">self</span>.connection_tasks.join_next(), <span class="kw">if </span>!<span class="self">self</span>.connection_tasks.is_empty() =&gt; {
                 <span class="macro">trace!</span>(<span class="question-mark">?</span>i, <span class="string">"tick: connection_tasks"</span>);
-                <span class="kw">if let </span><span class="prelude-val">Err</span>(err) = res {
-                    <span class="kw">if </span>!err.is_cancelled() {
-                        <span class="macro">warn!</span>(<span class="string">"connection task panicked: {err:?}"</span>);
-                    }
-                }
+                <span class="kw">let </span>(peer_id, conn, result) = res.expect(<span class="string">"connection task panicked"</span>);
+                <span class="self">self</span>.handle_connection_task_finished(peer_id, conn, result).<span class="kw">await</span><span class="question-mark">?</span>;
             }
         }
 
@@ -2516,22 +2655,17 @@
 
     <span class="kw">fn </span>handle_connection(<span class="kw-2">&amp;mut </span><span class="self">self</span>, peer_id: NodeId, origin: ConnOrigin, conn: Connection) {
         <span class="kw">let </span>(send_tx, send_rx) = mpsc::channel(SEND_QUEUE_CAP);
+        <span class="kw">let </span>conn_id = conn.stable_id();
 
         <span class="kw">let </span>queue = <span class="kw">match </span><span class="self">self</span>.peers.entry(peer_id) {
-            Entry::Occupied(<span class="kw-2">mut </span>occupied_entry) =&gt; {
-                <span class="kw">let </span>state = occupied_entry.get_mut();
-                <span class="kw">let </span><span class="prelude-val">Some</span>(queue) = state.accept_conn(origin, send_tx) <span class="kw">else </span>{
-                    <span class="kw">return </span><span class="macro">warn!</span>(<span class="question-mark">?</span>peer_id, <span class="question-mark">?</span>origin, <span class="string">"ignoring connection: already accepted"</span>);
-                };
-                queue
-            }
-            Entry::Vacant(vacant_entry) =&gt; {
-                vacant_entry.insert(PeerState::Active {
-                    send_tx,
-                    origin,
-                    alt_send_tx: <span class="prelude-val">None</span>,
+            Entry::Occupied(<span class="kw-2">mut </span>entry) =&gt; entry.get_mut().accept_conn(send_tx, conn_id),
+            Entry::Vacant(entry) =&gt; {
+                entry.insert(PeerState::Active {
+                    active_send_tx: send_tx,
+                    active_conn_id: conn_id,
+                    other_conns: Vec::new(),
                 });
-                Vec::default()
+                Vec::new()
             }
         };
 
@@ -2541,27 +2675,53 @@
         <span class="comment">// Spawn a task for this connection
         </span><span class="self">self</span>.connection_tasks.spawn(
             <span class="kw">async move </span>{
-                <span class="kw">match </span>connection_loop(
+                <span class="kw">let </span>res = connection_loop(
                     peer_id,
-                    conn,
+                    <span class="kw-2">&amp;</span>conn,
                     origin,
                     send_rx,
                     <span class="kw-2">&amp;</span>in_event_tx,
                     max_message_size,
                     queue,
                 )
-                .<span class="kw">await
-                </span>{
-                    <span class="prelude-val">Ok</span>(()) =&gt; <span class="macro">debug!</span>(<span class="string">"connection closed without error"</span>),
-                    <span class="prelude-val">Err</span>(err) =&gt; <span class="macro">warn!</span>(<span class="string">"connection closed: {err:?}"</span>),
-                }
-                in_event_tx
-                    .send(InEvent::PeerDisconnected(peer_id))
-                    .<span class="kw">await
-                    </span>.ok();
+                .<span class="kw">await</span>;
+                (peer_id, conn, res)
             }
-            .instrument(<span class="macro">error_span!</span>(<span class="string">"gossip_conn"</span>, peer = %peer_id.fmt_short())),
+            .instrument(<span class="macro">error_span!</span>(<span class="string">"conn"</span>, peer = %peer_id.fmt_short())),
         );
+    }
+
+    <span class="attr">#[tracing::instrument(name = <span class="string">"conn"</span>, skip_all, fields(peer = %peer_id.fmt_short()))]
+    </span><span class="kw">async fn </span>handle_connection_task_finished(
+        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
+        peer_id: NodeId,
+        conn: Connection,
+        task_result: anyhow::Result&lt;()&gt;,
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
+        <span class="kw">if </span>conn.close_reason().is_none() {
+            conn.close(<span class="number">0u32</span>.into(), <span class="string">b"close from disconnect"</span>);
+        }
+        <span class="kw">let </span>reason = conn.close_reason().expect(<span class="string">"just closed"</span>);
+        <span class="kw">let </span>error = task_result.err();
+        <span class="macro">debug!</span>(%reason, <span class="question-mark">?</span>error, <span class="string">"connection closed"</span>);
+        <span class="kw">if let </span><span class="prelude-val">Some</span>(PeerState::Active {
+            active_conn_id,
+            other_conns,
+            ..
+        }) = <span class="self">self</span>.peers.get_mut(<span class="kw-2">&amp;</span>peer_id)
+        {
+            <span class="kw">if </span>conn.stable_id() == <span class="kw-2">*</span>active_conn_id {
+                <span class="macro">debug!</span>(<span class="string">"active send connection closed, mark peer as disconnected"</span>);
+                <span class="self">self</span>.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
+                    .<span class="kw">await</span><span class="question-mark">?</span>;
+            } <span class="kw">else </span>{
+                other_conns.retain(|x| <span class="kw-2">*</span>x != conn.stable_id());
+                <span class="macro">debug!</span>(<span class="string">"remaining {} other connections"</span>, other_conns.len() + <span class="number">1</span>);
+            }
+        } <span class="kw">else </span>{
+            <span class="macro">debug!</span>(<span class="string">"peer already marked as disconnected"</span>);
+        }
+        <span class="prelude-val">Ok</span>(())
     }
 
     <span class="kw">async fn </span>handle_to_actor_msg(<span class="kw-2">&amp;mut </span><span class="self">self</span>, msg: ToActor, now: Instant) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
@@ -2648,15 +2808,19 @@
                 OutEvent::SendMessage(peer_id, message) =&gt; {
                     <span class="kw">let </span>state = <span class="self">self</span>.peers.entry(peer_id).or_default();
                     <span class="kw">match </span>state {
-                        PeerState::Active { send_tx, .. } =&gt; {
-                            <span class="kw">if let </span><span class="prelude-val">Err</span>(_err) = send_tx.send(message).<span class="kw">await </span>{
+                        PeerState::Active { active_send_tx, .. } =&gt; {
+                            <span class="kw">if let </span><span class="prelude-val">Err</span>(_err) = active_send_tx.send(message).<span class="kw">await </span>{
                                 <span class="comment">// Removing the peer is handled by the in_event PeerDisconnected sent
-                                // at the end of the connection task.
-                                </span><span class="macro">warn!</span>(<span class="string">"connection loop for {peer_id:?} dropped"</span>);
+                                // in [`Self::handle_connection_task_finished`].
+                                </span><span class="macro">warn!</span>(
+                                    peer = %peer_id.fmt_short(),
+                                    <span class="string">"failed to send: connection task send loop terminated"</span>,
+                                );
                             }
                         }
                         PeerState::Pending { queue } =&gt; {
                             <span class="kw">if </span>queue.is_empty() {
+                                <span class="macro">debug!</span>(peer = %peer_id.fmt_short(), <span class="string">"start to dial"</span>);
                                 <span class="self">self</span>.dialer.queue_dial(peer_id, GOSSIP_ALPN);
                             }
                             queue.push(message);
@@ -2696,20 +2860,17 @@
                 }
                 OutEvent::DisconnectPeer(peer_id) =&gt; {
                     <span class="comment">// signal disconnection by dropping the senders to the connection
-                    </span><span class="self">self</span>.peers.remove(<span class="kw-2">&amp;</span>peer_id);
+                    </span><span class="macro">debug!</span>(peer=%peer_id.fmt_short(), <span class="string">"gossip state indicates disconnect: drop peer"</span>);
+                    <span class="self">self</span>.peers.remove(<span class="kw-2">&amp;</span>peer_id);
                 }
                 OutEvent::PeerData(node_id, data) =&gt; <span class="kw">match </span>decode_peer_data(<span class="kw-2">&amp;</span>data) {
                     <span class="prelude-val">Err</span>(err) =&gt; <span class="macro">warn!</span>(<span class="string">"Failed to decode {data:?} from {node_id}: {err}"</span>),
                     <span class="prelude-val">Ok</span>(info) =&gt; {
                         <span class="macro">debug!</span>(peer = <span class="question-mark">?</span>node_id, <span class="string">"add known addrs: {info:?}"</span>);
-                        <span class="kw">let </span>AddrInfo {
-                            relay_url,
-                            direct_addresses,
-                        } = info;
                         <span class="kw">let </span>node_addr = NodeAddr {
                             node_id,
-                            relay_url,
-                            direct_addresses,
+                            relay_url: info.relay_url,
+                            direct_addresses: info.direct_addresses,
                         };
                         <span class="kw">if let </span><span class="prelude-val">Err</span>(err) = <span class="self">self
                             </span>.endpoint
@@ -2729,8 +2890,7 @@
         topic: TopicId,
         receiver_id: ReceiverId,
     ) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
-        <span class="kw">if let </span>Entry::Occupied(<span class="kw-2">mut </span>entry) = <span class="self">self</span>.topics.entry(topic) {
-            <span class="kw">let </span>state = entry.get_mut();
+        <span class="kw">if let </span><span class="prelude-val">Some</span>(state) = <span class="self">self</span>.topics.get_mut(<span class="kw-2">&amp;</span>topic) {
             state.event_senders.remove(<span class="kw-2">&amp;</span>receiver_id);
             <span class="kw">if </span>!state.still_needed() {
                 <span class="self">self</span>.quit_queue.push_back(topic);
@@ -2745,53 +2905,50 @@
     }
 }
 
+<span class="kw">type </span>ConnId = usize;
+
 <span class="attr">#[derive(Debug)]
 </span><span class="kw">enum </span>PeerState {
     Pending {
         queue: Vec&lt;ProtoMessage&gt;,
     },
     Active {
-        send_tx: mpsc::Sender&lt;ProtoMessage&gt;,
-        origin: ConnOrigin,
-        alt_send_tx: <span class="prelude-ty">Option</span>&lt;mpsc::Sender&lt;ProtoMessage&gt;&gt;,
+        active_send_tx: mpsc::Sender&lt;ProtoMessage&gt;,
+        active_conn_id: ConnId,
+        other_conns: Vec&lt;ConnId&gt;,
     },
 }
 
 <span class="kw">impl </span>PeerState {
-    <span class="doccomment">/// Modifies the state to account for a new connection, returning the queue of pending
-    /// messages.
-    ///
-    /// The connection can be rejected if there is already a connection from the same origin.
-    </span><span class="kw">fn </span>accept_conn(
+    <span class="kw">fn </span>accept_conn(
         <span class="kw-2">&amp;mut </span><span class="self">self</span>,
-        conn_origin: ConnOrigin,
-        conn_send_tx: mpsc::Sender&lt;ProtoMessage&gt;,
-    ) -&gt; <span class="prelude-ty">Option</span>&lt;Vec&lt;ProtoMessage&gt;&gt; {
+        send_tx: mpsc::Sender&lt;ProtoMessage&gt;,
+        conn_id: ConnId,
+    ) -&gt; Vec&lt;ProtoMessage&gt; {
         <span class="kw">match </span><span class="self">self </span>{
             PeerState::Pending { queue } =&gt; {
                 <span class="kw">let </span>queue = std::mem::take(queue);
                 <span class="kw-2">*</span><span class="self">self </span>= PeerState::Active {
-                    send_tx: conn_send_tx,
-                    origin: conn_origin,
-                    alt_send_tx: <span class="prelude-val">None</span>,
+                    active_send_tx: send_tx,
+                    active_conn_id: conn_id,
+                    other_conns: Vec::new(),
                 };
-                <span class="prelude-val">Some</span>(queue)
+                queue
             }
             PeerState::Active {
-                origin,
-                alt_send_tx,
-                ..
+                active_send_tx,
+                active_conn_id,
+                other_conns,
             } =&gt; {
-                <span class="kw">if </span><span class="kw-2">*</span>origin == conn_origin {
-                    <span class="comment">// the new connection has the same origin as the primary connection
-                    </span><span class="prelude-val">None
-                </span>} <span class="kw">else if </span>alt_send_tx.is_some() {
-                    <span class="comment">// the new connection has the same origin as the secondary connection
-                    </span><span class="prelude-val">None
-                </span>} <span class="kw">else </span>{
-                    <span class="kw-2">*</span>alt_send_tx = <span class="prelude-val">Some</span>(conn_send_tx);
-                    <span class="prelude-val">Some</span>(Default::default())
-                }
+                <span class="comment">// We already have an active connection. We keep the old connection intact,
+                // but only use the new connection for sending from now on.
+                // By dropping the `send_tx` of the old connection, the send loop part of
+                // the `connection_loop` of the old connection will terminate, which will also
+                // notify the peer that the old connection may be dropped.
+                </span>other_conns.push(<span class="kw-2">*</span>active_conn_id);
+                <span class="kw-2">*</span>active_send_tx = send_tx;
+                <span class="kw-2">*</span>active_conn_id = conn_id;
+                Vec::new()
             }
         }
     }
@@ -2841,13 +2998,13 @@
 
 <span class="kw">async fn </span>connection_loop(
     from: PublicKey,
-    conn: Connection,
+    conn: <span class="kw-2">&amp;</span>Connection,
     origin: ConnOrigin,
     <span class="kw-2">mut </span>send_rx: mpsc::Receiver&lt;ProtoMessage&gt;,
     in_event_tx: <span class="kw-2">&amp;</span>mpsc::Sender&lt;InEvent&gt;,
     max_message_size: usize,
     queue: Vec&lt;ProtoMessage&gt;,
-) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
+) -&gt; anyhow::Result&lt;()&gt; {
     <span class="kw">let </span>(<span class="kw-2">mut </span>send, <span class="kw-2">mut </span>recv) = <span class="kw">match </span>origin {
         ConnOrigin::Accept =&gt; conn.accept_bi().<span class="kw">await</span><span class="question-mark">?</span>,
         ConnOrigin::Dial =&gt; conn.open_bi().<span class="kw">await</span><span class="question-mark">?</span>,
@@ -2867,8 +3024,7 @@
         </span><span class="kw">let _ </span>= send.finish();
         <span class="comment">// wait for the other node to ack all the sent data
         </span><span class="kw">let _ </span>= send.stopped().<span class="kw">await</span>;
-        conn.close(<span class="number">0u8</span>.into(), <span class="string">b"close from disconnect"</span>);
-        <span class="prelude-val">Ok</span>::&lt;<span class="kw">_</span>, Error&gt;(())
+        anyhow::Ok(())
     };
 
     <span class="kw">let </span>recv_loop = <span class="kw">async </span>{
@@ -2880,11 +3036,11 @@
                 <span class="prelude-val">Some</span>(msg) =&gt; in_event_tx.send(InEvent::RecvMessage(from, msg)).<span class="kw">await</span><span class="question-mark">?</span>,
             }
         }
-        <span class="prelude-val">Ok</span>::&lt;<span class="kw">_</span>, Error&gt;(())
+        anyhow::Ok(())
     };
 
-    <span class="macro">tokio::join!</span>(send_loop, recv_loop).<span class="number">0</span><span class="question-mark">?</span>;
-    <span class="prelude-val">Ok</span>(())
+    <span class="kw">let </span>res = <span class="macro">tokio::join!</span>(send_loop, recv_loop);
+    res.<span class="number">0</span>.context(<span class="string">"send_loop"</span>).and(res.<span class="number">1</span>.context(<span class="string">"recv_loop"</span>))
 }
 
 <span class="attr">#[derive(Default, Debug, Clone, Serialize, Deserialize)]
@@ -2892,6 +3048,7 @@
     relay_url: <span class="prelude-ty">Option</span>&lt;RelayUrl&gt;,
     direct_addresses: BTreeSet&lt;SocketAddr&gt;,
 }
+
 <span class="kw">impl </span>From&lt;NodeAddr&gt; <span class="kw">for </span>AddrInfo {
     <span class="kw">fn </span>from(
         NodeAddr {
@@ -3108,7 +3265,8 @@
 
     <span class="kw">use </span>bytes::Bytes;
     <span class="kw">use </span>futures_concurrency::future::TryJoin;
-    <span class="kw">use </span>iroh::{RelayMap, RelayMode, SecretKey};
+    <span class="kw">use </span>iroh::{protocol::Router, RelayMap, RelayMode, SecretKey};
+    <span class="kw">use </span>rand::Rng;
     <span class="kw">use </span>tokio::{spawn, time::timeout};
     <span class="kw">use </span>tokio_util::sync::CancellationToken;
     <span class="kw">use </span>tracing::{info, instrument};
@@ -3636,6 +3794,138 @@
         timeout(wait, go2_handle).<span class="kw">await</span><span class="question-mark">???</span>;
 
         testresult::TestResult::Ok(())
+    }
+
+    <span class="attr">#[tokio::test]
+    #[traced_test]
+    </span><span class="kw">async fn </span>can_die_and_reconnect() -&gt; testresult::TestResult {
+        <span class="doccomment">/// Runs a future in a separate runtime on a separate thread, cancelling everything
+        /// abruptly once `cancel` is invoked.
+        </span><span class="kw">fn </span>run_in_thread&lt;T: Send + <span class="lifetime">'static</span>&gt;(
+            cancel: CancellationToken,
+            fut: <span class="kw">impl </span>std::future::Future&lt;Output = T&gt; + Send + <span class="lifetime">'static</span>,
+        ) -&gt; std::thread::JoinHandle&lt;<span class="prelude-ty">Option</span>&lt;T&gt;&gt; {
+            std::thread::spawn(<span class="kw">move </span>|| {
+                <span class="kw">let </span>rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(<span class="kw">async move </span>{ cancel.run_until_cancelled(fut).<span class="kw">await </span>})
+            })
+        }
+
+        <span class="doccomment">/// Spawns a new endpoint and gossip instance.
+        </span><span class="kw">async fn </span>spawn_gossip(
+            secret_key: SecretKey,
+            relay_map: RelayMap,
+        ) -&gt; anyhow::Result&lt;(Router, Gossip)&gt; {
+            <span class="kw">let </span>ep = Endpoint::builder()
+                .secret_key(secret_key)
+                .relay_mode(RelayMode::Custom(relay_map))
+                .insecure_skip_relay_cert_verify(<span class="bool-val">true</span>)
+                .bind()
+                .<span class="kw">await</span><span class="question-mark">?</span>;
+            <span class="kw">let </span>gossip = Gossip::builder().spawn(ep.clone()).<span class="kw">await</span><span class="question-mark">?</span>;
+            <span class="kw">let </span>router = Router::builder(ep.clone())
+                .accept(GOSSIP_ALPN, gossip.clone())
+                .spawn()
+                .<span class="kw">await</span><span class="question-mark">?</span>;
+            <span class="prelude-val">Ok</span>((router, gossip))
+        }
+
+        <span class="doccomment">/// Spawns a gossip node, and broadcasts a single message, then sleep until cancelled externally.
+        </span><span class="kw">async fn </span>broadcast_once(
+            secret_key: SecretKey,
+            relay_map: RelayMap,
+            bootstrap_addr: NodeAddr,
+            topic_id: TopicId,
+            message: String,
+        ) -&gt; anyhow::Result&lt;()&gt; {
+            <span class="kw">let </span>(router, gossip) = spawn_gossip(secret_key, relay_map).<span class="kw">await</span><span class="question-mark">?</span>;
+            <span class="macro">info!</span>(node_id = %router.endpoint().node_id().fmt_short(), <span class="string">"broadcast node spawned"</span>);
+            <span class="kw">let </span>bootstrap = <span class="macro">vec!</span>[bootstrap_addr.node_id];
+            router.endpoint().add_node_addr(bootstrap_addr)<span class="question-mark">?</span>;
+            <span class="kw">let </span>topic = gossip.subscribe_and_join(topic_id, bootstrap).<span class="kw">await</span><span class="question-mark">?</span>;
+            topic.broadcast(message.as_bytes().to_vec().into()).<span class="kw">await</span><span class="question-mark">?</span>;
+            std::future::pending::&lt;()&gt;().<span class="kw">await</span>;
+            <span class="prelude-val">Ok</span>(())
+        }
+
+        <span class="kw">let </span>(relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().<span class="kw">await</span>.unwrap();
+        <span class="kw">let </span><span class="kw-2">mut </span>rng = <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
+        <span class="kw">let </span>topic_id = TopicId::from_bytes(rng.gen());
+
+        <span class="comment">// spawn a gossip node, send the node's address on addr_tx,
+        // then wait to receive `count` messages, and terminate.
+        </span><span class="kw">let </span>(addr_tx, addr_rx) = tokio::sync::oneshot::channel();
+        <span class="kw">let </span>(msgs_recv_tx, <span class="kw-2">mut </span>msgs_recv_rx) = tokio::sync::mpsc::channel(<span class="number">3</span>);
+        <span class="kw">let </span>recv_task = tokio::task::spawn({
+            <span class="kw">let </span>relay_map = relay_map.clone();
+            <span class="kw">let </span>secret_key = SecretKey::generate(<span class="kw-2">&amp;mut </span>rng);
+            <span class="kw">async move </span>{
+                <span class="kw">let </span>(router, gossip) = spawn_gossip(secret_key, relay_map).<span class="kw">await</span><span class="question-mark">?</span>;
+                <span class="kw">let </span>addr = router.endpoint().node_addr().<span class="kw">await</span><span class="question-mark">?</span>;
+                <span class="macro">info!</span>(node_id = %addr.node_id.fmt_short(), <span class="string">"recv node spawned"</span>);
+                addr_tx.send(addr).unwrap();
+                <span class="kw">let </span><span class="kw-2">mut </span>topic = gossip.subscribe_and_join(topic_id, <span class="macro">vec!</span>[]).<span class="kw">await</span><span class="question-mark">?</span>;
+                <span class="kw">while let </span><span class="prelude-val">Some</span>(event) = topic.try_next().<span class="kw">await</span>.unwrap() {
+                    <span class="kw">if let </span>Event::Gossip(GossipEvent::Received(message)) = event {
+                        <span class="kw">let </span>message = std::str::from_utf8(<span class="kw-2">&amp;</span>message.content)<span class="question-mark">?</span>.to_string();
+                        msgs_recv_tx.send(message).<span class="kw">await</span><span class="question-mark">?</span>;
+                    }
+                }
+                anyhow::Ok(())
+            }
+        });
+
+        <span class="kw">let </span>node0_addr = addr_rx.<span class="kw">await</span><span class="question-mark">?</span>;
+        <span class="kw">let </span>max_wait = Duration::from_secs(<span class="number">5</span>);
+
+        <span class="comment">// spawn a node, send a message, and then abruptly terminate the node ungracefully
+        // after the message was received on our receiver node.
+        </span><span class="kw">let </span>cancel = CancellationToken::new();
+        <span class="kw">let </span>secret = SecretKey::generate(<span class="kw-2">&amp;mut </span>rng);
+        <span class="kw">let </span>join_handle_1 = run_in_thread(
+            cancel.clone(),
+            broadcast_once(
+                secret.clone(),
+                relay_map.clone(),
+                node0_addr.clone(),
+                topic_id,
+                <span class="string">"msg1"</span>.to_string(),
+            ),
+        );
+        <span class="comment">// assert that we received the message on the receiver node.
+        </span><span class="kw">let </span>msg = timeout(max_wait, msgs_recv_rx.recv()).<span class="kw">await</span><span class="question-mark">?</span>.unwrap();
+        <span class="macro">assert_eq!</span>(<span class="kw-2">&amp;</span>msg, <span class="string">"msg1"</span>);
+        <span class="macro">info!</span>(<span class="string">"kill broadcast node"</span>);
+        cancel.cancel();
+
+        <span class="comment">// spawns the node again with the same node id, and send another message
+        </span><span class="kw">let </span>cancel = CancellationToken::new();
+        <span class="kw">let </span>join_handle_2 = run_in_thread(
+            cancel.clone(),
+            broadcast_once(
+                secret.clone(),
+                relay_map.clone(),
+                node0_addr.clone(),
+                topic_id,
+                <span class="string">"msg2"</span>.to_string(),
+            ),
+        );
+        <span class="comment">// assert that we received the message on the receiver node.
+        // this means that the reconnect with the same node id worked.
+        </span><span class="kw">let </span>msg = timeout(max_wait, msgs_recv_rx.recv()).<span class="kw">await</span><span class="question-mark">?</span>.unwrap();
+        <span class="macro">assert_eq!</span>(<span class="kw-2">&amp;</span>msg, <span class="string">"msg2"</span>);
+        <span class="macro">info!</span>(<span class="string">"kill broadcast node"</span>);
+        cancel.cancel();
+
+        <span class="macro">info!</span>(<span class="string">"kill recv node"</span>);
+        recv_task.abort();
+        <span class="macro">assert!</span>(join_handle_1.join().unwrap().is_none());
+        <span class="macro">assert!</span>(join_handle_2.join().unwrap().is_none());
+
+        <span class="prelude-val">Ok</span>(())
     }
 }
 </code></pre></div></section></main></body></html>
