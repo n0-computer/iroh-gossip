@@ -571,9 +571,11 @@ impl<PI: PeerIdentity> State<PI> {
                         id: None,
                         round: ihave_round,
                     });
+                    self.add_eager(ihave_peer);
                     io.push(OutEvent::SendMessage(ihave_peer, message));
                 }
                 // Prune the sender of the Gossip.
+                self.add_lazy(*gossip_sender);
                 io.push(OutEvent::SendMessage(*gossip_sender, Message::Prune));
             }
         }
