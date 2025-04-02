@@ -1279,7 +1279,7 @@
         </span><span class="kw">if </span>nodes.len() &lt; len {
             nodes.extend(
                 <span class="self">self</span>.active_view
-                    .shuffled_and_capped(nodes.len() - len, <span class="kw-2">&amp;mut </span><span class="self">self</span>.rng),
+                    .shuffled_and_capped(len - nodes.len(), <span class="kw-2">&amp;mut </span><span class="self">self</span>.rng),
             );
         }
         <span class="kw">let </span>nodes = nodes.into_iter().map(|id| <span class="self">self</span>.peer_info(<span class="kw-2">&amp;</span>id));
