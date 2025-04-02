@@ -119,13 +119,13 @@ impl<PI> From<(PI, Option<PeerData>)> for PeerInfo<PI> {
 #[cfg(test)]
 mod test {
 
-    use std::{collections::HashSet, env};
+    use std::{collections::HashSet, env, fmt, str::FromStr, time::Duration};
 
-    use n0_future::time::Instant;
-    use rand::SeedableRng;
+    use rand::{seq::IteratorRandom, SeedableRng};
+    use rand_chacha::ChaCha12Rng;
     use tracing_test::traced_test;
 
-    use super::{Command, Config, Event, State};
+    use super::{Command, Config, Event};
     use crate::proto::{
         tests::{
             assert_synchronous_active, report_round_distribution, sort, Network, Simulator,
@@ -138,24 +138,19 @@ mod test {
     #[traced_test]
     fn hyparview_smoke() {
         // Create a network with 4 nodes and active_view_capacity 2
+        let rng = ChaCha12Rng::seed_from_u64(read_var("SEED", 0));
         let mut config = Config::default();
         config.membership.active_view_capacity = 2;
-        let mut network = Network::new(Instant::now());
-        let rng = rand_chacha::ChaCha12Rng::seed_from_u64(99);
+        let mut network = Network::new(config, rng);
+        network.set_default_latency_in_ticks(3);
         for i in 0..4 {
-            network.push(State::new(
-                i,
-                Default::default(),
-                config.clone(),
-                rng.clone(),
-            ));
+            network.insert(i);
         }
 
         let t: TopicId = [0u8; 32].into();
 
         // Do some joins between nodes 0,1,2
-        network.command(0, t, Command::Join(vec![1]));
-        network.command(0, t, Command::Join(vec![2]));
+        network.command(0, t, Command::Join(vec![1, 2]));
         network.command(1, t, Command::Join(vec![2]));
         network.command(2, t, Command::Join(vec![]));
         network.ticks(10);
@@ -210,19 +205,14 @@ mod test {
     #[test]
     #[traced_test]
     fn plumtree_smoke() {
+        let rng = ChaCha12Rng::seed_from_u64(read_var("SEED", 0));
         let config = Config::default();
-        let mut network = Network::new(Instant::now());
+        let mut network = Network::new(config, rng);
         let broadcast_ticks = 12;
         let join_ticks = 12;
         // build a network with 6 nodes
-        let rng = rand_chacha::ChaCha12Rng::seed_from_u64(99);
         for i in 0..6 {
-            network.push(State::new(
-                i,
-                Default::default(),
-                config.clone(),
-                rng.clone(),
-            ));
+            network.insert(i);
         }
 
         let t = [0u8; 32].into();
@@ -274,63 +264,102 @@ mod test {
     }
 
     #[test]
-    #[traced_test]
-    fn big_multiple_sender() {
+    // #[traced_test]
+    fn big_hyparview() {
         let mut gossip_config = Config::default();
-        gossip_config.broadcast.optimization_threshold = (read_var("OPTIM", 7) as u16).into();
-        let config = SimulatorConfig {
-            peers_count: read_var("PEERS", 100),
-            ..Default::default()
-        };
-        let rounds = read_var("ROUNDS", 10);
+        gossip_config.membership.shuffle_interval = Duration::from_secs(5);
+        let mut config = SimulatorConfig::from_env();
+        config.peers_count = read_var("PEERS", 100);
         let mut simulator = Simulator::new(config, gossip_config);
-        simulator.init();
         simulator.bootstrap();
-        for i in 0..rounds {
-            let from = i + 1;
-            let message = format!("m{i}").into_bytes().into();
-            simulator.gossip_round(from, message)
-        }
-        simulator.report_round_sums();
+        let state = simulator.report_swarm();
+        assert!(state.min_active_len > 0);
     }
 
     #[test]
-    #[traced_test]
+    // #[traced_test]
+    fn big_multiple_sender() {
+        let mut gossip_config = Config::default();
+        gossip_config.broadcast.optimization_threshold = (read_var("OPTIM", 7) as u16).into();
+        gossip_config.membership.shuffle_interval = Duration::from_secs(5);
+        let config = SimulatorConfig::from_env();
+        let rounds = read_var("ROUNDS", 50);
+        let mut simulator = Simulator::new(config, gossip_config);
+        simulator.bootstrap();
+        let mut rng = rand_chacha::ChaCha12Rng::seed_from_u64(0);
+        for i in 0..rounds {
+            let from = simulator.network.peers.keys().choose(&mut rng).unwrap();
+            let message = format!("m{i}").into_bytes().into();
+            let messages = vec![(*from, message)];
+            simulator.gossip_round(messages);
+        }
+        let avg = simulator.report_round_average();
+        assert!(avg.ldh < 10.);
+        assert!(avg.rmr < 0.1);
+    }
+
+    #[test]
+    // #[traced_test]
     fn big_single_sender() {
         let mut gossip_config = Config::default();
         gossip_config.broadcast.optimization_threshold = (read_var("OPTIM", 7) as u16).into();
-        let config = SimulatorConfig {
-            peers_count: read_var("PEERS", 100),
-            ..Default::default()
-        };
-        let rounds = read_var("ROUNDS", 10);
+        gossip_config.membership.shuffle_interval = Duration::from_secs(5);
+        let config = SimulatorConfig::from_env();
+        let rounds = read_var("ROUNDS", 50);
         let mut simulator = Simulator::new(config, gossip_config);
-        simulator.init();
         simulator.bootstrap();
+        let from = 8;
         for i in 0..rounds {
-            let from = 2;
             let message = format!("m{i}").into_bytes().into();
-            simulator.gossip_round(from, message)
+            let messages = vec![(from, message)];
+            simulator.gossip_round(messages);
         }
-        simulator.report_round_sums();
+        simulator.report_round_average();
+        let avg = simulator.report_round_average();
+        assert!(avg.ldh < 8.);
+        assert!(avg.rmr < 0.1);
+    }
+
+    #[test]
+    // #[traced_test]
+    fn big_burst() {
+        let mut gossip_config = Config::default();
+        gossip_config.broadcast.optimization_threshold = (read_var("OPTIM", 7) as u16).into();
+        gossip_config.membership.shuffle_interval = Duration::from_secs(5);
+        let config = SimulatorConfig::from_env();
+        let rounds = read_var("ROUNDS", 20);
+
+        let mut simulator = Simulator::new(config, gossip_config);
+        simulator.bootstrap();
+        let messages_per_peer = read_var("MESSAGES_PER_PEER", 2);
+        for i in 0..rounds {
+            let mut messages = vec![];
+            for id in simulator.network.peers.keys() {
+                for j in 0..messages_per_peer {
+                    let message: bytes::Bytes = format!("round {i}: message {j} from {id}")
+                        .into_bytes()
+                        .into();
+                    messages.push((*id, message));
+                }
+            }
+            simulator.gossip_round(messages);
+        }
+        let avg = simulator.report_round_average();
+        assert!(avg.ldh < 18.);
+        assert!(avg.rmr < 0.7);
     }
 
     #[test]
     #[traced_test]
     fn quit() {
         // Create a network with 4 nodes and active_view_capacity 2
+        let rng = ChaCha12Rng::seed_from_u64(read_var("SEED", 0));
         let mut config = Config::default();
         config.membership.active_view_capacity = 2;
-        let mut network = Network::new(Instant::now());
+        let mut network = Network::new(config, rng);
         let num = 4;
-        let rng = rand_chacha::ChaCha12Rng::seed_from_u64(99);
         for i in 0..num {
-            network.push(State::new(
-                i,
-                Default::default(),
-                config.clone(),
-                rng.clone(),
-            ));
+            network.insert(i);
         }
 
         let t: TopicId = [0u8; 32].into();
@@ -343,9 +372,9 @@ mod test {
         network.ticks(10);
 
         // assert all peers appear in the connections
-        let all_conns: HashSet<i32> = HashSet::from_iter((0..4).flat_map(|pa| {
+        let all_conns: HashSet<u64> = HashSet::from_iter((0u64..4).flat_map(|p| {
             network
-                .get_active(&pa, &t)
+                .get_active(&p, &t)
                 .unwrap()
                 .into_iter()
                 .flat_map(|x| x.into_iter())
@@ -359,9 +388,9 @@ mod test {
         assert!(network.peer(&3).unwrap().state(&t).is_none());
 
         // assert all peers without peer 3 appear in the connections
-        let all_conns: HashSet<i32> = HashSet::from_iter((0..num).flat_map(|pa| {
+        let all_conns: HashSet<u64> = HashSet::from_iter((0..num).flat_map(|p| {
             network
-                .get_active(&pa, &t)
+                .get_active(&p, &t)
                 .unwrap()
                 .into_iter()
                 .flat_map(|x| x.into_iter())
@@ -370,10 +399,12 @@ mod test {
         assert!(assert_synchronous_active(&network));
     }
 
-    fn read_var(name: &str, default: usize) -> usize {
+    fn read_var<T: FromStr<Err: fmt::Display + fmt::Debug>>(name: &str, default: T) -> T {
         env::var(name)
-            .unwrap_or_else(|_| default.to_string())
-            .parse()
-            .unwrap()
+            .map(|x| {
+                x.parse()
+                    .expect(&format!("Failed to parse environment variable {name}"))
+            })
+            .unwrap_or(default)
     }
 }
