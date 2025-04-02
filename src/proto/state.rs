@@ -191,8 +191,9 @@ impl<PI: PeerIdentity, R: Rng + Clone> State<PI, R> {
         self.states.get(topic)
     }
 
-    /// Get a reference to the protocol state for a topic.
-    #[cfg(test)]
+    /// Get a mutable reference to the protocol state for a topic.
+    ///
+    /// This can be used to reset stats.
     pub fn state_mut(&mut self, topic: &TopicId) -> Option<&mut topic::State<PI, R>> {
         self.states.get_mut(topic)
     }
