@@ -164,7 +164,7 @@ pub struct Disconnect {
     /// Whether we are actually shutting down or closing the connection only because our limits are
     /// reached.
     alive: bool,
-    /// Obsolete field (kept in the struct to not break wire compatibility).
+    /// Obsolete field (kept in the struct to maintain wire compatibility).
     _respond: bool,
 }
 
@@ -331,15 +331,23 @@ where
         ));
     }
 
+    /// We received a disconnect message.
     fn on_disconnect(&mut self, peer: PI, details: Disconnect, io: &mut impl IO<PI>) {
         self.pending_neighbor_requests.remove(&peer);
         if self.active_view.contains(&peer) {
-            self.remove_active(&peer, RemovalReason::DisconnectReceived(details.alive), io);
+            self.remove_active(
+                &peer,
+                RemovalReason::DisconnectReceived {
+                    is_alive: details.alive,
+                },
+                io,
+            );
         } else if details.alive && self.passive_view.contains(&peer) {
             self.alive_disconnect_peers.insert(peer);
         }
     }
 
+    /// A connection was closed by the peer.
     fn handle_connection_closed(&mut self, peer: PI, io: &mut impl IO<PI>) {
         self.pending_neighbor_requests.remove(&peer);
         if self.active_view.contains(&peer) {
@@ -367,17 +375,10 @@ where
     }
 
     fn on_join(&mut self, peer: PI, data: Option<PeerData>, now: Instant, io: &mut impl IO<PI>) {
-        // If the peer is already in our active view, there's nothing to do.
-        if self.active_view.contains(&peer) {
-            // .. but we still update the peer data.
-            self.insert_peer_info((peer, data.clone()).into(), io);
-            // .. and we reply to the peer with a `Neighbor` message, renewing our neighbor relationship
-            self.send_neighbor(peer, Priority::High, io);
-        } else {
-            // "A node that receives a join request will start by adding the new
-            // node to its active view, even if it has to drop a random node from it. (6)"
-            self.add_active(peer, data.clone(), Priority::High, now, io);
-        }
+        // "A node that receives a join request will start by adding the new
+        // node to its active view, even if it has to drop a random node from it. (6)"
+        self.add_active(peer, data.clone(), Priority::High, true, now, io);
+
         // "The contact node c will then send to all other nodes in its active view a ForwardJoin
         // request containing the new node identifier. Associated to the join procedure,
         // there are two configuration parameters, named Active Random Walk Length (ARWL),
@@ -400,65 +401,64 @@ where
         &mut self,
         sender: PI,
         message: ForwardJoin<PI>,
-        now: Instant,
+        _now: Instant,
         io: &mut impl IO<PI>,
     ) {
+        let peer_id = message.peer.id;
         // If the peer is already in our active view, we renew our neighbor relationship.
-        if self.active_view.contains(&message.peer.id) {
-            self.send_neighbor(message.peer.id, Priority::High, io);
+        if self.active_view.contains(&peer_id) {
+            self.insert_peer_info(message.peer, io);
+            self.send_neighbor(peer_id, Priority::High, io);
         }
         // "i) If the time to live is equal to zero or if the number of nodes in p’s active view is equal to one,
         // it will add the new node to its active view (7)"
         else if message.ttl.expired() || self.active_view.len() <= 1 {
-            self.add_active(
-                message.peer.id,
-                message.peer.data.clone(),
-                Priority::High,
-                now,
-                io,
-            );
-        }
-        // "ii) If the time to live is equal to PRWL, p will insert the new node into its passive view"
-        else if message.ttl == self.config.passive_random_walk_length {
-            self.add_passive(message.peer.id, message.peer.data.clone(), io);
-        }
-        // "iii) The time to live field is decremented."
-        // "iv) If, at this point, n has not been inserted
-        // in p’s active view, p will forward the request to a random node in its active view
-        // (different from the one from which the request was received)."
-        if !self.active_view.contains(&message.peer.id) {
-            match self
-                .active_view
-                .pick_random_without(&[&sender], &mut self.rng)
+            self.insert_peer_info(message.peer, io);
+            // Modification from paper: Instead of adding the peer directly to our active view,
+            // we only send the Neighbor message. We will add the peer to our active view once we receive a
+            // reply from our neighbor.
+            // This prevents us adding unreachable peers to our active view.
+            self.send_neighbor(peer_id, Priority::High, io);
+        } else {
+            // "ii) If the time to live is equal to PRWL, p will insert the new node into its passive view"
+            if message.ttl == self.config.passive_random_walk_length {
+                self.add_passive(peer_id, message.peer.data.clone(), io);
+            }
+            // "iii) The time to live field is decremented."
+            // "iv) If, at this point, n has not been inserted
+            // in p’s active view, p will forward the request to a random node in its active view
+            // (different from the one from which the request was received)."
+            if !self.active_view.contains(&peer_id)
+                && !self.pending_neighbor_requests.contains(&peer_id)
             {
-                None => {
-                    unreachable!("if the peer was not added, there are at least two peers in our active view.");
-                }
-                Some(next) => {
-                    let message = Message::ForwardJoin(ForwardJoin {
-                        peer: message.peer,
-                        ttl: message.ttl.next(),
-                    });
-                    io.push(OutEvent::SendMessage(*next, message));
+                match self
+                    .active_view
+                    .pick_random_without(&[&sender], &mut self.rng)
+                {
+                    None => {
+                        unreachable!("if the peer was not added, there are at least two peers in our active view.");
+                    }
+                    Some(next) => {
+                        let message = Message::ForwardJoin(ForwardJoin {
+                            peer: message.peer,
+                            ttl: message.ttl.next(),
+                        });
+                        io.push(OutEvent::SendMessage(*next, message));
+                    }
                 }
             }
         }
     }
 
     fn on_neighbor(&mut self, from: PI, details: Neighbor, now: Instant, io: &mut impl IO<PI>) {
-        self.pending_neighbor_requests.remove(&from);
+        let is_reply = self.pending_neighbor_requests.remove(&from);
+        let do_reply = !is_reply;
         // "A node q that receives a high priority neighbor request will always accept the request, even
         // if it has to drop a random member from its active view (again, the member that is dropped will
         // receive a Disconnect notification). If a node q receives a low priority Neighbor request, it will
         // only accept the request if it has a free slot in its active view, otherwise it will refuse the request."
-        match details.priority {
-            Priority::High => {
-                self.add_active(from, details.data, Priority::High, now, io);
-            }
-            Priority::Low if !self.active_is_full() => {
-                self.add_active(from, details.data, Priority::Low, now, io);
-            }
-            _ => {}
+        if !self.add_active(from, details.data, details.priority, do_reply, now, io) {
+            self.send_disconnect(from, true, io);
         }
     }
 
@@ -575,7 +575,7 @@ where
 
     /// Remove a peer from the active view.
     ///
-    /// If respond is true, a Disconnect message will be sent to the peer.
+    /// If `reason` is [`RemovalReason::Random`], a [`Disconnect`] message will be sent to the peer.
     fn remove_active(&mut self, peer: &PI, reason: RemovalReason, io: &mut impl IO<PI>) {
         if let Some(idx) = self.active_view.get_index_of(peer) {
             let removed_peer = self.remove_active_by_index(idx, reason, io).unwrap();
@@ -601,23 +601,19 @@ where
         if let Some(node) = self
             .passive_view
             .pick_random_without(&skip_peers, &mut self.rng)
+            .copied()
         {
             let priority = match self.active_view.is_empty() {
                 true => Priority::High,
                 false => Priority::Low,
             };
-            let message = Message::Neighbor(Neighbor {
-                priority,
-                data: self.me_data.clone(),
-            });
-            io.push(OutEvent::SendMessage(*node, message));
+            self.send_neighbor(node, priority, io);
             // schedule a timer that checks if the node replied with a neighbor message,
             // otherwise try again with another passive node.
             io.push(OutEvent::ScheduleTimer(
                 self.config.neighbor_request_timeout,
-                Timer::PendingNeighborRequest(*node),
+                Timer::PendingNeighborRequest(node),
             ));
-            self.pending_neighbor_requests.insert(*node);
         };
     }
 
@@ -641,21 +637,23 @@ where
                 // send a disconnect message, then close connection.
                 RemovalReason::Random => self.send_disconnect(peer, true, io),
                 // close connection without sending anything further.
-                RemovalReason::DisconnectReceived(_) => io.push(OutEvent::DisconnectPeer(peer)),
+                RemovalReason::DisconnectReceived { is_alive: _ } => {
+                    io.push(OutEvent::DisconnectPeer(peer))
+                }
                 // do nothing, connection already closed.
                 RemovalReason::ConnectionClosed => {}
             }
 
-            let keep_alive_as_passive = match reason {
+            let keep_as_passive = match reason {
                 // keep alive if previously marked as alive.
                 RemovalReason::ConnectionClosed => self.alive_disconnect_peers.remove(&peer),
                 // keep alive if other peer said to be still alive.
-                RemovalReason::DisconnectReceived(alive) => alive,
+                RemovalReason::DisconnectReceived { is_alive } => is_alive,
                 // keep alive (only we are removing for now)
                 RemovalReason::Random => true,
             };
 
-            if keep_alive_as_passive {
+            if keep_as_passive {
                 let data = self.peer_data.remove(&peer);
                 self.add_passive(peer, data, io);
                 // mark peer as alive, so it doesn't get removed from the passive view if the conn closes.
@@ -687,11 +685,18 @@ where
         peer: PI,
         data: Option<PeerData>,
         priority: Priority,
+        reply: bool,
         _now: Instant,
         io: &mut impl IO<PI>,
     ) -> bool {
+        if peer == self.me {
+            return false;
+        }
         self.insert_peer_info((peer, data).into(), io);
-        if self.active_view.contains(&peer) || peer == self.me {
+        if self.active_view.contains(&peer) {
+            if reply {
+                self.send_neighbor(peer, priority, io);
+            }
             return true;
         }
         match (priority, self.active_is_full()) {
@@ -699,38 +704,51 @@ where
                 if is_full {
                     self.free_random_slot_in_active_view(io);
                 }
-                self.add_active_unchecked(peer, Priority::High, io);
+                self.add_active_unchecked(peer, Priority::High, reply, io);
                 true
             }
             (Priority::Low, false) => {
-                self.add_active_unchecked(peer, Priority::Low, io);
+                self.add_active_unchecked(peer, Priority::Low, reply, io);
                 true
             }
             (Priority::Low, true) => false,
         }
     }
 
-    fn add_active_unchecked(&mut self, peer: PI, priority: Priority, io: &mut impl IO<PI>) {
+    fn add_active_unchecked(
+        &mut self,
+        peer: PI,
+        priority: Priority,
+        reply: bool,
+        io: &mut impl IO<PI>,
+    ) {
         self.passive_view.remove(&peer);
-        self.active_view.insert(peer);
-        debug!(other = ?peer, "add to active view");
-
-        self.send_neighbor(peer, priority, io);
-        io.push(OutEvent::EmitEvent(Event::NeighborUp(peer)));
+        if self.active_view.insert(peer) {
+            debug!(other = ?peer, "add to active view");
+            io.push(OutEvent::EmitEvent(Event::NeighborUp(peer)));
+            if reply {
+                self.send_neighbor(peer, priority, io);
+            }
+        }
     }
 
     fn send_neighbor(&mut self, peer: PI, priority: Priority, io: &mut impl IO<PI>) {
-        let message = Message::Neighbor(Neighbor {
-            priority,
-            data: self.me_data.clone(),
-        });
-        io.push(OutEvent::SendMessage(peer, message));
+        if self.pending_neighbor_requests.insert(peer) {
+            let message = Message::Neighbor(Neighbor {
+                priority,
+                data: self.me_data.clone(),
+            });
+            io.push(OutEvent::SendMessage(peer, message));
+        }
     }
 }
 
 #[derive(Debug)]
 enum RemovalReason {
+    /// A peer is removed because the connection was closed ungracefully.
     ConnectionClosed,
-    DisconnectReceived(bool),
+    /// A peer is removed because we received a disconnect message.
+    DisconnectReceived { is_alive: bool },
+    /// A peer is removed after random selection to make room for a newly joined peer.
     Random,
 }

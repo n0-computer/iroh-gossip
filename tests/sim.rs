@@ -1,3 +1,5 @@
+//! Tests that use the [`iroh_gossip::proto::sim::Simulator`].
+
 use std::{env, fmt, str::FromStr, time::Duration};
 
 use iroh_gossip::proto::{
@@ -26,7 +28,6 @@ fn big_hyparview() {
 
 #[test]
 // #[traced_test]
-#[ignore = "currently failing, will be fixed with https://github.com/n0-computer/iroh-gossip/pull/53"]
 fn big_multiple_sender() {
     tracing_subscriber::fmt::try_init().ok();
 
@@ -59,7 +60,6 @@ fn big_multiple_sender() {
 
 #[test]
 // #[traced_test]
-#[ignore = "currently failing, will be fixed with https://github.com/n0-computer/iroh-gossip/pull/53"]
 fn big_single_sender() {
     tracing_subscriber::fmt::try_init().ok();
 
@@ -91,7 +91,6 @@ fn big_single_sender() {
 
 #[test]
 // #[traced_test]
-#[ignore = "currently failing, will be fixed with https://github.com/n0-computer/iroh-gossip/pull/53"]
 fn big_burst() {
     tracing_subscriber::fmt::try_init().ok();
     let network_config = NetworkConfig::default();
