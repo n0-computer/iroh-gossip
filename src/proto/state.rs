@@ -228,7 +228,7 @@ impl<PI: PeerIdentity, R: Rng + Clone> State<PI, R> {
         now: Instant,
         metrics: Option<&Metrics>,
     ) -> impl Iterator<Item = OutEvent<PI>> + '_ {
-        trace!("in_event: {event:?}");
+        trace!("in : {event:?}");
         if let Some(metrics) = &metrics {
             track_in_event(&event, metrics);
         }
@@ -299,7 +299,7 @@ fn handle_out_event<PI: PeerIdentity>(
     conns: &mut ConnsMap<PI>,
     outbox: &mut Outbox<PI>,
 ) {
-    trace!("out_event: {event:?}");
+    trace!("out: {event:?}");
     match event {
         topic::OutEvent::SendMessage(to, message) => {
             outbox.push(OutEvent::SendMessage(to, Message { topic, message }))
