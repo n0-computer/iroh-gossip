@@ -226,7 +226,8 @@ pub struct Graft {
 ///
 /// Currently, the expectation is that the configuration is the same for all peers in the
 /// network (as recommended in the paper).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     /// When receiving an [`IHave`] message, this timeout is registered. If the message for the
     /// [`IHave`] was not received once the timeout is expired, a [`Graft`] message is sent to the
