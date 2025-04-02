@@ -75,7 +75,7 @@ fn push_back<PI: Eq + std::hash::Hash + Ord>(
     peer: &PI,
     event: InEvent<PI>,
 ) {
-    if let Some(q) = inqueues.get_mut(&peer) {
+    if let Some(q) = inqueues.get_mut(peer) {
         q.push_back(event);
     }
 }
@@ -229,8 +229,8 @@ impl<PI: PeerIdentity + Ord + std::fmt::Display, R: Rng + SeedableRng + Clone> N
         let remove_conns: Vec<_> = self
             .conns
             .iter()
+            .filter(|&c| c.peers().contains(peer))
             .cloned()
-            .filter(|c| c.peers().contains(peer))
             .collect();
         for conn in remove_conns.into_iter() {
             self.kill_connection(conn);
@@ -511,11 +511,8 @@ impl Simulator {
         for (peer, events) in events.into_iter() {
             let entry = missing.get_mut(&peer).unwrap();
             for event in events {
-                match event {
-                    Event::Received(message) => {
-                        entry.remove(&message.content);
-                    }
-                    _ => {}
+                if let Event::Received(message) = event {
+                    entry.remove(&message.content);
                 }
             }
         }
@@ -540,7 +537,7 @@ impl Simulator {
             }
         }
         assert_eq!(
-            missing.iter().map(|(_p, s)| s.len()).sum::<usize>(),
+            missing.values().map(|s| s.len()).sum::<usize>(),
             expected_recv_count
         );
 
@@ -552,9 +549,7 @@ impl Simulator {
         );
 
         // Send all messages at once
-        let mut cnt = 0;
         for (from, message) in messages {
-            cnt += 1;
             self.network.command(
                 from,
                 TOPIC,
@@ -571,7 +566,7 @@ impl Simulator {
         let mut ticks = 0;
         loop {
             ticks += 1;
-            let missing_count: usize = missing.iter().map(|(_k, set)| set.len()).sum();
+            let missing_count: usize = missing.values().map(|set| set.len()).sum();
 
             if missing_count == 0 {
                 break;
@@ -677,7 +672,7 @@ impl Simulator {
 
 fn add_one(map: &mut BTreeMap<usize, usize>, key: usize) {
     let entry = map.entry(key).or_default();
-    *entry = *entry + 1;
+    *entry += 1;
 }
 
 /// Helper struct for active connections. A sorted tuple.
@@ -748,7 +743,7 @@ fn read_var<T: FromStr<Err: fmt::Display + fmt::Debug>>(name: &str, default: T) 
     std::env::var(name)
         .map(|x| {
             x.parse()
-                .expect(&format!("Failed to parse environment variable {name}"))
+                .unwrap_or_else(|_| panic!("Failed to parse environment variable {name}"))
         })
         .unwrap_or(default)
 }

@@ -403,7 +403,7 @@ mod test {
         env::var(name)
             .map(|x| {
                 x.parse()
-                    .expect(&format!("Failed to parse environment variable {name}"))
+                    .unwrap_or_else(|_| panic!("Failed to parse environment variable {name}"))
             })
             .unwrap_or(default)
     }
