@@ -118,10 +118,8 @@ impl<PI: PeerIdentity + Ord, R: Rng + Clone> Network<PI, R> {
                 if let InEvent::RecvMessage(from, _message) = &event {
                     self.conns.insert((*from, peer).into());
                 }
-                debug!(peer = ?peer, "IN  {event:?}");
                 let out = state.handle(event, self.time);
                 for event in out {
-                    debug!(peer = ?peer, "OUT {event:?}");
                     match event {
                         OutEvent::SendMessage(to, message) => {
                             let to_idx = *self.peers_by_address.get(&to).unwrap();
