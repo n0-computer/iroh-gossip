@@ -1,6 +1,6 @@
 //! Simulation framework for testing the protocol implementation
 
-#![allow(unused)]
+#![allow(missing_docs)]
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -11,7 +11,6 @@ use std::{
 use bytes::Bytes;
 use n0_future::time::{Duration, Instant};
 use rand::Rng;
-use rand_chacha::ChaCha12Rng;
 use rand_core::SeedableRng;
 use tracing::{debug, error_span, info, trace, warn};
 
@@ -21,7 +20,6 @@ use super::{
 use crate::proto::Scope;
 
 const TICK_DURATION: Duration = Duration::from_millis(10);
-const DEFAULT_LATENCY: Duration = TICK_DURATION.saturating_mul(1);
 
 /// Test network implementation.
 ///
@@ -30,6 +28,7 @@ const DEFAULT_LATENCY: Duration = TICK_DURATION.saturating_mul(1);
 /// each tick.
 ///
 /// Note: Panics when sending to an unknown peer.
+#[derive(Debug)]
 pub struct Network<PI, R> {
     start: Instant,
     time: Instant,
@@ -122,6 +121,14 @@ impl<PI: PeerIdentity + Ord + std::fmt::Display, R: Rng + SeedableRng + Clone> N
     pub fn command(&mut self, peer: PI, topic: TopicId, command: Command<PI>) {
         debug!(?peer, "~~ COMMAND {command:?}");
         push_back(&mut self.inqueues, &peer, InEvent::Command(topic, command));
+    }
+
+    pub fn peer_states(&self) -> impl Iterator<Item = &State<PI, R>> {
+        self.peers.values()
+    }
+
+    pub fn peer_ids(&self) -> impl Iterator<Item = PI> + '_ {
+        self.peers.keys().cloned()
     }
 
     pub fn ticks(&mut self, n: usize) {
@@ -309,6 +316,7 @@ pub fn assert_synchronous_active<PI: PeerIdentity + Ord + Copy, R: Rng + Clone>(
 
 pub type PeerId = u64;
 
+#[derive(Debug)]
 pub struct SimulatorConfig {
     pub seed: u64,
     pub peers_count: usize,
@@ -376,15 +384,6 @@ fn max(map: &BTreeMap<usize, usize>) -> usize {
     map.last_key_value().map(|(k, _v)| *k).unwrap_or_default()
 }
 
-impl NetworkStats {
-    fn min_active_len(&self) -> usize {
-        self.active
-            .first_key_value()
-            .map(|(k, _v)| *k)
-            .unwrap_or_default()
-    }
-}
-
 impl fmt::Display for NetworkStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -395,6 +394,7 @@ impl fmt::Display for NetworkStats {
     }
 }
 
+#[derive(Debug)]
 pub struct TickReport {
     pub min_active_len: usize,
 }
@@ -402,10 +402,11 @@ pub struct TickReport {
 pub const TOPIC: TopicId = TopicId::from_bytes([0u8; 32]);
 
 /// A simple simulator for the gossip protocol
+#[derive(Debug)]
 pub struct Simulator {
-    config: SimulatorConfig,
+    pub config: SimulatorConfig,
     pub network: Network<PeerId, rand_chacha::ChaCha12Rng>,
-    round_stats: Vec<RoundStats>,
+    pub round_stats: Vec<RoundStats>,
 }
 
 impl Simulator {
@@ -441,7 +442,7 @@ impl Simulator {
     }
 
     fn run_until_all_active(&mut self, limit: usize) -> bool {
-        for i in 0..limit {
+        for _i in 0..limit {
             self.run_ticks(1);
             let _ = self.network.events();
             let report = self.report_swarm();

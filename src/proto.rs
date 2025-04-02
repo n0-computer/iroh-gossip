@@ -56,8 +56,8 @@ pub mod state;
 pub mod topic;
 pub mod util;
 
-#[cfg(test)]
-mod tests;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod tests;
 
 pub use hyparview::Config as HyparviewConfig;
 pub use plumtree::{Config as PlumtreeConfig, DeliveryScope, Scope};
@@ -119,18 +119,15 @@ impl<PI> From<(PI, Option<PeerData>)> for PeerInfo<PI> {
 #[cfg(test)]
 mod test {
 
-    use std::{collections::HashSet, env, fmt, str::FromStr, time::Duration};
+    use std::{collections::HashSet, env, fmt, str::FromStr};
 
-    use rand::{seq::IteratorRandom, SeedableRng};
+    use rand::SeedableRng;
     use rand_chacha::ChaCha12Rng;
     use tracing_test::traced_test;
 
     use super::{Command, Config, Event};
     use crate::proto::{
-        tests::{
-            assert_synchronous_active, report_round_distribution, sort, Network, Simulator,
-            SimulatorConfig,
-        },
+        tests::{assert_synchronous_active, report_round_distribution, sort, Network},
         Scope, TopicId,
     };
 
@@ -261,92 +258,6 @@ mod test {
         assert_eq!(received.count(), 5);
         assert!(assert_synchronous_active(&network));
         report_round_distribution(&network);
-    }
-
-    #[test]
-    // #[traced_test]
-    fn big_hyparview() {
-        let mut gossip_config = Config::default();
-        gossip_config.membership.shuffle_interval = Duration::from_secs(5);
-        let mut config = SimulatorConfig::from_env();
-        config.peers_count = read_var("PEERS", 100);
-        let mut simulator = Simulator::new(config, gossip_config);
-        simulator.bootstrap();
-        let state = simulator.report_swarm();
-        assert!(state.min_active_len > 0);
-    }
-
-    #[test]
-    // #[traced_test]
-    fn big_multiple_sender() {
-        let mut gossip_config = Config::default();
-        gossip_config.broadcast.optimization_threshold = (read_var("OPTIM", 7) as u16).into();
-        gossip_config.membership.shuffle_interval = Duration::from_secs(5);
-        let config = SimulatorConfig::from_env();
-        let rounds = read_var("ROUNDS", 50);
-        let mut simulator = Simulator::new(config, gossip_config);
-        simulator.bootstrap();
-        let mut rng = rand_chacha::ChaCha12Rng::seed_from_u64(0);
-        for i in 0..rounds {
-            let from = simulator.network.peers.keys().choose(&mut rng).unwrap();
-            let message = format!("m{i}").into_bytes().into();
-            let messages = vec![(*from, message)];
-            simulator.gossip_round(messages);
-        }
-        let avg = simulator.report_round_average();
-        assert!(avg.ldh < 10.);
-        assert!(avg.rmr < 0.1);
-    }
-
-    #[test]
-    // #[traced_test]
-    fn big_single_sender() {
-        let mut gossip_config = Config::default();
-        gossip_config.broadcast.optimization_threshold = (read_var("OPTIM", 7) as u16).into();
-        gossip_config.membership.shuffle_interval = Duration::from_secs(5);
-        let config = SimulatorConfig::from_env();
-        let rounds = read_var("ROUNDS", 50);
-        let mut simulator = Simulator::new(config, gossip_config);
-        simulator.bootstrap();
-        let from = 8;
-        for i in 0..rounds {
-            let message = format!("m{i}").into_bytes().into();
-            let messages = vec![(from, message)];
-            simulator.gossip_round(messages);
-        }
-        simulator.report_round_average();
-        let avg = simulator.report_round_average();
-        assert!(avg.ldh < 8.);
-        assert!(avg.rmr < 0.1);
-    }
-
-    #[test]
-    // #[traced_test]
-    fn big_burst() {
-        let mut gossip_config = Config::default();
-        gossip_config.broadcast.optimization_threshold = (read_var("OPTIM", 7) as u16).into();
-        gossip_config.membership.shuffle_interval = Duration::from_secs(5);
-        let config = SimulatorConfig::from_env();
-        let rounds = read_var("ROUNDS", 20);
-
-        let mut simulator = Simulator::new(config, gossip_config);
-        simulator.bootstrap();
-        let messages_per_peer = read_var("MESSAGES_PER_PEER", 2);
-        for i in 0..rounds {
-            let mut messages = vec![];
-            for id in simulator.network.peers.keys() {
-                for j in 0..messages_per_peer {
-                    let message: bytes::Bytes = format!("round {i}: message {j} from {id}")
-                        .into_bytes()
-                        .into();
-                    messages.push((*id, message));
-                }
-            }
-            simulator.gossip_round(messages);
-        }
-        let avg = simulator.report_round_average();
-        assert!(avg.ldh < 18.);
-        assert!(avg.rmr < 0.7);
     }
 
     #[test]
