@@ -247,7 +247,7 @@ pub struct State<PI, RG = ThreadRng> {
     /// Random number generator
     rng: RG,
     /// Statistics
-    stats: Stats,
+    pub(crate) stats: Stats,
     /// The set of neighbor requests we sent out but did not yet receive a reply for
     pending_neighbor_requests: HashSet<PI>,
     /// The opaque user peer data we received for other peers
