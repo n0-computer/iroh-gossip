@@ -12,7 +12,7 @@ use bytes::Bytes;
 use n0_future::time::{Duration, Instant};
 use rand::Rng;
 use rand_core::SeedableRng;
-use tracing::{debug, error_span, info, trace, warn};
+use tracing::{debug, error_span, info, trace};
 
 use super::{
     util::TimerMap, Command, Config, Event, InEvent, OutEvent, PeerIdentity, State, Timer, TopicId,
@@ -85,20 +85,11 @@ impl<PI: PeerIdentity + Ord + std::fmt::Display, R: Rng + SeedableRng + Clone> N
             Duration::from_millis(self.tick_duration.as_millis() as u64 * latency_in_ticks as u64)
     }
 
-    fn push(&mut self, peer: State<PI, R>) {
-        let id = *peer.me();
-        self.inqueues.insert(id, VecDeque::new());
-        self.peers.insert(id, peer);
-    }
-
     pub fn insert(&mut self, peer_id: PI) {
         let rng = R::from_rng(&mut self.rng).unwrap();
-        self.push(State::new(
-            peer_id,
-            Default::default(),
-            self.config.clone(),
-            rng,
-        ));
+        let state = State::new(peer_id, Default::default(), self.config.clone(), rng);
+        self.inqueues.insert(peer_id, VecDeque::new());
+        self.peers.insert(peer_id, state);
     }
 
     pub fn insert_and_join(&mut self, peer_id: PI, topic: TopicId, bootstrap: Vec<PI>) {
@@ -175,6 +166,7 @@ impl<PI: PeerIdentity + Ord + std::fmt::Display, R: Rng + SeedableRng + Clone> N
                                 &mut self.latencies,
                                 &peer,
                                 &to,
+                                &mut self.rng,
                             );
                             self.transport.insert(
                                 self.time + latency,
@@ -210,7 +202,13 @@ impl<PI: PeerIdentity + Ord + std::fmt::Display, R: Rng + SeedableRng + Clone> N
     pub fn kill_connection(&mut self, conn: ConnId<PI>) {
         if self.conns.remove(&conn) {
             let [a, b] = conn.peers();
-            let latency = latency_between(self.default_latency, &mut self.latencies, &a, &b);
+            let latency = latency_between(
+                self.default_latency,
+                &mut self.latencies,
+                &a,
+                &b,
+                &mut self.rng,
+            );
             let msg = (a, InEvent::PeerDisconnected(b));
             self.transport.insert(self.time + latency, msg);
             let msg = (b, InEvent::PeerDisconnected(a));
@@ -245,6 +243,44 @@ impl<PI: PeerIdentity + Ord + std::fmt::Display, R: Rng + SeedableRng + Clone> N
         self.peers.remove(peer);
         self.inqueues.remove(peer);
     }
+
+    pub fn check_synchronicity(&self) -> bool {
+        let mut ok = true;
+        for state in self.peers.values() {
+            let peer = *state.me();
+            for (topic, state) in state.states() {
+                for other in state.swarm.active_view.iter() {
+                    let other_state = &self
+                        .peers
+                        .get(other)
+                        .unwrap()
+                        .state(topic)
+                        .unwrap()
+                        .swarm
+                        .active_view;
+                    if !other_state.contains(&peer) {
+                        debug!(node = %peer, other = ?other, "missing active_view peer in other");
+                        ok = false;
+                    }
+                }
+                for other in state.gossip.eager_push_peers.iter() {
+                    let other_state = &self
+                        .peers
+                        .get(other)
+                        .unwrap()
+                        .state(topic)
+                        .unwrap()
+                        .gossip
+                        .eager_push_peers;
+                    if !other_state.contains(&peer) {
+                        debug!(node = %peer, other = ?other, "missing eager_push peer in other");
+                        ok = false;
+                    }
+                }
+            }
+        }
+        ok
+    }
 }
 
 impl<R: Rng + Clone> Network<PeerId, R> {
@@ -258,60 +294,35 @@ impl<R: Rng + Clone> Network<PeerId, R> {
             add_one(&mut stats.lazy, state.gossip.lazy_push_peers.len());
             if state.swarm.active_view.is_empty() {
                 stats.empty.insert(*id);
-                trace!(node=%id, active = ?state.swarm.active_view.iter().collect::<Vec<_>>(), passive=?state.swarm.passive_view.iter().collect::<Vec<_>>(), "EMPTY");
+                trace!(node=%id, active = ?state.swarm.active_view.iter().collect::<Vec<_>>(), passive=?state.swarm.passive_view.iter().collect::<Vec<_>>(), "active view empty^");
             }
-            // trace!(active = ?state.swarm.active_view.iter().collect::<Vec<_>>(), passive=?state.swarm.passive_view.iter().collect::<Vec<_>>(), "view");
         }
         stats
     }
 }
 
-fn latency_between<PI: PeerIdentity>(
+// fn latency_between<PI: PeerIdentity + Ord + PartialOrd, R: Rng>(
+//     _default_latency: Duration,
+//     latencies: &mut BTreeMap<ConnId<PI>, Duration>,
+//     a: &PI,
+//     b: &PI,
+//     rng: &mut R,
+// ) -> Duration {
+//     let id: ConnId<PI> = (*a, *b).into();
+//     *latencies.entry(id).or_insert_with(|| {
+//         let t: u64 = rng.gen_range(5..25);
+//         Duration::from_millis(t)
+//     })
+// }
+
+fn latency_between<PI: PeerIdentity + Ord + PartialOrd, R: Rng>(
     default_latency: Duration,
     _latencies: &mut BTreeMap<ConnId<PI>, Duration>,
     _a: &PI,
     _b: &PI,
+    _rng: &mut R,
 ) -> Duration {
     default_latency
-}
-
-pub fn assert_synchronous_active<PI: PeerIdentity + Ord + Copy, R: Rng + Clone>(
-    network: &Network<PI, R>,
-) -> bool {
-    for state in network.peers.values() {
-        let peer = *state.me();
-        for (topic, state) in state.states() {
-            for other in state.swarm.active_view.iter() {
-                let other_state = &network
-                    .peers
-                    .get(other)
-                    .unwrap()
-                    .state(topic)
-                    .unwrap()
-                    .swarm
-                    .active_view;
-                if !other_state.contains(&peer) {
-                    warn!(peer = ?peer, other = ?other, "missing active_view peer in other");
-                    return false;
-                }
-            }
-            for other in state.gossip.eager_push_peers.iter() {
-                let other_state = &network
-                    .peers
-                    .get(other)
-                    .unwrap()
-                    .state(topic)
-                    .unwrap()
-                    .gossip
-                    .eager_push_peers;
-                if !other_state.contains(&peer) {
-                    warn!(peer = ?peer, other = ?other, "missing eager_push peer in other");
-                    return false;
-                }
-            }
-        }
-    }
-    true
 }
 
 pub type PeerId = u64;
@@ -493,6 +504,10 @@ impl Simulator {
             panic!("failed to keep nodes active after warmup");
         }
         info!(tick=%self.network.current_tick(), "all active");
+
+        if !self.network.check_synchronicity() {
+            panic!("not all peers have synchronous relations");
+        }
     }
 
     pub fn run_ticks(&mut self, ticks: usize) -> BTreeMap<PeerId, Vec<Event<PeerId>>> {
@@ -570,6 +585,10 @@ impl Simulator {
             let missing_count: usize = missing.values().map(|set| set.len()).sum();
 
             if missing_count == 0 {
+                info!(
+                    tick=%self.network.current_tick(),
+                    "break: all messages received by all peers"
+                );
                 break;
             } else if ticks > self.config.round_max_ticks {
                 info!(

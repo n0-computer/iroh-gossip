@@ -127,7 +127,7 @@ mod test {
 
     use super::{Command, Config, Event};
     use crate::proto::{
-        tests::{assert_synchronous_active, report_round_distribution, sort, Network},
+        tests::{report_round_distribution, sort, Network},
         Scope, TopicId,
     };
 
@@ -196,7 +196,7 @@ mod test {
         } else {
             assert_eq!(network.conns(), vec![(0, 1), (0, 3), (1, 2)]);
         }
-        assert!(assert_synchronous_active(&network));
+        assert!(network.check_synchronicity());
     }
 
     #[test]
@@ -224,7 +224,7 @@ mod test {
         // run ticks and drain events
         network.ticks(join_ticks);
         let _ = network.events();
-        assert!(assert_synchronous_active(&network));
+        assert!(network.check_synchronicity());
 
         // now broadcast a first message
         network.command(
@@ -237,7 +237,7 @@ mod test {
         let received = events.filter(|x| matches!(x, (_, _, Event::Received(_))));
         // message should be received by two other nodes
         assert_eq!(received.count(), 2);
-        assert!(assert_synchronous_active(&network));
+        assert!(network.check_synchronicity());
 
         // now connect the two sections of the swarm
         network.command(2, t, Command::Join(vec![5]));
@@ -256,7 +256,7 @@ mod test {
         let received = events.filter(|x| matches!(x, (_, _, Event::Received(_))));
         // message should be received by all 5 other nodes
         assert_eq!(received.count(), 5);
-        assert!(assert_synchronous_active(&network));
+        assert!(network.check_synchronicity());
         report_round_distribution(&network);
     }
 
@@ -291,7 +291,7 @@ mod test {
                 .flat_map(|x| x.into_iter())
         }));
         assert_eq!(all_conns, HashSet::from_iter([0, 1, 2, 3]));
-        assert!(assert_synchronous_active(&network));
+        assert!(network.check_synchronicity());
 
         //  let node 3 leave the swarm
         network.command(3, t, Command::Quit);
@@ -307,7 +307,7 @@ mod test {
                 .flat_map(|x| x.into_iter())
         }));
         assert_eq!(all_conns, HashSet::from_iter([0, 1, 2]));
-        assert!(assert_synchronous_active(&network));
+        assert!(network.check_synchronicity());
     }
 
     fn read_var<T: FromStr<Err: fmt::Display + fmt::Debug>>(name: &str, default: T) -> T {
