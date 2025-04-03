@@ -1007,7 +1007,7 @@
     <span class="doccomment">/// Random number generator
     </span>rng: RG,
     <span class="doccomment">/// Statistics
-    </span>stats: Stats,
+    </span><span class="kw">pub</span>(<span class="kw">crate</span>) stats: Stats,
     <span class="doccomment">/// The set of neighbor requests we sent out but did not yet receive a reply for
     </span>pending_neighbor_requests: HashSet&lt;PI&gt;,
     <span class="doccomment">/// The opaque user peer data we received for other peers
