@@ -27,10 +27,13 @@ jobs:
           git checkout ${{ github.event.pull_request.head.sha }}
           cargo run -q --bin sim --features simulator --release -- run -c simulations/all.toml -o /tmp/sim-pr --baseline /tmp/sim-main |& tee REPORT
           echo "<details><summary>Simulation report</summary>" >> COMMENT
+          echo "" >> COMMENT
           echo '```' >> COMMENT
           cat REPORT >> COMMENT
+          echo "" >> COMMENT
           echo '```' >> COMMENT
           echo "</details>" >> COMMENT
+          echo "" >> COMMENT
           echo "*Last updated: $(date -u +'%Y-%m-%dT%H:%M:%SZ')*" >> COMMENT
 
       - name: Find Docs Comment
