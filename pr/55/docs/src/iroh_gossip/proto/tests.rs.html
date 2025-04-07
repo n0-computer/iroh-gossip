@@ -854,7 +854,130 @@
 <a href="#853" id="853">853</a>
 <a href="#854" id="854">854</a>
 <a href="#855" id="855">855</a>
-<a href="#856" id="856">856</a></pre></div><pre class="rust"><code><span class="doccomment">//! Simulation framework for testing the protocol implementation
+<a href="#856" id="856">856</a>
+<a href="#857" id="857">857</a>
+<a href="#858" id="858">858</a>
+<a href="#859" id="859">859</a>
+<a href="#860" id="860">860</a>
+<a href="#861" id="861">861</a>
+<a href="#862" id="862">862</a>
+<a href="#863" id="863">863</a>
+<a href="#864" id="864">864</a>
+<a href="#865" id="865">865</a>
+<a href="#866" id="866">866</a>
+<a href="#867" id="867">867</a>
+<a href="#868" id="868">868</a>
+<a href="#869" id="869">869</a>
+<a href="#870" id="870">870</a>
+<a href="#871" id="871">871</a>
+<a href="#872" id="872">872</a>
+<a href="#873" id="873">873</a>
+<a href="#874" id="874">874</a>
+<a href="#875" id="875">875</a>
+<a href="#876" id="876">876</a>
+<a href="#877" id="877">877</a>
+<a href="#878" id="878">878</a>
+<a href="#879" id="879">879</a>
+<a href="#880" id="880">880</a>
+<a href="#881" id="881">881</a>
+<a href="#882" id="882">882</a>
+<a href="#883" id="883">883</a>
+<a href="#884" id="884">884</a>
+<a href="#885" id="885">885</a>
+<a href="#886" id="886">886</a>
+<a href="#887" id="887">887</a>
+<a href="#888" id="888">888</a>
+<a href="#889" id="889">889</a>
+<a href="#890" id="890">890</a>
+<a href="#891" id="891">891</a>
+<a href="#892" id="892">892</a>
+<a href="#893" id="893">893</a>
+<a href="#894" id="894">894</a>
+<a href="#895" id="895">895</a>
+<a href="#896" id="896">896</a>
+<a href="#897" id="897">897</a>
+<a href="#898" id="898">898</a>
+<a href="#899" id="899">899</a>
+<a href="#900" id="900">900</a>
+<a href="#901" id="901">901</a>
+<a href="#902" id="902">902</a>
+<a href="#903" id="903">903</a>
+<a href="#904" id="904">904</a>
+<a href="#905" id="905">905</a>
+<a href="#906" id="906">906</a>
+<a href="#907" id="907">907</a>
+<a href="#908" id="908">908</a>
+<a href="#909" id="909">909</a>
+<a href="#910" id="910">910</a>
+<a href="#911" id="911">911</a>
+<a href="#912" id="912">912</a>
+<a href="#913" id="913">913</a>
+<a href="#914" id="914">914</a>
+<a href="#915" id="915">915</a>
+<a href="#916" id="916">916</a>
+<a href="#917" id="917">917</a>
+<a href="#918" id="918">918</a>
+<a href="#919" id="919">919</a>
+<a href="#920" id="920">920</a>
+<a href="#921" id="921">921</a>
+<a href="#922" id="922">922</a>
+<a href="#923" id="923">923</a>
+<a href="#924" id="924">924</a>
+<a href="#925" id="925">925</a>
+<a href="#926" id="926">926</a>
+<a href="#927" id="927">927</a>
+<a href="#928" id="928">928</a>
+<a href="#929" id="929">929</a>
+<a href="#930" id="930">930</a>
+<a href="#931" id="931">931</a>
+<a href="#932" id="932">932</a>
+<a href="#933" id="933">933</a>
+<a href="#934" id="934">934</a>
+<a href="#935" id="935">935</a>
+<a href="#936" id="936">936</a>
+<a href="#937" id="937">937</a>
+<a href="#938" id="938">938</a>
+<a href="#939" id="939">939</a>
+<a href="#940" id="940">940</a>
+<a href="#941" id="941">941</a>
+<a href="#942" id="942">942</a>
+<a href="#943" id="943">943</a>
+<a href="#944" id="944">944</a>
+<a href="#945" id="945">945</a>
+<a href="#946" id="946">946</a>
+<a href="#947" id="947">947</a>
+<a href="#948" id="948">948</a>
+<a href="#949" id="949">949</a>
+<a href="#950" id="950">950</a>
+<a href="#951" id="951">951</a>
+<a href="#952" id="952">952</a>
+<a href="#953" id="953">953</a>
+<a href="#954" id="954">954</a>
+<a href="#955" id="955">955</a>
+<a href="#956" id="956">956</a>
+<a href="#957" id="957">957</a>
+<a href="#958" id="958">958</a>
+<a href="#959" id="959">959</a>
+<a href="#960" id="960">960</a>
+<a href="#961" id="961">961</a>
+<a href="#962" id="962">962</a>
+<a href="#963" id="963">963</a>
+<a href="#964" id="964">964</a>
+<a href="#965" id="965">965</a>
+<a href="#966" id="966">966</a>
+<a href="#967" id="967">967</a>
+<a href="#968" id="968">968</a>
+<a href="#969" id="969">969</a>
+<a href="#970" id="970">970</a>
+<a href="#971" id="971">971</a>
+<a href="#972" id="972">972</a>
+<a href="#973" id="973">973</a>
+<a href="#974" id="974">974</a>
+<a href="#975" id="975">975</a>
+<a href="#976" id="976">976</a>
+<a href="#977" id="977">977</a>
+<a href="#978" id="978">978</a>
+<a href="#979" id="979">979</a></pre></div><pre class="rust"><code><span class="doccomment">//! Simulation framework for testing the protocol implementation
 
 </span><span class="attr">#![allow(missing_docs)]
 
@@ -870,7 +993,7 @@
 <span class="kw">use </span>rand_chacha::ChaCha12Rng;
 <span class="kw">use </span>rand_core::SeedableRng;
 <span class="kw">use </span>serde::{Deserialize, Serialize};
-<span class="kw">use </span>tracing::{debug, error_span, info, trace};
+<span class="kw">use </span>tracing::{debug, error_span, info, trace, warn};
 
 <span class="kw">use super</span>::{
     util::TimerMap, Command, Config, Event, InEvent, OutEvent, PeerIdentity, State, Timer, TopicId,
@@ -1185,24 +1308,81 @@
 
 <span class="kw">pub type </span>PeerId = u64;
 
-<span class="attr">#[derive(Debug)]
+<span class="attr">#[derive(Debug, Serialize, Deserialize)]
 </span><span class="kw">pub struct </span>SimulatorConfig {
-    <span class="kw">pub </span>seed: u64,
-    <span class="kw">pub </span>peers_count: usize,
-    <span class="kw">pub </span>bootstrap_count: usize,
-    <span class="kw">pub </span>warmup_ticks: usize,
-    <span class="kw">pub </span>round_max_ticks: usize,
+    <span class="doccomment">/// Seed for the random number generator used in the nodes
+    </span><span class="kw">pub </span>rng_seed: u64,
+    <span class="doccomment">/// Number of nodes to create
+    </span><span class="kw">pub </span>peers: usize,
+    <span class="doccomment">/// Max number of ticks for a gossip round before the round is aborted
+    </span><span class="kw">pub </span>round_max_ticks: usize,
+}
+
+<span class="attr">#[derive(Debug, Serialize, Deserialize, Clone)]
+</span><span class="kw">pub enum </span>BootstrapMode {
+    Static(StaticBootstrap),
+    Dynamic(DynamicBootstrap),
+}
+
+<span class="kw">impl </span>Default <span class="kw">for </span>BootstrapMode {
+    <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
+        <span class="self">Self</span>::Static(StaticBootstrap::default())
+    }
+}
+
+<span class="kw">impl </span>BootstrapMode {
+    <span class="kw">pub fn </span>from_env(nodes: usize) -&gt; <span class="self">Self </span>{
+        <span class="kw">let </span>is_dynamic = read_var(<span class="string">"BOOTSTRAP_MODE"</span>, <span class="string">"static"</span>.to_string());
+        <span class="kw">match </span>is_dynamic.as_str() {
+            <span class="string">"static" </span>=&gt; BootstrapMode::default(),
+            <span class="string">"dynamic" </span>=&gt; BootstrapMode::Dynamic(DynamicBootstrap {
+                bootstrap_nodes: read_var(<span class="string">"BOOTSTRAP_COUNT"</span>, (nodes / <span class="number">10</span>).max(<span class="number">3</span>)),
+                ticks_per_join: <span class="number">2</span>,
+                warmup_ticks: read_var(<span class="string">"WARMUP_TICKS"</span>, <span class="number">100</span>),
+            }),
+            <span class="kw">_ </span>=&gt; <span class="macro">panic!</span>(<span class="string">"BOOTSTRAP_MODE must be static or dynamic"</span>),
+        }
+    }
+}
+
+<span class="attr">#[derive(Debug, Serialize, Deserialize, Clone)]
+</span><span class="kw">pub struct </span>StaticBootstrap {
+    random_contacts: usize,
+    warmup_ticks: usize,
+}
+
+<span class="kw">impl </span>Default <span class="kw">for </span>StaticBootstrap {
+    <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
+        <span class="self">Self </span>{
+            random_contacts: <span class="number">3</span>,
+            warmup_ticks: <span class="number">100</span>,
+        }
+    }
+}
+
+<span class="attr">#[derive(Debug, Serialize, Deserialize, Clone)]
+</span><span class="kw">pub struct </span>DynamicBootstrap {
+    bootstrap_nodes: usize,
+    ticks_per_join: usize,
+    warmup_ticks: usize,
+}
+
+<span class="kw">impl </span>Default <span class="kw">for </span>DynamicBootstrap {
+    <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
+        <span class="self">Self </span>{
+            bootstrap_nodes: <span class="number">12</span>,
+            ticks_per_join: <span class="number">3</span>,
+            warmup_ticks: <span class="number">100</span>,
+        }
+    }
 }
 
 <span class="kw">impl </span>SimulatorConfig {
     <span class="kw">pub fn </span>from_env() -&gt; <span class="self">Self </span>{
-        <span class="kw">let </span>peers_count = read_var(<span class="string">"PEERS"</span>, <span class="number">100</span>);
-        <span class="kw">let </span>bootstrap_count = read_var(<span class="string">"BOOTSTRAP"</span>, peers_count / <span class="number">10</span>);
+        <span class="kw">let </span>nodes = read_var(<span class="string">"NODES"</span>, <span class="number">100</span>);
         <span class="self">Self </span>{
-            seed: read_var(<span class="string">"SEED"</span>, <span class="number">0</span>),
-            peers_count,
-            bootstrap_count,
-            warmup_ticks: read_var(<span class="string">"WARMUP_TICKS"</span>, <span class="number">100</span>),
+            rng_seed: read_var(<span class="string">"SEED"</span>, <span class="number">0</span>),
+            peers: nodes,
             round_max_ticks: read_var(<span class="string">"ROUND_MAX_TICKS"</span>, <span class="number">200</span>),
         }
     }
@@ -1211,10 +1391,8 @@
 <span class="kw">impl </span>Default <span class="kw">for </span>SimulatorConfig {
     <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
         <span class="self">Self </span>{
-            seed: <span class="number">0</span>,
-            peers_count: <span class="number">100</span>,
-            bootstrap_count: <span class="number">5</span>,
-            warmup_ticks: <span class="number">100</span>,
+            rng_seed: <span class="number">0</span>,
+            peers: <span class="number">100</span>,
             round_max_ticks: <span class="number">200</span>,
         }
     }
@@ -1225,14 +1403,15 @@
     <span class="kw">pub </span>ticks: f32,
     <span class="kw">pub </span>rmr: f32,
     <span class="kw">pub </span>ldh: f32,
+    <span class="kw">pub </span>missing_receives: f32,
 }
 
 <span class="kw">impl </span>fmt::Display <span class="kw">for </span>RoundStats {
     <span class="kw">fn </span>fmt(<span class="kw-2">&amp;</span><span class="self">self</span>, f: <span class="kw-2">&amp;mut </span>fmt::Formatter&lt;<span class="lifetime">'_</span>&gt;) -&gt; fmt::Result {
         <span class="macro">write!</span>(
             f,
-            <span class="string">"RMR {:&gt;2.2} LDH {:&gt;2.2} ticks {:&gt;3.2}"</span>,
-            <span class="self">self</span>.rmr, <span class="self">self</span>.ldh, <span class="self">self</span>.ticks
+            <span class="string">"RMR {:&gt;6.2} LDH {:&gt;6.2} ticks {:&gt;6.2} missed {:&gt;10.2}"</span>,
+            <span class="self">self</span>.rmr, <span class="self">self</span>.ldh, <span class="self">self</span>.ticks, <span class="self">self</span>.missing_receives
         )
     }
 }
@@ -1243,45 +1422,55 @@
             ticks: f32::MAX,
             rmr: f32::MAX,
             ldh: f32::MAX,
+            missing_receives: f32::MAX,
         }
     }
 
-    <span class="kw">pub fn </span>mean(rounds: <span class="kw-2">&amp;</span>[RoundStats]) -&gt; RoundStats {
-        <span class="kw">let </span>len = rounds.len() <span class="kw">as </span>f32;
-        <span class="kw">let </span><span class="kw-2">mut </span>avg = rounds.iter().fold(RoundStats::default(), |<span class="kw-2">mut </span>agg, round| {
-            agg.rmr += round.rmr;
-            agg.ldh += round.ldh;
-            agg.ticks += round.ticks <span class="kw">as </span>f32;
-            agg
-        });
+    <span class="kw">pub fn </span>merge&lt;<span class="lifetime">'a</span>&gt;(rounds: <span class="kw">impl </span>IntoIterator&lt;Item = <span class="kw-2">&amp;</span><span class="lifetime">'a </span>RoundStats&gt;) -&gt; RoundStats {
+        <span class="kw">let </span>(len, <span class="kw-2">mut </span>avg) =
+            rounds
+                .into_iter()
+                .fold((<span class="number">0.</span>, RoundStats::default()), |(len, <span class="kw-2">mut </span>agg), round| {
+                    agg.rmr += round.rmr;
+                    agg.ldh += round.ldh;
+                    agg.ticks += round.ticks <span class="kw">as </span>f32;
+                    agg.missing_receives += round.missing_receives <span class="kw">as </span>f32;
+                    (len + <span class="number">1.</span>, agg)
+                });
         avg.rmr /= len;
         avg.ldh /= len;
         avg.ticks /= len;
         avg
     }
 
-    <span class="kw">pub fn </span>min(rounds: <span class="kw-2">&amp;</span>[RoundStats]) -&gt; RoundStats {
-        rounds.iter().fold(RoundStats::new_max(), |<span class="kw-2">mut </span>agg, round| {
-            agg.rmr = agg.rmr.min(round.rmr);
-            agg.ldh = agg.ldh.min(round.ldh);
-            agg.ticks = agg.ticks.min(round.ticks);
-            agg
-        })
+    <span class="kw">pub fn </span>min&lt;<span class="lifetime">'a</span>&gt;(rounds: <span class="kw">impl </span>IntoIterator&lt;Item = <span class="kw-2">&amp;</span><span class="lifetime">'a </span>RoundStats&gt;) -&gt; RoundStats {
+        rounds
+            .into_iter()
+            .fold(RoundStats::new_max(), |<span class="kw-2">mut </span>agg, round| {
+                agg.rmr = agg.rmr.min(round.rmr);
+                agg.ldh = agg.ldh.min(round.ldh);
+                agg.ticks = agg.ticks.min(round.ticks);
+                agg.missing_receives = agg.missing_receives.min(round.missing_receives);
+                agg
+            })
     }
 
-    <span class="kw">pub fn </span>max(rounds: <span class="kw-2">&amp;</span>[RoundStats]) -&gt; RoundStats {
-        rounds.iter().fold(RoundStats::default(), |<span class="kw-2">mut </span>agg, round| {
-            agg.rmr = agg.rmr.max(round.rmr);
-            agg.ldh = agg.ldh.max(round.ldh);
-            agg.ticks = agg.ticks.max(round.ticks);
-            agg
-        })
+    <span class="kw">pub fn </span>max&lt;<span class="lifetime">'a</span>&gt;(rounds: <span class="kw">impl </span>IntoIterator&lt;Item = <span class="kw-2">&amp;</span><span class="lifetime">'a </span>RoundStats&gt;) -&gt; RoundStats {
+        rounds
+            .into_iter()
+            .fold(RoundStats::default(), |<span class="kw-2">mut </span>agg, round| {
+                agg.rmr = agg.rmr.max(round.rmr);
+                agg.ldh = agg.ldh.max(round.ldh);
+                agg.ticks = agg.ticks.max(round.ticks);
+                agg.missing_receives = agg.missing_receives.max(round.missing_receives);
+                agg
+            })
     }
 
-    <span class="kw">pub fn </span>avg(rounds: <span class="kw-2">&amp;</span>[RoundStats]) -&gt; RoundStatsAvg {
+    <span class="kw">pub fn </span>avg&lt;<span class="lifetime">'a</span>&gt;(rounds: <span class="kw-2">&amp;</span>[RoundStats]) -&gt; RoundStatsAvg {
         <span class="kw">let </span>min = <span class="self">Self</span>::min(rounds);
         <span class="kw">let </span>max = <span class="self">Self</span>::max(rounds);
-        <span class="kw">let </span>mean = <span class="self">Self</span>::mean(rounds);
+        <span class="kw">let </span>mean = <span class="self">Self</span>::merge(rounds);
         RoundStatsAvg { min, max, mean }
     }
 
@@ -1290,12 +1479,21 @@
             ticks: diff_percent(<span class="self">self</span>.ticks, other.ticks),
             rmr: diff_percent(<span class="self">self</span>.rmr, other.rmr),
             ldh: diff_percent(<span class="self">self</span>.ldh, other.ldh),
+            missing_receives: diff_percent(<span class="self">self</span>.missing_receives, other.missing_receives),
         }
     }
 }
 
 <span class="kw">fn </span>diff_percent(a: f32, b: f32) -&gt; f32 {
-    (b - a) / a
+    <span class="kw">if </span>a == <span class="number">0.0 </span>&amp;&amp; b == <span class="number">0.0 </span>{
+        <span class="number">0.0
+    </span>} <span class="kw">else if </span>b == <span class="number">0.0 </span>{
+        -<span class="number">1.0
+    </span>} <span class="kw">else if </span>a == <span class="number">0.0 </span>{
+        <span class="number">1.0
+    </span>} <span class="kw">else </span>{
+        (b - a) / a
+    }
 }
 
 <span class="attr">#[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -1368,7 +1566,7 @@
 
 <span class="kw">impl </span>Simulator {
     <span class="kw">pub fn </span>new(simulator_config: SimulatorConfig, protocol_config: Config) -&gt; <span class="self">Self </span>{
-        <span class="kw">let </span>rng = rand_chacha::ChaCha12Rng::seed_from_u64(simulator_config.seed);
+        <span class="kw">let </span>rng = rand_chacha::ChaCha12Rng::seed_from_u64(simulator_config.rng_seed);
         <span class="self">Self </span>{
             network: Network::new(protocol_config, rng),
             config: simulator_config,
@@ -1415,21 +1613,81 @@
         TickReport { min_active_len }
     }
 
-    <span class="kw">fn </span>run_until_all_active(<span class="kw-2">&amp;mut </span><span class="self">self</span>, limit: usize) -&gt; bool {
-        <span class="kw">for </span>_i <span class="kw">in </span><span class="number">0</span>..limit {
-            <span class="self">self</span>.run_ticks(<span class="number">1</span>);
-            <span class="kw">let _ </span>= <span class="self">self</span>.network.events();
-            <span class="kw">let </span>report = <span class="self">self</span>.report_swarm();
-            <span class="kw">if </span>report.min_active_len &gt; <span class="number">0 </span>{
-                <span class="macro">info!</span>(<span class="string">"bootstrapped {}"</span>, <span class="self">self</span>.network.peers.len());
-                <span class="kw">return </span><span class="bool-val">true</span>;
-            }
-        }
-        <span class="bool-val">false
-    </span>}
+    <span class="comment">// fn run_until_all_active(&amp;mut self, limit: usize) -&gt; bool {
+    //     info!("run max {limit} ticks or until all nodes active..");
+    //     for _i in 0..limit {
+    //         self.run_ticks(1);
+    //         let report = self.report_swarm();
+    //         if report.min_active_len &gt; 0 {
+    //             info!("bootstrapped {}", self.network.peers.len());
+    //             return true;
+    //         }
+    //     }
+    //     false
+    // }
 
-    <span class="kw">pub fn </span>bootstrap(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
-        <span class="kw">let </span>bootstrap_count = <span class="self">self</span>.config.bootstrap_count;
+    </span><span class="kw">pub fn </span>bootstrap(<span class="kw-2">&amp;mut </span><span class="self">self</span>, bootstrap_mode: BootstrapMode) -&gt; bool {
+        <span class="kw">match </span>bootstrap_mode {
+            BootstrapMode::Static(opts) =&gt; <span class="self">self</span>.bootstrap_static(opts),
+            BootstrapMode::Dynamic(opts) =&gt; <span class="self">self</span>.bootstrap_dynamic(opts),
+        }
+    }
+
+    <span class="kw">pub fn </span>bootstrap_static(<span class="kw-2">&amp;mut </span><span class="self">self</span>, opts: StaticBootstrap) -&gt; bool {
+        <span class="kw">let </span>node_count = <span class="self">self</span>.config.peers;
+        <span class="kw">for </span>i <span class="kw">in </span>(<span class="number">0</span>..node_count).into_iter() {
+            <span class="kw">let </span>chunk_size = opts.random_contacts;
+            <span class="kw">let </span>contacts = <span class="self">self
+                </span>.network
+                .peers
+                .keys()
+                .cloned()
+                .choose_multiple(<span class="kw-2">&amp;mut </span><span class="self">self</span>.network.rng, chunk_size);
+            <span class="self">self</span>.network.insert_and_join(i <span class="kw">as </span>u64, TOPIC, contacts);
+        }
+        <span class="self">self</span>.warmup(opts.warmup_ticks)
+    }
+
+    <span class="kw">pub fn </span>bootstrap_static2(<span class="kw-2">&amp;mut </span><span class="self">self</span>, opts: StaticBootstrap) -&gt; bool {
+        <span class="self">self</span>.network.insert_and_join(<span class="number">0</span>, TOPIC, <span class="macro">vec!</span>[]);
+        <span class="kw">let </span>node_count = <span class="self">self</span>.config.peers;
+        <span class="kw">let </span><span class="kw-2">mut </span>chunk = <span class="number">0</span>;
+        <span class="kw">let </span>chunk_size = opts.random_contacts;
+        <span class="kw">for </span>i <span class="kw">in </span>(<span class="number">1</span>..node_count).into_iter() {
+            <span class="kw">let </span>contact = chunk * chunk_size <span class="kw">as </span>u64;
+            <span class="kw">if </span>i % chunk_size == <span class="number">0 </span>{
+                chunk += <span class="number">1</span>;
+            }
+            <span class="self">self</span>.network.insert_and_join(i <span class="kw">as </span>u64, TOPIC, <span class="macro">vec!</span>[contact]);
+            <span class="comment">// if i % 3 == 0 {
+            //     self.run_ticks(4);
+            // }
+        </span>}
+
+        <span class="self">self</span>.warmup(opts.warmup_ticks)
+    }
+
+    <span class="kw">fn </span>warmup(<span class="kw-2">&amp;mut </span><span class="self">self</span>, ticks: usize) -&gt; bool {
+        <span class="self">self</span>.drop_events();
+        <span class="self">self</span>.run_ticks(ticks);
+        <span class="self">self</span>.drop_events();
+        <span class="macro">info!</span>(tick=%<span class="self">self</span>.network.current_tick(), <span class="string">"warmup complete"</span>);
+        <span class="kw">if </span>!<span class="self">self</span>.network.check_synchronicity() {
+            <span class="macro">warn!</span>(<span class="string">"not all peers have synchronous relations"</span>);
+        }
+
+        <span class="kw">let </span>report = <span class="self">self</span>.report_swarm();
+        <span class="kw">if </span>report.min_active_len == <span class="number">0 </span>{
+            <span class="macro">warn!</span>(<span class="string">"failed to keep all nodes active after warmup"</span>);
+            <span class="bool-val">false
+        </span>} <span class="kw">else </span>{
+            <span class="macro">info!</span>(<span class="string">"bootstrap complete, all nodes active"</span>);
+            <span class="bool-val">true
+        </span>}
+    }
+
+    <span class="kw">pub fn </span>bootstrap_dynamic(<span class="kw-2">&amp;mut </span><span class="self">self</span>, opts: DynamicBootstrap) -&gt; bool {
+        <span class="kw">let </span>bootstrap_count = opts.bootstrap_nodes;
         <span class="self">self</span>.network.insert_and_join(<span class="number">0</span>, TOPIC, <span class="macro">vec!</span>[]);
         <span class="self">self</span>.run_ticks(<span class="number">1</span>);
         <span class="kw">for </span>i <span class="kw">in </span><span class="number">1</span>..bootstrap_count {
@@ -1438,61 +1696,43 @@
         }
         <span class="macro">info!</span>(tick=%<span class="self">self</span>.network.current_tick(), <span class="string">"created {bootstrap_count}"</span>);
 
-        <span class="kw">let </span>limit = bootstrap_count * <span class="number">4</span>;
-        <span class="kw">if </span>!<span class="self">self</span>.run_until_all_active(limit) {
-            <span class="macro">panic!</span>(<span class="string">"failed to activate {bootstrap_count} bootstrap nodes within a limit of {limit} ticks"</span>);
+        <span class="kw">if </span>!<span class="self">self</span>.warmup(opts.warmup_ticks) {
+            <span class="macro">warn!</span>(
+                <span class="string">"failed to activate {bootstrap_count} bootstrap nodes within a limit of {} ticks"</span>,
+                opts.warmup_ticks
+            );
+        } <span class="kw">else </span>{
+            <span class="macro">info!</span>(<span class="string">"bootstrap nodes actived"</span>);
         }
 
-        <span class="macro">info!</span>(tick=%<span class="self">self</span>.network.current_tick(), <span class="string">"all active"</span>);
-
-        <span class="kw">let </span>peer_count = <span class="self">self</span>.config.peers_count;
-        <span class="kw">for </span>i <span class="kw">in </span>bootstrap_count..peer_count {
+        <span class="kw">let </span>node_count = <span class="self">self</span>.config.peers;
+        <span class="kw">for </span>i <span class="kw">in </span>bootstrap_count..node_count {
             <span class="kw">let </span>contact = (i % bootstrap_count) <span class="kw">as </span>u64;
             <span class="self">self</span>.network.insert_and_join(i <span class="kw">as </span>u64, TOPIC, <span class="macro">vec!</span>[contact]);
-            <span class="self">self</span>.run_ticks(<span class="number">2</span>);
+            <span class="self">self</span>.run_ticks(opts.ticks_per_join);
         }
-        <span class="macro">info!</span>(tick=%<span class="self">self</span>.network.current_tick(), <span class="string">"created {peer_count}"</span>);
+        <span class="macro">info!</span>(tick=%<span class="self">self</span>.network.current_tick(), <span class="string">"created {node_count}"</span>);
 
-        <span class="kw">let </span>limit = peer_count;
-        <span class="kw">if </span>!<span class="self">self</span>.run_until_all_active(limit) {
-            <span class="macro">panic!</span>(<span class="string">"failed to activate nodes within a limit of {limit} ticks"</span>);
-        }
-        <span class="macro">info!</span>(tick=%<span class="self">self</span>.network.current_tick(), <span class="string">"all active"</span>);
+        <span class="self">self</span>.warmup(opts.warmup_ticks)
+    }
 
-        <span class="self">self</span>.run_ticks(<span class="self">self</span>.config.warmup_ticks);
-        <span class="macro">info!</span>(tick=%<span class="self">self</span>.network.current_tick(), <span class="string">"warmup complete"</span>);
-
-        <span class="kw">let </span>limit = <span class="number">100</span>;
-        <span class="kw">if </span>!<span class="self">self</span>.run_until_all_active(limit) {
-            <span class="macro">panic!</span>(<span class="string">"failed to keep nodes active after warmup"</span>);
-        }
-        <span class="macro">info!</span>(tick=%<span class="self">self</span>.network.current_tick(), <span class="string">"all active"</span>);
-
-        <span class="kw">if </span>!<span class="self">self</span>.network.check_synchronicity() {
-            <span class="macro">panic!</span>(<span class="string">"not all peers have synchronous relations"</span>);
+    <span class="kw">pub fn </span>run_ticks(<span class="kw-2">&amp;mut </span><span class="self">self</span>, ticks: usize) {
+        <span class="kw">for _ in </span><span class="number">0</span>..ticks {
+            <span class="self">self</span>.network.tick();
         }
     }
 
-    <span class="kw">pub fn </span>run_ticks(<span class="kw-2">&amp;mut </span><span class="self">self</span>, ticks: usize) -&gt; BTreeMap&lt;PeerId, Vec&lt;Event&lt;PeerId&gt;&gt;&gt; {
-        <span class="kw">let </span><span class="kw-2">mut </span>events: BTreeMap&lt;PeerId, Vec&lt;Event&lt;PeerId&gt;&gt;&gt; = BTreeMap::new();
-        <span class="kw">for _ in </span><span class="number">0</span>..ticks {
-            <span class="self">self</span>.network.tick();
-            <span class="self">self</span>.report_swarm();
-            <span class="kw">for </span>(peer, _topic, event) <span class="kw">in </span><span class="self">self</span>.network.events() {
-                events.entry(peer).or_default().push(event);
-            }
-        }
-        events
+    <span class="kw">pub fn </span>drop_events(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
+        <span class="kw">let _ </span>= <span class="self">self</span>.network.events();
     }
 
     <span class="kw">pub fn </span>gossip_tick(<span class="kw-2">&amp;mut </span><span class="self">self</span>, missing: <span class="kw-2">&amp;mut </span>BTreeMap&lt;PeerId, BTreeSet&lt;Bytes&gt;&gt;) {
-        <span class="kw">let </span>events = <span class="self">self</span>.run_ticks(<span class="number">1</span>);
-        <span class="kw">for </span>(peer, events) <span class="kw">in </span>events.into_iter() {
+        <span class="self">self</span>.run_ticks(<span class="number">1</span>);
+
+        <span class="kw">for </span>(peer, _topic, event) <span class="kw">in </span><span class="self">self</span>.network.events() {
             <span class="kw">let </span>entry = missing.get_mut(<span class="kw-2">&amp;</span>peer).unwrap();
-            <span class="kw">for </span>event <span class="kw">in </span>events {
-                <span class="kw">if let </span>Event::Received(message) = event {
-                    entry.remove(<span class="kw-2">&amp;</span>message.content);
-                }
+            <span class="kw">if let </span>Event::Received(message) = event {
+                entry.remove(<span class="kw-2">&amp;</span>message.content);
             }
         }
     }
@@ -1539,7 +1779,8 @@
                     set.insert(message.clone());
                 }
             }
-            <span class="self">self</span>.gossip_tick(<span class="kw-2">&amp;mut </span>missing);
+            <span class="comment">// tick once after each sent message
+            </span><span class="self">self</span>.gossip_tick(<span class="kw-2">&amp;mut </span>missing);
         }
 
         <span class="kw">let </span><span class="kw-2">mut </span>ticks = <span class="number">0</span>;
@@ -1563,36 +1804,41 @@
 
             <span class="self">self</span>.gossip_tick(<span class="kw-2">&amp;mut </span>missing);
         }
-        <span class="self">self</span>.report_gossip_round(expected_recv_count, ticks);
+        <span class="kw">let </span>missing_count: usize = missing.values().map(|set| set.len()).sum();
+        <span class="self">self</span>.report_gossip_round(expected_recv_count, missing_count, ticks);
     }
 
-    <span class="kw">fn </span>report_gossip_round(<span class="kw-2">&amp;mut </span><span class="self">self</span>, expected_recv_count: usize, ticks: usize) {
+    <span class="kw">fn </span>report_gossip_round(
+        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
+        expected_recv_count: usize,
+        missing_receives_count: usize,
+        ticks: usize,
+    ) {
         <span class="kw">let </span>ticks = ticks <span class="kw">as </span>f32;
         <span class="kw">let </span>payloud_msg_count = <span class="self">self</span>.total_payload_messages();
         <span class="kw">let </span>ctrl_msg_count = <span class="self">self</span>.total_control_messages();
-        <span class="kw">let </span>rmr = (payloud_msg_count <span class="kw">as </span>f32 / (expected_recv_count <span class="kw">as </span>f32 - <span class="number">1.</span>)) - <span class="number">1.</span>;
+        <span class="kw">let </span>rmr_expected_count = expected_recv_count - missing_receives_count;
+        <span class="kw">let </span>rmr = (payloud_msg_count <span class="kw">as </span>f32 / (rmr_expected_count <span class="kw">as </span>f32 - <span class="number">1.</span>)) - <span class="number">1.</span>;
         <span class="kw">let </span>ldh = <span class="self">self</span>.max_ldh();
 
         <span class="kw">let </span>round_stats = RoundStats {
             ticks,
             rmr,
             ldh: ldh <span class="kw">as </span>f32,
+            missing_receives: missing_receives_count <span class="kw">as </span>f32,
         };
         <span class="kw">let </span>network_stats = <span class="self">self</span>.network.state_stats();
         <span class="macro">info!</span>(
-            <span class="string">"round {}: pay {} ctrl {} rmr {:.4} ldh {} ticks {}\n{network_stats}"</span>,
+            <span class="string">"round {}: pay {} ctrl {} {round_stats} \n{network_stats}"</span>,
             <span class="self">self</span>.round_stats.len(),
             payloud_msg_count,
             ctrl_msg_count,
-            round_stats.rmr,
-            round_stats.ldh,
-            round_stats.ticks
         );
         <span class="self">self</span>.round_stats.push(round_stats);
     }
 
     <span class="kw">pub fn </span>report_round_average(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; RoundStats {
-        RoundStats::mean(<span class="kw-2">&amp;</span><span class="self">self</span>.round_stats)
+        RoundStats::merge(<span class="kw-2">&amp;</span><span class="self">self</span>.round_stats)
     }
 
     <span class="kw">fn </span>reset_stats(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
