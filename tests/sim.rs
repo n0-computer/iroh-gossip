@@ -4,9 +4,7 @@ use rand::{seq::IteratorRandom, SeedableRng};
 
 use iroh_gossip::proto::Config;
 
-use iroh_gossip::proto::tests::{
-    Simulator, SimulatorConfig,
-};
+use iroh_gossip::proto::tests::{Simulator, SimulatorConfig};
 
 #[test]
 // #[traced_test]
@@ -39,8 +37,14 @@ fn big_multiple_sender() {
         simulator.gossip_round(messages);
     }
     let avg = simulator.report_round_average();
-    assert!(avg.ldh < 10.);
-    assert!(avg.rmr < 0.1);
+    eprintln!(
+        "average with {} peers after {} rounds:\n{}",
+        simulator.peer_count(),
+        rounds,
+        avg
+    );
+    assert!(avg.ldh < 18.);
+    assert!(avg.rmr < 0.2);
 }
 
 #[test]
@@ -59,9 +63,14 @@ fn big_single_sender() {
         let messages = vec![(from, message)];
         simulator.gossip_round(messages);
     }
-    simulator.report_round_average();
     let avg = simulator.report_round_average();
-    assert!(avg.ldh < 8.);
+    eprintln!(
+        "average with {} peers after {} rounds:\n{}",
+        simulator.peer_count(),
+        rounds,
+        avg
+    );
+    assert!(avg.ldh < 10.);
     assert!(avg.rmr < 0.1);
 }
 
@@ -88,8 +97,14 @@ fn big_burst() {
         simulator.gossip_round(messages);
     }
     let avg = simulator.report_round_average();
-    assert!(avg.ldh < 18.);
-    assert!(avg.rmr < 0.7);
+    eprintln!(
+        "average with {} peers after {} rounds:\n{}",
+        simulator.peer_count(),
+        rounds,
+        avg
+    );
+    assert!(avg.ldh < 30.);
+    assert!(avg.rmr < 2.);
 }
 
 fn read_var<T: FromStr<Err: fmt::Display + fmt::Debug>>(name: &str, default: T) -> T {

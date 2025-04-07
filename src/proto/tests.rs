@@ -10,8 +10,10 @@ use std::{
 
 use bytes::Bytes;
 use n0_future::time::{Duration, Instant};
-use rand::Rng;
+use rand::{seq::IteratorRandom, Rng};
+use rand_chacha::ChaCha12Rng;
 use rand_core::SeedableRng;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, error_span, info, trace};
 
 use super::{
@@ -362,11 +364,99 @@ impl Default for SimulatorConfig {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RoundStats {
-    pub ticks: u32,
+    pub ticks: f32,
     pub rmr: f32,
     pub ldh: f32,
+}
+
+impl fmt::Display for RoundStats {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "RMR {:>2.2} LDH {:>2.2} ticks {:>3.2}",
+            self.rmr, self.ldh, self.ticks
+        )
+    }
+}
+
+impl RoundStats {
+    fn new_max() -> Self {
+        Self {
+            ticks: f32::MAX,
+            rmr: f32::MAX,
+            ldh: f32::MAX,
+        }
+    }
+
+    pub fn mean(rounds: &[RoundStats]) -> RoundStats {
+        let len = rounds.len() as f32;
+        let mut avg = rounds.iter().fold(RoundStats::default(), |mut agg, round| {
+            agg.rmr += round.rmr;
+            agg.ldh += round.ldh;
+            agg.ticks += round.ticks as f32;
+            agg
+        });
+        avg.rmr /= len;
+        avg.ldh /= len;
+        avg.ticks /= len;
+        avg
+    }
+
+    pub fn min(rounds: &[RoundStats]) -> RoundStats {
+        rounds.iter().fold(RoundStats::new_max(), |mut agg, round| {
+            agg.rmr = agg.rmr.min(round.rmr);
+            agg.ldh = agg.ldh.min(round.ldh);
+            agg.ticks = agg.ticks.min(round.ticks);
+            agg
+        })
+    }
+
+    pub fn max(rounds: &[RoundStats]) -> RoundStats {
+        rounds.iter().fold(RoundStats::default(), |mut agg, round| {
+            agg.rmr = agg.rmr.max(round.rmr);
+            agg.ldh = agg.ldh.max(round.ldh);
+            agg.ticks = agg.ticks.max(round.ticks);
+            agg
+        })
+    }
+
+    pub fn avg(rounds: &[RoundStats]) -> RoundStatsAvg {
+        let min = Self::min(rounds);
+        let max = Self::max(rounds);
+        let mean = Self::mean(rounds);
+        RoundStatsAvg { min, max, mean }
+    }
+
+    pub fn diff(&self, other: &Self) -> Self {
+        RoundStats {
+            ticks: diff_percent(self.ticks, other.ticks),
+            rmr: diff_percent(self.rmr, other.rmr),
+            ldh: diff_percent(self.ldh, other.ldh),
+        }
+    }
+}
+
+fn diff_percent(a: f32, b: f32) -> f32 {
+    (b - a) / a
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct RoundStatsAvg {
+    pub min: RoundStats,
+    pub max: RoundStats,
+    pub mean: RoundStats,
+}
+
+impl RoundStatsAvg {
+    pub fn diff(&self, other: &Self) -> Self {
+        Self {
+            min: self.min.diff(&other.min),
+            max: self.max.diff(&other.max),
+            mean: self.mean.diff(&other.mean),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -428,6 +518,23 @@ impl Simulator {
             config: simulator_config,
             round_stats: Default::default(),
         }
+    }
+
+    pub fn rng(&mut self) -> ChaCha12Rng {
+        ChaCha12Rng::from_rng(&mut self.network.rng).unwrap()
+    }
+
+    pub fn random_peer(&mut self) -> PeerId {
+        *self
+            .network
+            .peers
+            .keys()
+            .choose(&mut self.network.rng)
+            .unwrap()
+    }
+
+    pub fn peer_count(&self) -> usize {
+        self.network.peers.len()
     }
 
     pub fn kill(&mut self, n: usize) {
@@ -604,7 +711,7 @@ impl Simulator {
     }
 
     fn report_gossip_round(&mut self, expected_recv_count: usize, ticks: usize) {
-        let ticks = ticks as u32;
+        let ticks = ticks as f32;
         let payloud_msg_count = self.total_payload_messages();
         let ctrl_msg_count = self.total_control_messages();
         let rmr = (payloud_msg_count as f32 / (expected_recv_count as f32 - 1.)) - 1.;
@@ -629,27 +736,7 @@ impl Simulator {
     }
 
     pub fn report_round_average(&self) -> RoundStats {
-        let len = self.round_stats.len();
-        let mut avg = self
-            .round_stats
-            .iter()
-            .fold(RoundStats::default(), |mut agg, round| {
-                agg.rmr += round.rmr;
-                agg.ldh += round.ldh;
-                agg.ticks += round.ticks;
-                agg
-            });
-        avg.rmr /= len as f32;
-        avg.ldh /= len as f32;
-        avg.ticks /= len as u32;
-        let RoundStats { ticks, rmr, ldh } = avg;
-        eprintln!(
-            "average over {} rounds with {} peers: RMR {rmr:.2} LDH {ldh:.2} ticks {ticks:.2}",
-            self.round_stats.len(),
-            self.network.peers.len(),
-        );
-        eprintln!("RMR = Relative Message Redundancy, LDH = Last Delivery Hop");
-        avg
+        RoundStats::mean(&self.round_stats)
     }
 
     fn reset_stats(&mut self) {

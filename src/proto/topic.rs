@@ -174,7 +174,8 @@ impl<PI: Clone> IO<PI> for VecDeque<OutEvent<PI>> {
 }
 
 /// Protocol configuration
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     /// Configuration for the swarm membership layer
     pub membership: hyparview::Config,
