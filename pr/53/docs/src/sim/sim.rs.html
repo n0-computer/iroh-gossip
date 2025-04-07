@@ -387,22 +387,14 @@
 <a href="#386" id="386">386</a>
 <a href="#387" id="387">387</a>
 <a href="#388" id="388">388</a>
-<a href="#389" id="389">389</a>
-<a href="#390" id="390">390</a>
-<a href="#391" id="391">391</a>
-<a href="#392" id="392">392</a>
-<a href="#393" id="393">393</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::{
+<a href="#389" id="389">389</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::{
     collections::HashMap,
     path::{Path, PathBuf},
 };
 
 <span class="kw">use </span>anyhow::{Context, <span class="prelude-ty">Result</span>};
 <span class="kw">use </span>clap::Parser;
-<span class="kw">use </span>comfy_table::{
-    modifiers::UTF8_ROUND_CORNERS,
-    presets::{NOTHING, UTF8_FULL, UTF8_NO_BORDERS},
-    Cell, CellAlignment, Table,
-};
+<span class="kw">use </span>comfy_table::{presets::NOTHING, Cell, CellAlignment, Table};
 <span class="kw">use </span>iroh_gossip::proto::{
     tests::{BootstrapMode, RoundStats, RoundStatsAvg, Simulator, SimulatorConfig},
     Config,
