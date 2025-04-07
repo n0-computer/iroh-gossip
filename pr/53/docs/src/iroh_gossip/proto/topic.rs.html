@@ -348,7 +348,8 @@
 <a href="#347" id="347">347</a>
 <a href="#348" id="348">348</a>
 <a href="#349" id="349">349</a>
-<a href="#350" id="350">350</a></pre></div><pre class="rust"><code><span class="doccomment">//! This module contains the implementation of the gossiping protocol for an individual topic
+<a href="#350" id="350">350</a>
+<a href="#351" id="351">351</a></pre></div><pre class="rust"><code><span class="doccomment">//! This module contains the implementation of the gossiping protocol for an individual topic
 
 </span><span class="kw">use </span>std::collections::VecDeque;
 
@@ -524,7 +525,8 @@
 }
 
 <span class="doccomment">/// Protocol configuration
-</span><span class="attr">#[derive(Clone, Debug)]
+</span><span class="attr">#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 </span><span class="kw">pub struct </span>Config {
     <span class="doccomment">/// Configuration for the swarm membership layer
     </span><span class="kw">pub </span>membership: hyparview::Config,
