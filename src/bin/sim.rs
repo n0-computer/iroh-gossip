@@ -5,11 +5,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use comfy_table::{
-    modifiers::UTF8_ROUND_CORNERS,
-    presets::{NOTHING, UTF8_FULL, UTF8_NO_BORDERS},
-    Cell, CellAlignment, Table,
-};
+use comfy_table::{presets::NOTHING, Cell, CellAlignment, Table};
 use iroh_gossip::proto::{
     tests::{BootstrapMode, RoundStats, RoundStatsAvg, Simulator, SimulatorConfig},
     Config,
