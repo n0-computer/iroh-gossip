@@ -724,7 +724,8 @@
 <a href="#723" id="723">723</a>
 <a href="#724" id="724">724</a>
 <a href="#725" id="725">725</a>
-<a href="#726" id="726">726</a></pre></div><pre class="rust"><code><span class="doccomment">//! Implementation of the HyParView membership protocol
+<a href="#726" id="726">726</a>
+<a href="#727" id="727">727</a></pre></div><pre class="rust"><code><span class="doccomment">//! Implementation of the HyParView membership protocol
 //!
 //! The implementation is based on [this paper][paper] by Joao Leitao, Jose Pereira, Luıs Rodrigues
 //! and the [example implementation][impl] by Bartosz Sypytkowski
@@ -897,7 +898,8 @@
 }
 
 <span class="doccomment">/// Configuration for the swarm membership layer
-</span><span class="attr">#[derive(Clone, Debug)]
+</span><span class="attr">#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 </span><span class="kw">pub struct </span>Config {
     <span class="doccomment">/// Number of peers to which active connections are maintained
     </span><span class="kw">pub </span>active_view_capacity: usize,
