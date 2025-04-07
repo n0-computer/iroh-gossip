@@ -454,8 +454,8 @@ impl RoundStats {
                 .fold((0., RoundStats::default()), |(len, mut agg), round| {
                     agg.rmr += round.rmr;
                     agg.ldh += round.ldh;
-                    agg.ticks += round.ticks as f32;
-                    agg.missing_receives += round.missing_receives as f32;
+                    agg.ticks += round.ticks;
+                    agg.missing_receives += round.missing_receives;
                     (len + 1., agg)
                 });
         avg.rmr /= len;
@@ -488,7 +488,7 @@ impl RoundStats {
             })
     }
 
-    pub fn avg<'a>(rounds: &[RoundStats]) -> RoundStatsAvg {
+    pub fn avg(rounds: &[RoundStats]) -> RoundStatsAvg {
         let min = Self::min(rounds);
         let max = Self::max(rounds);
         let mean = Self::merge(rounds);
@@ -656,7 +656,7 @@ impl Simulator {
 
     pub fn bootstrap_static(&mut self, opts: StaticBootstrap) -> bool {
         let node_count = self.config.peers;
-        for i in (0..node_count).into_iter() {
+        for i in 0..node_count {
             let chunk_size = opts.random_contacts;
             let contacts = self
                 .network
@@ -674,7 +674,7 @@ impl Simulator {
         let node_count = self.config.peers;
         let mut chunk = 0;
         let chunk_size = opts.random_contacts;
-        for i in (1..node_count).into_iter() {
+        for i in 1..node_count {
             let contact = chunk * chunk_size as u64;
             if i % chunk_size == 0 {
                 chunk += 1;
@@ -723,7 +723,7 @@ impl Simulator {
                 opts.warmup_ticks
             );
         } else {
-            info!("bootstrap nodes actived");
+            info!("bootstrap nodes activated");
         }
 
         let node_count = self.config.peers;

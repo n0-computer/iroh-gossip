@@ -1,10 +1,10 @@
 use std::{env, fmt, str::FromStr, time::Duration};
 
+use iroh_gossip::proto::{
+    tests::{BootstrapMode, Simulator, SimulatorConfig},
+    Config,
+};
 use rand::{seq::IteratorRandom, SeedableRng};
-
-use iroh_gossip::proto::Config;
-
-use iroh_gossip::proto::tests::{BootstrapMode, Simulator, SimulatorConfig};
 
 #[test]
 // #[traced_test]
