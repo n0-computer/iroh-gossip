@@ -24,21 +24,26 @@ jobs:
           cat REPORT >> COMMENT
           echo "```" >> COMMENT
           echo "</details>" >> COMMENT
+          echo "*Last updated: $(date -u +'%Y-%m-%dT%H:%M:%SZ')*" >> $COMMENT
 
       - name: Find Docs Comment
         if: ${{ inputs.pr_number != '' }}
         uses: peter-evans/find-comment@v3
         id: fc
         with:
-          issue-number: ${{ inputs.pr_number }}
+          issue-number: ${{ github.event.pull_request.number || inputs.pr_number }}
           comment-author: "github-actions[bot]"
           body-includes: Simulation report
+
+      - name: Get current timestamp
+        id: get_timestamp
+        run: echo "TIMESTAMP=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_ENV
 
       - name: Create or Update Docs Comment
         if: ${{ inputs.pr_number != '' && !github.event.pull_request.head.repo.fork }}
         uses: peter-evans/create-or-update-comment@v4
         with:
-          issue-number: ${{ inputs.pr_number }}
+          issue-number: ${{ github.event.pull_request.number || inputs.pr_number }}
           comment-id: ${{ steps.fc.outputs.comment-id }}
           body-path: COMMENT
           edit-mode: replace
