@@ -3,7 +3,6 @@ seeds = [0, 1, 212312388123, 123]
 [[scenario]]
 sim = "GossipSingle"
 nodes = 20
-config.membership = { active_view_capacity = 10 }
 
 [[scenario]]
 sim = "GossipSingle"
@@ -24,7 +23,6 @@ nodes = 100
 [[scenario]]
 sim = "GossipMulti"
 nodes = 1000
-config.membership.active_view_size = 10
 
 [[scenario]]
 sim = "GossipAll"
@@ -34,8 +32,3 @@ nodes = 20
 sim = "GossipAll"
 nodes = 100
 rounds = 5
-
-# [[scenario]]
-# sim = "GossipAll"
-# nodes = 500
-# rounds = 5

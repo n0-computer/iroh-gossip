@@ -1,12 +1,17 @@
-use std::{ffi::OsStr, path::PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
+use anyhow::{Context, Result};
 use clap::Parser;
 use iroh_gossip::proto::{
-    tests::{RoundStats, RoundStatsAvg, Simulator, SimulatorConfig},
+    tests::{BootstrapMode, RoundStats, RoundStatsAvg, Simulator, SimulatorConfig},
     Config,
 };
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
+use tracing::{error_span, warn};
 
 #[derive(Debug, Serialize, Deserialize)]
 enum Simulation {
@@ -19,7 +24,9 @@ enum Simulation {
 struct ScenarioDescription {
     sim: Simulation,
     nodes: u32,
-    bootstrap_nodes: Option<u32>,
+    #[serde(default)]
+    bootstrap_mode: BootstrapMode,
+    // bootstrap_nodes: Option<u32>,
     #[serde(default = "defaults::rounds")]
     rounds: u32,
     config: Option<Config>,
@@ -30,9 +37,9 @@ impl ScenarioDescription {
         let &ScenarioDescription {
             sim,
             nodes,
-            bootstrap_nodes: _,
             rounds,
             config: _,
+            bootstrap_mode: _,
         } = &self;
         format!("{sim:?}-n{nodes}-r{rounds}")
     }
@@ -47,6 +54,7 @@ mod defaults {
 #[derive(Debug, Serialize, Deserialize)]
 struct SimConfig {
     seeds: Vec<u64>,
+    config: Option<Config>,
     scenario: Vec<ScenarioDescription>,
 }
 
@@ -66,12 +74,14 @@ enum Command {
         out_dir: PathBuf,
         #[clap(short, long)]
         baseline: Option<PathBuf>,
+        #[clap(short, long)]
+        single_threaded: bool,
     },
     /// Compare simulation runs
     Compare { baseline: PathBuf, current: PathBuf },
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let args: Cli = Cli::parse();
     match args.command {
@@ -79,64 +89,129 @@ fn main() -> anyhow::Result<()> {
             config_path,
             out_dir,
             baseline,
+            single_threaded,
         } => {
             let config_text = std::fs::read_to_string(&config_path)?;
             let config: SimConfig = toml::from_str(&config_text)?;
 
+            let base_config = config.config.unwrap_or_default();
             let seeds = config.seeds;
-            let scenarios = config.scenario;
+            let mut scenarios = config.scenario;
+            for scenario in scenarios.iter_mut() {
+                scenario.config.get_or_insert_with(|| base_config.clone());
+            }
 
             std::fs::create_dir_all(&out_dir)?;
-            scenarios.into_par_iter().try_for_each(|scenario| {
-                let path = out_dir.join(format!("{}.json", scenario.label()));
-                let avg = run_simulation(&seeds, scenario);
-                let json = serde_json::to_string(&avg)?;
-                std::fs::write(path, json)?;
-                anyhow::Ok(())
-            })?;
+
+            if !single_threaded {
+                scenarios
+                    .into_par_iter()
+                    .try_for_each(|scenario| run_and_save_simulation(scenario, &seeds, &out_dir))?;
+            } else {
+                scenarios
+                    .into_iter()
+                    .try_for_each(|scenario| run_and_save_simulation(scenario, &seeds, &out_dir))?;
+            }
             if let Some(baseline) = baseline {
-                compare(baseline, out_dir)?;
+                compare_dirs(baseline, out_dir)?;
             }
         }
         Command::Compare { baseline, current } => {
-            compare(baseline, current)?;
+            compare_dirs(baseline, current)?;
         }
     }
 
     Ok(())
 }
 
-fn run_simulation(seeds: &[u64], scenario: ScenarioDescription) -> RoundStatsAvg {
+fn run_and_save_simulation(
+    scenario: ScenarioDescription,
+    seeds: &[u64],
+    out_path: impl AsRef<Path>,
+) -> Result<()> {
+    let span = error_span!("sim", s=%scenario.label());
+    let _guard = span.enter();
+
+    let label = scenario.label();
+
+    let path = out_path.as_ref().join(format!("{label}.config.toml"));
+    let encoded = toml::to_string(&scenario)?;
+    std::fs::write(path, encoded)?;
+
+    let result = run_simulation(&seeds, scenario);
+
+    let path = out_path.as_ref().join(format!("{label}.results.json"));
+    let encoded = serde_json::to_string(&result)?;
+    std::fs::write(path, encoded)?;
+
+    anyhow::Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct SimulationResults {
+    /// Maps seeds to results
+    results: HashMap<u64, Result<RoundStats, SimulationError>>,
+    average: Option<RoundStatsAvg>,
+}
+
+impl SimulationResults {
+    fn load_from_file(path: impl AsRef<Path>) -> Result<Self> {
+        let s = std::fs::read_to_string(path.as_ref())?;
+        let out = serde_json::from_str(&s)?;
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, thiserror::Error)]
+enum SimulationError {
+    #[error("failed to bootstrap")]
+    FailedToBootstrap,
+}
+
+fn run_simulation(seeds: &[u64], scenario: ScenarioDescription) -> SimulationResults {
+    let mut results = HashMap::new();
     let label = scenario.label();
     let proto_config = scenario.config.unwrap_or_default();
-    let mut stats = vec![];
     for seed in seeds {
         let seed = *seed;
-        let bootstrap_nodes = scenario
-            .bootstrap_nodes
-            .unwrap_or_else(|| (scenario.nodes / 10).max(3));
         let sim_config = SimulatorConfig {
-            seed,
-            peers_count: scenario.nodes as usize,
-            bootstrap_count: bootstrap_nodes as usize,
+            rng_seed: seed,
+            peers: scenario.nodes as usize,
             ..Default::default()
         };
+        let bootstrap = scenario.bootstrap_mode.clone();
         let mut simulator = Simulator::new(sim_config, proto_config.clone());
-        simulator.bootstrap();
-        let avg = match scenario.sim {
-            Simulation::GossipSingle => BigSingle.run(simulator, scenario.rounds as usize),
-            Simulation::GossipMulti => BigMulti.run(simulator, scenario.rounds as usize),
-            Simulation::GossipAll => BigAll.run(simulator, scenario.rounds as usize),
+        let result = if !simulator.bootstrap(bootstrap) {
+            warn!("{label} failed to bootstrap with seed {seed}");
+            Err(SimulationError::FailedToBootstrap)
+        } else {
+            Ok(match scenario.sim {
+                Simulation::GossipSingle => BigSingle.run(simulator, scenario.rounds as usize),
+                Simulation::GossipMulti => BigMulti.run(simulator, scenario.rounds as usize),
+                Simulation::GossipAll => BigAll.run(simulator, scenario.rounds as usize),
+            })
         };
-        stats.push(avg);
+        results.insert(seed, result);
     }
-    let avg = RoundStats::avg(&stats);
-    println!("{label} with {} seeds", scenario.rounds);
-    println!("mean: {}", avg.mean);
-    println!("min:  {}", avg.min);
-    println!("max:  {}", avg.max);
-    println!("");
-    avg
+
+    let stats: Vec<_> = results
+        .values()
+        .filter_map(|x| x.as_ref().ok())
+        .cloned()
+        .collect();
+    let average = if !stats.is_empty() {
+        let avg = RoundStats::avg(&stats);
+        println!("{label} with {} seeds", seeds.len());
+        println!("mean: {}", avg.mean);
+        println!("min:  {}", avg.min);
+        println!("max:  {}", avg.max);
+        println!("");
+        Some(avg)
+    } else {
+        println!("all seeds failed");
+        None
+    };
+    SimulationResults { average, results }
 }
 
 trait Scenario {
@@ -188,38 +263,62 @@ impl Scenario for BigAll {
     }
 }
 
-fn compare(baseline: PathBuf, current: PathBuf) -> anyhow::Result<()> {
-    for entry in std::fs::read_dir(&baseline)? {
+fn compare_dirs(baseline_dir: PathBuf, current_path: PathBuf) -> Result<()> {
+    for entry in std::fs::read_dir(&current_path)? {
         let entry = entry?;
-        let path = entry.path();
-        let Some(filename) = path.file_name() else {
+        let current_file = entry.path();
+        let Some(filename) = current_file.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
-        if !path.is_file() || path.extension() != Some(OsStr::new("json")) {
+        if !current_file.is_file() || !filename.ends_with(".results.json") {
             continue;
         }
-        let current_path = current.join(filename);
-        let Ok(current) = std::fs::read_to_string(current_path) else {
-            continue;
-        };
-        let baseline = std::fs::read_to_string(&path)?;
-        let baseline: RoundStatsAvg = serde_json::from_str(&baseline)?;
-        let current: RoundStatsAvg = serde_json::from_str(&current)?;
-        let diff = baseline.diff(&current);
-        println!("{}", filename.to_string_lossy());
-        println!("mean {}", fmt_diff_round(&diff.mean));
-        println!("min  {}", fmt_diff_round(&diff.min));
-        println!("max  {}", fmt_diff_round(&diff.max));
+        let baseline_file = baseline_dir.join(filename);
+        if !baseline_file.exists() {
+            println!("skip {} (not in baseline)", filename);
+        }
+        println!("comparing {}", filename);
+        if let Err(err) = compare_files(&baseline_file, &current_file) {
+            println!("  skip (reason: {err:#}");
+        }
     }
     Ok(())
 }
 
+fn compare_files(baseline: impl AsRef<Path>, current: impl AsRef<Path>) -> Result<()> {
+    let baseline =
+        SimulationResults::load_from_file(baseline.as_ref()).context("failed to load baseline")?;
+    let current =
+        SimulationResults::load_from_file(current.as_ref()).context("failed to load current")?;
+    compare_results(baseline, current);
+    Ok(())
+}
+
+fn compare_results(baseline: SimulationResults, current: SimulationResults) {
+    match (baseline.average, current.average) {
+        (None, Some(_avg)) => {
+            println!("baseline run did not finish");
+        }
+        (Some(_avg), None) => {
+            println!("current run did not finish");
+        }
+        (None, None) => println!("both runs did not finish"),
+        (Some(baseline), Some(current)) => {
+            let diff = baseline.diff(&current);
+            println!("mean {}", fmt_diff_round(&diff.mean));
+            println!("min  {}", fmt_diff_round(&diff.min));
+            println!("max  {}", fmt_diff_round(&diff.max));
+        }
+    }
+}
+
 fn fmt_diff_round(round: &RoundStats) -> String {
     format!(
-        "RMR {} LDH {} ticks {}",
+        "RMR {} LDH {} ticks {} missing {}",
         fmt_percent(round.rmr),
         fmt_percent(round.ldh),
         fmt_percent(round.ticks),
+        fmt_percent(round.missing_receives),
     )
 }
 fn fmt_percent(diff: f32) -> String {

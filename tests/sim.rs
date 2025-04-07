@@ -4,17 +4,17 @@ use rand::{seq::IteratorRandom, SeedableRng};
 
 use iroh_gossip::proto::Config;
 
-use iroh_gossip::proto::tests::{Simulator, SimulatorConfig};
+use iroh_gossip::proto::tests::{BootstrapMode, Simulator, SimulatorConfig};
 
 #[test]
 // #[traced_test]
 fn big_hyparview() {
     let mut gossip_config = Config::default();
     gossip_config.membership.shuffle_interval = Duration::from_secs(5);
-    let mut config = SimulatorConfig::from_env();
-    config.peers_count = read_var("PEERS", 100);
+    let config = SimulatorConfig::from_env();
+    let bootstrap = BootstrapMode::from_env(config.peers);
     let mut simulator = Simulator::new(config, gossip_config);
-    simulator.bootstrap();
+    simulator.bootstrap(bootstrap);
     let state = simulator.report_swarm();
     assert!(state.min_active_len > 0);
 }
@@ -26,9 +26,10 @@ fn big_multiple_sender() {
     gossip_config.broadcast.optimization_threshold = (read_var("OPTIM", 7) as u16).into();
     gossip_config.membership.shuffle_interval = Duration::from_secs(5);
     let config = SimulatorConfig::from_env();
-    let rounds = read_var("ROUNDS", 50);
+    let rounds = read_var("ROUNDS", 30);
+    let bootstrap = BootstrapMode::from_env(config.peers);
     let mut simulator = Simulator::new(config, gossip_config);
-    simulator.bootstrap();
+    simulator.bootstrap(bootstrap);
     let mut rng = rand_chacha::ChaCha12Rng::seed_from_u64(0);
     for i in 0..rounds {
         let from = simulator.network.peer_ids().choose(&mut rng).unwrap();
@@ -54,9 +55,10 @@ fn big_single_sender() {
     gossip_config.broadcast.optimization_threshold = (read_var("OPTIM", 7) as u16).into();
     gossip_config.membership.shuffle_interval = Duration::from_secs(5);
     let config = SimulatorConfig::from_env();
-    let rounds = read_var("ROUNDS", 50);
+    let bootstrap = BootstrapMode::from_env(config.peers);
+    let rounds = read_var("ROUNDS", 30);
     let mut simulator = Simulator::new(config, gossip_config);
-    simulator.bootstrap();
+    simulator.bootstrap(bootstrap);
     let from = 8;
     for i in 0..rounds {
         let message = format!("m{i}").into_bytes().into();
@@ -80,11 +82,13 @@ fn big_burst() {
     let mut gossip_config = Config::default();
     gossip_config.broadcast.optimization_threshold = (read_var("OPTIM", 7) as u16).into();
     gossip_config.membership.shuffle_interval = Duration::from_secs(5);
+
     let config = SimulatorConfig::from_env();
+    let bootstrap = BootstrapMode::from_env(config.peers);
     let rounds = read_var("ROUNDS", 20);
 
     let mut simulator = Simulator::new(config, gossip_config);
-    simulator.bootstrap();
+    simulator.bootstrap(bootstrap);
     let messages_per_peer = read_var("MESSAGES_PER_PEER", 1);
     for i in 0..rounds {
         let mut messages = vec![];

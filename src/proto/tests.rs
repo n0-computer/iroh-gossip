@@ -14,7 +14,7 @@ use rand::{seq::IteratorRandom, Rng};
 use rand_chacha::ChaCha12Rng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, error_span, info, trace};
+use tracing::{debug, error_span, info, trace, warn};
 
 use super::{
     util::TimerMap, Command, Config, Event, InEvent, OutEvent, PeerIdentity, State, Timer, TopicId,
@@ -329,24 +329,81 @@ fn latency_between<PI: PeerIdentity + Ord + PartialOrd, R: Rng>(
 
 pub type PeerId = u64;
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SimulatorConfig {
-    pub seed: u64,
-    pub peers_count: usize,
-    pub bootstrap_count: usize,
-    pub warmup_ticks: usize,
+    /// Seed for the random number generator used in the nodes
+    pub rng_seed: u64,
+    /// Number of nodes to create
+    pub peers: usize,
+    /// Max number of ticks for a gossip round before the round is aborted
     pub round_max_ticks: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub enum BootstrapMode {
+    Static(StaticBootstrap),
+    Dynamic(DynamicBootstrap),
+}
+
+impl Default for BootstrapMode {
+    fn default() -> Self {
+        Self::Static(StaticBootstrap::default())
+    }
+}
+
+impl BootstrapMode {
+    pub fn from_env(nodes: usize) -> Self {
+        let is_dynamic = read_var("BOOTSTRAP_MODE", "static".to_string());
+        match is_dynamic.as_str() {
+            "static" => BootstrapMode::default(),
+            "dynamic" => BootstrapMode::Dynamic(DynamicBootstrap {
+                bootstrap_nodes: read_var("BOOTSTRAP_COUNT", (nodes / 10).max(3)),
+                ticks_per_join: 2,
+                warmup_ticks: read_var("WARMUP_TICKS", 100),
+            }),
+            _ => panic!("BOOTSTRAP_MODE must be static or dynamic"),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct StaticBootstrap {
+    chunk_size: usize,
+    warmup_ticks: usize,
+}
+
+impl Default for StaticBootstrap {
+    fn default() -> Self {
+        Self {
+            chunk_size: 3,
+            warmup_ticks: 100,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DynamicBootstrap {
+    bootstrap_nodes: usize,
+    ticks_per_join: usize,
+    warmup_ticks: usize,
+}
+
+impl Default for DynamicBootstrap {
+    fn default() -> Self {
+        Self {
+            bootstrap_nodes: 12,
+            ticks_per_join: 3,
+            warmup_ticks: 100,
+        }
+    }
 }
 
 impl SimulatorConfig {
     pub fn from_env() -> Self {
-        let peers_count = read_var("PEERS", 100);
-        let bootstrap_count = read_var("BOOTSTRAP", peers_count / 10);
+        let nodes = read_var("NODES", 100);
         Self {
-            seed: read_var("SEED", 0),
-            peers_count,
-            bootstrap_count,
-            warmup_ticks: read_var("WARMUP_TICKS", 100),
+            rng_seed: read_var("SEED", 0),
+            peers: nodes,
             round_max_ticks: read_var("ROUND_MAX_TICKS", 200),
         }
     }
@@ -355,10 +412,8 @@ impl SimulatorConfig {
 impl Default for SimulatorConfig {
     fn default() -> Self {
         Self {
-            seed: 0,
-            peers_count: 100,
-            bootstrap_count: 5,
-            warmup_ticks: 100,
+            rng_seed: 0,
+            peers: 100,
             round_max_ticks: 200,
         }
     }
@@ -369,14 +424,15 @@ pub struct RoundStats {
     pub ticks: f32,
     pub rmr: f32,
     pub ldh: f32,
+    pub missing_receives: f32,
 }
 
 impl fmt::Display for RoundStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "RMR {:>2.2} LDH {:>2.2} ticks {:>3.2}",
-            self.rmr, self.ldh, self.ticks
+            "RMR {:>6.2} LDH {:>6.2} ticks {:>6.2} missed {:>10.2}",
+            self.rmr, self.ldh, self.ticks, self.missing_receives
         )
     }
 }
@@ -387,45 +443,55 @@ impl RoundStats {
             ticks: f32::MAX,
             rmr: f32::MAX,
             ldh: f32::MAX,
+            missing_receives: f32::MAX,
         }
     }
 
-    pub fn mean(rounds: &[RoundStats]) -> RoundStats {
-        let len = rounds.len() as f32;
-        let mut avg = rounds.iter().fold(RoundStats::default(), |mut agg, round| {
-            agg.rmr += round.rmr;
-            agg.ldh += round.ldh;
-            agg.ticks += round.ticks as f32;
-            agg
-        });
+    pub fn merge<'a>(rounds: impl IntoIterator<Item = &'a RoundStats>) -> RoundStats {
+        let (len, mut avg) =
+            rounds
+                .into_iter()
+                .fold((0., RoundStats::default()), |(len, mut agg), round| {
+                    agg.rmr += round.rmr;
+                    agg.ldh += round.ldh;
+                    agg.ticks += round.ticks as f32;
+                    agg.missing_receives += round.missing_receives as f32;
+                    (len + 1., agg)
+                });
         avg.rmr /= len;
         avg.ldh /= len;
         avg.ticks /= len;
         avg
     }
 
-    pub fn min(rounds: &[RoundStats]) -> RoundStats {
-        rounds.iter().fold(RoundStats::new_max(), |mut agg, round| {
-            agg.rmr = agg.rmr.min(round.rmr);
-            agg.ldh = agg.ldh.min(round.ldh);
-            agg.ticks = agg.ticks.min(round.ticks);
-            agg
-        })
+    pub fn min<'a>(rounds: impl IntoIterator<Item = &'a RoundStats>) -> RoundStats {
+        rounds
+            .into_iter()
+            .fold(RoundStats::new_max(), |mut agg, round| {
+                agg.rmr = agg.rmr.min(round.rmr);
+                agg.ldh = agg.ldh.min(round.ldh);
+                agg.ticks = agg.ticks.min(round.ticks);
+                agg.missing_receives = agg.missing_receives.min(round.missing_receives);
+                agg
+            })
     }
 
-    pub fn max(rounds: &[RoundStats]) -> RoundStats {
-        rounds.iter().fold(RoundStats::default(), |mut agg, round| {
-            agg.rmr = agg.rmr.max(round.rmr);
-            agg.ldh = agg.ldh.max(round.ldh);
-            agg.ticks = agg.ticks.max(round.ticks);
-            agg
-        })
+    pub fn max<'a>(rounds: impl IntoIterator<Item = &'a RoundStats>) -> RoundStats {
+        rounds
+            .into_iter()
+            .fold(RoundStats::default(), |mut agg, round| {
+                agg.rmr = agg.rmr.max(round.rmr);
+                agg.ldh = agg.ldh.max(round.ldh);
+                agg.ticks = agg.ticks.max(round.ticks);
+                agg.missing_receives = agg.missing_receives.max(round.missing_receives);
+                agg
+            })
     }
 
-    pub fn avg(rounds: &[RoundStats]) -> RoundStatsAvg {
+    pub fn avg<'a>(rounds: &[RoundStats]) -> RoundStatsAvg {
         let min = Self::min(rounds);
         let max = Self::max(rounds);
-        let mean = Self::mean(rounds);
+        let mean = Self::merge(rounds);
         RoundStatsAvg { min, max, mean }
     }
 
@@ -434,12 +500,17 @@ impl RoundStats {
             ticks: diff_percent(self.ticks, other.ticks),
             rmr: diff_percent(self.rmr, other.rmr),
             ldh: diff_percent(self.ldh, other.ldh),
+            missing_receives: diff_percent(self.missing_receives, other.missing_receives),
         }
     }
 }
 
 fn diff_percent(a: f32, b: f32) -> f32 {
-    (b - a) / a
+    if a == 0.0 {
+        1.0
+    } else {
+        (b - a) / a
+    }
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -512,7 +583,7 @@ pub struct Simulator {
 
 impl Simulator {
     pub fn new(simulator_config: SimulatorConfig, protocol_config: Config) -> Self {
-        let rng = rand_chacha::ChaCha12Rng::seed_from_u64(simulator_config.seed);
+        let rng = rand_chacha::ChaCha12Rng::seed_from_u64(simulator_config.rng_seed);
         Self {
             network: Network::new(protocol_config, rng),
             config: simulator_config,
@@ -559,21 +630,66 @@ impl Simulator {
         TickReport { min_active_len }
     }
 
-    fn run_until_all_active(&mut self, limit: usize) -> bool {
-        for _i in 0..limit {
-            self.run_ticks(1);
-            let _ = self.network.events();
-            let report = self.report_swarm();
-            if report.min_active_len > 0 {
-                info!("bootstrapped {}", self.network.peers.len());
-                return true;
-            }
+    // fn run_until_all_active(&mut self, limit: usize) -> bool {
+    //     info!("run max {limit} ticks or until all nodes active..");
+    //     for _i in 0..limit {
+    //         self.run_ticks(1);
+    //         let report = self.report_swarm();
+    //         if report.min_active_len > 0 {
+    //             info!("bootstrapped {}", self.network.peers.len());
+    //             return true;
+    //         }
+    //     }
+    //     false
+    // }
+
+    pub fn bootstrap(&mut self, bootstrap_mode: BootstrapMode) -> bool {
+        match bootstrap_mode {
+            BootstrapMode::Static(opts) => self.bootstrap_static(opts),
+            BootstrapMode::Dynamic(opts) => self.bootstrap_dynamic(opts),
         }
-        false
     }
 
-    pub fn bootstrap(&mut self) {
-        let bootstrap_count = self.config.bootstrap_count;
+    pub fn bootstrap_static(&mut self, opts: StaticBootstrap) -> bool {
+        self.network.insert_and_join(0, TOPIC, vec![]);
+        let node_count = self.config.peers;
+        let mut chunk = 0;
+        let chunk_size = opts.chunk_size;
+        for i in (1..node_count).into_iter() {
+            let contact = chunk * chunk_size as u64;
+            if i % chunk_size == 0 {
+                chunk += 1;
+            }
+            self.network.insert_and_join(i as u64, TOPIC, vec![contact]);
+            // if i % 3 == 0 {
+            //     self.run_ticks(4);
+            // }
+        }
+
+        self.warmup(opts.warmup_ticks)
+    }
+
+    fn warmup(&mut self, ticks: usize) -> bool {
+        self.drop_events();
+        self.run_ticks(ticks);
+        self.drop_events();
+        info!(tick=%self.network.current_tick(), "warmup complete");
+        if !self.network.check_synchronicity() {
+            warn!("not all peers have synchronous relations");
+        }
+
+        let report = self.report_swarm();
+        if report.min_active_len == 0 {
+            warn!("failed to keep all nodes active after warmup");
+            false
+        } else {
+            info!("bootstrap complete, all nodes active");
+            true
+        }
+    }
+
+    pub fn bootstrap_dynamic(&mut self, opts: DynamicBootstrap) -> bool {
+        let bootstrap_count = opts.bootstrap_nodes;
         self.network.insert_and_join(0, TOPIC, vec![]);
         self.run_ticks(1);
         for i in 1..bootstrap_count {
@@ -582,61 +698,43 @@ impl Simulator {
         }
         info!(tick=%self.network.current_tick(), "created {bootstrap_count}");
 
-        let limit = bootstrap_count * 4;
-        if !self.run_until_all_active(limit) {
-            panic!("failed to activate {bootstrap_count} bootstrap nodes within a limit of {limit} ticks");
+        if !self.warmup(opts.warmup_ticks) {
+            warn!(
+                "failed to activate {bootstrap_count} bootstrap nodes within a limit of {} ticks",
+                opts.warmup_ticks
+            );
+        } else {
+            info!("bootstrap nodes actived");
         }
 
-        info!(tick=%self.network.current_tick(), "all active");
-
-        let peer_count = self.config.peers_count;
-        for i in bootstrap_count..peer_count {
+        let node_count = self.config.peers;
+        for i in bootstrap_count..node_count {
             let contact = (i % bootstrap_count) as u64;
             self.network.insert_and_join(i as u64, TOPIC, vec![contact]);
-            self.run_ticks(2);
+            self.run_ticks(opts.ticks_per_join);
         }
-        info!(tick=%self.network.current_tick(), "created {peer_count}");
+        info!(tick=%self.network.current_tick(), "created {node_count}");
 
-        let limit = peer_count;
-        if !self.run_until_all_active(limit) {
-            panic!("failed to activate nodes within a limit of {limit} ticks");
-        }
-        info!(tick=%self.network.current_tick(), "all active");
+        self.warmup(opts.warmup_ticks)
+    }
 
-        self.run_ticks(self.config.warmup_ticks);
-        info!(tick=%self.network.current_tick(), "warmup complete");
-
-        let limit = 100;
-        if !self.run_until_all_active(limit) {
-            panic!("failed to keep nodes active after warmup");
-        }
-        info!(tick=%self.network.current_tick(), "all active");
-
-        if !self.network.check_synchronicity() {
-            panic!("not all peers have synchronous relations");
+    pub fn run_ticks(&mut self, ticks: usize) {
+        for _ in 0..ticks {
+            self.network.tick();
         }
     }
 
-    pub fn run_ticks(&mut self, ticks: usize) -> BTreeMap<PeerId, Vec<Event<PeerId>>> {
-        let mut events: BTreeMap<PeerId, Vec<Event<PeerId>>> = BTreeMap::new();
-        for _ in 0..ticks {
-            self.network.tick();
-            self.report_swarm();
-            for (peer, _topic, event) in self.network.events() {
-                events.entry(peer).or_default().push(event);
-            }
-        }
-        events
+    pub fn drop_events(&mut self) {
+        let _ = self.network.events();
     }
 
     pub fn gossip_tick(&mut self, missing: &mut BTreeMap<PeerId, BTreeSet<Bytes>>) {
-        let events = self.run_ticks(1);
-        for (peer, events) in events.into_iter() {
+        self.run_ticks(1);
+
+        for (peer, _topic, event) in self.network.events() {
             let entry = missing.get_mut(&peer).unwrap();
-            for event in events {
-                if let Event::Received(message) = event {
-                    entry.remove(&message.content);
-                }
+            if let Event::Received(message) = event {
+                entry.remove(&message.content);
             }
         }
     }
@@ -683,6 +781,7 @@ impl Simulator {
                     set.insert(message.clone());
                 }
             }
+            // tick once after each sent message
             self.gossip_tick(&mut missing);
         }
 
@@ -707,36 +806,41 @@ impl Simulator {
 
             self.gossip_tick(&mut missing);
         }
-        self.report_gossip_round(expected_recv_count, ticks);
+        let missing_count: usize = missing.values().map(|set| set.len()).sum();
+        self.report_gossip_round(expected_recv_count, missing_count, ticks);
     }
 
-    fn report_gossip_round(&mut self, expected_recv_count: usize, ticks: usize) {
+    fn report_gossip_round(
+        &mut self,
+        expected_recv_count: usize,
+        missing_receives_count: usize,
+        ticks: usize,
+    ) {
         let ticks = ticks as f32;
         let payloud_msg_count = self.total_payload_messages();
         let ctrl_msg_count = self.total_control_messages();
-        let rmr = (payloud_msg_count as f32 / (expected_recv_count as f32 - 1.)) - 1.;
+        let rmr_expected_count = expected_recv_count - missing_receives_count;
+        let rmr = (payloud_msg_count as f32 / (rmr_expected_count as f32)) - 1.;
         let ldh = self.max_ldh();
 
         let round_stats = RoundStats {
             ticks,
             rmr,
             ldh: ldh as f32,
+            missing_receives: missing_receives_count as f32,
         };
         let network_stats = self.network.state_stats();
         info!(
-            "round {}: pay {} ctrl {} rmr {:.4} ldh {} ticks {}\n{network_stats}",
+            "round {}: pay {} ctrl {} {round_stats} \n{network_stats}",
             self.round_stats.len(),
             payloud_msg_count,
             ctrl_msg_count,
-            round_stats.rmr,
-            round_stats.ldh,
-            round_stats.ticks
         );
         self.round_stats.push(round_stats);
     }
 
     pub fn report_round_average(&self) -> RoundStats {
-        RoundStats::mean(&self.round_stats)
+        RoundStats::merge(&self.round_stats)
     }
 
     fn reset_stats(&mut self) {
