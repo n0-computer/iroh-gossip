@@ -1,0 +1,37 @@
+name: run simulations
+on:
+  pull_request:
+
+jobs:
+  run_sim:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run simulations
+        run: |
+          git checkout ${{ github.event.pull_request.base.sha }}
+          cargo run --bin sim --features simulator --release -- run -c simulations/all.toml -o sim-main
+          git checkout ${{ github.event.pull_request.head.sha }}
+          cargo run --bin sim --features simulator --release -- run -c simulations/all.toml -o sim-pr --baseline sim-main |& tee REPORT
+          echo "<details><summary>Simulation report</summary>" >> COMMENT
+          echo "```" >> COMMENT
+          cat REPORT >> COMMENT
+          echo "```" >> COMMENT
+          echo "</details>" >> COMMENT
+
+      - name: Find Docs Comment
+        if: ${{ inputs.pr_number != '' }}
+        uses: peter-evans/find-comment@v3
+        id: fc
+        with:
+          issue-number: ${{ inputs.pr_number }}
+          comment-author: "github-actions[bot]"
+          body-includes: Simulation report
+
+      - name: Create or Update Docs Comment
+        if: ${{ inputs.pr_number != '' && !github.event.pull_request.head.repo.fork }}
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          issue-number: ${{ inputs.pr_number }}
+          comment-id: ${{ steps.fc.outputs.comment-id }}
+          body-path: COMMENT
+          edit-mode: replace
