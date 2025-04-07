@@ -491,7 +491,7 @@
         <span class="comment">// Now let node 3 join node 0.
         // Node 0 is full, so it will disconnect from either node 1 or node 2.
         </span>network.command(<span class="number">3</span>, t, Command::Join(<span class="macro">vec!</span>[<span class="number">0</span>]));
-        network.ticks(<span class="number">10</span>);
+        network.ticks(<span class="number">8</span>);
 
         <span class="comment">// Confirm emitted events. There's two options because whether node 0 disconnects from
         // node 1 or node 2 is random.
@@ -527,7 +527,7 @@
         <span class="kw">let </span>config = Config::default();
         <span class="kw">let </span><span class="kw-2">mut </span>network = Network::new(config, rng);
         <span class="kw">let </span>broadcast_ticks = <span class="number">12</span>;
-        <span class="kw">let </span>join_ticks = <span class="number">13</span>;
+        <span class="kw">let </span>join_ticks = <span class="number">12</span>;
         <span class="comment">// build a network with 6 nodes
         </span><span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..<span class="number">6 </span>{
             network.insert(i);

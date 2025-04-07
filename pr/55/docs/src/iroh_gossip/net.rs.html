@@ -1963,13 +1963,7 @@
 <a href="#1962" id="1962">1962</a>
 <a href="#1963" id="1963">1963</a>
 <a href="#1964" id="1964">1964</a>
-<a href="#1965" id="1965">1965</a>
-<a href="#1966" id="1966">1966</a>
-<a href="#1967" id="1967">1967</a>
-<a href="#1968" id="1968">1968</a>
-<a href="#1969" id="1969">1969</a>
-<a href="#1970" id="1970">1970</a>
-<a href="#1971" id="1971">1971</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
+<a href="#1965" id="1965">1965</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
@@ -2584,12 +2578,6 @@
                     <span class="prelude-val">Some</span>(<span class="prelude-val">Err</span>(err)) =&gt; {
                         <span class="macro">warn!</span>(peer = %peer_id.fmt_short(), <span class="string">"dial failed: {err}"</span>);
                         <span class="macro">inc!</span>(Metrics, actor_tick_dialer_failure);
-                        <span class="kw">let </span>peer_state = <span class="self">self</span>.peers.get(<span class="kw-2">&amp;</span>peer_id);
-                        <span class="kw">let </span>is_active = <span class="macro">matches!</span>(peer_state, <span class="prelude-val">Some</span>(PeerState::Active { .. }));
-                        <span class="kw">if </span>!is_active {
-                            <span class="self">self</span>.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
-                                .<span class="kw">await</span><span class="question-mark">?</span>;
-                        }
                     }
                     <span class="prelude-val">None </span>=&gt; {
                         <span class="macro">warn!</span>(peer = %peer_id.fmt_short(), <span class="string">"dial disconnected"</span>);
