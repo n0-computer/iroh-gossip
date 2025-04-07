@@ -34,7 +34,6 @@ jobs:
           echo "*Last updated: $(date -u +'%Y-%m-%dT%H:%M:%SZ')*" >> COMMENT
 
       - name: Find Docs Comment
-        if: ${{ inputs.pr_number != '' }}
         uses: peter-evans/find-comment@v3
         id: fc
         with:
@@ -43,7 +42,6 @@ jobs:
           body-includes: Simulation report
 
       - name: Create or Update Docs Comment
-        if: ${{ inputs.pr_number != '' && !github.event.pull_request.head.repo.fork }}
         uses: peter-evans/create-or-update-comment@v4
         with:
           issue-number: ${{ github.event.pull_request.number || inputs.pr_number }}
