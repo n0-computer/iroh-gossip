@@ -16,15 +16,15 @@ jobs:
       - name: Run simulations
         run: |
           git checkout ${{ github.event.pull_request.base.ref }}
-          cargo run --bin sim --features simulator --release -- run -c simulations/all.toml -o sim-main
+          cargo run -q --bin sim --features simulator --release -- run -c simulations/all.toml -o /tmp/sim-main
           git checkout ${{ github.event.pull_request.head.sha }}
-          cargo run --bin sim --features simulator --release -- run -c simulations/all.toml -o sim-pr --baseline sim-main |& tee REPORT
+          cargo run -q --bin sim --features simulator --release -- run -c simulations/single.toml -o /tmp/sim-pr --baseline /tmp/sim-main |& tee REPORT
           echo "<details><summary>Simulation report</summary>" >> COMMENT
-          echo "```" >> COMMENT
+          echo '```' >> COMMENT
           cat REPORT >> COMMENT
-          echo "```" >> COMMENT
+          echo '```' >> COMMENT
           echo "</details>" >> COMMENT
-          echo "*Last updated: $(date -u +'%Y-%m-%dT%H:%M:%SZ')*" >> $COMMENT
+          echo "*Last updated: $(date -u +'%Y-%m-%dT%H:%M:%SZ')*" >> COMMENT
 
       - name: Find Docs Comment
         if: ${{ inputs.pr_number != '' }}
@@ -34,10 +34,6 @@ jobs:
           issue-number: ${{ github.event.pull_request.number || inputs.pr_number }}
           comment-author: "github-actions[bot]"
           body-includes: Simulation report
-
-      - name: Get current timestamp
-        id: get_timestamp
-        run: echo "TIMESTAMP=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_ENV
 
       - name: Create or Update Docs Comment
         if: ${{ inputs.pr_number != '' && !github.event.pull_request.head.repo.fork }}
