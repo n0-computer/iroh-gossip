@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["TOPIC"],"fn":["report_round_distribution","sort"],"struct":["ConnId","Network","RoundStats","RoundStatsAvg","Simulator","SimulatorConfig","TickReport"],"type":["PeerId"]};
+window.SIDEBAR_ITEMS = {"constant":["TOPIC"],"enum":["BootstrapMode"],"fn":["report_round_distribution","sort"],"struct":["ConnId","DynamicBootstrap","Network","RoundStats","RoundStatsAvg","Simulator","SimulatorConfig","StaticBootstrap","TickReport"],"type":["PeerId"]};
