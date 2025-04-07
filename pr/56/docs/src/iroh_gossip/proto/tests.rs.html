@@ -1433,8 +1433,8 @@
                 .fold((<span class="number">0.</span>, RoundStats::default()), |(len, <span class="kw-2">mut </span>agg), round| {
                     agg.rmr += round.rmr;
                     agg.ldh += round.ldh;
-                    agg.ticks += round.ticks <span class="kw">as </span>f32;
-                    agg.missing_receives += round.missing_receives <span class="kw">as </span>f32;
+                    agg.ticks += round.ticks;
+                    agg.missing_receives += round.missing_receives;
                     (len + <span class="number">1.</span>, agg)
                 });
         avg.rmr /= len;
@@ -1467,7 +1467,7 @@
             })
     }
 
-    <span class="kw">pub fn </span>avg&lt;<span class="lifetime">'a</span>&gt;(rounds: <span class="kw-2">&amp;</span>[RoundStats]) -&gt; RoundStatsAvg {
+    <span class="kw">pub fn </span>avg(rounds: <span class="kw-2">&amp;</span>[RoundStats]) -&gt; RoundStatsAvg {
         <span class="kw">let </span>min = <span class="self">Self</span>::min(rounds);
         <span class="kw">let </span>max = <span class="self">Self</span>::max(rounds);
         <span class="kw">let </span>mean = <span class="self">Self</span>::merge(rounds);
@@ -1635,7 +1635,7 @@
 
     <span class="kw">pub fn </span>bootstrap_static(<span class="kw-2">&amp;mut </span><span class="self">self</span>, opts: StaticBootstrap) -&gt; bool {
         <span class="kw">let </span>node_count = <span class="self">self</span>.config.peers;
-        <span class="kw">for </span>i <span class="kw">in </span>(<span class="number">0</span>..node_count).into_iter() {
+        <span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..node_count {
             <span class="kw">let </span>chunk_size = opts.random_contacts;
             <span class="kw">let </span>contacts = <span class="self">self
                 </span>.network
@@ -1653,7 +1653,7 @@
         <span class="kw">let </span>node_count = <span class="self">self</span>.config.peers;
         <span class="kw">let </span><span class="kw-2">mut </span>chunk = <span class="number">0</span>;
         <span class="kw">let </span>chunk_size = opts.random_contacts;
-        <span class="kw">for </span>i <span class="kw">in </span>(<span class="number">1</span>..node_count).into_iter() {
+        <span class="kw">for </span>i <span class="kw">in </span><span class="number">1</span>..node_count {
             <span class="kw">let </span>contact = chunk * chunk_size <span class="kw">as </span>u64;
             <span class="kw">if </span>i % chunk_size == <span class="number">0 </span>{
                 chunk += <span class="number">1</span>;
@@ -1702,7 +1702,7 @@
                 opts.warmup_ticks
             );
         } <span class="kw">else </span>{
-            <span class="macro">info!</span>(<span class="string">"bootstrap nodes actived"</span>);
+            <span class="macro">info!</span>(<span class="string">"bootstrap nodes activated"</span>);
         }
 
         <span class="kw">let </span>node_count = <span class="self">self</span>.config.peers;
