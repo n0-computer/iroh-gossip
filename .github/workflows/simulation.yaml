@@ -6,9 +6,16 @@ jobs:
   run_sim:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install rust stable
+        uses: dtolnay/rust-toolchain@stable
       - name: Run simulations
         run: |
-          git checkout ${{ github.event.pull_request.base.sha }}
+          git checkout ${{ github.event.pull_request.base.ref }}
           cargo run --bin sim --features simulator --release -- run -c simulations/all.toml -o sim-main
           git checkout ${{ github.event.pull_request.head.sha }}
           cargo run --bin sim --features simulator --release -- run -c simulations/all.toml -o sim-pr --baseline sim-main |& tee REPORT
