@@ -5,6 +5,11 @@ use std::{
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use comfy_table::{
+    modifiers::UTF8_ROUND_CORNERS,
+    presets::{NOTHING, UTF8_FULL, UTF8_NO_BORDERS},
+    Cell, CellAlignment, Table,
+};
 use iroh_gossip::proto::{
     tests::{BootstrapMode, RoundStats, RoundStatsAvg, Simulator, SimulatorConfig},
     Config,
@@ -225,9 +230,22 @@ fn run_simulation(seeds: &[u64], scenario: ScenarioDescription) -> SimulationRes
     let average = if !stats.is_empty() {
         let avg = RoundStats::avg(&stats);
         println!("{label} with {} seeds", seeds.len());
-        println!("mean: {}", avg.mean);
-        println!("min:  {}", avg.min);
-        println!("max:  {}", avg.max);
+        // println!("mean: {}", avg.mean);
+        // println!("min:  {}", avg.min);
+        // println!("max:  {}", avg.max);
+        // println!("");
+
+        let mut table = Table::new();
+        let header = ["", "RMR", "LDH", "ticks", "missing"]
+            .into_iter()
+            .map(|s| Cell::new(s).set_alignment(CellAlignment::Right));
+        table
+            .load_preset(NOTHING)
+            .set_header(header)
+            .add_row(fmt_round("mean", &avg.mean))
+            .add_row(fmt_round("max", &avg.max))
+            .add_row(fmt_round("min", &avg.min));
+        println!("{table}");
         println!("");
         Some(avg)
     } else {
@@ -250,8 +268,7 @@ impl Scenario for BigSingle {
             let messages = vec![(from, message)];
             simulator.gossip_round(messages);
         }
-        let avg = simulator.report_round_average();
-        avg
+        simulator.report_round_average()
     }
 }
 
@@ -305,7 +322,8 @@ fn compare_dirs(baseline_dir: PathBuf, current_path: PathBuf, filter: Vec<String
         if !baseline_file.exists() {
             println!("skip {} (not in baseline)", filename);
         }
-        println!("comparing {}", filename);
+        println!("");
+        println!("comparing {}", basename);
         if let Err(err) = compare_files(&baseline_file, &current_file) {
             println!("  skip (reason: {err:#}");
         }
@@ -333,22 +351,43 @@ fn compare_results(baseline: SimulationResults, current: SimulationResults) {
         (None, None) => println!("both runs did not finish"),
         (Some(baseline), Some(current)) => {
             let diff = baseline.diff(&current);
-            println!("mean {}", fmt_diff_round(&diff.mean));
-            println!("min  {}", fmt_diff_round(&diff.min));
-            println!("max  {}", fmt_diff_round(&diff.max));
+            let mut table = Table::new();
+            let header = ["", "RMR", "LDH", "ticks", "missing"]
+                .into_iter()
+                .map(|s| Cell::new(s).set_alignment(CellAlignment::Right));
+            table
+                .load_preset(NOTHING)
+                .set_header(header)
+                .add_row(fmt_diff_round("mean", &diff.mean))
+                .add_row(fmt_diff_round("max", &diff.max))
+                .add_row(fmt_diff_round("min", &diff.min));
+            println!("{table}");
         }
     }
 }
 
-fn fmt_diff_round(round: &RoundStats) -> String {
-    format!(
-        "RMR {} LDH {} ticks {} missing {}",
+fn fmt_round(label: &str, round: &RoundStats) -> Vec<Cell> {
+    [
+        label.to_string(),
+        format!("{:.2}", round.rmr),
+        format!("{:.2}", round.ldh),
+        format!("{:.2}", round.ticks),
+        format!("{:.2}", round.missing_receives),
+    ]
+    .into_iter()
+    .map(|s| Cell::new(s).set_alignment(CellAlignment::Right))
+    .collect()
+}
+fn fmt_diff_round(label: &str, round: &RoundStats) -> Vec<String> {
+    vec![
+        label.to_string(),
         fmt_percent(round.rmr),
         fmt_percent(round.ldh),
         fmt_percent(round.ticks),
         fmt_percent(round.missing_receives),
-    )
+    ]
 }
+
 fn fmt_percent(diff: f32) -> String {
     format!("{:>+10.2}%", diff * 100.)
 }
