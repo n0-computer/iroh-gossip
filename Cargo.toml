@@ -111,7 +111,7 @@ tracing-test = "0.2.5"
 url = "2.4.0"
 
 [features]
-default = ["net", "simulator"]
+default = ["net"]
 net = [
     "dep:futures-lite",
     "dep:iroh",
@@ -141,8 +141,6 @@ simulator = [
     "dep:comfy-table",
 ]
 examples = ["net", "dep:data-encoding"]
-serde_json = ["dep:serde_json"]
-comfy-table = ["dep:comfy-table"]
 
 [[test]]
 name = "sim"
