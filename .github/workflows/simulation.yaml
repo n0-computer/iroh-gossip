@@ -5,6 +5,9 @@ on:
 jobs:
   run_sim:
     runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: "sccache"
+      SCCACHE_GHA_ENABLED: "on"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -13,12 +16,16 @@ jobs:
 
       - name: Install rust stable
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
       - name: Run simulations
         run: |
           git checkout ${{ github.event.pull_request.base.ref }}
           cargo run -q --bin sim --features simulator --release -- run -c simulations/all.toml -o /tmp/sim-main
           git checkout ${{ github.event.pull_request.head.sha }}
-          cargo run -q --bin sim --features simulator --release -- run -c simulations/single.toml -o /tmp/sim-pr --baseline /tmp/sim-main |& tee REPORT
+          cargo run -q --bin sim --features simulator --release -- run -c simulations/all.toml -o /tmp/sim-pr --baseline /tmp/sim-main |& tee REPORT
           echo "<details><summary>Simulation report</summary>" >> COMMENT
           echo '```' >> COMMENT
           cat REPORT >> COMMENT
