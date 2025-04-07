@@ -368,14 +368,14 @@ impl BootstrapMode {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct StaticBootstrap {
-    chunk_size: usize,
+    random_contacts: usize,
     warmup_ticks: usize,
 }
 
 impl Default for StaticBootstrap {
     fn default() -> Self {
         Self {
-            chunk_size: 3,
+            random_contacts: 3,
             warmup_ticks: 100,
         }
     }
@@ -506,7 +506,11 @@ impl RoundStats {
 }
 
 fn diff_percent(a: f32, b: f32) -> f32 {
-    if a == 0.0 {
+    if a == 0.0 && b == 0.0 {
+        0.0
+    } else if b == 0.0 {
+        -1.0
+    } else if a == 0.0 {
         1.0
     } else {
         (b - a) / a
@@ -651,10 +655,25 @@ impl Simulator {
     }
 
     pub fn bootstrap_static(&mut self, opts: StaticBootstrap) -> bool {
+        let node_count = self.config.peers;
+        for i in (0..node_count).into_iter() {
+            let chunk_size = opts.random_contacts;
+            let contacts = self
+                .network
+                .peers
+                .keys()
+                .cloned()
+                .choose_multiple(&mut self.network.rng, chunk_size);
+            self.network.insert_and_join(i as u64, TOPIC, contacts);
+        }
+        self.warmup(opts.warmup_ticks)
+    }
+
+    pub fn bootstrap_static2(&mut self, opts: StaticBootstrap) -> bool {
         self.network.insert_and_join(0, TOPIC, vec![]);
         let node_count = self.config.peers;
         let mut chunk = 0;
-        let chunk_size = opts.chunk_size;
+        let chunk_size = opts.random_contacts;
         for i in (1..node_count).into_iter() {
             let contact = chunk * chunk_size as u64;
             if i % chunk_size == 0 {
@@ -820,7 +839,7 @@ impl Simulator {
         let payloud_msg_count = self.total_payload_messages();
         let ctrl_msg_count = self.total_control_messages();
         let rmr_expected_count = expected_recv_count - missing_receives_count;
-        let rmr = (payloud_msg_count as f32 / (rmr_expected_count as f32)) - 1.;
+        let rmr = (payloud_msg_count as f32 / (rmr_expected_count as f32 - 1.)) - 1.;
         let ldh = self.max_ldh();
 
         let round_stats = RoundStats {

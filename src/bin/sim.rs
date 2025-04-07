@@ -25,7 +25,7 @@ struct ScenarioDescription {
     sim: Simulation,
     nodes: u32,
     #[serde(default)]
-    bootstrap_mode: BootstrapMode,
+    bootstrap: BootstrapMode,
     // bootstrap_nodes: Option<u32>,
     #[serde(default = "defaults::rounds")]
     rounds: u32,
@@ -39,7 +39,7 @@ impl ScenarioDescription {
             nodes,
             rounds,
             config: _,
-            bootstrap_mode: _,
+            bootstrap: _,
         } = &self;
         format!("{sim:?}-n{nodes}-r{rounds}")
     }
@@ -76,9 +76,16 @@ enum Command {
         baseline: Option<PathBuf>,
         #[clap(short, long)]
         single_threaded: bool,
+        #[clap(short, long)]
+        filter: Vec<String>,
     },
     /// Compare simulation runs
-    Compare { baseline: PathBuf, current: PathBuf },
+    Compare {
+        baseline: PathBuf,
+        current: PathBuf,
+        #[clap(short, long)]
+        filter: Vec<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -90,6 +97,7 @@ fn main() -> Result<()> {
             out_dir,
             baseline,
             single_threaded,
+            filter,
         } => {
             let config_text = std::fs::read_to_string(&config_path)?;
             let config: SimConfig = toml::from_str(&config_text)?;
@@ -103,21 +111,36 @@ fn main() -> Result<()> {
 
             std::fs::create_dir_all(&out_dir)?;
 
+            let filter_fn = |s: &ScenarioDescription| {
+                let label = s.label();
+                if filter.is_empty() {
+                    true
+                } else {
+                    filter.iter().any(|x| x == &label)
+                }
+            };
+
             if !single_threaded {
                 scenarios
                     .into_par_iter()
+                    .filter(filter_fn)
                     .try_for_each(|scenario| run_and_save_simulation(scenario, &seeds, &out_dir))?;
             } else {
                 scenarios
                     .into_iter()
+                    .filter(filter_fn)
                     .try_for_each(|scenario| run_and_save_simulation(scenario, &seeds, &out_dir))?;
             }
             if let Some(baseline) = baseline {
-                compare_dirs(baseline, out_dir)?;
+                compare_dirs(baseline, out_dir, filter)?;
             }
         }
-        Command::Compare { baseline, current } => {
-            compare_dirs(baseline, current)?;
+        Command::Compare {
+            baseline,
+            current,
+            filter,
+        } => {
+            compare_dirs(baseline, current, filter)?;
         }
     }
 
@@ -179,7 +202,7 @@ fn run_simulation(seeds: &[u64], scenario: ScenarioDescription) -> SimulationRes
             peers: scenario.nodes as usize,
             ..Default::default()
         };
-        let bootstrap = scenario.bootstrap_mode.clone();
+        let bootstrap = scenario.bootstrap.clone();
         let mut simulator = Simulator::new(sim_config, proto_config.clone());
         let result = if !simulator.bootstrap(bootstrap) {
             warn!("{label} failed to bootstrap with seed {seed}");
@@ -263,14 +286,19 @@ impl Scenario for BigAll {
     }
 }
 
-fn compare_dirs(baseline_dir: PathBuf, current_path: PathBuf) -> Result<()> {
-    for entry in std::fs::read_dir(&current_path)? {
-        let entry = entry?;
+fn compare_dirs(baseline_dir: PathBuf, current_path: PathBuf, filter: Vec<String>) -> Result<()> {
+    for entry in std::fs::read_dir(&current_path)?
+        .filter_map(Result::ok)
+        .filter(|x| x.path().is_file())
+    {
         let current_file = entry.path();
         let Some(filename) = current_file.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
-        if !current_file.is_file() || !filename.ends_with(".results.json") {
+        let Some(basename) = filename.strip_suffix(".results.json") else {
+            continue;
+        };
+        if !filter.is_empty() && !filter.iter().any(|x| x == basename) {
             continue;
         }
         let baseline_file = baseline_dir.join(filename);
@@ -322,9 +350,5 @@ fn fmt_diff_round(round: &RoundStats) -> String {
     )
 }
 fn fmt_percent(diff: f32) -> String {
-    if diff == 0.0 {
-        "   0.00%".to_string()
-    } else {
-        format!("{:>+7.2}%", diff * 100.)
-    }
+    format!("{:>+10.2}%", diff * 100.)
 }
