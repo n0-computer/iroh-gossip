@@ -2,7 +2,6 @@
 
 use std::collections::{hash_map, HashMap, HashSet};
 
-use iroh_metrics::{inc, inc_by};
 use n0_future::time::{Duration, Instant};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -206,9 +205,12 @@ impl<PI: PeerIdentity, R: Rng + Clone> State<PI, R> {
         &mut self,
         event: InEvent<PI>,
         now: Instant,
+        metrics: Option<&Metrics>,
     ) -> impl Iterator<Item = OutEvent<PI>> + '_ {
         trace!("in_event: {event:?}");
-        track_in_event(&event);
+        if let Some(metrics) = &metrics {
+            track_in_event(&event, metrics);
+        }
 
         let event: InEventMapped<PI> = event.into();
 
@@ -262,7 +264,9 @@ impl<PI: PeerIdentity, R: Rng + Clone> State<PI, R> {
         }
 
         // track metrics
-        track_out_events(&self.outbox);
+        if let Some(metrics) = &metrics {
+            track_out_events(&self.outbox, metrics);
+        }
 
         self.outbox.drain(..)
     }
@@ -297,30 +301,30 @@ fn handle_out_event<PI: PeerIdentity>(
     }
 }
 
-fn track_out_events<PI: Serialize>(events: &[OutEvent<PI>]) {
+fn track_out_events<PI: Serialize>(events: &[OutEvent<PI>], metrics: &Metrics) {
     for event in events {
         match event {
             OutEvent::SendMessage(_to, message) => match message.kind() {
                 MessageKind::Data => {
-                    inc!(Metrics, msgs_data_sent);
-                    inc_by!(
-                        Metrics,
-                        msgs_data_sent_size,
-                        message.size().unwrap_or(0) as u64
-                    );
+                    metrics.msgs_data_sent.inc();
+                    metrics
+                        .msgs_data_sent_size
+                        .inc_by(message.size().unwrap_or(0) as u64);
                 }
                 MessageKind::Control => {
-                    inc!(Metrics, msgs_ctrl_sent);
-                    inc_by!(
-                        Metrics,
-                        msgs_ctrl_sent_size,
-                        message.size().unwrap_or(0) as u64
-                    );
+                    metrics.msgs_ctrl_sent.inc();
+                    metrics
+                        .msgs_ctrl_sent_size
+                        .inc_by(message.size().unwrap_or(0) as u64);
                 }
             },
             OutEvent::EmitEvent(_topic, event) => match event {
-                super::Event::NeighborUp(_peer) => inc!(Metrics, neighbor_up),
-                super::Event::NeighborDown(_peer) => inc!(Metrics, neighbor_down),
+                super::Event::NeighborUp(_peer) => {
+                    metrics.neighbor_up.inc();
+                }
+                super::Event::NeighborDown(_peer) => {
+                    metrics.neighbor_down.inc();
+                }
                 _ => {}
             },
             _ => {}
@@ -328,24 +332,20 @@ fn track_out_events<PI: Serialize>(events: &[OutEvent<PI>]) {
     }
 }
 
-fn track_in_event<PI: Serialize>(event: &InEvent<PI>) {
+fn track_in_event<PI: Serialize>(event: &InEvent<PI>, metrics: &Metrics) {
     if let InEvent::RecvMessage(_from, message) = event {
         match message.kind() {
             MessageKind::Data => {
-                inc!(Metrics, msgs_data_recv);
-                inc_by!(
-                    Metrics,
-                    msgs_data_recv_size,
-                    message.size().unwrap_or(0) as u64
-                );
+                metrics.msgs_data_recv.inc();
+                metrics
+                    .msgs_data_recv_size
+                    .inc_by(message.size().unwrap_or(0) as u64);
             }
             MessageKind::Control => {
-                inc!(Metrics, msgs_ctrl_recv);
-                inc_by!(
-                    Metrics,
-                    msgs_ctrl_recv_size,
-                    message.size().unwrap_or(0) as u64
-                );
+                metrics.msgs_ctrl_recv.inc();
+                metrics
+                    .msgs_ctrl_recv_size
+                    .inc_by(message.size().unwrap_or(0) as u64);
             }
         }
     }

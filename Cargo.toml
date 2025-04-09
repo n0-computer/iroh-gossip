@@ -39,7 +39,7 @@ derive_more = { version = "1.0.0", features = ["add", "debug", "deref", "display
 ed25519-dalek = { version = "2.0.0", features = ["serde", "rand_core"] }
 hex = "0.4.3"
 indexmap = "2.0"
-iroh-metrics = { version = "0.32", default-features = false }
+iroh-metrics = { version = "0.32" }
 n0-future = "0.1.2"
 postcard = { version = "1", default-features = false, features = ["alloc", "use-std", "experimental-derive"] }
 rand = { version = "0.8.5", features = ["std_rng"] }
@@ -113,3 +113,7 @@ required-features = ["examples"]
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "iroh_docsrs"]
+
+[patch.crates-io]
+iroh = { git = "https://github.com/n0-computer/iroh", branch = "Frando/metrics" }
+iroh-metrics = { git = "https://github.com/n0-computer/iroh-metrics", branch = "Frando/refactor" }

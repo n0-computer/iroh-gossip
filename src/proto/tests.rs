@@ -119,7 +119,7 @@ impl<PI: PeerIdentity + Ord, R: Rng + Clone> Network<PI, R> {
                     self.conns.insert((*from, peer).into());
                 }
                 debug!(peer = ?peer, "IN  {event:?}");
-                let out = state.handle(event, self.time);
+                let out = state.handle(event, self.time, None);
                 for event in out {
                     debug!(peer = ?peer, "OUT {event:?}");
                     match event {
