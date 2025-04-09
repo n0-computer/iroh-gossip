@@ -17,7 +17,6 @@ use iroh::{
     protocol::ProtocolHandler,
     Endpoint, NodeAddr, NodeId, PublicKey, RelayUrl,
 };
-use iroh_metrics::inc;
 use n0_future::{
     boxed::BoxFuture,
     task::{self, AbortOnDropHandle, JoinSet},
@@ -152,6 +151,7 @@ pub(crate) struct Inner {
     max_message_size: usize,
     /// Next [`ReceiverId`] to be assigned when a receiver is registered for a topic.
     next_receiver_id: AtomicUsize,
+    metrics: Arc<Metrics>,
 }
 
 impl ProtocolHandler for Gossip {
@@ -192,6 +192,7 @@ impl Builder {
 
     /// Spawn a gossip actor and get a handle for it
     pub async fn spawn(self, endpoint: Endpoint) -> Result<Gossip, Error> {
+        let metrics = Arc::new(Metrics::default());
         // We want to wait for our endpoint to be addressable by other nodes before launching gossip,
         // because otherwise our Join messages, which will be forwarded into the swarm through a random
         // walk, might not include an address to talk back to us.
@@ -216,7 +217,7 @@ impl Builder {
             NodeAddr::from_parts(endpoint.node_id(), home_relay, addrs)
         };
 
-        let (actor, to_actor_tx) = Actor::new(endpoint, self.config, &addr.into());
+        let (actor, to_actor_tx) = Actor::new(endpoint, self.config, metrics.clone(), &addr.into());
         let me = actor.endpoint.node_id().fmt_short();
         let max_message_size = actor.state.max_message_size();
 
@@ -235,6 +236,7 @@ impl Builder {
                 _actor_handle: AbortOnDropHandle::new(actor_handle),
                 max_message_size,
                 next_receiver_id: Default::default(),
+                metrics,
             }
             .into(),
             #[cfg(feature = "rpc")]
@@ -315,6 +317,11 @@ impl Gossip {
         updates: CommandStream,
     ) -> EventStream {
         self.inner.subscribe_with_stream(topic_id, options, updates)
+    }
+
+    /// Returns the metrics tracked for this gossip instance.
+    pub fn metrics(&self) -> &Metrics {
+        &self.inner.metrics
     }
 }
 
@@ -478,12 +485,14 @@ struct Actor {
     quit_queue: VecDeque<TopicId>,
     /// Tasks for the connection loops, to keep track of panics.
     connection_tasks: JoinSet<(NodeId, Connection, anyhow::Result<()>)>,
+    metrics: Arc<Metrics>,
 }
 
 impl Actor {
     fn new(
         endpoint: Endpoint,
         config: proto::Config,
+        metrics: Arc<Metrics>,
         my_addr: &AddrInfo,
     ) -> (Self, mpsc::Sender<ToActor>) {
         let peer_id = endpoint.node_id();
@@ -510,6 +519,7 @@ impl Actor {
             topics: Default::default(),
             quit_queue: Default::default(),
             connection_tasks: Default::default(),
+            metrics,
         };
 
         (actor, to_actor_tx)
@@ -573,12 +583,12 @@ impl Actor {
         direct_addresses_stream: &mut (impl Stream<Item = BTreeSet<DirectAddr>> + Unpin),
         i: usize,
     ) -> Result<Option<()>, Error> {
-        inc!(Metrics, actor_tick_main);
+        self.metrics.actor_tick_main.inc();
         tokio::select! {
             biased;
             msg = self.to_actor_rx.recv() => {
                 trace!(?i, "tick: to_actor_rx");
-                inc!(Metrics, actor_tick_rx);
+                self.metrics.actor_tick_rx.inc();
                 match msg {
                     Some(msg) => self.handle_to_actor_msg(msg, Instant::now()).await?,
                     None => {
@@ -593,7 +603,7 @@ impl Actor {
             },
             Some(new_addresses) = direct_addresses_stream.next() => {
                 trace!(?i, "tick: new_endpoints");
-                inc!(Metrics, actor_tick_endpoint);
+                self.metrics.actor_tick_endpoint.inc();
                 *current_addresses = new_addresses;
                 self.handle_addr_update(current_addresses).await?;
             }
@@ -603,32 +613,32 @@ impl Actor {
             }
             (peer_id, res) = self.dialer.next_conn() => {
                 trace!(?i, "tick: dialer");
-                inc!(Metrics, actor_tick_dialer);
+                self.metrics.actor_tick_dialer.inc();
                 match res {
                     Some(Ok(conn)) => {
                         debug!(peer = %peer_id.fmt_short(), "dial successful");
-                        inc!(Metrics, actor_tick_dialer_success);
+                        self.metrics.actor_tick_dialer_success.inc();
                         self.handle_connection(peer_id, ConnOrigin::Dial, conn);
                     }
                     Some(Err(err)) => {
                         warn!(peer = %peer_id.fmt_short(), "dial failed: {err}");
-                        inc!(Metrics, actor_tick_dialer_failure);
+                        self.metrics.actor_tick_dialer_failure.inc();
                     }
                     None => {
                         warn!(peer = %peer_id.fmt_short(), "dial disconnected");
-                        inc!(Metrics, actor_tick_dialer_failure);
+                        self.metrics.actor_tick_dialer_failure.inc();
                     }
                 }
             }
             event = self.in_event_rx.recv() => {
                 trace!(?i, "tick: in_event_rx");
-                inc!(Metrics, actor_tick_in_event_rx);
+                self.metrics.actor_tick_in_event_rx.inc();
                 let event = event.expect("unreachable: in_event_tx is never dropped before receiver");
                 self.handle_in_event(event, Instant::now()).await?;
             }
             drain = self.timers.wait_and_drain() => {
                 trace!(?i, "tick: timers");
-                inc!(Metrics, actor_tick_timers);
+                self.metrics.actor_tick_timers.inc();
                 let now = Instant::now();
                 for (_instant, timer) in drain {
                     self.handle_in_event(InEvent::TimerExpired(timer), now).await?;
@@ -832,7 +842,7 @@ impl Actor {
         } else {
             debug!(?event, "handle in_event");
         };
-        let out = self.state.handle(event, now);
+        let out = self.state.handle(event, now, Some(&self.metrics));
         for event in out {
             if matches!(event, OutEvent::ScheduleTimer(_, _)) {
                 trace!(?event, "handle out_event");
@@ -1397,8 +1407,9 @@ mod test {
                 direct_addresses: Default::default(),
             };
             let endpoint = create_endpoint(rng, relay_map).await?;
+            let metrics = Arc::new(Metrics::default());
 
-            let (actor, to_actor_tx) = Actor::new(endpoint, config, &my_addr);
+            let (actor, to_actor_tx) = Actor::new(endpoint, config, metrics.clone(), &my_addr);
             let max_message_size = actor.state.max_message_size();
 
             let _actor_handle =
@@ -1409,6 +1420,7 @@ mod test {
                     _actor_handle,
                     max_message_size,
                     next_receiver_id: Default::default(),
+                    metrics,
                 }
                 .into(),
                 #[cfg(feature = "rpc")]
