@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Command","Simulation","SimulationError"],"fn":["compare_dirs","compare_files","compare_results","fmt_diff_round","fmt_percent","fmt_round","main","run_and_save_simulation","run_simulation"],"mod":["defaults"],"struct":["BigAll","BigMulti","BigSingle","Cli","ScenarioDescription","SimConfig","SimulationResults"],"trait":["Scenario"]};
