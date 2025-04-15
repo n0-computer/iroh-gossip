@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `src/proto/tests.rs`."><title>tests.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-dbdb5eec.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="iroh_gossip" data-themes="" data-resource-suffix="" data-rustdoc-version="1.85.0-nightly (d10a6823f 2024-11-29)" data-channel="nightly" data-search-js="search-92e6798f.js" data-settings-js="settings-0f613d39.js" ><script src="../../../static.files/storage-59e33391.js"></script><script defer src="../../../static.files/src-script-56102188.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-5f194d8c.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-893ab5e7.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-6580c154.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer"></div><main><rustdoc-search></rustdoc-search><section id="main-content" class="content"><div class="main-heading"><h1><div class="sub-heading">iroh_gossip/proto/</div>tests.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap"><div data-nosnippet><pre class="src-line-numbers">
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `src/proto/sim.rs`."><title>sim.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-dbdb5eec.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="iroh_gossip" data-themes="" data-resource-suffix="" data-rustdoc-version="1.85.0-nightly (d10a6823f 2024-11-29)" data-channel="nightly" data-search-js="search-92e6798f.js" data-settings-js="settings-0f613d39.js" ><script src="../../../static.files/storage-59e33391.js"></script><script defer src="../../../static.files/src-script-56102188.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-5f194d8c.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-893ab5e7.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-6580c154.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer"></div><main><rustdoc-search></rustdoc-search><section id="main-content" class="content"><div class="main-heading"><h1><div class="sub-heading">iroh_gossip/proto/</div>sim.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap"><div data-nosnippet><pre class="src-line-numbers">
 <a href="#1" id="1">1</a>
 <a href="#2" id="2">2</a>
 <a href="#3" id="3">3</a>
@@ -977,12 +977,136 @@
 <a href="#976" id="976">976</a>
 <a href="#977" id="977">977</a>
 <a href="#978" id="978">978</a>
-<a href="#979" id="979">979</a></pre></div><pre class="rust"><code><span class="doccomment">//! Simulation framework for testing the protocol implementation
+<a href="#979" id="979">979</a>
+<a href="#980" id="980">980</a>
+<a href="#981" id="981">981</a>
+<a href="#982" id="982">982</a>
+<a href="#983" id="983">983</a>
+<a href="#984" id="984">984</a>
+<a href="#985" id="985">985</a>
+<a href="#986" id="986">986</a>
+<a href="#987" id="987">987</a>
+<a href="#988" id="988">988</a>
+<a href="#989" id="989">989</a>
+<a href="#990" id="990">990</a>
+<a href="#991" id="991">991</a>
+<a href="#992" id="992">992</a>
+<a href="#993" id="993">993</a>
+<a href="#994" id="994">994</a>
+<a href="#995" id="995">995</a>
+<a href="#996" id="996">996</a>
+<a href="#997" id="997">997</a>
+<a href="#998" id="998">998</a>
+<a href="#999" id="999">999</a>
+<a href="#1000" id="1000">1000</a>
+<a href="#1001" id="1001">1001</a>
+<a href="#1002" id="1002">1002</a>
+<a href="#1003" id="1003">1003</a>
+<a href="#1004" id="1004">1004</a>
+<a href="#1005" id="1005">1005</a>
+<a href="#1006" id="1006">1006</a>
+<a href="#1007" id="1007">1007</a>
+<a href="#1008" id="1008">1008</a>
+<a href="#1009" id="1009">1009</a>
+<a href="#1010" id="1010">1010</a>
+<a href="#1011" id="1011">1011</a>
+<a href="#1012" id="1012">1012</a>
+<a href="#1013" id="1013">1013</a>
+<a href="#1014" id="1014">1014</a>
+<a href="#1015" id="1015">1015</a>
+<a href="#1016" id="1016">1016</a>
+<a href="#1017" id="1017">1017</a>
+<a href="#1018" id="1018">1018</a>
+<a href="#1019" id="1019">1019</a>
+<a href="#1020" id="1020">1020</a>
+<a href="#1021" id="1021">1021</a>
+<a href="#1022" id="1022">1022</a>
+<a href="#1023" id="1023">1023</a>
+<a href="#1024" id="1024">1024</a>
+<a href="#1025" id="1025">1025</a>
+<a href="#1026" id="1026">1026</a>
+<a href="#1027" id="1027">1027</a>
+<a href="#1028" id="1028">1028</a>
+<a href="#1029" id="1029">1029</a>
+<a href="#1030" id="1030">1030</a>
+<a href="#1031" id="1031">1031</a>
+<a href="#1032" id="1032">1032</a>
+<a href="#1033" id="1033">1033</a>
+<a href="#1034" id="1034">1034</a>
+<a href="#1035" id="1035">1035</a>
+<a href="#1036" id="1036">1036</a>
+<a href="#1037" id="1037">1037</a>
+<a href="#1038" id="1038">1038</a>
+<a href="#1039" id="1039">1039</a>
+<a href="#1040" id="1040">1040</a>
+<a href="#1041" id="1041">1041</a>
+<a href="#1042" id="1042">1042</a>
+<a href="#1043" id="1043">1043</a>
+<a href="#1044" id="1044">1044</a>
+<a href="#1045" id="1045">1045</a>
+<a href="#1046" id="1046">1046</a>
+<a href="#1047" id="1047">1047</a>
+<a href="#1048" id="1048">1048</a>
+<a href="#1049" id="1049">1049</a>
+<a href="#1050" id="1050">1050</a>
+<a href="#1051" id="1051">1051</a>
+<a href="#1052" id="1052">1052</a>
+<a href="#1053" id="1053">1053</a>
+<a href="#1054" id="1054">1054</a>
+<a href="#1055" id="1055">1055</a>
+<a href="#1056" id="1056">1056</a>
+<a href="#1057" id="1057">1057</a>
+<a href="#1058" id="1058">1058</a>
+<a href="#1059" id="1059">1059</a>
+<a href="#1060" id="1060">1060</a>
+<a href="#1061" id="1061">1061</a>
+<a href="#1062" id="1062">1062</a>
+<a href="#1063" id="1063">1063</a>
+<a href="#1064" id="1064">1064</a>
+<a href="#1065" id="1065">1065</a>
+<a href="#1066" id="1066">1066</a>
+<a href="#1067" id="1067">1067</a>
+<a href="#1068" id="1068">1068</a>
+<a href="#1069" id="1069">1069</a>
+<a href="#1070" id="1070">1070</a>
+<a href="#1071" id="1071">1071</a>
+<a href="#1072" id="1072">1072</a>
+<a href="#1073" id="1073">1073</a>
+<a href="#1074" id="1074">1074</a>
+<a href="#1075" id="1075">1075</a>
+<a href="#1076" id="1076">1076</a>
+<a href="#1077" id="1077">1077</a>
+<a href="#1078" id="1078">1078</a>
+<a href="#1079" id="1079">1079</a>
+<a href="#1080" id="1080">1080</a>
+<a href="#1081" id="1081">1081</a>
+<a href="#1082" id="1082">1082</a>
+<a href="#1083" id="1083">1083</a>
+<a href="#1084" id="1084">1084</a>
+<a href="#1085" id="1085">1085</a>
+<a href="#1086" id="1086">1086</a>
+<a href="#1087" id="1087">1087</a>
+<a href="#1088" id="1088">1088</a>
+<a href="#1089" id="1089">1089</a>
+<a href="#1090" id="1090">1090</a>
+<a href="#1091" id="1091">1091</a>
+<a href="#1092" id="1092">1092</a>
+<a href="#1093" id="1093">1093</a>
+<a href="#1094" id="1094">1094</a>
+<a href="#1095" id="1095">1095</a>
+<a href="#1096" id="1096">1096</a>
+<a href="#1097" id="1097">1097</a>
+<a href="#1098" id="1098">1098</a>
+<a href="#1099" id="1099">1099</a>
+<a href="#1100" id="1100">1100</a>
+<a href="#1101" id="1101">1101</a>
+<a href="#1102" id="1102">1102</a>
+<a href="#1103" id="1103">1103</a></pre></div><pre class="rust"><code><span class="doccomment">//! Simulation framework for testing the protocol implementation
 
 </span><span class="attr">#![allow(missing_docs)]
 
 </span><span class="kw">use </span>std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque},
     fmt,
     str::FromStr,
 };
@@ -993,106 +1117,171 @@
 <span class="kw">use </span>rand_chacha::ChaCha12Rng;
 <span class="kw">use </span>rand_core::SeedableRng;
 <span class="kw">use </span>serde::{Deserialize, Serialize};
-<span class="kw">use </span>tracing::{debug, error_span, info, trace, warn};
+<span class="kw">use </span>tracing::{debug, debug_span, info, info_span, trace, warn};
 
-<span class="kw">use super</span>::{
-    util::TimerMap, Command, Config, Event, InEvent, OutEvent, PeerIdentity, State, Timer, TopicId,
-};
-<span class="kw">use </span><span class="kw">crate</span>::proto::Scope;
+<span class="kw">use super</span>::{Command, Config, Event, InEvent, OutEvent, PeerIdentity, State, TopicId};
+<span class="kw">use </span><span class="kw">crate</span>::proto::{PeerData, Scope};
 
-<span class="kw">const </span>TICK_DURATION: Duration = Duration::from_millis(<span class="number">10</span>);
-
-<span class="doccomment">/// Test network implementation.
-///
-/// Stores events in VecDeques and processes on ticks.
-/// Timers are checked after each tick. The local time is increased with TICK_DURATION before
-/// each tick.
-///
-/// Note: Panics when sending to an unknown peer.
-</span><span class="attr">#[derive(Debug)]
-</span><span class="kw">pub struct </span>Network&lt;PI, R&gt; {
-    start: Instant,
-    time: Instant,
-    tick_duration: Duration,
-    default_latency: Duration,
-    inqueues: BTreeMap&lt;PI, VecDeque&lt;InEvent&lt;PI&gt;&gt;&gt;,
-    <span class="kw">pub</span>(<span class="kw">crate</span>) peers: BTreeMap&lt;PI, State&lt;PI, R&gt;&gt;,
-    conns: BTreeSet&lt;ConnId&lt;PI&gt;&gt;,
-    events: VecDeque&lt;(PI, TopicId, Event&lt;PI&gt;)&gt;,
-    timers: TimerMap&lt;(PI, Timer&lt;PI&gt;)&gt;,
-    transport: TimerMap&lt;(PI, InEvent&lt;PI&gt;)&gt;,
-    latencies: BTreeMap&lt;ConnId&lt;PI&gt;, Duration&gt;,
-    rng: R,
-    config: Config,
+<span class="doccomment">/// Configuration for a [`Network`].
+</span><span class="attr">#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+</span><span class="kw">pub struct </span>NetworkConfig {
+    <span class="doccomment">/// Configures the latency between peers.
+    </span><span class="attr">#[serde(default)]
+    </span><span class="kw">pub </span>latency: LatencyConfig,
+    <span class="doccomment">/// Default protocol config for all peer.
+    </span><span class="attr">#[serde(default)]
+    </span><span class="kw">pub </span>proto: Config,
 }
 
-<span class="kw">impl</span>&lt;PI, R&gt; Network&lt;PI, R&gt; {
-    <span class="kw">pub fn </span>new(config: Config, rng: R) -&gt; <span class="self">Self </span>{
-        <span class="self">Self</span>::with_opts(config, rng, TICK_DURATION)
-    }
-    <span class="kw">pub fn </span>with_opts(config: Config, rng: R, tick_duration: Duration) -&gt; <span class="self">Self </span>{
-        <span class="kw">let </span>time = Instant::now();
+<span class="kw">impl </span>From&lt;Config&gt; <span class="kw">for </span>NetworkConfig {
+    <span class="kw">fn </span>from(config: Config) -&gt; <span class="self">Self </span>{
         <span class="self">Self </span>{
-            start: time,
-            time,
-            tick_duration,
-            default_latency: tick_duration,
-            inqueues: Default::default(),
-            peers: Default::default(),
-            conns: Default::default(),
-            events: Default::default(),
-            timers: TimerMap::new(),
-            transport: TimerMap::new(),
-            latencies: BTreeMap::new(),
-            rng,
-            config,
+            latency: Default::default(),
+            proto: config,
         }
     }
 }
 
-<span class="kw">fn </span>push_back&lt;PI: Eq + std::hash::Hash + Ord&gt;(
-    inqueues: <span class="kw-2">&amp;mut </span>BTreeMap&lt;PI, VecDeque&lt;InEvent&lt;PI&gt;&gt;&gt;,
-    peer: <span class="kw-2">&amp;</span>PI,
-    event: InEvent&lt;PI&gt;,
-) {
-    <span class="kw">if let </span><span class="prelude-val">Some</span>(q) = inqueues.get_mut(peer) {
-        q.push_back(event);
+<span class="doccomment">/// Configures the latency between peers.
+</span><span class="attr">#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = <span class="string">"lowercase"</span>)]
+</span><span class="kw">pub enum </span>LatencyConfig {
+    <span class="doccomment">/// Use the same latency, always.
+    </span>Static(<span class="attr">#[serde(with = <span class="string">"humantime_serde"</span>)] </span>Duration),
+    <span class="doccomment">/// Chose a random latency for each connection in the specified bounds.
+    </span>Random {
+        <span class="attr">#[serde(with = <span class="string">"humantime_serde"</span>)]
+        </span>min: Duration,
+        <span class="attr">#[serde(with = <span class="string">"humantime_serde"</span>)]
+        </span>max: Duration,
+    },
+}
+
+<span class="kw">impl </span>LatencyConfig {
+    <span class="doccomment">/// Creates a new latency config with the provided min and max values in milliseconds.
+    </span><span class="kw">pub fn </span>random_ms(min: u64, max: u64) -&gt; <span class="self">Self </span>{
+        <span class="self">Self</span>::Random {
+            min: Duration::from_millis(min),
+            max: Duration::from_millis(max),
+        }
+    }
+
+    <span class="doccomment">/// Returns the maximum latency possible.
+    </span><span class="kw">pub fn </span>max(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Duration {
+        <span class="kw">match </span><span class="self">self </span>{
+            <span class="self">Self</span>::Static(dur) =&gt; <span class="kw-2">*</span>dur,
+            <span class="self">Self</span>::Random { max, .. } =&gt; <span class="kw-2">*</span>max,
+        }
+    }
+
+    <span class="doccomment">/// Returns a new latency value to use for a peer connection.
+    </span><span class="kw">pub fn </span>gen(<span class="kw-2">&amp;</span><span class="self">self</span>, <span class="kw-2">mut </span>rng: <span class="kw">impl </span>Rng) -&gt; Duration {
+        <span class="kw">match </span><span class="self">self </span>{
+            <span class="self">Self</span>::Static(d) =&gt; <span class="kw-2">*</span>d,
+            <span class="comment">// TODO(frando): use uniform distribution?
+            </span><span class="self">Self</span>::Random { min, max } =&gt; rng.gen_range(<span class="kw-2">*</span>min..<span class="kw-2">*</span>max),
+        }
+    }
+}
+
+<span class="kw">impl </span>Default <span class="kw">for </span>LatencyConfig {
+    <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
+        <span class="self">Self</span>::Static(Duration::from_millis(<span class="number">50</span>))
+    }
+}
+
+<span class="doccomment">/// Test network implementation.
+///
+/// A discrete event simulation of a gossip swarm.
+</span><span class="attr">#[derive(Debug)]
+</span><span class="kw">pub struct </span>Network&lt;PI, R&gt; {
+    start: Instant,
+    time: Instant,
+    tick: usize,
+    <span class="kw">pub</span>(<span class="kw">crate</span>) peers: BTreeMap&lt;PI, State&lt;PI, R&gt;&gt;,
+    conns: BTreeSet&lt;ConnId&lt;PI&gt;&gt;,
+    events: VecDeque&lt;(PI, TopicId, Event&lt;PI&gt;)&gt;,
+    latencies: BTreeMap&lt;ConnId&lt;PI&gt;, Duration&gt;,
+    rng: R,
+    config: NetworkConfig,
+    queue: TimedEventQueue&lt;PI&gt;,
+}
+
+<span class="kw">impl</span>&lt;PI, R&gt; Network&lt;PI, R&gt; {
+    <span class="doccomment">/// Creates a new network.
+    </span><span class="kw">pub fn </span>new(config: NetworkConfig, rng: R) -&gt; <span class="self">Self </span>{
+        <span class="kw">let </span>time = Instant::now();
+        <span class="self">Self </span>{
+            tick: <span class="number">0</span>,
+            start: time,
+            time,
+            config,
+            queue: Default::default(),
+            peers: Default::default(),
+            conns: Default::default(),
+            events: Default::default(),
+            latencies: BTreeMap::new(),
+            rng,
+        }
     }
 }
 
 <span class="kw">impl</span>&lt;PI: PeerIdentity + Ord + std::fmt::Display, R: Rng + SeedableRng + Clone&gt; Network&lt;PI, R&gt; {
-    <span class="kw">pub fn </span>set_default_latency_in_ticks(<span class="kw-2">&amp;mut </span><span class="self">self</span>, latency_in_ticks: usize) {
-        <span class="self">self</span>.default_latency =
-            Duration::from_millis(<span class="self">self</span>.tick_duration.as_millis() <span class="kw">as </span>u64 * latency_in_ticks <span class="kw">as </span>u64)
+    <span class="doccomment">/// Inserts a new peer.
+    ///
+    /// Panics if the peer already exists.
+    </span><span class="kw">pub fn </span>insert(<span class="kw-2">&amp;mut </span><span class="self">self</span>, peer_id: PI) {
+        <span class="kw">let </span>config = <span class="self">self</span>.config.proto.clone();
+        <span class="self">self</span>.insert_with_config(peer_id, config);
     }
 
-    <span class="kw">pub fn </span>insert(<span class="kw-2">&amp;mut </span><span class="self">self</span>, peer_id: PI) {
+    <span class="doccomment">/// Inserts a new peer with the specified protocol config.
+    ///
+    /// Panics if the peer already exists.
+    </span><span class="kw">pub fn </span>insert_with_config(<span class="kw-2">&amp;mut </span><span class="self">self</span>, peer_id: PI, config: Config) {
+        <span class="macro">assert!</span>(
+            !<span class="self">self</span>.peers.contains_key(<span class="kw-2">&amp;</span>peer_id),
+            <span class="string">"duplicate peer: {peer_id:?}"
+        </span>);
         <span class="kw">let </span>rng = R::from_rng(<span class="kw-2">&amp;mut </span><span class="self">self</span>.rng).unwrap();
-        <span class="kw">let </span>state = State::new(peer_id, Default::default(), <span class="self">self</span>.config.clone(), rng);
-        <span class="self">self</span>.inqueues.insert(peer_id, VecDeque::new());
+        <span class="kw">let </span>state = State::new(peer_id, PeerData::default(), config, rng);
         <span class="self">self</span>.peers.insert(peer_id, state);
     }
 
-    <span class="kw">pub fn </span>insert_and_join(<span class="kw-2">&amp;mut </span><span class="self">self</span>, peer_id: PI, topic: TopicId, bootstrap: Vec&lt;PI&gt;) {
+    <span class="doccomment">/// Inserts a new peer and joins a topic with a set of bootstrap nodes.
+    ///
+    /// Panics if the peer already exists.
+    </span><span class="kw">pub fn </span>insert_and_join(<span class="kw-2">&amp;mut </span><span class="self">self</span>, peer_id: PI, topic: TopicId, bootstrap: Vec&lt;PI&gt;) {
         <span class="self">self</span>.insert(peer_id);
         <span class="self">self</span>.command(peer_id, topic, Command::Join(bootstrap));
     }
 
-    <span class="kw">pub fn </span>events(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="kw">impl </span>Iterator&lt;Item = (PI, TopicId, Event&lt;PI&gt;)&gt; + <span class="lifetime">'_ </span>{
+    <span class="doccomment">/// Drains all queued events.
+    </span><span class="kw">pub fn </span>events(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="kw">impl </span>Iterator&lt;Item = (PI, TopicId, Event&lt;PI&gt;)&gt; + <span class="lifetime">'_ </span>{
         <span class="self">self</span>.events.drain(..)
     }
 
-    <span class="kw">pub fn </span>events_sorted(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; Vec&lt;(PI, TopicId, Event&lt;PI&gt;)&gt; {
+    <span class="doccomment">/// Returns the number of queued events.
+    </span><span class="kw">pub fn </span>events_len(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+        <span class="self">self</span>.events.len()
+    }
+
+    <span class="doccomment">/// Drains all queued events and returns them in a sorted vector.
+    </span><span class="kw">pub fn </span>events_sorted(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; Vec&lt;(PI, TopicId, Event&lt;PI&gt;)&gt; {
         sort(<span class="self">self</span>.events().collect())
     }
 
-    <span class="kw">pub fn </span>conns(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Vec&lt;(PI, PI)&gt; {
+    <span class="doccomment">/// Returns all active connections.
+    </span><span class="kw">pub fn </span>conns(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Vec&lt;(PI, PI)&gt; {
         sort(<span class="self">self</span>.conns.iter().cloned().map(Into::into).collect())
     }
 
-    <span class="kw">pub fn </span>command(<span class="kw-2">&amp;mut </span><span class="self">self</span>, peer: PI, topic: TopicId, command: Command&lt;PI&gt;) {
+    <span class="doccomment">/// Queues and performs a command.
+    </span><span class="kw">pub fn </span>command(<span class="kw-2">&amp;mut </span><span class="self">self</span>, peer: PI, topic: TopicId, command: Command&lt;PI&gt;) {
         <span class="macro">debug!</span>(<span class="question-mark">?</span>peer, <span class="string">"~~ COMMAND {command:?}"</span>);
-        push_back(<span class="kw-2">&amp;mut </span><span class="self">self</span>.inqueues, <span class="kw-2">&amp;</span>peer, InEvent::Command(topic, command));
+        <span class="self">self</span>.queue
+            .insert(<span class="self">self</span>.time, peer, InEvent::Command(topic, command));
+        <span class="self">self</span>.tick();
     }
 
     <span class="kw">pub fn </span>peer_states(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw">impl </span>Iterator&lt;Item = <span class="kw-2">&amp;</span>State&lt;PI, R&gt;&gt; {
@@ -1103,97 +1292,143 @@
         <span class="self">self</span>.peers.keys().cloned()
     }
 
-    <span class="kw">pub fn </span>ticks(<span class="kw-2">&amp;mut </span><span class="self">self</span>, n: usize) {
-        (<span class="number">0</span>..n).for_each(|<span class="kw">_</span>| <span class="self">self</span>.tick())
-    }
-
     <span class="kw">pub fn </span>current_tick(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; u32 {
-        ((<span class="self">self</span>.time - <span class="self">self</span>.start) / <span class="self">self</span>.tick_duration.as_millis() <span class="kw">as </span>u32).as_millis() <span class="kw">as </span>u32
+        <span class="self">self</span>.tick <span class="kw">as </span>u32
     }
 
-    <span class="kw">pub fn </span>tick(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
-        <span class="self">self</span>.time += <span class="self">self</span>.tick_duration;
-        <span class="kw">let </span>tick =
-            <span class="self">self</span>.time.duration_since(<span class="self">self</span>.start).as_millis() / <span class="self">self</span>.tick_duration.as_millis();
+    <span class="kw">pub fn </span>elapsed(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Duration {
+        <span class="self">self</span>.time.duration_since(<span class="self">self</span>.start)
+    }
 
-        <span class="comment">// process timers
-        </span><span class="kw">for </span>(_time, (peer, timer)) <span class="kw">in </span><span class="self">self</span>.timers.drain_until(<span class="kw-2">&amp;</span><span class="self">self</span>.time) {
-            push_back(<span class="kw-2">&amp;mut </span><span class="self">self</span>.inqueues, <span class="kw-2">&amp;</span>peer, InEvent::TimerExpired(timer));
+    <span class="kw">pub fn </span>elapsed_fmt(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; String {
+        <span class="macro">format!</span>(
+            <span class="string">"{:&gt;2.4}s"</span>,
+            <span class="self">self</span>.time.duration_since(<span class="self">self</span>.start).as_secs_f32()
+        )
+    }
+
+    <span class="doccomment">/// Runs the simulation for `n` times the maximum latency between peers.
+    </span><span class="kw">pub fn </span>run_roundtrips(<span class="kw-2">&amp;mut </span><span class="self">self</span>, n: usize) {
+        <span class="kw">let </span>duration = <span class="self">self</span>.config.latency.max() * n <span class="kw">as </span>u32;
+        <span class="self">self</span>.run_duration(duration)
+    }
+
+    <span class="doccomment">/// Runs the simulation for `timeout`.
+    </span><span class="kw">pub fn </span>run_duration(<span class="kw-2">&amp;mut </span><span class="self">self</span>, timeout: Duration) {
+        <span class="kw">let </span>end = <span class="self">self</span>.time + timeout;
+        <span class="kw">while </span><span class="self">self</span>.queue.next_before(end) {
+            <span class="self">self</span>.tick();
         }
+        <span class="macro">assert!</span>(<span class="self">self</span>.time &lt;= end);
+        <span class="self">self</span>.time = end;
+    }
 
-        <span class="comment">// move messages
-        </span><span class="kw">for </span>(_time, (peer, event)) <span class="kw">in </span><span class="self">self</span>.transport.drain_until(<span class="kw-2">&amp;</span><span class="self">self</span>.time) {
-            push_back(<span class="kw-2">&amp;mut </span><span class="self">self</span>.inqueues, <span class="kw-2">&amp;</span>peer, event);
-        }
-
-        <span class="comment">// process inqueues: let peer handle all incoming events
-        </span><span class="kw">let </span><span class="kw-2">mut </span>messages_sent = <span class="number">0</span>;
-        <span class="kw">let </span><span class="kw-2">mut </span>kill: Vec&lt;ConnId&lt;PI&gt;&gt; = Vec::new();
-        <span class="kw">for </span>(peer, queue) <span class="kw">in </span><span class="self">self</span>.inqueues.iter_mut() {
-            <span class="kw">let </span>state = <span class="self">self</span>.peers.get_mut(peer).unwrap();
-            <span class="kw">let </span>peer = <span class="kw-2">*</span>state.me();
-            <span class="kw">let </span>span = <span class="macro">error_span!</span>(<span class="string">"tick"</span>, node = %peer, %tick);
-            <span class="kw">let </span>_guard = span.enter();
-            <span class="kw">while let </span><span class="prelude-val">Some</span>(event) = queue.pop_front() {
-                <span class="kw">if let </span>InEvent::RecvMessage(from, _message) = <span class="kw-2">&amp;</span>event {
-                    <span class="self">self</span>.conns.insert((<span class="kw-2">*</span>from, peer).into());
-                }
-                <span class="kw">let </span>out = state.handle(event, <span class="self">self</span>.time);
-                <span class="kw">for </span>event <span class="kw">in </span>out {
-                    <span class="kw">match </span>event {
-                        OutEvent::SendMessage(to, message) =&gt; {
-                            <span class="kw">let </span>latency = latency_between(
-                                <span class="self">self</span>.default_latency,
-                                <span class="kw-2">&amp;mut </span><span class="self">self</span>.latencies,
-                                <span class="kw-2">&amp;</span>peer,
-                                <span class="kw-2">&amp;</span>to,
-                                <span class="kw-2">&amp;mut </span><span class="self">self</span>.rng,
-                            );
-                            <span class="self">self</span>.transport.insert(
-                                <span class="self">self</span>.time + latency,
-                                (to, InEvent::RecvMessage(peer, message)),
-                            );
-                            messages_sent += <span class="number">1</span>;
-                        }
-                        OutEvent::ScheduleTimer(latency, timer) =&gt; {
-                            <span class="self">self</span>.timers.insert(<span class="self">self</span>.time + latency, (peer, timer));
-                        }
-                        OutEvent::DisconnectPeer(to) =&gt; {
-                            <span class="macro">debug!</span>(peer = <span class="question-mark">?</span>peer, other = <span class="question-mark">?</span>to, <span class="string">"disconnect"</span>);
-                            kill.push((peer, to).into());
-                        }
-                        OutEvent::EmitEvent(topic, event) =&gt; {
-                            <span class="macro">debug!</span>(peer = <span class="question-mark">?</span>peer, <span class="string">"emit   {event:?}"</span>);
-                            <span class="self">self</span>.events.push_back((peer, topic, event));
-                        }
-                        OutEvent::PeerData(_peer, _data) =&gt; {}
-                    }
+    <span class="doccomment">/// Runs the simulation while `f` returns `true`.
+    ///
+    /// The callback will be called for each emitted event.
+    </span><span class="kw">pub fn </span>run_while(<span class="kw-2">&amp;mut </span><span class="self">self</span>, <span class="kw-2">mut </span>f: <span class="kw">impl </span>FnMut(PI, TopicId, Event&lt;PI&gt;) -&gt; bool) {
+        <span class="lifetime">'outer</span>: <span class="kw">loop </span>{
+            <span class="kw">while let </span><span class="prelude-val">Some</span>((peer, topic, event)) = <span class="self">self</span>.events.pop_front() {
+                <span class="kw">if </span>!f(peer, topic, event) {
+                    <span class="kw">break </span><span class="lifetime">'outer</span>;
                 }
             }
+            <span class="self">self</span>.tick();
         }
-        <span class="kw">for </span>conn <span class="kw">in </span>kill {
-            <span class="self">self</span>.kill_connection(conn);
-        }
-        <span class="macro">debug!</span>(
-            tick = <span class="self">self</span>.current_tick(),
-            <span class="string">"~~ TICK (messages sent: {messages_sent})"
-        </span>);
     }
 
-    <span class="kw">pub fn </span>kill_connection(<span class="kw-2">&amp;mut </span><span class="self">self</span>, conn: ConnId&lt;PI&gt;) {
+    <span class="doccomment">/// Runs the simulation while `f` returns `true`, aborting after `timeout`.
+    ///
+    /// The callback will be called for each emitted event.
+    </span><span class="kw">pub fn </span>run_while_with_timeout(
+        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
+        timeout: Duration,
+        <span class="kw-2">mut </span>f: <span class="kw">impl </span>FnMut(PI, TopicId, Event&lt;PI&gt;) -&gt; bool,
+    ) {
+        <span class="kw">let </span>end = <span class="self">self</span>.time + timeout;
+        <span class="kw">loop </span>{
+            <span class="kw">while let </span><span class="prelude-val">Some</span>((peer, topic, event)) = <span class="self">self</span>.events.pop_front() {
+                <span class="kw">if </span>!f(peer, topic, event) {
+                    <span class="kw">return</span>;
+                }
+            }
+            <span class="kw">if </span><span class="self">self</span>.queue.next_before(end) {
+                <span class="self">self</span>.tick();
+            } <span class="kw">else </span>{
+                <span class="kw">break</span>;
+            }
+        }
+        <span class="macro">assert!</span>(<span class="self">self</span>.time &lt;= end);
+        <span class="self">self</span>.time = end;
+    }
+
+    <span class="kw">fn </span>tick(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
+        <span class="self">self</span>.tick += <span class="number">1</span>;
+        <span class="kw">let </span><span class="prelude-val">Some</span>((time, peer, event)) = <span class="self">self</span>.queue.pop() <span class="kw">else </span>{
+            <span class="macro">warn!</span>(<span class="string">"tick on empty queue"</span>);
+            <span class="kw">return</span>;
+        };
+        <span class="macro">assert!</span>(time &gt;= <span class="self">self</span>.time);
+        <span class="self">self</span>.time = time;
+        <span class="kw">let </span>span = <span class="macro">debug_span!</span>(<span class="string">"tick"</span>, %peer, tick = %<span class="self">self</span>.tick, t = %<span class="self">self</span>.elapsed_fmt());
+        <span class="kw">let </span>_guard = span.enter();
+        <span class="macro">debug!</span>(<span class="string">"~~ TICK "</span>);
+
+        <span class="kw">let </span><span class="prelude-val">Some</span>(state) = <span class="self">self</span>.peers.get_mut(<span class="kw-2">&amp;</span>peer) <span class="kw">else </span>{
+            <span class="comment">// TODO: queue PeerDisconnected for sender?
+            </span><span class="macro">warn!</span>(<span class="question-mark">?</span>time, <span class="question-mark">?</span>peer, <span class="question-mark">?</span>event, <span class="string">"event for dead peer"</span>);
+            <span class="kw">return</span>;
+        };
+        <span class="kw">if let </span>InEvent::RecvMessage(from, _message) = <span class="kw-2">&amp;</span>event {
+            <span class="self">self</span>.conns.insert((<span class="kw-2">*</span>from, peer).into());
+        }
+        <span class="kw">let </span>out = state.handle(event, <span class="self">self</span>.time);
+        <span class="kw">let </span><span class="kw-2">mut </span>kill = <span class="macro">vec!</span>[];
+        <span class="kw">for </span>event <span class="kw">in </span>out {
+            <span class="kw">match </span>event {
+                OutEvent::SendMessage(to, message) =&gt; {
+                    <span class="kw">let </span>latency = latency_between(
+                        <span class="kw-2">&amp;</span><span class="self">self</span>.config.latency,
+                        <span class="kw-2">&amp;mut </span><span class="self">self</span>.latencies,
+                        <span class="kw-2">&amp;</span>peer,
+                        <span class="kw-2">&amp;</span>to,
+                        <span class="kw-2">&amp;mut </span><span class="self">self</span>.rng,
+                    );
+                    <span class="self">self</span>.queue
+                        .insert(<span class="self">self</span>.time + latency, to, InEvent::RecvMessage(peer, message));
+                }
+                OutEvent::ScheduleTimer(time, timer) =&gt; {
+                    <span class="self">self</span>.queue
+                        .insert(<span class="self">self</span>.time + time, peer, InEvent::TimerExpired(timer));
+                }
+                OutEvent::DisconnectPeer(to) =&gt; {
+                    <span class="macro">debug!</span>(peer = <span class="question-mark">?</span>peer, other = <span class="question-mark">?</span>to, <span class="string">"disconnect"</span>);
+                    kill.push((peer, to));
+                }
+                OutEvent::EmitEvent(topic, event) =&gt; {
+                    <span class="macro">debug!</span>(peer = <span class="question-mark">?</span>peer, <span class="string">"emit   {event:?}"</span>);
+                    <span class="self">self</span>.events.push_back((peer, topic, event));
+                }
+                OutEvent::PeerData(_peer, _data) =&gt; {}
+            }
+        }
+        <span class="kw">for </span>(from, to) <span class="kw">in </span>kill {
+            <span class="self">self</span>.kill_connection(from, to);
+        }
+    }
+
+    <span class="kw">pub fn </span>kill_connection(<span class="kw-2">&amp;mut </span><span class="self">self</span>, from: PI, to: PI) {
+        <span class="kw">let </span>conn = ConnId::from((from, to));
         <span class="kw">if </span><span class="self">self</span>.conns.remove(<span class="kw-2">&amp;</span>conn) {
-            <span class="kw">let </span>[a, b] = conn.peers();
             <span class="kw">let </span>latency = latency_between(
-                <span class="self">self</span>.default_latency,
+                <span class="kw-2">&amp;</span><span class="self">self</span>.config.latency,
                 <span class="kw-2">&amp;mut </span><span class="self">self</span>.latencies,
-                <span class="kw-2">&amp;</span>a,
-                <span class="kw-2">&amp;</span>b,
+                <span class="kw-2">&amp;</span>from,
+                <span class="kw-2">&amp;</span>to,
                 <span class="kw-2">&amp;mut </span><span class="self">self</span>.rng,
-            );
-            <span class="kw">let </span>msg = (a, InEvent::PeerDisconnected(b));
-            <span class="self">self</span>.transport.insert(<span class="self">self</span>.time + latency, msg);
-            <span class="kw">let </span>msg = (b, InEvent::PeerDisconnected(a));
-            <span class="self">self</span>.transport.insert(<span class="self">self</span>.time + latency, msg);
+            ) + Duration::from_micros(<span class="number">1</span>);
+            <span class="self">self</span>.queue
+                .insert(<span class="self">self</span>.time + latency, to, InEvent::PeerDisconnected(from));
         }
     }
 
@@ -1201,7 +1436,7 @@
         <span class="self">self</span>.peers.get(peer)
     }
 
-    <span class="kw">pub fn </span>get_active(<span class="kw-2">&amp;</span><span class="self">self</span>, peer: <span class="kw-2">&amp;</span>PI, topic: <span class="kw-2">&amp;</span>TopicId) -&gt; <span class="prelude-ty">Option</span>&lt;<span class="prelude-ty">Option</span>&lt;Vec&lt;PI&gt;&gt;&gt; {
+    <span class="kw">pub fn </span>active_view(<span class="kw-2">&amp;</span><span class="self">self</span>, peer: <span class="kw-2">&amp;</span>PI, topic: <span class="kw-2">&amp;</span>TopicId) -&gt; <span class="prelude-ty">Option</span>&lt;<span class="prelude-ty">Option</span>&lt;Vec&lt;PI&gt;&gt;&gt; {
         <span class="kw">let </span>peer = <span class="self">self</span>.peer(peer)<span class="question-mark">?</span>;
         <span class="kw">match </span>peer.state(topic) {
             <span class="prelude-val">Some</span>(state) =&gt; <span class="prelude-val">Some</span>(<span class="prelude-val">Some</span>(
@@ -1219,10 +1454,9 @@
             .cloned()
             .collect();
         <span class="kw">for </span>conn <span class="kw">in </span>remove_conns.into_iter() {
-            <span class="self">self</span>.kill_connection(conn);
+            <span class="self">self</span>.kill_connection(<span class="kw-2">*</span>peer, conn.other(<span class="kw-2">*</span>peer).unwrap());
         }
         <span class="self">self</span>.peers.remove(peer);
-        <span class="self">self</span>.inqueues.remove(peer);
     }
 
     <span class="kw">pub fn </span>check_synchronicity(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
@@ -1282,28 +1516,92 @@
     }
 }
 
-<span class="comment">// fn latency_between&lt;PI: PeerIdentity + Ord + PartialOrd, R: Rng&gt;(
-//     _default_latency: Duration,
-//     latencies: &amp;mut BTreeMap&lt;ConnId&lt;PI&gt;, Duration&gt;,
-//     a: &amp;PI,
-//     b: &amp;PI,
-//     rng: &amp;mut R,
-// ) -&gt; Duration {
-//     let id: ConnId&lt;PI&gt; = (*a, *b).into();
-//     *latencies.entry(id).or_insert_with(|| {
-//         let t: u64 = rng.gen_range(5..25);
-//         Duration::from_millis(t)
-//     })
-// }
-
-</span><span class="kw">fn </span>latency_between&lt;PI: PeerIdentity + Ord + PartialOrd, R: Rng&gt;(
-    default_latency: Duration,
-    _latencies: <span class="kw-2">&amp;mut </span>BTreeMap&lt;ConnId&lt;PI&gt;, Duration&gt;,
-    _a: <span class="kw-2">&amp;</span>PI,
-    _b: <span class="kw-2">&amp;</span>PI,
-    _rng: <span class="kw-2">&amp;mut </span>R,
+<span class="kw">fn </span>latency_between&lt;PI: PeerIdentity + Ord + PartialOrd, R: Rng&gt;(
+    latency_config: <span class="kw-2">&amp;</span>LatencyConfig,
+    latencies: <span class="kw-2">&amp;mut </span>BTreeMap&lt;ConnId&lt;PI&gt;, Duration&gt;,
+    a: <span class="kw-2">&amp;</span>PI,
+    b: <span class="kw-2">&amp;</span>PI,
+    rng: <span class="kw-2">&amp;mut </span>R,
 ) -&gt; Duration {
-    default_latency
+    <span class="kw">let </span>id: ConnId&lt;PI&gt; = (<span class="kw-2">*</span>a, <span class="kw-2">*</span>b).into();
+    <span class="kw-2">*</span>latencies
+        .entry(id)
+        .or_insert_with(|| latency_config.gen(rng))
+}
+
+<span class="attr">#[derive(Debug)]
+</span><span class="kw">struct </span>TimedEventQueue&lt;PI&gt; {
+    seq: i32,
+    events: BinaryHeap&lt;(TimedEvent&lt;PeerEvent&lt;PI&gt;&gt;, i32)&gt;,
+}
+
+<span class="kw">impl</span>&lt;PI&gt; Default <span class="kw">for </span>TimedEventQueue&lt;PI&gt; {
+    <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
+        <span class="self">Self </span>{
+            seq: <span class="number">0</span>,
+            events: Default::default(),
+        }
+    }
+}
+
+<span class="kw">impl</span>&lt;PI&gt; TimedEventQueue&lt;PI&gt; {
+    <span class="kw">fn </span>insert(<span class="kw-2">&amp;mut </span><span class="self">self</span>, time: Instant, peer: PI, event: InEvent&lt;PI&gt;) {
+        <span class="kw">let </span>seq = <span class="self">self</span>.seq;
+        <span class="self">self</span>.seq += <span class="number">1</span>;
+        <span class="self">self</span>.events.push((
+            TimedEvent {
+                time,
+                event: PeerEvent(peer, event),
+            },
+            -seq,
+        ))
+    }
+
+    <span class="kw">fn </span>pop(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Option</span>&lt;(Instant, PI, InEvent&lt;PI&gt;)&gt; {
+        <span class="self">self</span>.events
+            .pop()
+            .map(|(e, <span class="kw">_</span>)| (e.time, e.event.<span class="number">0</span>, e.event.<span class="number">1</span>))
+    }
+
+    <span class="kw">fn </span>peek_next(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Option</span>&lt;Instant&gt; {
+        <span class="self">self</span>.events.peek().map(|(e, <span class="kw">_</span>)| e.time)
+    }
+
+    <span class="kw">fn </span>next_before(<span class="kw-2">&amp;</span><span class="self">self</span>, before: Instant) -&gt; bool {
+        <span class="kw">match </span><span class="self">self</span>.peek_next() {
+            <span class="prelude-val">None </span>=&gt; <span class="bool-val">false</span>,
+            <span class="prelude-val">Some</span>(at) =&gt; at &lt;= before,
+        }
+    }
+}
+
+<span class="attr">#[derive(Debug)]
+</span><span class="kw">struct </span>TimedEvent&lt;E&gt; {
+    time: Instant,
+    event: E,
+}
+
+<span class="attr">#[derive(Debug)]
+</span><span class="kw">struct </span>PeerEvent&lt;PI&gt;(PI, InEvent&lt;PI&gt;);
+
+<span class="kw">impl</span>&lt;E&gt; Eq <span class="kw">for </span>TimedEvent&lt;E&gt; {}
+
+<span class="kw">impl</span>&lt;E&gt; PartialEq <span class="kw">for </span>TimedEvent&lt;E&gt; {
+    <span class="kw">fn </span>eq(<span class="kw-2">&amp;</span><span class="self">self</span>, other: <span class="kw-2">&amp;</span><span class="self">Self</span>) -&gt; bool {
+        <span class="self">self</span>.time.eq(<span class="kw-2">&amp;</span>other.time)
+    }
+}
+
+<span class="kw">impl</span>&lt;E&gt; PartialOrd <span class="kw">for </span>TimedEvent&lt;E&gt; {
+    <span class="kw">fn </span>partial_cmp(<span class="kw-2">&amp;</span><span class="self">self</span>, other: <span class="kw-2">&amp;</span><span class="self">Self</span>) -&gt; <span class="prelude-ty">Option</span>&lt;std::cmp::Ordering&gt; {
+        <span class="prelude-val">Some</span>(<span class="self">self</span>.cmp(other))
+    }
+}
+
+<span class="kw">impl</span>&lt;E&gt; Ord <span class="kw">for </span>TimedEvent&lt;E&gt; {
+    <span class="kw">fn </span>cmp(<span class="kw-2">&amp;</span><span class="self">self</span>, other: <span class="kw-2">&amp;</span><span class="self">Self</span>) -&gt; std::cmp::Ordering {
+        <span class="self">self</span>.time.cmp(<span class="kw-2">&amp;</span>other.time).reverse()
+    }
 }
 
 <span class="kw">pub type </span>PeerId = u64;
@@ -1314,76 +1612,83 @@
     </span><span class="kw">pub </span>rng_seed: u64,
     <span class="doccomment">/// Number of nodes to create
     </span><span class="kw">pub </span>peers: usize,
-    <span class="doccomment">/// Max number of ticks for a gossip round before the round is aborted
-    </span><span class="kw">pub </span>round_max_ticks: usize,
+    <span class="doccomment">/// Timeout after which a gossip round is aborted
+    </span><span class="kw">pub </span>gossip_round_timeout: Duration,
 }
 
-<span class="attr">#[derive(Debug, Serialize, Deserialize, Clone)]
+<span class="comment">// #[derive(Debug, Serialize, Deserialize, Clone)]
+// #[serde(rename_all = "lowercase")]
+// pub enum BootstrapMode {
+//     Static(StaticBootstrap),
+//     Dynamic(DynamicBootstrap),
+// }
+
+</span><span class="attr">#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = <span class="string">"lowercase"</span>)]
 </span><span class="kw">pub enum </span>BootstrapMode {
-    Static(StaticBootstrap),
-    Dynamic(DynamicBootstrap),
-}
-
-<span class="kw">impl </span>Default <span class="kw">for </span>BootstrapMode {
-    <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
-        <span class="self">Self</span>::Static(StaticBootstrap::default())
-    }
+    <span class="attr">#[default]
+    </span>Single,
+    Set {
+        count: u64,
+    },
 }
 
 <span class="kw">impl </span>BootstrapMode {
-    <span class="kw">pub fn </span>from_env(nodes: usize) -&gt; <span class="self">Self </span>{
-        <span class="kw">let </span>is_dynamic = read_var(<span class="string">"BOOTSTRAP_MODE"</span>, <span class="string">"static"</span>.to_string());
-        <span class="kw">match </span>is_dynamic.as_str() {
-            <span class="string">"static" </span>=&gt; BootstrapMode::default(),
-            <span class="string">"dynamic" </span>=&gt; BootstrapMode::Dynamic(DynamicBootstrap {
-                bootstrap_nodes: read_var(<span class="string">"BOOTSTRAP_COUNT"</span>, (nodes / <span class="number">10</span>).max(<span class="number">3</span>)),
-                ticks_per_join: <span class="number">2</span>,
-                warmup_ticks: read_var(<span class="string">"WARMUP_TICKS"</span>, <span class="number">100</span>),
-            }),
-            <span class="kw">_ </span>=&gt; <span class="macro">panic!</span>(<span class="string">"BOOTSTRAP_MODE must be static or dynamic"</span>),
-        }
+    <span class="kw">pub fn </span>from_env(_nodes: usize) -&gt; <span class="self">Self </span>{
+        <span class="self">Self</span>::default()
     }
 }
 
-<span class="attr">#[derive(Debug, Serialize, Deserialize, Clone)]
-</span><span class="kw">pub struct </span>StaticBootstrap {
-    random_contacts: usize,
-    warmup_ticks: usize,
-}
+<span class="comment">// impl Default for BootstrapMode {
+//     fn default() -&gt; Self {
+//         Self::Static(StaticBootstrap::default())
+//     }
+// }
 
-<span class="kw">impl </span>Default <span class="kw">for </span>StaticBootstrap {
-    <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
-        <span class="self">Self </span>{
-            random_contacts: <span class="number">3</span>,
-            warmup_ticks: <span class="number">100</span>,
-        }
-    }
-}
+// impl BootstrapMode {
+//     pub fn from_env(nodes: usize) -&gt; Self {
+//         let mode = read_var("BOOTSTRAP_MODE", "static".to_string());
+//         match mode.as_str() {
+//             "static" =&gt; BootstrapMode::default(),
+//             "dynamic" =&gt; BootstrapMode::Dynamic(DynamicBootstrap {
+//                 bootstrap_nodes: read_var("BOOTSTRAP_COUNT", (nodes / 10).max(3)),
+//             }),
+//             _ =&gt; panic!("BOOTSTRAP_MODE must be static or dynamic"),
+//         }
+//     }
+// }
 
-<span class="attr">#[derive(Debug, Serialize, Deserialize, Clone)]
-</span><span class="kw">pub struct </span>DynamicBootstrap {
-    bootstrap_nodes: usize,
-    ticks_per_join: usize,
-    warmup_ticks: usize,
-}
+// #[derive(Debug, Serialize, Deserialize, Clone)]
+// pub struct StaticBootstrap {
+//     random_contacts: usize,
+// }
 
-<span class="kw">impl </span>Default <span class="kw">for </span>DynamicBootstrap {
-    <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
-        <span class="self">Self </span>{
-            bootstrap_nodes: <span class="number">12</span>,
-            ticks_per_join: <span class="number">3</span>,
-            warmup_ticks: <span class="number">100</span>,
-        }
-    }
-}
+// impl Default for StaticBootstrap {
+//     fn default() -&gt; Self {
+//         Self { random_contacts: 3 }
+//     }
+// }
 
-<span class="kw">impl </span>SimulatorConfig {
+// #[derive(Debug, Serialize, Deserialize, Clone)]
+// pub struct DynamicBootstrap {
+//     bootstrap_nodes: usize,
+// }
+
+// impl Default for DynamicBootstrap {
+//     fn default() -&gt; Self {
+//         Self {
+//             bootstrap_nodes: 12,
+//         }
+//     }
+// }
+
+</span><span class="kw">impl </span>SimulatorConfig {
     <span class="kw">pub fn </span>from_env() -&gt; <span class="self">Self </span>{
         <span class="kw">let </span>nodes = read_var(<span class="string">"NODES"</span>, <span class="number">100</span>);
         <span class="self">Self </span>{
             rng_seed: read_var(<span class="string">"SEED"</span>, <span class="number">0</span>),
             peers: nodes,
-            round_max_ticks: read_var(<span class="string">"ROUND_MAX_TICKS"</span>, <span class="number">200</span>),
+            gossip_round_timeout: Duration::from_secs(read_var(<span class="string">"GOSSIP_ROUND_TIMEOUT"</span>, <span class="number">5</span>)),
         }
     }
 }
@@ -1393,25 +1698,36 @@
         <span class="self">Self </span>{
             rng_seed: <span class="number">0</span>,
             peers: <span class="number">100</span>,
-            round_max_ticks: <span class="number">200</span>,
+            gossip_round_timeout: Duration::from_secs(<span class="number">5</span>),
         }
     }
 }
 
 <span class="attr">#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 </span><span class="kw">pub struct </span>RoundStats {
-    <span class="kw">pub </span>ticks: f32,
+    <span class="kw">pub </span>duration: Duration,
     <span class="kw">pub </span>rmr: f32,
     <span class="kw">pub </span>ldh: f32,
-    <span class="kw">pub </span>missing_receives: f32,
+    <span class="kw">pub </span>missed: f32,
+}
+
+<span class="attr">#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+</span><span class="kw">pub struct </span>RoundStatsDiff {
+    <span class="kw">pub </span>duration: f32,
+    <span class="kw">pub </span>rmr: f32,
+    <span class="kw">pub </span>ldh: f32,
+    <span class="kw">pub </span>missed: f32,
 }
 
 <span class="kw">impl </span>fmt::Display <span class="kw">for </span>RoundStats {
     <span class="kw">fn </span>fmt(<span class="kw-2">&amp;</span><span class="self">self</span>, f: <span class="kw-2">&amp;mut </span>fmt::Formatter&lt;<span class="lifetime">'_</span>&gt;) -&gt; fmt::Result {
         <span class="macro">write!</span>(
             f,
-            <span class="string">"RMR {:&gt;6.2} LDH {:&gt;6.2} ticks {:&gt;6.2} missed {:&gt;10.2}"</span>,
-            <span class="self">self</span>.rmr, <span class="self">self</span>.ldh, <span class="self">self</span>.ticks, <span class="self">self</span>.missing_receives
+            <span class="string">"RMR {:&gt;6.2} LDH {:&gt;6.2} duration {:&gt;6.2}ms missed {:&gt;10.2}"</span>,
+            <span class="self">self</span>.rmr,
+            <span class="self">self</span>.ldh,
+            <span class="self">self</span>.duration.as_millis(),
+            <span class="self">self</span>.missed
         )
     }
 }
@@ -1419,27 +1735,28 @@
 <span class="kw">impl </span>RoundStats {
     <span class="kw">fn </span>new_max() -&gt; <span class="self">Self </span>{
         <span class="self">Self </span>{
-            ticks: f32::MAX,
+            duration: Duration::MAX,
             rmr: f32::MAX,
             ldh: f32::MAX,
-            missing_receives: f32::MAX,
+            missed: f32::MAX,
         }
     }
 
-    <span class="kw">pub fn </span>merge&lt;<span class="lifetime">'a</span>&gt;(rounds: <span class="kw">impl </span>IntoIterator&lt;Item = <span class="kw-2">&amp;</span><span class="lifetime">'a </span>RoundStats&gt;) -&gt; RoundStats {
+    <span class="kw">pub fn </span>mean&lt;<span class="lifetime">'a</span>&gt;(rounds: <span class="kw">impl </span>IntoIterator&lt;Item = <span class="kw-2">&amp;</span><span class="lifetime">'a </span>RoundStats&gt;) -&gt; RoundStats {
         <span class="kw">let </span>(len, <span class="kw-2">mut </span>avg) =
             rounds
                 .into_iter()
                 .fold((<span class="number">0.</span>, RoundStats::default()), |(len, <span class="kw-2">mut </span>agg), round| {
                     agg.rmr += round.rmr;
                     agg.ldh += round.ldh;
-                    agg.ticks += round.ticks;
-                    agg.missing_receives += round.missing_receives;
+                    agg.duration += round.duration;
+                    agg.missed += round.missed;
                     (len + <span class="number">1.</span>, agg)
                 });
         avg.rmr /= len;
         avg.ldh /= len;
-        avg.ticks /= len;
+        avg.missed /= len;
+        avg.duration /= len <span class="kw">as </span>u32;
         avg
     }
 
@@ -1449,8 +1766,8 @@
             .fold(RoundStats::new_max(), |<span class="kw-2">mut </span>agg, round| {
                 agg.rmr = agg.rmr.min(round.rmr);
                 agg.ldh = agg.ldh.min(round.ldh);
-                agg.ticks = agg.ticks.min(round.ticks);
-                agg.missing_receives = agg.missing_receives.min(round.missing_receives);
+                agg.duration = agg.duration.min(round.duration);
+                agg.missed = agg.missed.min(round.missed);
                 agg
             })
     }
@@ -1461,8 +1778,8 @@
             .fold(RoundStats::default(), |<span class="kw-2">mut </span>agg, round| {
                 agg.rmr = agg.rmr.max(round.rmr);
                 agg.ldh = agg.ldh.max(round.ldh);
-                agg.ticks = agg.ticks.max(round.ticks);
-                agg.missing_receives = agg.missing_receives.max(round.missing_receives);
+                agg.duration = agg.duration.max(round.duration);
+                agg.missed = agg.missed.max(round.missed);
                 agg
             })
     }
@@ -1470,16 +1787,16 @@
     <span class="kw">pub fn </span>avg(rounds: <span class="kw-2">&amp;</span>[RoundStats]) -&gt; RoundStatsAvg {
         <span class="kw">let </span>min = <span class="self">Self</span>::min(rounds);
         <span class="kw">let </span>max = <span class="self">Self</span>::max(rounds);
-        <span class="kw">let </span>mean = <span class="self">Self</span>::merge(rounds);
+        <span class="kw">let </span>mean = <span class="self">Self</span>::mean(rounds);
         RoundStatsAvg { min, max, mean }
     }
 
-    <span class="kw">pub fn </span>diff(<span class="kw-2">&amp;</span><span class="self">self</span>, other: <span class="kw-2">&amp;</span><span class="self">Self</span>) -&gt; <span class="self">Self </span>{
-        RoundStats {
-            ticks: diff_percent(<span class="self">self</span>.ticks, other.ticks),
+    <span class="kw">pub fn </span>diff(<span class="kw-2">&amp;</span><span class="self">self</span>, other: <span class="kw-2">&amp;</span><span class="self">Self</span>) -&gt; RoundStatsDiff {
+        RoundStatsDiff {
+            duration: diff_percent(<span class="self">self</span>.duration.as_secs_f32(), other.duration.as_secs_f32()),
             rmr: diff_percent(<span class="self">self</span>.rmr, other.rmr),
             ldh: diff_percent(<span class="self">self</span>.ldh, other.ldh),
-            missing_receives: diff_percent(<span class="self">self</span>.missing_receives, other.missing_receives),
+            missed: diff_percent(<span class="self">self</span>.missed, other.missed),
         }
     }
 }
@@ -1503,18 +1820,32 @@
     <span class="kw">pub </span>mean: RoundStats,
 }
 
+<span class="attr">#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+</span><span class="kw">pub struct </span>RoundStatsAvgDiff {
+    <span class="kw">pub </span>min: RoundStatsDiff,
+    <span class="kw">pub </span>max: RoundStatsDiff,
+    <span class="kw">pub </span>mean: RoundStatsDiff,
+}
+
 <span class="kw">impl </span>RoundStatsAvg {
-    <span class="kw">pub fn </span>diff(<span class="kw-2">&amp;</span><span class="self">self</span>, other: <span class="kw-2">&amp;</span><span class="self">Self</span>) -&gt; <span class="self">Self </span>{
-        <span class="self">Self </span>{
+    <span class="kw">pub fn </span>diff(<span class="kw-2">&amp;</span><span class="self">self</span>, other: <span class="kw-2">&amp;</span><span class="self">Self</span>) -&gt; RoundStatsAvgDiff {
+        RoundStatsAvgDiff {
             min: <span class="self">self</span>.min.diff(<span class="kw-2">&amp;</span>other.min),
             max: <span class="self">self</span>.max.diff(<span class="kw-2">&amp;</span>other.max),
             mean: <span class="self">self</span>.mean.diff(<span class="kw-2">&amp;</span>other.mean),
         }
     }
+
+    <span class="kw">pub fn </span>avg(rows: <span class="kw-2">&amp;</span>[<span class="self">Self</span>]) -&gt; <span class="self">Self </span>{
+        <span class="kw">let </span>min = RoundStats::min(rows.iter().map(|x| <span class="kw-2">&amp;</span>x.min));
+        <span class="kw">let </span>max = RoundStats::min(rows.iter().map(|x| <span class="kw-2">&amp;</span>x.max));
+        <span class="kw">let </span>mean = RoundStats::min(rows.iter().map(|x| <span class="kw-2">&amp;</span>x.mean));
+        <span class="self">Self </span>{ min, max, mean }
+    }
 }
 
 <span class="attr">#[derive(Debug, Default)]
-</span><span class="kw">struct </span>NetworkStats {
+</span><span class="kw">pub struct </span>NetworkStats {
     active: BTreeMap&lt;usize, usize&gt;,
     passive: BTreeMap&lt;usize, usize&gt;,
     eager: BTreeMap&lt;usize, usize&gt;,
@@ -1552,6 +1883,7 @@
 <span class="attr">#[derive(Debug)]
 </span><span class="kw">pub struct </span>TickReport {
     <span class="kw">pub </span>min_active_len: usize,
+    <span class="kw">pub </span>stats: NetworkStats,
 }
 
 <span class="kw">pub const </span>TOPIC: TopicId = TopicId::from_bytes([<span class="number">0u8</span>; <span class="number">32</span>]);
@@ -1565,10 +1897,15 @@
 }
 
 <span class="kw">impl </span>Simulator {
-    <span class="kw">pub fn </span>new(simulator_config: SimulatorConfig, protocol_config: Config) -&gt; <span class="self">Self </span>{
+    <span class="kw">pub fn </span>new(
+        simulator_config: SimulatorConfig,
+        network_config: <span class="kw">impl </span>Into&lt;NetworkConfig&gt;,
+    ) -&gt; <span class="self">Self </span>{
+        <span class="kw">let </span>network_config = network_config.into();
+        <span class="macro">info!</span>(<span class="string">"start {simulator_config:?} {network_config:?}"</span>);
         <span class="kw">let </span>rng = rand_chacha::ChaCha12Rng::seed_from_u64(simulator_config.rng_seed);
         <span class="self">Self </span>{
-            network: Network::new(protocol_config, rng),
+            network: Network::new(network_config, rng),
             config: simulator_config,
             round_stats: Default::default(),
         }
@@ -1601,231 +1938,132 @@
 
     <span class="kw">pub fn </span>report_swarm(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; TickReport {
         <span class="kw">let </span>stats = <span class="self">self</span>.network.state_stats();
-        <span class="kw">let </span>tick = <span class="self">self</span>.network.current_tick();
         <span class="kw">let </span>min_active_len = min(<span class="kw-2">&amp;</span>stats.active);
         <span class="kw">let </span>max_active_len = max(<span class="kw-2">&amp;</span>stats.active);
         <span class="kw">let </span>avg = avg(<span class="kw-2">&amp;</span>stats.active);
         <span class="kw">let </span>len = <span class="self">self</span>.network.peers.len();
         <span class="macro">debug!</span>(
-            <span class="string">"{tick}: nodes {len} active: avg {avg:2.2} min {min_active_len} max {max_active_len} empty {}"</span>,
+            <span class="string">"nodes {len} active: avg {avg:2.2} min {min_active_len} max {max_active_len} empty {}"</span>,
             stats.empty.len()
         );
-        TickReport { min_active_len }
+        TickReport {
+            min_active_len,
+            stats,
+        }
     }
 
-    <span class="comment">// fn run_until_all_active(&amp;mut self, limit: usize) -&gt; bool {
-    //     info!("run max {limit} ticks or until all nodes active..");
-    //     for _i in 0..limit {
-    //         self.run_ticks(1);
-    //         let report = self.report_swarm();
-    //         if report.min_active_len &gt; 0 {
-    //             info!("bootstrapped {}", self.network.peers.len());
-    //             return true;
-    //         }
-    //     }
-    //     false
-    // }
+    <span class="kw">pub fn </span>bootstrap(<span class="kw-2">&amp;mut </span><span class="self">self</span>, bootstrap_mode: BootstrapMode) -&gt; TickReport {
+        <span class="kw">let </span>span = <span class="macro">info_span!</span>(<span class="string">"bootstrap"</span>);
+        <span class="kw">let </span>_guard = span.enter();
+        <span class="macro">info!</span>(<span class="string">"bootstrap {bootstrap_mode:?}"</span>);
 
-    </span><span class="kw">pub fn </span>bootstrap(<span class="kw-2">&amp;mut </span><span class="self">self</span>, bootstrap_mode: BootstrapMode) -&gt; bool {
+        <span class="kw">let </span>node_count = <span class="self">self</span>.config.peers <span class="kw">as </span>u64;
+
         <span class="kw">match </span>bootstrap_mode {
-            BootstrapMode::Static(opts) =&gt; <span class="self">self</span>.bootstrap_static(opts),
-            BootstrapMode::Dynamic(opts) =&gt; <span class="self">self</span>.bootstrap_dynamic(opts),
-        }
-    }
-
-    <span class="kw">pub fn </span>bootstrap_static(<span class="kw-2">&amp;mut </span><span class="self">self</span>, opts: StaticBootstrap) -&gt; bool {
-        <span class="kw">let </span>node_count = <span class="self">self</span>.config.peers;
-        <span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..node_count {
-            <span class="kw">let </span>chunk_size = opts.random_contacts;
-            <span class="kw">let </span>contacts = <span class="self">self
-                </span>.network
-                .peers
-                .keys()
-                .cloned()
-                .choose_multiple(<span class="kw-2">&amp;mut </span><span class="self">self</span>.network.rng, chunk_size);
-            <span class="self">self</span>.network.insert_and_join(i <span class="kw">as </span>u64, TOPIC, contacts);
-        }
-        <span class="self">self</span>.warmup(opts.warmup_ticks)
-    }
-
-    <span class="kw">pub fn </span>bootstrap_static2(<span class="kw-2">&amp;mut </span><span class="self">self</span>, opts: StaticBootstrap) -&gt; bool {
-        <span class="self">self</span>.network.insert_and_join(<span class="number">0</span>, TOPIC, <span class="macro">vec!</span>[]);
-        <span class="kw">let </span>node_count = <span class="self">self</span>.config.peers;
-        <span class="kw">let </span><span class="kw-2">mut </span>chunk = <span class="number">0</span>;
-        <span class="kw">let </span>chunk_size = opts.random_contacts;
-        <span class="kw">for </span>i <span class="kw">in </span><span class="number">1</span>..node_count {
-            <span class="kw">let </span>contact = chunk * chunk_size <span class="kw">as </span>u64;
-            <span class="kw">if </span>i % chunk_size == <span class="number">0 </span>{
-                chunk += <span class="number">1</span>;
+            BootstrapMode::Single =&gt; {
+                <span class="self">self</span>.network.insert_and_join(<span class="number">0</span>, TOPIC, <span class="macro">vec!</span>[]);
+                <span class="kw">for </span>i <span class="kw">in </span><span class="number">1</span>..node_count {
+                    <span class="self">self</span>.network.insert_and_join(i, TOPIC, <span class="macro">vec!</span>[<span class="number">0</span>]);
+                }
+                <span class="self">self</span>.network.run_roundtrips(<span class="number">20</span>);
             }
-            <span class="self">self</span>.network.insert_and_join(i <span class="kw">as </span>u64, TOPIC, <span class="macro">vec!</span>[contact]);
-            <span class="comment">// if i % 3 == 0 {
-            //     self.run_ticks(4);
-            // }
-        </span>}
+            BootstrapMode::Set { count } =&gt; {
+                <span class="self">self</span>.network.insert_and_join(<span class="number">0</span>, TOPIC, <span class="macro">vec!</span>[]);
+                <span class="kw">for </span>i <span class="kw">in </span><span class="number">1</span>..count {
+                    <span class="self">self</span>.network.insert_and_join(i, TOPIC, <span class="macro">vec!</span>[<span class="number">0</span>]);
+                }
 
-        <span class="self">self</span>.warmup(opts.warmup_ticks)
-    }
+                <span class="self">self</span>.network.run_roundtrips(<span class="number">7</span>);
 
-    <span class="kw">fn </span>warmup(<span class="kw-2">&amp;mut </span><span class="self">self</span>, ticks: usize) -&gt; bool {
-        <span class="self">self</span>.drop_events();
-        <span class="self">self</span>.run_ticks(ticks);
-        <span class="self">self</span>.drop_events();
-        <span class="macro">info!</span>(tick=%<span class="self">self</span>.network.current_tick(), <span class="string">"warmup complete"</span>);
-        <span class="kw">if </span>!<span class="self">self</span>.network.check_synchronicity() {
-            <span class="macro">warn!</span>(<span class="string">"not all peers have synchronous relations"</span>);
+                <span class="kw">for </span>i <span class="kw">in </span>count..node_count {
+                    <span class="kw">let </span>contact = <span class="self">self</span>.network.rng.gen_range(<span class="number">0</span>..count);
+                    <span class="self">self</span>.network.insert_and_join(i, TOPIC, <span class="macro">vec!</span>[contact]);
+                }
+
+                <span class="self">self</span>.network.run_roundtrips(<span class="number">20</span>);
+            }
         }
 
         <span class="kw">let </span>report = <span class="self">self</span>.report_swarm();
         <span class="kw">if </span>report.min_active_len == <span class="number">0 </span>{
-            <span class="macro">warn!</span>(<span class="string">"failed to keep all nodes active after warmup"</span>);
-            <span class="bool-val">false
-        </span>} <span class="kw">else </span>{
-            <span class="macro">info!</span>(<span class="string">"bootstrap complete, all nodes active"</span>);
-            <span class="bool-val">true
-        </span>}
-    }
-
-    <span class="kw">pub fn </span>bootstrap_dynamic(<span class="kw-2">&amp;mut </span><span class="self">self</span>, opts: DynamicBootstrap) -&gt; bool {
-        <span class="kw">let </span>bootstrap_count = opts.bootstrap_nodes;
-        <span class="self">self</span>.network.insert_and_join(<span class="number">0</span>, TOPIC, <span class="macro">vec!</span>[]);
-        <span class="self">self</span>.run_ticks(<span class="number">1</span>);
-        <span class="kw">for </span>i <span class="kw">in </span><span class="number">1</span>..bootstrap_count {
-            <span class="self">self</span>.network.insert_and_join(i <span class="kw">as </span>u64, TOPIC, <span class="macro">vec!</span>[<span class="number">0</span>]);
-            <span class="self">self</span>.run_ticks(<span class="number">4</span>);
-        }
-        <span class="macro">info!</span>(tick=%<span class="self">self</span>.network.current_tick(), <span class="string">"created {bootstrap_count}"</span>);
-
-        <span class="kw">if </span>!<span class="self">self</span>.warmup(opts.warmup_ticks) {
-            <span class="macro">warn!</span>(
-                <span class="string">"failed to activate {bootstrap_count} bootstrap nodes within a limit of {} ticks"</span>,
-                opts.warmup_ticks
-            );
+            <span class="macro">warn!</span>(<span class="string">"failed to keep all nodes active after warmup: {report:?}"</span>);
         } <span class="kw">else </span>{
-            <span class="macro">info!</span>(<span class="string">"bootstrap nodes activated"</span>);
+            <span class="macro">info!</span>(<span class="string">"bootstrap complete, all nodes active"</span>);
         }
-
-        <span class="kw">let </span>node_count = <span class="self">self</span>.config.peers;
-        <span class="kw">for </span>i <span class="kw">in </span>bootstrap_count..node_count {
-            <span class="kw">let </span>contact = (i % bootstrap_count) <span class="kw">as </span>u64;
-            <span class="self">self</span>.network.insert_and_join(i <span class="kw">as </span>u64, TOPIC, <span class="macro">vec!</span>[contact]);
-            <span class="self">self</span>.run_ticks(opts.ticks_per_join);
-        }
-        <span class="macro">info!</span>(tick=%<span class="self">self</span>.network.current_tick(), <span class="string">"created {node_count}"</span>);
-
-        <span class="self">self</span>.warmup(opts.warmup_ticks)
-    }
-
-    <span class="kw">pub fn </span>run_ticks(<span class="kw-2">&amp;mut </span><span class="self">self</span>, ticks: usize) {
-        <span class="kw">for _ in </span><span class="number">0</span>..ticks {
-            <span class="self">self</span>.network.tick();
-        }
+        report
     }
 
     <span class="kw">pub fn </span>drop_events(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
         <span class="kw">let _ </span>= <span class="self">self</span>.network.events();
     }
 
-    <span class="kw">pub fn </span>gossip_tick(<span class="kw-2">&amp;mut </span><span class="self">self</span>, missing: <span class="kw-2">&amp;mut </span>BTreeMap&lt;PeerId, BTreeSet&lt;Bytes&gt;&gt;) {
-        <span class="self">self</span>.run_ticks(<span class="number">1</span>);
-
-        <span class="kw">for </span>(peer, _topic, event) <span class="kw">in </span><span class="self">self</span>.network.events() {
-            <span class="kw">let </span>entry = missing.get_mut(<span class="kw-2">&amp;</span>peer).unwrap();
-            <span class="kw">if let </span>Event::Received(message) = event {
-                entry.remove(<span class="kw-2">&amp;</span>message.content);
-            }
-        }
-    }
-
     <span class="kw">pub fn </span>gossip_round(<span class="kw-2">&amp;mut </span><span class="self">self</span>, messages: Vec&lt;(PeerId, Bytes)&gt;) {
+        <span class="kw">let </span>span = <span class="macro">debug_span!</span>(<span class="string">"g"</span>, r = <span class="self">self</span>.round_stats.len());
+        <span class="kw">let </span>_guard = span.enter();
         <span class="self">self</span>.reset_stats();
-        <span class="kw">let </span>expected_recv_count: usize = messages.len() * (<span class="self">self</span>.network.peers.len() - <span class="number">1</span>);
-
-        <span class="comment">// assemble expected receives.
-        </span><span class="kw">let </span><span class="kw-2">mut </span>missing: BTreeMap&lt;<span class="kw">_</span>, <span class="kw">_</span>&gt; = <span class="self">self
-            </span>.network
-            .peers
-            .keys()
-            .map(|peer| (<span class="kw-2">*</span>peer, BTreeSet::new()))
-            .collect();
-        <span class="kw">for </span>(from, message) <span class="kw">in </span>messages.iter().cloned() {
-            <span class="kw">for </span>(peer, set) <span class="kw">in </span>missing.iter_mut() {
-                <span class="kw">if </span><span class="kw-2">*</span>peer != from {
-                    set.insert(message.clone());
-                }
-            }
-        }
-        <span class="macro">assert_eq!</span>(
-            missing.values().map(|s| s.len()).sum::&lt;usize&gt;(),
-            expected_recv_count
-        );
-
+        <span class="kw">let </span>start = <span class="self">self</span>.network.time;
+        <span class="kw">let </span>expected_count: usize = messages.len() * (<span class="self">self</span>.network.peers.len() - <span class="number">1</span>);
         <span class="macro">info!</span>(
             tick=%<span class="self">self</span>.network.current_tick(),
-            <span class="string">"round {i}: send {len} messages / recv {expected_recv_count} total"</span>,
+            <span class="string">"round {i}: send {len} messages / recv {expected_count} total"</span>,
             len = messages.len(),
             i = <span class="self">self</span>.round_stats.len()
         );
 
-        <span class="comment">// Send all messages at once
-        </span><span class="kw">for </span>(from, message) <span class="kw">in </span>messages {
-            <span class="self">self</span>.network.command(
-                from,
-                TOPIC,
-                Command::Broadcast(message.clone(), Scope::Swarm),
-            );
-            <span class="kw">for </span>(peer, set) <span class="kw">in </span>missing.iter_mut() {
-                <span class="kw">if </span><span class="kw-2">*</span>peer != from {
-                    set.insert(message.clone());
+        <span class="comment">// Send messages and keep track of expected receives
+        </span><span class="kw">let </span><span class="kw-2">mut </span>missing: BTreeMap&lt;PeerId, BTreeSet&lt;Bytes&gt;&gt; = BTreeMap::new();
+        <span class="kw">for </span>(from, message) <span class="kw">in </span>messages {
+            <span class="kw">for </span>peer <span class="kw">in </span><span class="self">self</span>.network.peer_ids().filter(|p| <span class="kw-2">*</span>p != from) {
+                missing.entry(peer).or_default().insert(message.clone());
+            }
+            <span class="self">self</span>.network
+                .command(from, TOPIC, Command::Broadcast(message, Scope::Swarm));
+        }
+
+        <span class="kw">let </span>timeout = <span class="self">self</span>.config.gossip_round_timeout;
+        <span class="kw">let </span><span class="kw-2">mut </span>received_count = <span class="number">0</span>;
+        <span class="self">self</span>.network
+            .run_while_with_timeout(timeout, |peer, _topic, event| {
+                <span class="kw">if let </span>Event::Received(message) = event {
+                    <span class="kw">let </span>set = missing.get_mut(<span class="kw-2">&amp;</span>peer).unwrap();
+                    <span class="kw">if </span>!set.remove(<span class="kw-2">&amp;</span>message.content) {
+                        <span class="macro">panic!</span>(<span class="string">"received duplicate message event"</span>);
+                    } <span class="kw">else if </span>set.is_empty() {
+                        missing.remove(<span class="kw-2">&amp;</span>peer);
+                    }
+                    received_count += <span class="number">1</span>;
                 }
-            }
-            <span class="comment">// tick once after each sent message
-            </span><span class="self">self</span>.gossip_tick(<span class="kw-2">&amp;mut </span>missing);
+                received_count != expected_count
+            });
+
+        <span class="kw">let </span>missing_count: usize = expected_count - received_count;
+        <span class="kw">if </span>missing_count == <span class="number">0 </span>{
+            <span class="macro">info!</span>(<span class="string">"break: all messages received by all peers"</span>);
+        } <span class="kw">else </span>{
+            <span class="macro">warn!</span>(<span class="string">"break: max ticks for round exceeded (still missing {missing_count})"</span>);
+            <span class="macro">debug!</span>(<span class="string">"missing: {missing:?}"</span>);
         }
-
-        <span class="kw">let </span><span class="kw-2">mut </span>ticks = <span class="number">0</span>;
-        <span class="kw">loop </span>{
-            ticks += <span class="number">1</span>;
-            <span class="kw">let </span>missing_count: usize = missing.values().map(|set| set.len()).sum();
-
-            <span class="kw">if </span>missing_count == <span class="number">0 </span>{
-                <span class="macro">info!</span>(
-                    tick=%<span class="self">self</span>.network.current_tick(),
-                    <span class="string">"break: all messages received by all peers"
-                </span>);
-                <span class="kw">break</span>;
-            } <span class="kw">else if </span>ticks &gt; <span class="self">self</span>.config.round_max_ticks {
-                <span class="macro">info!</span>(
-                    tick=%<span class="self">self</span>.network.current_tick(),
-                    <span class="string">"break: max ticks for round exceeded (still missing {missing_count})"
-                </span>);
-                <span class="kw">break</span>;
-            }
-
-            <span class="self">self</span>.gossip_tick(<span class="kw-2">&amp;mut </span>missing);
-        }
-        <span class="kw">let </span>missing_count: usize = missing.values().map(|set| set.len()).sum();
-        <span class="self">self</span>.report_gossip_round(expected_recv_count, missing_count, ticks);
+        <span class="kw">let </span>elapsed = <span class="self">self</span>.network.time.duration_since(start);
+        <span class="self">self</span>.report_gossip_round(expected_count, missing_count, elapsed);
     }
 
     <span class="kw">fn </span>report_gossip_round(
         <span class="kw-2">&amp;mut </span><span class="self">self</span>,
         expected_recv_count: usize,
-        missing_receives_count: usize,
-        ticks: usize,
+        missed: usize,
+        duration: Duration,
     ) {
-        <span class="kw">let </span>ticks = ticks <span class="kw">as </span>f32;
         <span class="kw">let </span>payloud_msg_count = <span class="self">self</span>.total_payload_messages();
         <span class="kw">let </span>ctrl_msg_count = <span class="self">self</span>.total_control_messages();
-        <span class="kw">let </span>rmr_expected_count = expected_recv_count - missing_receives_count;
+        <span class="kw">let </span>rmr_expected_count = expected_recv_count - missed;
         <span class="kw">let </span>rmr = (payloud_msg_count <span class="kw">as </span>f32 / (rmr_expected_count <span class="kw">as </span>f32 - <span class="number">1.</span>)) - <span class="number">1.</span>;
         <span class="kw">let </span>ldh = <span class="self">self</span>.max_ldh();
 
         <span class="kw">let </span>round_stats = RoundStats {
-            ticks,
+            duration,
             rmr,
             ldh: ldh <span class="kw">as </span>f32,
-            missing_receives: missing_receives_count <span class="kw">as </span>f32,
+            missed: missed <span class="kw">as </span>f32,
         };
         <span class="kw">let </span>network_stats = <span class="self">self</span>.network.state_stats();
         <span class="macro">info!</span>(
@@ -1837,8 +2075,8 @@
         <span class="self">self</span>.round_stats.push(round_stats);
     }
 
-    <span class="kw">pub fn </span>report_round_average(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; RoundStats {
-        RoundStats::merge(<span class="kw-2">&amp;</span><span class="self">self</span>.round_stats)
+    <span class="kw">pub fn </span>report_round_average(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; RoundStatsAvg {
+        RoundStats::avg(<span class="kw-2">&amp;</span><span class="self">self</span>.round_stats)
     }
 
     <span class="kw">fn </span>reset_stats(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
@@ -1896,6 +2134,16 @@
     <span class="kw">pub fn </span>peers(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; [PI; <span class="number">2</span>] {
         <span class="self">self</span>.<span class="number">0
     </span>}
+
+    <span class="kw">pub fn </span>other(<span class="kw-2">&amp;</span><span class="self">self</span>, other: PI) -&gt; <span class="prelude-ty">Option</span>&lt;PI&gt; {
+        <span class="kw">if </span><span class="self">self</span>.<span class="number">0</span>[<span class="number">0</span>] == other {
+            <span class="prelude-val">Some</span>(<span class="self">self</span>.<span class="number">0</span>[<span class="number">1</span>])
+        } <span class="kw">else if </span><span class="self">self</span>.<span class="number">0</span>[<span class="number">1</span>] == other {
+            <span class="prelude-val">Some</span>(<span class="self">self</span>.<span class="number">0</span>[<span class="number">0</span>])
+        } <span class="kw">else </span>{
+            <span class="prelude-val">None
+        </span>}
+    }
 }
 <span class="kw">impl</span>&lt;PI: Ord + Copy&gt; From&lt;(PI, PI)&gt; <span class="kw">for </span>ConnId&lt;PI&gt; {
     <span class="kw">fn </span>from((a, b): (PI, PI)) -&gt; <span class="self">Self </span>{
