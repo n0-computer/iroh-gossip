@@ -322,7 +322,10 @@
 <a href="#321" id="321">321</a>
 <a href="#322" id="322">322</a>
 <a href="#323" id="323">323</a>
-<a href="#324" id="324">324</a></pre></div><pre class="rust"><code><span class="doccomment">//! Implementation of the iroh-gossip protocol, as an IO-less state machine
+<a href="#324" id="324">324</a>
+<a href="#325" id="325">325</a>
+<a href="#326" id="326">326</a>
+<a href="#327" id="327">327</a></pre></div><pre class="rust"><code><span class="doccomment">//! Implementation of the iroh-gossip protocol, as an IO-less state machine
 //!
 //! This module implements the iroh-gossip protocol. The entry point is [`State`], which contains
 //! the protocol state for a node.
@@ -399,8 +402,11 @@
 ///
 /// TODO: Rename to `PeerId`? It does not necessarily refer to a peer's address, as long as the
 /// networking layer can translate the value of its concrete type into an address.
-</span><span class="kw">pub trait </span>PeerIdentity: Hash + Eq + Copy + fmt::Debug + Serialize + DeserializeOwned {}
-<span class="kw">impl</span>&lt;T&gt; PeerIdentity <span class="kw">for </span>T <span class="kw">where </span>T: Hash + Eq + Copy + fmt::Debug + Serialize + DeserializeOwned {}
+</span><span class="kw">pub trait </span>PeerIdentity: Hash + Eq + Ord + Copy + fmt::Debug + Serialize + DeserializeOwned {}
+<span class="kw">impl</span>&lt;T&gt; PeerIdentity <span class="kw">for </span>T <span class="kw">where
+    </span>T: Hash + Eq + Ord + Copy + fmt::Debug + Serialize + DeserializeOwned
+{
+}
 
 <span class="doccomment">/// Opaque binary data that is transmitted on messages that introduce new peers.
 ///

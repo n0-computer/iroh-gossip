@@ -886,7 +886,7 @@
 //! [impl]: https://gist.github.com/Horusiath/84fac596101b197da0546d1697580d99
 
 </span><span class="kw">use </span>std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     hash::Hash,
 };
 
@@ -1218,11 +1218,11 @@
     </span>config: Config,
 
     <span class="doccomment">/// Set of peers used for payload exchange.
-    </span><span class="kw">pub</span>(<span class="kw">crate</span>) eager_push_peers: HashSet&lt;PI&gt;,
+    </span><span class="kw">pub</span>(<span class="kw">crate</span>) eager_push_peers: BTreeSet&lt;PI&gt;,
     <span class="doccomment">/// Set of peers used for control message exchange.
-    </span><span class="kw">pub</span>(<span class="kw">crate</span>) lazy_push_peers: HashSet&lt;PI&gt;,
+    </span><span class="kw">pub</span>(<span class="kw">crate</span>) lazy_push_peers: BTreeSet&lt;PI&gt;,
 
-    lazy_push_queue: HashMap&lt;PI, Vec&lt;IHave&gt;&gt;,
+    lazy_push_queue: BTreeMap&lt;PI, Vec&lt;IHave&gt;&gt;,
 
     <span class="doccomment">/// Messages for which a [`MessageId`] has been seen via a [`Message::IHave`] but we have not
     /// yet received the full payload. For each, we store the peers that have claimed to have this
@@ -1307,7 +1307,7 @@
 
     <span class="doccomment">/// Dispatches messages from lazy queue over to lazy peers.
     </span><span class="kw">fn </span>on_dispatch_timer(<span class="kw-2">&amp;mut </span><span class="self">self</span>, io: <span class="kw-2">&amp;mut </span><span class="kw">impl </span>IO&lt;PI&gt;) {
-        <span class="kw">for </span>(peer, list) <span class="kw">in </span><span class="self">self</span>.lazy_push_queue.drain() {
+        <span class="kw">while let </span><span class="prelude-val">Some</span>((peer, list)) = <span class="self">self</span>.lazy_push_queue.pop_first() {
             io.push(OutEvent::SendMessage(peer, Message::IHave(list)));
         }
 
