@@ -636,11 +636,11 @@ impl Actor {
                 let event = event.expect("unreachable: in_event_tx is never dropped before receiver");
                 self.handle_in_event(event, Instant::now()).await?;
             }
-            drain = self.timers.wait_and_drain() => {
+            _ = self.timers.wait_next() => {
                 trace!(?i, "tick: timers");
                 self.metrics.actor_tick_timers.inc();
                 let now = Instant::now();
-                for (_instant, timer) in drain {
+                while let Some((_instant, timer)) = self.timers.pop_before(now) {
                     self.handle_in_event(InEvent::TimerExpired(timer), now).await?;
                 }
             }
