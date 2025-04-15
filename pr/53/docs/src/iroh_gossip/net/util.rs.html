@@ -290,24 +290,24 @@
         <span class="self">self</span>.next = <span class="self">self
             </span>.map
             .first()
-            .map(|(instant, <span class="kw">_</span>)| (<span class="kw-2">*</span>instant, Box::pin(sleep_until(<span class="kw-2">*</span>instant))))
+            .map(|instant| (<span class="kw-2">*</span>instant, Box::pin(sleep_until(<span class="kw-2">*</span>instant))))
     }
 
-    <span class="doccomment">/// Wait for the next timer to expire and return an iterator of all expired timers
-    ///
-    /// If the [TimerMap] is empty, this will return a future that is pending forever.
-    /// After inserting a new entry, prior futures returned from this method will not become ready.
-    /// They should be dropped after calling [Self::insert], and a new future as returned from
-    /// this method should be awaited instead.
-    </span><span class="kw">pub async fn </span>wait_and_drain(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="kw">impl </span>Iterator&lt;Item = (Instant, T)&gt; {
+    <span class="doccomment">/// Waits for the next timer to elapse.
+    </span><span class="kw">pub async fn </span>wait_next(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; Instant {
         <span class="self">self</span>.reset();
         <span class="kw">match </span><span class="self">self</span>.next.as_mut() {
             <span class="prelude-val">Some</span>((instant, sleep)) =&gt; {
                 sleep.<span class="kw">await</span>;
-                <span class="self">self</span>.map.drain_until(instant)
+                <span class="kw-2">*</span>instant
             }
             <span class="prelude-val">None </span>=&gt; std::future::pending().<span class="kw">await</span>,
         }
+    }
+
+    <span class="doccomment">/// Pops the next timer, if it elapses at or before `now`.
+    </span><span class="kw">pub fn </span>pop_before(<span class="kw-2">&amp;mut </span><span class="self">self</span>, now: Instant) -&gt; <span class="prelude-ty">Option</span>&lt;(Instant, T)&gt; {
+        <span class="self">self</span>.map.pop_before(now)
     }
 }
 </code></pre></div></section></main></body></html>

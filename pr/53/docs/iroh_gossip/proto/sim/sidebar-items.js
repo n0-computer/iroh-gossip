@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["TOPIC"],"enum":["BootstrapMode","LatencyConfig"],"fn":["report_round_distribution","sort"],"struct":["ConnId","Network","NetworkConfig","NetworkStats","RoundStats","RoundStatsAvg","RoundStatsAvgDiff","RoundStatsDiff","Simulator","SimulatorConfig","TickReport"],"type":["PeerId"]};

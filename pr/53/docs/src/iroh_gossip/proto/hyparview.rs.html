@@ -764,7 +764,8 @@
 <a href="#763" id="763">763</a>
 <a href="#764" id="764">764</a>
 <a href="#765" id="765">765</a>
-<a href="#766" id="766">766</a></pre></div><pre class="rust"><code><span class="doccomment">//! Implementation of the HyParView membership protocol
+<a href="#766" id="766">766</a>
+<a href="#767" id="767">767</a></pre></div><pre class="rust"><code><span class="doccomment">//! Implementation of the HyParView membership protocol
 //!
 //! The implementation is based on [this paper][paper] by Joao Leitao, Jose Pereira, Luıs Rodrigues
 //! and the [example implementation][impl] by Bartosz Sypytkowski
@@ -1085,6 +1086,7 @@
         }
 
         <span class="comment">// Disconnect from passive nodes right after receiving a message.
+        // TODO(frando): I'm not sure anymore that this is correct. Maybe remove?
         </span><span class="kw">if </span>!is_disconnect &amp;&amp; !<span class="self">self</span>.active_view.contains(<span class="kw-2">&amp;</span>from) {
             io.push(OutEvent::DisconnectPeer(from));
         }
@@ -1240,7 +1242,7 @@
         <span class="kw">if let </span><span class="prelude-val">Some</span>(data) = peer_info.data {
             <span class="kw">let </span>old = <span class="self">self</span>.peer_data.remove(<span class="kw-2">&amp;</span>peer_info.id);
             <span class="kw">let </span>same = <span class="macro">matches!</span>(old, <span class="prelude-val">Some</span>(old) <span class="kw">if </span>old == data);
-            <span class="kw">if </span>!same {
+            <span class="kw">if </span>!same &amp;&amp; !data.<span class="number">0</span>.is_empty() {
                 io.push(OutEvent::PeerData(peer_info.id, data.clone()));
             }
             <span class="self">self</span>.peer_data.insert(peer_info.id, data);

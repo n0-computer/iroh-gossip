@@ -879,7 +879,8 @@
 <a href="#878" id="878">878</a>
 <a href="#879" id="879">879</a>
 <a href="#880" id="880">880</a>
-<a href="#881" id="881">881</a></pre></div><pre class="rust"><code><span class="doccomment">//! Implementation of the Plumtree epidemic broadcast tree protocol
+<a href="#881" id="881">881</a>
+<a href="#882" id="882">882</a></pre></div><pre class="rust"><code><span class="doccomment">//! Implementation of the Plumtree epidemic broadcast tree protocol
 //!
 //! The implementation is based on [this paper][paper] by Joao Leitao, Jose Pereira, Luıs Rodrigues
 //! and the [example implementation][impl] by Bartosz Sypytkowski
@@ -888,7 +889,7 @@
 //! [impl]: https://gist.github.com/Horusiath/84fac596101b197da0546d1697580d99
 
 </span><span class="kw">use </span>std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     hash::Hash,
 };
 
@@ -1220,11 +1221,11 @@
     </span>config: Config,
 
     <span class="doccomment">/// Set of peers used for payload exchange.
-    </span><span class="kw">pub</span>(<span class="kw">crate</span>) eager_push_peers: HashSet&lt;PI&gt;,
+    </span><span class="kw">pub</span>(<span class="kw">crate</span>) eager_push_peers: BTreeSet&lt;PI&gt;,
     <span class="doccomment">/// Set of peers used for control message exchange.
-    </span><span class="kw">pub</span>(<span class="kw">crate</span>) lazy_push_peers: HashSet&lt;PI&gt;,
+    </span><span class="kw">pub</span>(<span class="kw">crate</span>) lazy_push_peers: BTreeSet&lt;PI&gt;,
 
-    lazy_push_queue: HashMap&lt;PI, Vec&lt;IHave&gt;&gt;,
+    lazy_push_queue: BTreeMap&lt;PI, Vec&lt;IHave&gt;&gt;,
 
     <span class="doccomment">/// Messages for which a [`MessageId`] has been seen via a [`Message::IHave`] but we have not
     /// yet received the full payload. For each, we store the peers that have claimed to have this
@@ -1309,7 +1310,7 @@
 
     <span class="doccomment">/// Dispatches messages from lazy queue over to lazy peers.
     </span><span class="kw">fn </span>on_dispatch_timer(<span class="kw-2">&amp;mut </span><span class="self">self</span>, io: <span class="kw-2">&amp;mut </span><span class="kw">impl </span>IO&lt;PI&gt;) {
-        <span class="kw">for </span>(peer, list) <span class="kw">in </span><span class="self">self</span>.lazy_push_queue.drain() {
+        <span class="kw">while let </span><span class="prelude-val">Some</span>((peer, list)) = <span class="self">self</span>.lazy_push_queue.pop_first() {
             io.push(OutEvent::SendMessage(peer, Message::IHave(list)));
         }
 
@@ -1471,6 +1472,7 @@
 
     <span class="doccomment">/// A scheduled [`Timer::SendGraft`] has reached it's deadline.
     </span><span class="kw">fn </span>on_send_graft_timer(<span class="kw-2">&amp;mut </span><span class="self">self</span>, id: MessageId, io: <span class="kw-2">&amp;mut </span><span class="kw">impl </span>IO&lt;PI&gt;) {
+        <span class="self">self</span>.graft_timer_scheduled.remove(<span class="kw-2">&amp;</span>id);
         <span class="comment">// if the message was received before the timer ran out, there is no need to request it
         // again
         </span><span class="kw">if </span><span class="self">self</span>.received_messages.contains_key(<span class="kw-2">&amp;</span>id) {
