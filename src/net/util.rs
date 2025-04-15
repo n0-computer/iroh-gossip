@@ -134,23 +134,23 @@ impl<T> Timers<T> {
         self.next = self
             .map
             .first()
-            .map(|(instant, _)| (*instant, Box::pin(sleep_until(*instant))))
+            .map(|instant| (*instant, Box::pin(sleep_until(*instant))))
     }
 
-    /// Wait for the next timer to expire and return an iterator of all expired timers
-    ///
-    /// If the [TimerMap] is empty, this will return a future that is pending forever.
-    /// After inserting a new entry, prior futures returned from this method will not become ready.
-    /// They should be dropped after calling [Self::insert], and a new future as returned from
-    /// this method should be awaited instead.
-    pub async fn wait_and_drain(&mut self) -> impl Iterator<Item = (Instant, T)> {
+    /// Waits for the next timer to elapse.
+    pub async fn wait_next(&mut self) -> Instant {
         self.reset();
         match self.next.as_mut() {
             Some((instant, sleep)) => {
                 sleep.await;
-                self.map.drain_until(instant)
+                *instant
             }
             None => std::future::pending().await,
         }
+    }
+
+    /// Pops the next timer, if it elapses at or before `now`.
+    pub fn pop_before(&mut self, now: Instant) -> Option<(Instant, T)> {
+        self.map.pop_before(now)
     }
 }
