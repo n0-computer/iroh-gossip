@@ -7,7 +7,7 @@
 //! [impl]: https://gist.github.com/Horusiath/84fac596101b197da0546d1697580d99
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     hash::Hash,
 };
 
@@ -353,11 +353,11 @@ pub struct State<PI> {
     config: Config,
 
     /// Set of peers used for payload exchange.
-    pub(crate) eager_push_peers: HashSet<PI>,
+    pub(crate) eager_push_peers: BTreeSet<PI>,
     /// Set of peers used for control message exchange.
-    pub(crate) lazy_push_peers: HashSet<PI>,
+    pub(crate) lazy_push_peers: BTreeSet<PI>,
 
-    lazy_push_queue: HashMap<PI, Vec<IHave>>,
+    lazy_push_queue: BTreeMap<PI, Vec<IHave>>,
 
     /// Messages for which a [`MessageId`] has been seen via a [`Message::IHave`] but we have not
     /// yet received the full payload. For each, we store the peers that have claimed to have this
@@ -451,7 +451,7 @@ impl<PI: PeerIdentity> State<PI> {
             // Space for length prefix
             - 2;
         let chunk_len = chunk_size / IHave::POSTCARD_MAX_SIZE;
-        for (peer, list) in self.lazy_push_queue.drain() {
+        while let Some((peer, list)) = self.lazy_push_queue.pop_first() {
             for chunk in list.chunks(chunk_len) {
                 io.push(OutEvent::SendMessage(peer, Message::IHave(chunk.to_vec())));
             }
