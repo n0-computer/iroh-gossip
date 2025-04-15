@@ -615,6 +615,7 @@ impl<PI: PeerIdentity> State<PI> {
 
     /// A scheduled [`Timer::SendGraft`] has reached it's deadline.
     fn on_send_graft_timer(&mut self, id: MessageId, io: &mut impl IO<PI>) {
+        self.graft_timer_scheduled.remove(&id);
         // if the message was received before the timer ran out, there is no need to request it
         // again
         if self.received_messages.contains_key(&id) {
