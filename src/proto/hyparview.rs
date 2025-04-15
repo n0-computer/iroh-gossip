@@ -319,6 +319,7 @@ where
         }
 
         // Disconnect from passive nodes right after receiving a message.
+        // TODO(frando): I'm not sure anymore that this is correct. Maybe remove?
         if !is_disconnect && !self.active_view.contains(&from) {
             io.push(OutEvent::DisconnectPeer(from));
         }
@@ -480,7 +481,7 @@ where
         if let Some(data) = peer_info.data {
             let old = self.peer_data.remove(&peer_info.id);
             let same = matches!(old, Some(old) if old == data);
-            if !same {
+            if !same && !data.0.is_empty() {
                 io.push(OutEvent::PeerData(peer_info.id, data.clone()));
             }
             self.peer_data.insert(peer_info.id, data);
