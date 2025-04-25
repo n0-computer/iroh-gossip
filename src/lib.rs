@@ -19,6 +19,8 @@ pub use net::GOSSIP_ALPN as ALPN;
 
 pub mod proto;
 
+pub mod conn_manager;
+
 #[cfg(feature = "cli")]
 pub mod cli;
 #[cfg(feature = "rpc")]
