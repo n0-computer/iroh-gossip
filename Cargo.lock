@@ -829,12 +829,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dtoa"
-version = "1.0.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dcbb2bf8e87535c23f7a8a321e364ce21462d0ff10cb6407820e8e96dfff6653"
-
-[[package]]
 name = "ed25519"
 version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1719,7 +1713,7 @@ checksum = "469fb0b9cefa57e3ef31275ee7cacb78f2fdca44e4765491884a2b119d4eb130"
 [[package]]
 name = "iroh"
 version = "0.34.1"
-source = "git+https://github.com/n0-computer/iroh?branch=Frando/metrics#d18257e963e4df60bc74e041298568bb8be6846c"
+source = "git+https://github.com/n0-computer/iroh?branch=Frando/metrics2#3d22b7e9dca1467a9bf26689ca28ffe1d1393af0"
 dependencies = [
  "aead",
  "anyhow",
@@ -1778,7 +1772,7 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "0.34.1"
-source = "git+https://github.com/n0-computer/iroh?branch=Frando/metrics#d18257e963e4df60bc74e041298568bb8be6846c"
+source = "git+https://github.com/n0-computer/iroh?branch=Frando/metrics2#3d22b7e9dca1467a9bf26689ca28ffe1d1393af0"
 dependencies = [
  "curve25519-dalek",
  "data-encoding",
@@ -1846,14 +1840,13 @@ dependencies = [
 [[package]]
 name = "iroh-metrics"
 version = "0.33.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d64b607e49f67fa42b3e780109cad0fa1fdb476b4a78d4cf8443499bbc1ad0a"
+source = "git+https://github.com/n0-computer/iroh-metrics?branch=Frando/derive-metricsgroupset#ff3c5270a5e5e6bd909e9cd0214d659f899f0073"
 dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
  "iroh-metrics-derive",
- "prometheus-client",
+ "itoa",
  "reqwest",
  "serde",
  "thiserror 2.0.11",
@@ -1864,8 +1857,7 @@ dependencies = [
 [[package]]
 name = "iroh-metrics-derive"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "caaa484b5f192006b1cc39261712d65baf87342fc72a4acc1560355d1dc410d9"
+source = "git+https://github.com/n0-computer/iroh-metrics?branch=Frando/derive-metricsgroupset#ff3c5270a5e5e6bd909e9cd0214d659f899f0073"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -1931,7 +1923,7 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "0.34.1"
-source = "git+https://github.com/n0-computer/iroh?branch=Frando/metrics#d18257e963e4df60bc74e041298568bb8be6846c"
+source = "git+https://github.com/n0-computer/iroh?branch=Frando/metrics2#3d22b7e9dca1467a9bf26689ca28ffe1d1393af0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2363,7 +2355,7 @@ dependencies = [
 [[package]]
 name = "netwatch"
 version = "0.4.0"
-source = "git+https://github.com/n0-computer/net-tools?branch=Frando/metrics#ef897c745d78dbd19429bdf6131f91c9563c2c1a"
+source = "git+https://github.com/n0-computer/net-tools?branch=Frando/metrics2#647b31b2c4468b7fe8651f8a31d5fea5411ee549"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -2796,7 +2788,7 @@ checksum = "350e9b48cbc6b0e028b0473b114454c6316e57336ee184ceab6e53f72c178b3e"
 [[package]]
 name = "portmapper"
 version = "0.4.1"
-source = "git+https://github.com/n0-computer/net-tools?branch=Frando/metrics#ef897c745d78dbd19429bdf6131f91c9563c2c1a"
+source = "git+https://github.com/n0-computer/net-tools?branch=Frando/metrics2#647b31b2c4468b7fe8651f8a31d5fea5411ee549"
 dependencies = [
  "base64",
  "bytes",
@@ -2806,7 +2798,7 @@ dependencies = [
  "igd-next",
  "iroh-metrics",
  "libc",
- "netwatch 0.4.0 (git+https://github.com/n0-computer/net-tools?branch=Frando/metrics)",
+ "netwatch 0.4.0 (git+https://github.com/n0-computer/net-tools?branch=Frando/metrics2)",
  "num_enum",
  "rand 0.8.5",
  "serde",
@@ -2909,29 +2901,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60946a68e5f9d28b0dc1c21bb8a97ee7d018a8b322fa57838ba31cc878e22d99"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "prometheus-client"
-version = "0.22.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "504ee9ff529add891127c4827eb481bd69dc0ebc72e9a682e187db4caa60c3ca"
-dependencies = [
- "dtoa",
- "itoa",
- "parking_lot",
- "prometheus-client-derive-encode",
-]
-
-[[package]]
-name = "prometheus-client-derive-encode"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "440f724eba9f6996b75d63681b0a92b06947f1457076d503a4d2e2c8f56442b8"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.98",
 ]
 
 [[package]]

@@ -115,4 +115,5 @@ all-features = true
 rustdoc-args = ["--cfg", "iroh_docsrs"]
 
 [patch.crates-io]
-iroh = { git = "https://github.com/n0-computer/iroh", branch = "Frando/metrics" }
+iroh = { git = "https://github.com/n0-computer/iroh", branch = "Frando/metrics2" }
+iroh-metrics = { git = "https://github.com/n0-computer/iroh-metrics", branch = "Frando/derive-metricsgroupset" }
