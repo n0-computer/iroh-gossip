@@ -120,12 +120,12 @@ impl<T> Default for Timers<T> {
 }
 
 impl<T> Timers<T> {
-    /// Create a new timer map
+    /// Creates a new timer map.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Insert a new entry at the specified instant
+    /// Inserts a new entry at the specified instant
     pub fn insert(&mut self, instant: Instant, item: T) {
         self.map.insert(instant, item);
     }
@@ -149,7 +149,7 @@ impl<T> Timers<T> {
         }
     }
 
-    /// Pops the next timer, if it elapses at or before `now`.
+    /// Pops the earliest timer that expires at or before `now`.
     pub fn pop_before(&mut self, now: Instant) -> Option<(Instant, T)> {
         self.map.pop_before(now)
     }

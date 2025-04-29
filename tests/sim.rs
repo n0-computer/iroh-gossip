@@ -12,7 +12,7 @@ fn big_hyparview() {
     let mut gossip_config = Config::default();
     gossip_config.membership.shuffle_interval = Duration::from_secs(5);
     let config = SimulatorConfig::from_env();
-    let bootstrap = BootstrapMode::from_env(config.peers);
+    let bootstrap = BootstrapMode::default();
     let mut simulator = Simulator::new(config, gossip_config);
     simulator.bootstrap(bootstrap);
     let state = simulator.report_swarm();
@@ -32,7 +32,7 @@ fn big_multiple_sender() {
         latency: LatencyConfig::random_ms(10, 100),
     };
     let config = SimulatorConfig::from_env();
-    let bootstrap = BootstrapMode::from_env(config.peers);
+    let bootstrap = BootstrapMode::default();
     let mut simulator = Simulator::new(config, network_config);
 
     simulator.bootstrap(bootstrap);
@@ -70,7 +70,7 @@ fn big_single_sender() {
     };
 
     let config = SimulatorConfig::from_env();
-    let bootstrap = BootstrapMode::from_env(config.peers);
+    let bootstrap = BootstrapMode::default();
     let rounds = read_var("ROUNDS", 20);
     let mut simulator = Simulator::new(config, network_config);
     simulator.bootstrap(bootstrap);
@@ -106,7 +106,7 @@ fn big_burst() {
     };
 
     let config = SimulatorConfig::from_env();
-    let bootstrap = BootstrapMode::from_env(config.peers);
+    let bootstrap = BootstrapMode::default();
     let rounds = read_var("ROUNDS", 5);
 
     let mut simulator = Simulator::new(config, network_config);
