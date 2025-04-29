@@ -1744,7 +1744,7 @@
         RoundStatsAvg { min, max, mean }
     }
 
-    <span class="doccomment">/// Calulates the difference factors for each value between `self` and `other`.
+    <span class="doccomment">/// Calculates the difference factors for each value between `self` and `other`.
     </span><span class="kw">pub fn </span>diff(<span class="kw-2">&amp;</span><span class="self">self</span>, other: <span class="kw-2">&amp;</span><span class="self">Self</span>) -&gt; RoundStatsDiff {
         RoundStatsDiff {
             duration: diff_percent(<span class="self">self</span>.duration.as_secs_f32(), other.duration.as_secs_f32()),
@@ -1991,7 +1991,7 @@
 
     <span class="doccomment">/// Runs a round of gossiping.
     ///
-    /// `messages` is a list of `(sender, message)` pairs. All messages will be sent simulatenously.
+    /// `messages` is a list of `(sender, message)` pairs. All messages will be sent simultaneously.
     /// The round will run until all peers received all messages, or until [`SimulatorConfig::gossip_round_timeout`]
     /// is elapsed.
     </span><span class="kw">pub fn </span>gossip_round(<span class="kw-2">&amp;mut </span><span class="self">self</span>, messages: Vec&lt;(PeerId, Bytes)&gt;) {
@@ -2072,7 +2072,7 @@
         <span class="self">self</span>.round_stats.push(round_stats);
     }
 
-    <span class="doccomment">/// Caluclates the [`RoundStatsAvg`] of all gossip rounds.
+    <span class="doccomment">/// Calculates the [`RoundStatsAvg`] of all gossip rounds.
     </span><span class="kw">pub fn </span>report_round_average(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; RoundStatsAvg {
         RoundStats::avg(<span class="kw-2">&amp;</span><span class="self">self</span>.round_stats)
     }
