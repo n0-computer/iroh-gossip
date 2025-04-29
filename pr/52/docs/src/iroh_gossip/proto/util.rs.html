@@ -518,10 +518,19 @@
 <a href="#517" id="517">517</a>
 <a href="#518" id="518">518</a>
 <a href="#519" id="519">519</a>
-<a href="#520" id="520">520</a></pre></div><pre class="rust"><code><span class="doccomment">//! Utilities used in the protocol implementation
+<a href="#520" id="520">520</a>
+<a href="#521" id="521">521</a>
+<a href="#522" id="522">522</a>
+<a href="#523" id="523">523</a>
+<a href="#524" id="524">524</a>
+<a href="#525" id="525">525</a>
+<a href="#526" id="526">526</a>
+<a href="#527" id="527">527</a>
+<a href="#528" id="528">528</a>
+<a href="#529" id="529">529</a></pre></div><pre class="rust"><code><span class="doccomment">//! Utilities used in the protocol implementation
 
 </span><span class="kw">use </span>std::{
-    collections::{BinaryHeap, HashMap},
+    collections::{hash_map, BinaryHeap, HashMap},
     hash::Hash,
 };
 
@@ -737,48 +746,20 @@
     seq: u64,
 }
 
-<span class="attr">#[derive(Debug, Clone)]
-</span><span class="kw">struct </span>TimerMapEntry&lt;T&gt; {
-    time: Instant,
-    seq: u64,
-    item: T,
-}
-
-<span class="kw">impl</span>&lt;T&gt; PartialEq <span class="kw">for </span>TimerMapEntry&lt;T&gt; {
-    <span class="kw">fn </span>eq(<span class="kw-2">&amp;</span><span class="self">self</span>, other: <span class="kw-2">&amp;</span><span class="self">Self</span>) -&gt; bool {
-        <span class="self">self</span>.time == other.time &amp;&amp; <span class="self">self</span>.seq == other.seq
-    }
-}
-<span class="kw">impl</span>&lt;T&gt; Eq <span class="kw">for </span>TimerMapEntry&lt;T&gt; {}
-
-<span class="kw">impl</span>&lt;T&gt; PartialOrd <span class="kw">for </span>TimerMapEntry&lt;T&gt; {
-    <span class="kw">fn </span>partial_cmp(<span class="kw-2">&amp;</span><span class="self">self</span>, other: <span class="kw-2">&amp;</span><span class="self">Self</span>) -&gt; <span class="prelude-ty">Option</span>&lt;std::cmp::Ordering&gt; {
-        <span class="prelude-val">Some</span>(<span class="self">self</span>.cmp(other))
-    }
-}
-
-<span class="kw">impl</span>&lt;T&gt; Ord <span class="kw">for </span>TimerMapEntry&lt;T&gt; {
-    <span class="kw">fn </span>cmp(<span class="kw-2">&amp;</span><span class="self">self</span>, other: <span class="kw-2">&amp;</span><span class="self">Self</span>) -&gt; std::cmp::Ordering {
-        <span class="self">self</span>.time
-            .cmp(<span class="kw-2">&amp;</span>other.time)
-            .reverse()
-            .then_with(|| <span class="self">self</span>.seq.cmp(<span class="kw-2">&amp;</span>other.seq).reverse())
-    }
-}
-
-<span class="kw">impl</span>&lt;T&gt; Default <span class="kw">for </span>TimerMap&lt;T&gt; {
+<span class="comment">// Can't derive default because we don't want a `T: Default` bound.
+</span><span class="kw">impl</span>&lt;T&gt; Default <span class="kw">for </span>TimerMap&lt;T&gt; {
     <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
-        <span class="self">Self</span>::new()
+        <span class="self">Self </span>{
+            heap: Default::default(),
+            seq: <span class="number">0</span>,
+        }
     }
 }
 
 <span class="kw">impl</span>&lt;T&gt; TimerMap&lt;T&gt; {
     <span class="doccomment">/// Create a new, empty TimerMap.
     </span><span class="kw">pub fn </span>new() -&gt; <span class="self">Self </span>{
-        <span class="self">Self </span>{
-            heap: Default::default(),
-            seq: <span class="number">0</span>,
-        }
+        <span class="self">Self</span>::default()
     }
 
     <span class="doccomment">/// Insert a new entry at the specified instant.
@@ -807,7 +788,7 @@
         }
     }
 
-    <span class="doccomment">/// Get a reference to the earliest entry in the TimerMap.
+    <span class="doccomment">/// Get a reference to the earliest entry in the `TimerMap`.
     </span><span class="kw">pub fn </span>first(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>Instant&gt; {
         <span class="self">self</span>.heap.peek().map(|x| <span class="kw-2">&amp;</span>x.time)
     }
@@ -824,6 +805,36 @@
             .rev()
             .map(|x| (x.time, x.item))
             .collect()
+    }
+}
+
+<span class="attr">#[derive(Debug, Clone)]
+</span><span class="kw">struct </span>TimerMapEntry&lt;T&gt; {
+    time: Instant,
+    seq: u64,
+    item: T,
+}
+
+<span class="kw">impl</span>&lt;T&gt; PartialEq <span class="kw">for </span>TimerMapEntry&lt;T&gt; {
+    <span class="kw">fn </span>eq(<span class="kw-2">&amp;</span><span class="self">self</span>, other: <span class="kw-2">&amp;</span><span class="self">Self</span>) -&gt; bool {
+        <span class="self">self</span>.time == other.time &amp;&amp; <span class="self">self</span>.seq == other.seq
+    }
+}
+
+<span class="kw">impl</span>&lt;T&gt; Eq <span class="kw">for </span>TimerMapEntry&lt;T&gt; {}
+
+<span class="kw">impl</span>&lt;T&gt; PartialOrd <span class="kw">for </span>TimerMapEntry&lt;T&gt; {
+    <span class="kw">fn </span>partial_cmp(<span class="kw-2">&amp;</span><span class="self">self</span>, other: <span class="kw-2">&amp;</span><span class="self">Self</span>) -&gt; <span class="prelude-ty">Option</span>&lt;std::cmp::Ordering&gt; {
+        <span class="prelude-val">Some</span>(<span class="self">self</span>.cmp(other))
+    }
+}
+
+<span class="kw">impl</span>&lt;T&gt; Ord <span class="kw">for </span>TimerMapEntry&lt;T&gt; {
+    <span class="kw">fn </span>cmp(<span class="kw-2">&amp;</span><span class="self">self</span>, other: <span class="kw-2">&amp;</span><span class="self">Self</span>) -&gt; std::cmp::Ordering {
+        <span class="self">self</span>.time
+            .cmp(<span class="kw-2">&amp;</span>other.time)
+            .reverse()
+            .then_with(|| <span class="self">self</span>.seq.cmp(<span class="kw-2">&amp;</span>other.seq).reverse())
     }
 }
 
@@ -887,14 +898,21 @@
         <span class="kw">let </span>drain = <span class="self">self</span>.expiry.drain_until(<span class="kw-2">&amp;</span>instant);
         <span class="kw">let </span><span class="kw-2">mut </span>count = <span class="number">0</span>;
         <span class="kw">for </span>(time, key) <span class="kw">in </span>drain {
-            <span class="kw">let </span>value = <span class="self">self</span>.map.remove(<span class="kw-2">&amp;</span>key);
-            <span class="kw">match </span>value {
-                <span class="prelude-val">Some</span>(value) <span class="kw">if </span>value.<span class="number">0 </span>!= time =&gt; {
-                    <span class="self">self</span>.map.insert(key, value);
-                }
-                <span class="kw">_ </span>=&gt; {
+            <span class="kw">match </span><span class="self">self</span>.map.entry(key) {
+                hash_map::Entry::Occupied(entry) <span class="kw">if </span>entry.get().<span class="number">0 </span>== time =&gt; {
+                    <span class="comment">// If the entry's time matches that of the item we are draining from the expiry list,
+                    // remove the entry from the map and increase the count of items we removed.
+                    </span>entry.remove();
                     count += <span class="number">1</span>;
                 }
+                hash_map::Entry::Occupied(_entry) =&gt; {
+                    <span class="comment">// If the entry's time does not match the time of the item we are draining,
+                    // do not remove the entry: It means that it was re-added with a later time.
+                </span>}
+                hash_map::Entry::Vacant(<span class="kw">_</span>) =&gt; {
+                    <span class="comment">// If the entry is not in the map, it means that it was already removed,
+                    // which can happen if it was inserted multiple times.
+                </span>}
             }
         }
         count

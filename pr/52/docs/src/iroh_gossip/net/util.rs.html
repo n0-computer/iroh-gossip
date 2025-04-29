@@ -276,12 +276,12 @@
 }
 
 <span class="kw">impl</span>&lt;T&gt; Timers&lt;T&gt; {
-    <span class="doccomment">/// Create a new timer map
+    <span class="doccomment">/// Creates a new timer map.
     </span><span class="kw">pub fn </span>new() -&gt; <span class="self">Self </span>{
         <span class="self">Self</span>::default()
     }
 
-    <span class="doccomment">/// Insert a new entry at the specified instant
+    <span class="doccomment">/// Inserts a new entry at the specified instant
     </span><span class="kw">pub fn </span>insert(<span class="kw-2">&amp;mut </span><span class="self">self</span>, instant: Instant, item: T) {
         <span class="self">self</span>.map.insert(instant, item);
     }
@@ -305,7 +305,7 @@
         }
     }
 
-    <span class="doccomment">/// Pops the next timer, if it elapses at or before `now`.
+    <span class="doccomment">/// Pops the earliest timer that expires at or before `now`.
     </span><span class="kw">pub fn </span>pop_before(<span class="kw-2">&amp;mut </span><span class="self">self</span>, now: Instant) -&gt; <span class="prelude-ty">Option</span>&lt;(Instant, T)&gt; {
         <span class="self">self</span>.map.pop_before(now)
     }
