@@ -320,7 +320,7 @@ impl Gossip {
     }
 
     /// Returns the metrics tracked for this gossip instance.
-    pub fn metrics(&self) -> &Metrics {
+    pub fn metrics(&self) -> &Arc<Metrics> {
         &self.inner.metrics
     }
 }
