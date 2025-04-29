@@ -129,17 +129,18 @@ impl<PI> From<(PI, Option<PeerData>)> for PeerInfo<PI> {
 #[cfg(test)]
 mod test {
 
-    use std::{collections::HashSet, env, fmt, str::FromStr};
+    use std::{
+        collections::{BTreeMap, HashSet},
+        env, fmt,
+        str::FromStr,
+    };
 
-    use rand::SeedableRng;
+    use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha12Rng;
     use tracing_test::traced_test;
 
-    use super::{Command, Config, Event};
-    use crate::proto::{
-        sim::{report_round_distribution, sort, Network},
-        Scope, TopicId,
-    };
+    use super::{Command, Config, Event, PeerIdentity};
+    use crate::proto::{sim::Network, Scope, TopicId};
 
     #[test]
     #[traced_test]
@@ -181,7 +182,7 @@ mod test {
         // Node 0 is full, so it will disconnect from either node 1 or node 2.
         network.command(3, t, Command::Join(vec![0]));
 
-        network.run_roundtrips(3);
+        network.run_roundtrips(2);
 
         // Confirm emitted events. There's two options because whether node 0 disconnects from
         // node 1 or node 2 is random.
@@ -232,7 +233,7 @@ mod test {
         (4..6).for_each(|i| network.command(i, t, Command::Join(vec![3])));
         // run ticks and drain events
 
-        network.run_roundtrips(2);
+        network.run_roundtrips(4);
 
         let _ = network.events();
         assert!(network.check_synchronicity());
@@ -298,8 +299,7 @@ mod test {
         // assert all peers appear in the connections
         let all_conns: HashSet<u64> = HashSet::from_iter((0u64..4).flat_map(|p| {
             network
-                .active_view(&p, &t)
-                .unwrap()
+                .neighbors(&p, &t)
                 .into_iter()
                 .flat_map(|x| x.into_iter())
         }));
@@ -314,8 +314,7 @@ mod test {
         // assert all peers without peer 3 appear in the connections
         let all_conns: HashSet<u64> = HashSet::from_iter((0..num).flat_map(|p| {
             network
-                .active_view(&p, &t)
-                .unwrap()
+                .neighbors(&p, &t)
                 .into_iter()
                 .flat_map(|x| x.into_iter())
         }));
@@ -330,5 +329,45 @@ mod test {
                     .unwrap_or_else(|_| panic!("Failed to parse environment variable {name}"))
             })
             .unwrap_or(default)
+    }
+
+    fn sort<T: Ord + Clone>(items: Vec<T>) -> Vec<T> {
+        let mut sorted = items;
+        sorted.sort();
+        sorted
+    }
+
+    fn report_round_distribution<PI: PeerIdentity, R: Rng + Clone>(network: &Network<PI, R>) {
+        let mut eager_distrib: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut lazy_distrib: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut active_distrib: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut passive_distrib: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut payload_recv = 0;
+        let mut control_recv = 0;
+        for state in network.peers.values() {
+            for (_topic, state) in state.states() {
+                let stats = state.gossip.stats();
+                *eager_distrib
+                    .entry(state.gossip.eager_push_peers.len())
+                    .or_default() += 1;
+                *lazy_distrib
+                    .entry(state.gossip.lazy_push_peers.len())
+                    .or_default() += 1;
+                *active_distrib
+                    .entry(state.swarm.active_view.len())
+                    .or_default() += 1;
+                *passive_distrib
+                    .entry(state.swarm.passive_view.len())
+                    .or_default() += 1;
+                payload_recv += stats.payload_messages_received;
+                control_recv += stats.control_messages_received;
+            }
+        }
+        // eprintln!("distributions {round_distrib:?}");
+        eprintln!("payload_recv {payload_recv} control_recv {control_recv}");
+        eprintln!("eager_distrib {eager_distrib:?}");
+        eprintln!("lazy_distrib {lazy_distrib:?}");
+        eprintln!("active_distrib {active_distrib:?}");
+        eprintln!("passive_distrib {passive_distrib:?}");
     }
 }

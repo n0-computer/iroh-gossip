@@ -1,7 +1,7 @@
 //! Utilities used in the protocol implementation
 
 use std::{
-    collections::{BinaryHeap, HashMap},
+    collections::{hash_map, BinaryHeap, HashMap},
     hash::Hash,
 };
 
@@ -217,48 +217,20 @@ pub struct TimerMap<T> {
     seq: u64,
 }
 
-#[derive(Debug, Clone)]
-struct TimerMapEntry<T> {
-    time: Instant,
-    seq: u64,
-    item: T,
-}
-
-impl<T> PartialEq for TimerMapEntry<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.time == other.time && self.seq == other.seq
-    }
-}
-impl<T> Eq for TimerMapEntry<T> {}
-
-impl<T> PartialOrd for TimerMapEntry<T> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<T> Ord for TimerMapEntry<T> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.time
-            .cmp(&other.time)
-            .reverse()
-            .then_with(|| self.seq.cmp(&other.seq).reverse())
-    }
-}
-
+// Can't derive default because we don't want a `T: Default` bound.
 impl<T> Default for TimerMap<T> {
     fn default() -> Self {
-        Self::new()
+        Self {
+            heap: Default::default(),
+            seq: 0,
+        }
     }
 }
 
 impl<T> TimerMap<T> {
     /// Create a new, empty TimerMap.
     pub fn new() -> Self {
-        Self {
-            heap: Default::default(),
-            seq: 0,
-        }
+        Self::default()
     }
 
     /// Insert a new entry at the specified instant.
@@ -287,7 +259,7 @@ impl<T> TimerMap<T> {
         }
     }
 
-    /// Get a reference to the earliest entry in the TimerMap.
+    /// Get a reference to the earliest entry in the `TimerMap`.
     pub fn first(&self) -> Option<&Instant> {
         self.heap.peek().map(|x| &x.time)
     }
@@ -304,6 +276,36 @@ impl<T> TimerMap<T> {
             .rev()
             .map(|x| (x.time, x.item))
             .collect()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TimerMapEntry<T> {
+    time: Instant,
+    seq: u64,
+    item: T,
+}
+
+impl<T> PartialEq for TimerMapEntry<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.time == other.time && self.seq == other.seq
+    }
+}
+
+impl<T> Eq for TimerMapEntry<T> {}
+
+impl<T> PartialOrd for TimerMapEntry<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T> Ord for TimerMapEntry<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.time
+            .cmp(&other.time)
+            .reverse()
+            .then_with(|| self.seq.cmp(&other.seq).reverse())
     }
 }
 
@@ -367,13 +369,20 @@ impl<K: Hash + Eq + Clone, V> TimeBoundCache<K, V> {
         let drain = self.expiry.drain_until(&instant);
         let mut count = 0;
         for (time, key) in drain {
-            let value = self.map.remove(&key);
-            match value {
-                Some(value) if value.0 != time => {
-                    self.map.insert(key, value);
-                }
-                _ => {
+            match self.map.entry(key) {
+                hash_map::Entry::Occupied(entry) if entry.get().0 == time => {
+                    // If the entry's time matches that of the item we are draining from the expiry list,
+                    // remove the entry from the map and increase the count of items we removed.
+                    entry.remove();
                     count += 1;
+                }
+                hash_map::Entry::Occupied(_entry) => {
+                    // If the entry's time does not match the time of the item we are draining,
+                    // do not remove the entry: It means that it was re-added with a later time.
+                }
+                hash_map::Entry::Vacant(_) => {
+                    // If the entry is not in the map, it means that it was already removed,
+                    // which can happen if it was inserted multiple times.
                 }
             }
         }

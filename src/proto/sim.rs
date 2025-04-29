@@ -1,7 +1,5 @@
 //! Simulation framework for testing the protocol implementation
 
-#![allow(missing_docs)]
-
 use std::{
     collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque},
     fmt,
@@ -19,13 +17,15 @@ use tracing::{debug, debug_span, info, info_span, trace, warn};
 use super::{Command, Config, Event, InEvent, OutEvent, PeerIdentity, State, TopicId};
 use crate::proto::{PeerData, Scope};
 
+const DEFAULT_LATENCY: Duration = Duration::from_millis(50);
+
 /// Configuration for a [`Network`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NetworkConfig {
     /// Configures the latency between peers.
     #[serde(default)]
     pub latency: LatencyConfig,
-    /// Default protocol config for all peer.
+    /// Default protocol config for all peers.
     #[serde(default)]
     pub proto: Config,
 }
@@ -45,10 +45,12 @@ impl From<Config> for NetworkConfig {
 pub enum LatencyConfig {
     /// Use the same latency, always.
     Static(#[serde(with = "humantime_serde")] Duration),
-    /// Chose a random latency for each connection in the specified bounds.
+    /// Chose a random latency for each connection within the specified bounds.
     Random {
+        /// The lower bound for the latency between two peers.
         #[serde(with = "humantime_serde")]
         min: Duration,
+        /// The upper bound for the latency between two peers.
         #[serde(with = "humantime_serde")]
         max: Duration,
     },
@@ -83,7 +85,7 @@ impl LatencyConfig {
 
 impl Default for LatencyConfig {
     fn default() -> Self {
-        Self::Static(Duration::from_millis(50))
+        Self::Static(DEFAULT_LATENCY)
     }
 }
 
@@ -158,11 +160,6 @@ impl<PI: PeerIdentity + Ord + std::fmt::Display, R: Rng + SeedableRng + Clone> N
         self.events.drain(..)
     }
 
-    /// Returns the number of queued events.
-    pub fn events_len(&self) -> usize {
-        self.events.len()
-    }
-
     /// Drains all queued events and returns them in a sorted vector.
     pub fn events_sorted(&mut self) -> Vec<(PI, TopicId, Event<PI>)> {
         sort(self.events().collect())
@@ -181,27 +178,24 @@ impl<PI: PeerIdentity + Ord + std::fmt::Display, R: Rng + SeedableRng + Clone> N
         self.tick();
     }
 
+    /// Returns an iterator over the [`State`] for each peer.
     pub fn peer_states(&self) -> impl Iterator<Item = &State<PI, R>> {
         self.peers.values()
     }
 
+    /// Returns an iterator over the node ids of all peers.
     pub fn peer_ids(&self) -> impl Iterator<Item = PI> + '_ {
         self.peers.keys().cloned()
     }
 
-    pub fn current_tick(&self) -> u32 {
-        self.tick as u32
-    }
-
+    /// Returns the time elapsed since starting the network.
     pub fn elapsed(&self) -> Duration {
         self.time.duration_since(self.start)
     }
 
+    /// Returns the time elapsed since starting the network, formatted as seconds with limited decimals.
     pub fn elapsed_fmt(&self) -> String {
-        format!(
-            "{:>2.4}s",
-            self.time.duration_since(self.start).as_secs_f32()
-        )
+        format!("{:>2.4}s", self.elapsed().as_secs_f32())
     }
 
     /// Runs the simulation for `n` times the maximum latency between peers.
@@ -224,10 +218,10 @@ impl<PI: PeerIdentity + Ord + std::fmt::Display, R: Rng + SeedableRng + Clone> N
     ///
     /// The callback will be called for each emitted event.
     pub fn run_while(&mut self, mut f: impl FnMut(PI, TopicId, Event<PI>) -> bool) {
-        'outer: loop {
+        loop {
             while let Some((peer, topic, event)) = self.events.pop_front() {
                 if !f(peer, topic, event) {
-                    break 'outer;
+                    return;
                 }
             }
             self.tick();
@@ -303,7 +297,7 @@ impl<PI: PeerIdentity + Ord + std::fmt::Display, R: Rng + SeedableRng + Clone> N
                     kill.push((peer, to));
                 }
                 OutEvent::EmitEvent(topic, event) => {
-                    debug!(peer = ?peer, "emit   {event:?}");
+                    debug!(peer = ?peer, "emit {event:?}");
                     self.events.push_back((peer, topic, event));
                 }
                 OutEvent::PeerData(_peer, _data) => {}
@@ -314,9 +308,14 @@ impl<PI: PeerIdentity + Ord + std::fmt::Display, R: Rng + SeedableRng + Clone> N
         }
     }
 
-    pub fn kill_connection(&mut self, from: PI, to: PI) {
+    /// Breaks the connection between two peers.
+    ///
+    /// The `to` peer will received a [`InEvent::PeerDisconnected`] after a latency interval.
+    fn kill_connection(&mut self, from: PI, to: PI) {
         let conn = ConnId::from((from, to));
         if self.conns.remove(&conn) {
+            // We add the event a microsecond after the regular latency between the two peers,
+            // so that any messages queued from the current time arrive before the disconnected event.
             let latency = latency_between(
                 &self.config.latency,
                 &mut self.latencies,
@@ -329,20 +328,19 @@ impl<PI: PeerIdentity + Ord + std::fmt::Display, R: Rng + SeedableRng + Clone> N
         }
     }
 
+    /// Returns the [`State`] for a peer, if it exists.
     pub fn peer(&self, peer: &PI) -> Option<&State<PI, R>> {
         self.peers.get(peer)
     }
 
-    pub fn active_view(&self, peer: &PI, topic: &TopicId) -> Option<Option<Vec<PI>>> {
+    /// Returns the neighbors a peer has on the swarm membership layer.
+    pub fn neighbors(&self, peer: &PI, topic: &TopicId) -> Option<Vec<PI>> {
         let peer = self.peer(peer)?;
-        match peer.state(topic) {
-            Some(state) => Some(Some(
-                state.swarm.active_view.iter().cloned().collect::<Vec<_>>(),
-            )),
-            None => Some(None),
-        }
+        let state = peer.state(topic)?;
+        Some(state.swarm.active_view.iter().cloned().collect::<Vec<_>>())
     }
 
+    /// Removes a peer, breaking all connections to other peers.
     pub fn remove(&mut self, peer: &PI) {
         let remove_conns: Vec<_> = self
             .conns
@@ -356,6 +354,9 @@ impl<PI: PeerIdentity + Ord + std::fmt::Display, R: Rng + SeedableRng + Clone> N
         self.peers.remove(peer);
     }
 
+    /// Checks if all neighbor relations are synchronous.
+    ///
+    /// Returns `true` if, for all peers, each neighbor has the peer among its neighbors as well.
     pub fn check_synchronicity(&self) -> bool {
         let mut ok = true;
         for state in self.peers.values() {
@@ -501,8 +502,10 @@ impl<E> Ord for TimedEvent<E> {
     }
 }
 
+/// The peer id type used in the simulator.
 pub type PeerId = u64;
 
+/// Configuration for the [`Simulator`].
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SimulatorConfig {
     /// Seed for the random number generator used in the nodes
@@ -513,73 +516,27 @@ pub struct SimulatorConfig {
     pub gossip_round_timeout: Duration,
 }
 
-// #[derive(Debug, Serialize, Deserialize, Clone)]
-// #[serde(rename_all = "lowercase")]
-// pub enum BootstrapMode {
-//     Static(StaticBootstrap),
-//     Dynamic(DynamicBootstrap),
-// }
-
+/// Variants how to bootstrap the swarm.
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum BootstrapMode {
+    /// All peers join a single peer.
     #[default]
     Single,
+    /// First `count` bootstrap peers are created and join each other,
+    /// then the remaining peers join the swarm by joining one of these first `count` peers.
     Set {
+        /// Number of bootstrap peers to join first
         count: u64,
     },
 }
 
-impl BootstrapMode {
-    pub fn from_env(_nodes: usize) -> Self {
-        Self::default()
-    }
-}
-
-// impl Default for BootstrapMode {
-//     fn default() -> Self {
-//         Self::Static(StaticBootstrap::default())
-//     }
-// }
-
-// impl BootstrapMode {
-//     pub fn from_env(nodes: usize) -> Self {
-//         let mode = read_var("BOOTSTRAP_MODE", "static".to_string());
-//         match mode.as_str() {
-//             "static" => BootstrapMode::default(),
-//             "dynamic" => BootstrapMode::Dynamic(DynamicBootstrap {
-//                 bootstrap_nodes: read_var("BOOTSTRAP_COUNT", (nodes / 10).max(3)),
-//             }),
-//             _ => panic!("BOOTSTRAP_MODE must be static or dynamic"),
-//         }
-//     }
-// }
-
-// #[derive(Debug, Serialize, Deserialize, Clone)]
-// pub struct StaticBootstrap {
-//     random_contacts: usize,
-// }
-
-// impl Default for StaticBootstrap {
-//     fn default() -> Self {
-//         Self { random_contacts: 3 }
-//     }
-// }
-
-// #[derive(Debug, Serialize, Deserialize, Clone)]
-// pub struct DynamicBootstrap {
-//     bootstrap_nodes: usize,
-// }
-
-// impl Default for DynamicBootstrap {
-//     fn default() -> Self {
-//         Self {
-//             bootstrap_nodes: 12,
-//         }
-//     }
-// }
-
 impl SimulatorConfig {
+    /// Creates a [`SimulatorConfig`] by reading from environment variables.
+    ///
+    /// [`Self::peers`] is read from `NODES`, defaulting to `100` if unset.
+    /// [`Self::rng_seed`] is read from `SEED`, defaulting to `0` if unset.
+    /// [`Self::gossip_round_timeout`] is read, as seconds, from `GOSSIP_ROUND_TIMEOUT`, defaulting to `5` if unset.
     pub fn from_env() -> Self {
         let nodes = read_var("NODES", 100);
         Self {
@@ -600,19 +557,29 @@ impl Default for SimulatorConfig {
     }
 }
 
+/// Statistics for a gossip round.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RoundStats {
+    /// The (simulated) time this round took in total.
     pub duration: Duration,
+    /// The relative message redundancy in this round.
     pub rmr: f32,
+    /// The maximum last delivery hop in this round.
     pub ldh: f32,
+    /// The number of undelivered messages in this round.
     pub missed: f32,
 }
 
+/// Difference (as factors) between two [`RoundStats`].
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RoundStatsDiff {
+    /// The difference in [`RoundStats::duration`], as a factor.
     pub duration: f32,
+    /// The difference in [`RoundStats::rmr`], as a factor.
     pub rmr: f32,
+    /// The difference in [`RoundStats::ldh`], as a factor.
     pub ldh: f32,
+    /// The difference in [`RoundStats::missed`], as a factor.
     pub missed: f32,
 }
 
@@ -639,6 +606,7 @@ impl RoundStats {
         }
     }
 
+    /// Calculates the mean for each value in a list of [`RoundStats`].
     pub fn mean<'a>(rounds: impl IntoIterator<Item = &'a RoundStats>) -> RoundStats {
         let (len, mut avg) =
             rounds
@@ -657,6 +625,7 @@ impl RoundStats {
         avg
     }
 
+    /// Calculates the minimum for each value in a list of [`RoundStats`].
     pub fn min<'a>(rounds: impl IntoIterator<Item = &'a RoundStats>) -> RoundStats {
         rounds
             .into_iter()
@@ -669,6 +638,7 @@ impl RoundStats {
             })
     }
 
+    /// Calculates the maximum for each value in a list of [`RoundStats`].
     pub fn max<'a>(rounds: impl IntoIterator<Item = &'a RoundStats>) -> RoundStats {
         rounds
             .into_iter()
@@ -681,6 +651,7 @@ impl RoundStats {
             })
     }
 
+    /// Calculates the minimum, maximum, and mean for each value in a list of [`RoundStats`].
     pub fn avg(rounds: &[RoundStats]) -> RoundStatsAvg {
         let min = Self::min(rounds);
         let max = Self::max(rounds);
@@ -688,6 +659,7 @@ impl RoundStats {
         RoundStatsAvg { min, max, mean }
     }
 
+    /// Calculates the difference factors for each value between `self` and `other`.
     pub fn diff(&self, other: &Self) -> RoundStatsDiff {
         RoundStatsDiff {
             duration: diff_percent(self.duration.as_secs_f32(), other.duration.as_secs_f32()),
@@ -710,21 +682,30 @@ fn diff_percent(a: f32, b: f32) -> f32 {
     }
 }
 
+/// Summary values for a list of [`RoundStats`].
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RoundStatsAvg {
+    /// The minimum values of the list.
     pub min: RoundStats,
+    /// The maximum values of the list.
     pub max: RoundStats,
+    /// The mean values of the list.
     pub mean: RoundStats,
 }
 
+/// Difference, in factors, between two [`RoundStatsAvg`]
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RoundStatsAvgDiff {
+    /// The difference, as factors, in the minimums.
     pub min: RoundStatsDiff,
+    /// The difference, as factors, in the maximumx.
     pub max: RoundStatsDiff,
+    /// The difference, as factors, in the mean values.
     pub mean: RoundStatsDiff,
 }
 
 impl RoundStatsAvg {
+    /// Calculates the difference, as factors, between `self` and `other`.
     pub fn diff(&self, other: &Self) -> RoundStatsAvgDiff {
         RoundStatsAvgDiff {
             min: self.min.diff(&other.min),
@@ -733,6 +714,7 @@ impl RoundStatsAvg {
         }
     }
 
+    /// Calculates the average between a list of [`RoundStatsAvg`].
     pub fn avg(rows: &[Self]) -> Self {
         let min = RoundStats::min(rows.iter().map(|x| &x.min));
         let max = RoundStats::min(rows.iter().map(|x| &x.max));
@@ -741,12 +723,21 @@ impl RoundStatsAvg {
     }
 }
 
+/// Histograms on the distribution of peers in the network.
+///
+/// For each field, the map's key is the bucket value, and the map's value is
+/// the number of peers that fall into that bucket.
 #[derive(Debug, Default)]
 pub struct NetworkStats {
+    /// Distribution of active neighbor counts.
     active: BTreeMap<usize, usize>,
+    /// Distribution of passive neighbor counts.
     passive: BTreeMap<usize, usize>,
+    /// Distribution of eager peer counts.
     eager: BTreeMap<usize, usize>,
+    /// Distribution of lazy peer counts.
     lazy: BTreeMap<usize, usize>,
+    /// List of peers that don't have any neighbors.
     empty: BTreeSet<PeerId>,
 }
 
@@ -777,23 +768,32 @@ impl fmt::Display for NetworkStats {
     }
 }
 
+/// A report on the state of a [`Network`].
 #[derive(Debug)]
-pub struct TickReport {
+pub struct NetworkReport {
+    /// The minimum number of neighbors that any peer has.
+    ///
+    /// If this is `0`, it means that at least one peer is not connected to any other peers.
     pub min_active_len: usize,
+    /// The [`NetworkStats`] at this point in time.
     pub stats: NetworkStats,
 }
 
-pub const TOPIC: TopicId = TopicId::from_bytes([0u8; 32]);
+const TOPIC: TopicId = TopicId::from_bytes([0u8; 32]);
 
 /// A simple simulator for the gossip protocol
 #[derive(Debug)]
 pub struct Simulator {
+    /// Configuration of the simulator.
     pub config: SimulatorConfig,
+    /// The [`Network`]
     pub network: Network<PeerId, rand_chacha::ChaCha12Rng>,
-    pub round_stats: Vec<RoundStats>,
+    /// List of [`RoundStats`] of all previous rounds.
+    round_stats: Vec<RoundStats>,
 }
 
 impl Simulator {
+    /// Creates a new simulator.
     pub fn new(
         simulator_config: SimulatorConfig,
         network_config: impl Into<NetworkConfig>,
@@ -808,10 +808,12 @@ impl Simulator {
         }
     }
 
+    /// Creates a new random number generator, derived from the simuator's RNG.
     pub fn rng(&mut self) -> ChaCha12Rng {
         ChaCha12Rng::from_rng(&mut self.network.rng).unwrap()
     }
 
+    /// Returns the peer id of a random peer.
     pub fn random_peer(&mut self) -> PeerId {
         *self
             .network
@@ -821,19 +823,21 @@ impl Simulator {
             .unwrap()
     }
 
+    /// Returns the number of peers.
     pub fn peer_count(&self) -> usize {
         self.network.peers.len()
     }
 
+    /// Removes `n` peers from the network.
     pub fn kill(&mut self, n: usize) {
         for _i in 0..n {
-            let key = *self.network.peers.keys().next().unwrap();
-            println!("KILL {key}");
+            let key = self.random_peer();
             self.network.remove(&key);
         }
     }
 
-    pub fn report_swarm(&mut self) -> TickReport {
+    /// Returns a report on the current state of the network.
+    pub fn report_swarm(&mut self) -> NetworkReport {
         let stats = self.network.state_stats();
         let min_active_len = min(&stats.active);
         let max_active_len = max(&stats.active);
@@ -843,13 +847,18 @@ impl Simulator {
             "nodes {len} active: avg {avg:2.2} min {min_active_len} max {max_active_len} empty {}",
             stats.empty.len()
         );
-        TickReport {
+        NetworkReport {
             min_active_len,
             stats,
         }
     }
 
-    pub fn bootstrap(&mut self, bootstrap_mode: BootstrapMode) -> TickReport {
+    /// Bootstraps the network.
+    ///
+    /// See [`BootstrapMode`] for details.
+    ///
+    /// Returns the [`NetworkReport`] after finishing the bootstrap.
+    pub fn bootstrap(&mut self, bootstrap_mode: BootstrapMode) -> NetworkReport {
         let span = info_span!("bootstrap");
         let _guard = span.enter();
         info!("bootstrap {bootstrap_mode:?}");
@@ -890,10 +899,16 @@ impl Simulator {
         report
     }
 
+    /// Drops all queued events.
     pub fn drop_events(&mut self) {
         let _ = self.network.events();
     }
 
+    /// Runs a round of gossiping.
+    ///
+    /// `messages` is a list of `(sender, message)` pairs. All messages will be sent simultaneously.
+    /// The round will run until all peers received all messages, or until [`SimulatorConfig::gossip_round_timeout`]
+    /// is elapsed.
     pub fn gossip_round(&mut self, messages: Vec<(PeerId, Bytes)>) {
         let span = debug_span!("g", r = self.round_stats.len());
         let _guard = span.enter();
@@ -901,7 +916,7 @@ impl Simulator {
         let start = self.network.time;
         let expected_count: usize = messages.len() * (self.network.peers.len() - 1);
         info!(
-            tick=%self.network.current_tick(),
+            time=%self.network.elapsed_fmt(),
             "round {i}: send {len} messages / recv {expected_count} total",
             len = messages.len(),
             i = self.round_stats.len()
@@ -972,6 +987,7 @@ impl Simulator {
         self.round_stats.push(round_stats);
     }
 
+    /// Calculates the [`RoundStatsAvg`] of all gossip rounds.
     pub fn report_round_average(&self) -> RoundStatsAvg {
         RoundStats::avg(&self.round_stats)
     }
@@ -1021,18 +1037,18 @@ fn add_one(map: &mut BTreeMap<usize, usize>, key: usize) {
 
 /// Helper struct for active connections. A sorted tuple.
 #[derive(Debug, Clone, PartialOrd, Ord, Eq, PartialEq, Hash)]
-pub struct ConnId<PI>([PI; 2]);
+struct ConnId<PI>([PI; 2]);
 impl<PI: Ord + Copy> ConnId<PI> {
-    pub fn new(a: PI, b: PI) -> Self {
+    fn new(a: PI, b: PI) -> Self {
         let mut conn = [a, b];
         conn.sort();
         Self(conn)
     }
-    pub fn peers(&self) -> [PI; 2] {
+    fn peers(&self) -> [PI; 2] {
         self.0
     }
 
-    pub fn other(&self, other: PI) -> Option<PI> {
+    fn other(&self, other: PI) -> Option<PI> {
         if self.0[0] == other {
             Some(self.0[1])
         } else if self.0[1] == other {
@@ -1053,44 +1069,10 @@ impl<PI: Copy> From<ConnId<PI>> for (PI, PI) {
     }
 }
 
-pub fn sort<T: Ord + Clone>(items: Vec<T>) -> Vec<T> {
+fn sort<T: Ord + Clone>(items: Vec<T>) -> Vec<T> {
     let mut sorted = items;
     sorted.sort();
     sorted
-}
-
-pub fn report_round_distribution<PI: PeerIdentity, R: Rng + Clone>(network: &Network<PI, R>) {
-    let mut eager_distrib: BTreeMap<usize, usize> = BTreeMap::new();
-    let mut lazy_distrib: BTreeMap<usize, usize> = BTreeMap::new();
-    let mut active_distrib: BTreeMap<usize, usize> = BTreeMap::new();
-    let mut passive_distrib: BTreeMap<usize, usize> = BTreeMap::new();
-    let mut payload_recv = 0;
-    let mut control_recv = 0;
-    for state in network.peers.values() {
-        for (_topic, state) in state.states() {
-            let stats = state.gossip.stats();
-            *eager_distrib
-                .entry(state.gossip.eager_push_peers.len())
-                .or_default() += 1;
-            *lazy_distrib
-                .entry(state.gossip.lazy_push_peers.len())
-                .or_default() += 1;
-            *active_distrib
-                .entry(state.swarm.active_view.len())
-                .or_default() += 1;
-            *passive_distrib
-                .entry(state.swarm.passive_view.len())
-                .or_default() += 1;
-            payload_recv += stats.payload_messages_received;
-            control_recv += stats.control_messages_received;
-        }
-    }
-    // eprintln!("distributions {round_distrib:?}");
-    eprintln!("payload_recv {payload_recv} control_recv {control_recv}");
-    eprintln!("eager_distrib {eager_distrib:?}");
-    eprintln!("lazy_distrib {lazy_distrib:?}");
-    eprintln!("active_distrib {active_distrib:?}");
-    eprintln!("passive_distrib {passive_distrib:?}");
 }
 
 fn read_var<T: FromStr<Err: fmt::Display + fmt::Debug>>(name: &str, default: T) -> T {
