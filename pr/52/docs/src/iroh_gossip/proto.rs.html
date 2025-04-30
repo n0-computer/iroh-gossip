@@ -326,7 +326,17 @@
 <a href="#325" id="325">325</a>
 <a href="#326" id="326">326</a>
 <a href="#327" id="327">327</a>
-<a href="#328" id="328">328</a></pre></div><pre class="rust"><code><span class="doccomment">//! Implementation of the iroh-gossip protocol, as an IO-less state machine
+<a href="#328" id="328">328</a>
+<a href="#329" id="329">329</a>
+<a href="#330" id="330">330</a>
+<a href="#331" id="331">331</a>
+<a href="#332" id="332">332</a>
+<a href="#333" id="333">333</a>
+<a href="#334" id="334">334</a>
+<a href="#335" id="335">335</a>
+<a href="#336" id="336">336</a>
+<a href="#337" id="337">337</a>
+<a href="#338" id="338">338</a></pre></div><pre class="rust"><code><span class="doccomment">//! Implementation of the iroh-gossip protocol, as an IO-less state machine
 //!
 //! This module implements the iroh-gossip protocol. The entry point is [`State`], which contains
 //! the protocol state for a node.
@@ -457,7 +467,10 @@
     <span class="kw">use </span>tracing_test::traced_test;
 
     <span class="kw">use super</span>::{Command, Config, Event};
-    <span class="kw">use </span><span class="kw">crate</span>::proto::{sim::Network, Scope, TopicId};
+    <span class="kw">use </span><span class="kw">crate</span>::proto::{
+        sim::{LatencyConfig, Network, NetworkConfig},
+        Scope, TopicId,
+    };
 
     <span class="attr">#[test]
     #[traced_test]
@@ -466,7 +479,11 @@
         </span><span class="kw">let </span>rng = ChaCha12Rng::seed_from_u64(read_var(<span class="string">"SEED"</span>, <span class="number">0</span>));
         <span class="kw">let </span><span class="kw-2">mut </span>config = Config::default();
         config.membership.active_view_capacity = <span class="number">2</span>;
-        <span class="kw">let </span><span class="kw-2">mut </span>network = Network::new(config.into(), rng);
+        <span class="kw">let </span>network_config = NetworkConfig {
+            proto: config,
+            latency: LatencyConfig::default_static(),
+        };
+        <span class="kw">let </span><span class="kw-2">mut </span>network = Network::new(network_config, rng);
         <span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..<span class="number">4 </span>{
             network.insert(i);
         }
@@ -532,8 +549,11 @@
     #[traced_test]
     </span><span class="kw">fn </span>plumtree_smoke() {
         <span class="kw">let </span>rng = ChaCha12Rng::seed_from_u64(read_var(<span class="string">"SEED"</span>, <span class="number">0</span>));
-        <span class="kw">let </span>config = Config::default();
-        <span class="kw">let </span><span class="kw-2">mut </span>network = Network::new(config.into(), rng);
+        <span class="kw">let </span>network_config = NetworkConfig {
+            proto: Config::default(),
+            latency: LatencyConfig::default_static(),
+        };
+        <span class="kw">let </span><span class="kw-2">mut </span>network = Network::new(network_config, rng);
         <span class="comment">// build a network with 6 nodes
         </span><span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..<span class="number">6 </span>{
             network.insert(i);
