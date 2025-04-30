@@ -17,7 +17,9 @@ use tracing::{debug, debug_span, info, info_span, trace, warn};
 use super::{Command, Config, Event, InEvent, OutEvent, PeerIdentity, State, TopicId};
 use crate::proto::{PeerData, Scope};
 
-const DEFAULT_LATENCY: Duration = Duration::from_millis(50);
+const DEFAULT_LATENCY_STATIC: Duration = Duration::from_millis(50);
+const DEFAULT_LATENCY_MIN: Duration = Duration::from_millis(10);
+const DEFAULT_LATENCY_MAX: Duration = Duration::from_millis(100);
 
 /// Configuration for a [`Network`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -46,7 +48,7 @@ pub enum LatencyConfig {
     /// Use the same latency, always.
     Static(#[serde(with = "humantime_serde")] Duration),
     /// Chose a random latency for each connection within the specified bounds.
-    Random {
+    Dynamic {
         /// The lower bound for the latency between two peers.
         #[serde(with = "humantime_serde")]
         min: Duration,
@@ -57,9 +59,22 @@ pub enum LatencyConfig {
 }
 
 impl LatencyConfig {
+    /// Returns a default latency config with a static latency.
+    pub fn default_static() -> Self {
+        Self::Static(DEFAULT_LATENCY_STATIC)
+    }
+
+    /// Returns a default latency config with a dynamic latency.
+    pub fn default_dynamic() -> Self {
+        Self::Dynamic {
+            min: DEFAULT_LATENCY_MIN,
+            max: DEFAULT_LATENCY_MAX,
+        }
+    }
+
     /// Creates a new latency config with the provided min and max values in milliseconds.
     pub fn random_ms(min: u64, max: u64) -> Self {
-        Self::Random {
+        Self::Dynamic {
             min: Duration::from_millis(min),
             max: Duration::from_millis(max),
         }
@@ -69,7 +84,7 @@ impl LatencyConfig {
     pub fn max(&self) -> Duration {
         match self {
             Self::Static(dur) => *dur,
-            Self::Random { max, .. } => *max,
+            Self::Dynamic { max, .. } => *max,
         }
     }
 
@@ -78,14 +93,14 @@ impl LatencyConfig {
         match self {
             Self::Static(d) => *d,
             // TODO(frando): use uniform distribution?
-            Self::Random { min, max } => rng.gen_range(*min..*max),
+            Self::Dynamic { min, max } => rng.gen_range(*min..*max),
         }
     }
 }
 
 impl Default for LatencyConfig {
     fn default() -> Self {
-        Self::Static(DEFAULT_LATENCY)
+        Self::default_dynamic()
     }
 }
 
@@ -97,7 +112,7 @@ pub struct Network<PI, R> {
     start: Instant,
     time: Instant,
     tick: usize,
-    pub(crate) peers: BTreeMap<PI, State<PI, R>>,
+    peers: BTreeMap<PI, State<PI, R>>,
     conns: BTreeSet<ConnId<PI>>,
     events: VecDeque<(PI, TopicId, Event<PI>)>,
     latencies: BTreeMap<ConnId<PI>, Duration>,
@@ -125,7 +140,7 @@ impl<PI, R> Network<PI, R> {
     }
 }
 
-impl<PI: PeerIdentity + Ord + std::fmt::Display, R: Rng + SeedableRng + Clone> Network<PI, R> {
+impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng + Clone> Network<PI, R> {
     /// Inserts a new peer.
     ///
     /// Panics if the peer already exists.
@@ -154,7 +169,9 @@ impl<PI: PeerIdentity + Ord + std::fmt::Display, R: Rng + SeedableRng + Clone> N
         self.insert(peer_id);
         self.command(peer_id, topic, Command::Join(bootstrap));
     }
+}
 
+impl<PI: PeerIdentity + fmt::Display, R: Rng + Clone> Network<PI, R> {
     /// Drains all queued events.
     pub fn events(&mut self) -> impl Iterator<Item = (PI, TopicId, Event<PI>)> + '_ {
         self.events.drain(..)
@@ -186,6 +203,32 @@ impl<PI: PeerIdentity + Ord + std::fmt::Display, R: Rng + SeedableRng + Clone> N
     /// Returns an iterator over the node ids of all peers.
     pub fn peer_ids(&self) -> impl Iterator<Item = PI> + '_ {
         self.peers.keys().cloned()
+    }
+
+    /// Returns the [`State`] for a peer, if it exists.
+    pub fn peer(&self, peer: &PI) -> Option<&State<PI, R>> {
+        self.peers.get(peer)
+    }
+
+    /// Returns the neighbors a peer has on the swarm membership layer.
+    pub fn neighbors(&self, peer: &PI, topic: &TopicId) -> Option<Vec<PI>> {
+        let peer = self.peer(peer)?;
+        let state = peer.state(topic)?;
+        Some(state.swarm.active_view.iter().cloned().collect::<Vec<_>>())
+    }
+
+    /// Removes a peer, breaking all connections to other peers.
+    pub fn remove(&mut self, peer: &PI) {
+        let remove_conns: Vec<_> = self
+            .conns
+            .iter()
+            .filter(|&c| c.peers().contains(peer))
+            .cloned()
+            .collect();
+        for conn in remove_conns.into_iter() {
+            self.kill_connection(*peer, conn.other(*peer).unwrap());
+        }
+        self.peers.remove(peer);
     }
 
     /// Returns the time elapsed since starting the network.
@@ -328,35 +371,15 @@ impl<PI: PeerIdentity + Ord + std::fmt::Display, R: Rng + SeedableRng + Clone> N
         }
     }
 
-    /// Returns the [`State`] for a peer, if it exists.
-    pub fn peer(&self, peer: &PI) -> Option<&State<PI, R>> {
-        self.peers.get(peer)
-    }
-
-    /// Returns the neighbors a peer has on the swarm membership layer.
-    pub fn neighbors(&self, peer: &PI, topic: &TopicId) -> Option<Vec<PI>> {
-        let peer = self.peer(peer)?;
-        let state = peer.state(topic)?;
-        Some(state.swarm.active_view.iter().cloned().collect::<Vec<_>>())
-    }
-
-    /// Removes a peer, breaking all connections to other peers.
-    pub fn remove(&mut self, peer: &PI) {
-        let remove_conns: Vec<_> = self
-            .conns
-            .iter()
-            .filter(|&c| c.peers().contains(peer))
-            .cloned()
-            .collect();
-        for conn in remove_conns.into_iter() {
-            self.kill_connection(*peer, conn.other(*peer).unwrap());
-        }
-        self.peers.remove(peer);
-    }
-
-    /// Checks if all neighbor relations are synchronous.
+    /// Checks if all neighbor and eager relations are synchronous.
     ///
-    /// Returns `true` if, for all peers, each neighbor has the peer among its neighbors as well.
+    /// Iterates over all peers, and checks for each peer X:
+    /// - that all active view members (neighbors) have X listed as a neighbor as well
+    /// - that all eager peers have X listed as eager as well
+    ///
+    /// Returns `true` if this is holds, otherwise returns `false`.
+    ///
+    /// Logs, at debug level, the cases where the above doesn't hold.
     pub fn check_synchronicity(&self) -> bool {
         let mut ok = true;
         for state in self.peers.values() {
@@ -394,23 +417,27 @@ impl<PI: PeerIdentity + Ord + std::fmt::Display, R: Rng + SeedableRng + Clone> N
         }
         ok
     }
-}
 
-impl<R: Rng + Clone> Network<PeerId, R> {
-    fn state_stats(&self) -> NetworkStats {
-        let mut stats = NetworkStats::default();
+    /// Returns a report with histograms on active, passive, eager and lazy counts.
+    pub fn report(&self) -> NetworkReport<PI> {
+        let mut histograms = NetworkHistograms::default();
+        let mut peers_without_neighbors = Vec::new();
         for (id, peer) in self.peers.iter() {
             let state = peer.state(&TOPIC).unwrap();
-            add_one(&mut stats.active, state.swarm.active_view.len());
-            add_one(&mut stats.passive, state.swarm.passive_view.len());
-            add_one(&mut stats.eager, state.gossip.eager_push_peers.len());
-            add_one(&mut stats.lazy, state.gossip.lazy_push_peers.len());
+            add_one(&mut histograms.active, state.swarm.active_view.len());
+            add_one(&mut histograms.passive, state.swarm.passive_view.len());
+            add_one(&mut histograms.eager, state.gossip.eager_push_peers.len());
+            add_one(&mut histograms.lazy, state.gossip.lazy_push_peers.len());
             if state.swarm.active_view.is_empty() {
-                stats.empty.insert(*id);
+                peers_without_neighbors.push(*id);
                 trace!(node=%id, active = ?state.swarm.active_view.iter().collect::<Vec<_>>(), passive=?state.swarm.passive_view.iter().collect::<Vec<_>>(), "active view empty^");
             }
         }
-        stats
+        NetworkReport {
+            histograms,
+            peer_count: self.peers.len(),
+            peers_without_neighbors,
+        }
     }
 }
 
@@ -503,7 +530,7 @@ impl<E> Ord for TimedEvent<E> {
 }
 
 /// The peer id type used in the simulator.
-pub type PeerId = u64;
+type PeerId = u64;
 
 /// Configuration for the [`Simulator`].
 #[derive(Debug, Serialize, Deserialize)]
@@ -534,14 +561,14 @@ pub enum BootstrapMode {
 impl SimulatorConfig {
     /// Creates a [`SimulatorConfig`] by reading from environment variables.
     ///
-    /// [`Self::peers`] is read from `NODES`, defaulting to `100` if unset.
+    /// [`Self::peers`] is read from `PEERS`, defaulting to `100` if unset.
     /// [`Self::rng_seed`] is read from `SEED`, defaulting to `0` if unset.
     /// [`Self::gossip_round_timeout`] is read, as seconds, from `GOSSIP_ROUND_TIMEOUT`, defaulting to `5` if unset.
     pub fn from_env() -> Self {
-        let nodes = read_var("NODES", 100);
+        let peer = read_var("PEERS", 100);
         Self {
             rng_seed: read_var("SEED", 0),
-            peers: nodes,
+            peers: peer,
             gossip_round_timeout: Duration::from_secs(read_var("GOSSIP_ROUND_TIMEOUT", 5)),
         }
     }
@@ -653,10 +680,16 @@ impl RoundStats {
 
     /// Calculates the minimum, maximum, and mean for each value in a list of [`RoundStats`].
     pub fn avg(rounds: &[RoundStats]) -> RoundStatsAvg {
+        let len = rounds.len();
         let min = Self::min(rounds);
         let max = Self::max(rounds);
         let mean = Self::mean(rounds);
-        RoundStatsAvg { min, max, mean }
+        RoundStatsAvg {
+            len,
+            min,
+            max,
+            mean,
+        }
     }
 
     /// Calculates the difference factors for each value between `self` and `other`.
@@ -685,6 +718,8 @@ fn diff_percent(a: f32, b: f32) -> f32 {
 /// Summary values for a list of [`RoundStats`].
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RoundStatsAvg {
+    /// The number of rounds for which this average is calculated.
+    pub len: usize,
     /// The minimum values of the list.
     pub min: RoundStats,
     /// The maximum values of the list.
@@ -716,10 +751,16 @@ impl RoundStatsAvg {
 
     /// Calculates the average between a list of [`RoundStatsAvg`].
     pub fn avg(rows: &[Self]) -> Self {
+        let len = rows.iter().map(|row| row.len).sum();
         let min = RoundStats::min(rows.iter().map(|x| &x.min));
         let max = RoundStats::min(rows.iter().map(|x| &x.max));
         let mean = RoundStats::min(rows.iter().map(|x| &x.mean));
-        Self { min, max, mean }
+        Self {
+            min,
+            max,
+            mean,
+            len,
+        }
     }
 }
 
@@ -728,17 +769,15 @@ impl RoundStatsAvg {
 /// For each field, the map's key is the bucket value, and the map's value is
 /// the number of peers that fall into that bucket.
 #[derive(Debug, Default)]
-pub struct NetworkStats {
-    /// Distribution of active neighbor counts.
-    active: BTreeMap<usize, usize>,
-    /// Distribution of passive neighbor counts.
-    passive: BTreeMap<usize, usize>,
+pub struct NetworkHistograms {
+    /// Distribution of active view (neighbor) counts.
+    pub active: BTreeMap<usize, usize>,
+    /// Distribution of passive view counts.
+    pub passive: BTreeMap<usize, usize>,
     /// Distribution of eager peer counts.
-    eager: BTreeMap<usize, usize>,
+    pub eager: BTreeMap<usize, usize>,
     /// Distribution of lazy peer counts.
-    lazy: BTreeMap<usize, usize>,
-    /// List of peers that don't have any neighbors.
-    empty: BTreeSet<PeerId>,
+    pub lazy: BTreeMap<usize, usize>,
 }
 
 fn avg(map: &BTreeMap<usize, usize>) -> f32 {
@@ -751,14 +790,16 @@ fn avg(map: &BTreeMap<usize, usize>) -> f32 {
         0.
     }
 }
+
 fn min(map: &BTreeMap<usize, usize>) -> usize {
     map.first_key_value().map(|(k, _v)| *k).unwrap_or_default()
 }
+
 fn max(map: &BTreeMap<usize, usize>) -> usize {
     map.last_key_value().map(|(k, _v)| *k).unwrap_or_default()
 }
 
-impl fmt::Display for NetworkStats {
+impl fmt::Display for NetworkHistograms {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -770,18 +811,40 @@ impl fmt::Display for NetworkStats {
 
 /// A report on the state of a [`Network`].
 #[derive(Debug)]
-pub struct NetworkReport {
-    /// The minimum number of neighbors that any peer has.
-    ///
-    /// If this is `0`, it means that at least one peer is not connected to any other peers.
-    pub min_active_len: usize,
-    /// The [`NetworkStats`] at this point in time.
-    pub stats: NetworkStats,
+pub struct NetworkReport<PI> {
+    /// The number of peers in the network.
+    pub peer_count: usize,
+    /// List of peers that don't have any neighbors.
+    pub peers_without_neighbors: Vec<PI>,
+    /// Histograms of peer distribution metrics.
+    pub histograms: NetworkHistograms,
+}
+
+impl<PI> NetworkReport<PI> {
+    /// Returns `true` if the network contains peers that have no active neighbors.
+    pub fn has_peers_with_no_neighbors(&self) -> bool {
+        *self.histograms.active.get(&0).unwrap_or(&0) > 0
+    }
+}
+
+impl<PI> fmt::Display for NetworkReport<PI> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "peers: {}\n{}", self.peer_count, self.histograms)?;
+        if self.peers_without_neighbors.is_empty() {
+            writeln!(f, "(all have neighbors)")
+        } else {
+            writeln!(
+                f,
+                "({} peers have no neighbors)",
+                self.peers_without_neighbors.len()
+            )
+        }
+    }
 }
 
 const TOPIC: TopicId = TopicId::from_bytes([0u8; 32]);
 
-/// A simple simulator for the gossip protocol
+/// A simulator for the gossip protocol
 #[derive(Debug)]
 pub struct Simulator {
     /// Configuration of the simulator.
@@ -829,7 +892,7 @@ impl Simulator {
     }
 
     /// Removes `n` peers from the network.
-    pub fn kill(&mut self, n: usize) {
+    pub fn remove_peers(&mut self, n: usize) {
         for _i in 0..n {
             let key = self.random_peer();
             self.network.remove(&key);
@@ -837,20 +900,17 @@ impl Simulator {
     }
 
     /// Returns a report on the current state of the network.
-    pub fn report_swarm(&mut self) -> NetworkReport {
-        let stats = self.network.state_stats();
-        let min_active_len = min(&stats.active);
-        let max_active_len = max(&stats.active);
-        let avg = avg(&stats.active);
-        let len = self.network.peers.len();
+    pub fn report(&mut self) -> NetworkReport<PeerId> {
+        let report = self.network.report();
+        let min_active_len = min(&report.histograms.active);
+        let max_active_len = max(&report.histograms.active);
+        let avg = avg(&report.histograms.active);
+        let len = report.peer_count;
         debug!(
             "nodes {len} active: avg {avg:2.2} min {min_active_len} max {max_active_len} empty {}",
-            stats.empty.len()
+            report.peers_without_neighbors.len()
         );
-        NetworkReport {
-            min_active_len,
-            stats,
-        }
+        report
     }
 
     /// Bootstraps the network.
@@ -858,7 +918,7 @@ impl Simulator {
     /// See [`BootstrapMode`] for details.
     ///
     /// Returns the [`NetworkReport`] after finishing the bootstrap.
-    pub fn bootstrap(&mut self, bootstrap_mode: BootstrapMode) -> NetworkReport {
+    pub fn bootstrap(&mut self, bootstrap_mode: BootstrapMode) -> NetworkReport<PeerId> {
         let span = info_span!("bootstrap");
         let _guard = span.enter();
         info!("bootstrap {bootstrap_mode:?}");
@@ -890,8 +950,8 @@ impl Simulator {
             }
         }
 
-        let report = self.report_swarm();
-        if report.min_active_len == 0 {
+        let report = self.report();
+        if report.has_peers_with_no_neighbors() {
             warn!("failed to keep all nodes active after warmup: {report:?}");
         } else {
             info!("bootstrap complete, all nodes active");
@@ -899,17 +959,14 @@ impl Simulator {
         report
     }
 
-    /// Drops all queued events.
-    pub fn drop_events(&mut self) {
-        let _ = self.network.events();
-    }
-
     /// Runs a round of gossiping.
     ///
     /// `messages` is a list of `(sender, message)` pairs. All messages will be sent simultaneously.
     /// The round will run until all peers received all messages, or until [`SimulatorConfig::gossip_round_timeout`]
     /// is elapsed.
-    pub fn gossip_round(&mut self, messages: Vec<(PeerId, Bytes)>) {
+    ///
+    /// Returns the number of undelivered messages.
+    pub fn gossip_round(&mut self, messages: Vec<(PeerId, Bytes)>) -> usize {
         let span = debug_span!("g", r = self.round_stats.len());
         let _guard = span.enter();
         self.reset_stats();
@@ -957,6 +1014,7 @@ impl Simulator {
         }
         let elapsed = self.network.time.duration_since(start);
         self.report_gossip_round(expected_count, missing_count, elapsed);
+        missing_count
     }
 
     fn report_gossip_round(
@@ -977,9 +1035,9 @@ impl Simulator {
             ldh: ldh as f32,
             missed: missed as f32,
         };
-        let network_stats = self.network.state_stats();
+        let histograms = self.network.report().histograms;
         info!(
-            "round {}: pay {} ctrl {} {round_stats} \n{network_stats}",
+            "round {}: pay {} ctrl {} {round_stats} \n{histograms}",
             self.round_stats.len(),
             payloud_msg_count,
             ctrl_msg_count,
@@ -988,7 +1046,7 @@ impl Simulator {
     }
 
     /// Calculates the [`RoundStatsAvg`] of all gossip rounds.
-    pub fn report_round_average(&self) -> RoundStatsAvg {
+    pub fn round_stats_average(&self) -> RoundStatsAvg {
         RoundStats::avg(&self.round_stats)
     }
 

@@ -129,18 +129,17 @@ impl<PI> From<(PI, Option<PeerData>)> for PeerInfo<PI> {
 #[cfg(test)]
 mod test {
 
-    use std::{
-        collections::{BTreeMap, HashSet},
-        env, fmt,
-        str::FromStr,
-    };
+    use std::{collections::HashSet, env, fmt, str::FromStr};
 
-    use rand::{Rng, SeedableRng};
+    use rand::SeedableRng;
     use rand_chacha::ChaCha12Rng;
     use tracing_test::traced_test;
 
-    use super::{Command, Config, Event, PeerIdentity};
-    use crate::proto::{sim::Network, Scope, TopicId};
+    use super::{Command, Config, Event};
+    use crate::proto::{
+        sim::{LatencyConfig, Network, NetworkConfig},
+        Scope, TopicId,
+    };
 
     #[test]
     #[traced_test]
@@ -149,7 +148,11 @@ mod test {
         let rng = ChaCha12Rng::seed_from_u64(read_var("SEED", 0));
         let mut config = Config::default();
         config.membership.active_view_capacity = 2;
-        let mut network = Network::new(config.into(), rng);
+        let network_config = NetworkConfig {
+            proto: config,
+            latency: LatencyConfig::default_static(),
+        };
+        let mut network = Network::new(network_config, rng);
         for i in 0..4 {
             network.insert(i);
         }
@@ -215,8 +218,11 @@ mod test {
     #[traced_test]
     fn plumtree_smoke() {
         let rng = ChaCha12Rng::seed_from_u64(read_var("SEED", 0));
-        let config = Config::default();
-        let mut network = Network::new(config.into(), rng);
+        let network_config = NetworkConfig {
+            proto: Config::default(),
+            latency: LatencyConfig::default_static(),
+        };
+        let mut network = Network::new(network_config, rng);
         // build a network with 6 nodes
         for i in 0..6 {
             network.insert(i);
@@ -257,7 +263,7 @@ mod test {
         network.command(2, t, Command::Join(vec![5]));
         network.run_roundtrips(3);
         let _ = network.events();
-        report_round_distribution(&network);
+        println!("{}", network.report());
 
         // now broadcast again
         network.command(
@@ -271,7 +277,7 @@ mod test {
         // message should be received by all 5 other nodes
         assert_eq!(received.count(), 5);
         assert!(network.check_synchronicity());
-        report_round_distribution(&network);
+        println!("{}", network.report());
     }
 
     #[test]
@@ -335,39 +341,5 @@ mod test {
         let mut sorted = items;
         sorted.sort();
         sorted
-    }
-
-    fn report_round_distribution<PI: PeerIdentity, R: Rng + Clone>(network: &Network<PI, R>) {
-        let mut eager_distrib: BTreeMap<usize, usize> = BTreeMap::new();
-        let mut lazy_distrib: BTreeMap<usize, usize> = BTreeMap::new();
-        let mut active_distrib: BTreeMap<usize, usize> = BTreeMap::new();
-        let mut passive_distrib: BTreeMap<usize, usize> = BTreeMap::new();
-        let mut payload_recv = 0;
-        let mut control_recv = 0;
-        for state in network.peers.values() {
-            for (_topic, state) in state.states() {
-                let stats = state.gossip.stats();
-                *eager_distrib
-                    .entry(state.gossip.eager_push_peers.len())
-                    .or_default() += 1;
-                *lazy_distrib
-                    .entry(state.gossip.lazy_push_peers.len())
-                    .or_default() += 1;
-                *active_distrib
-                    .entry(state.swarm.active_view.len())
-                    .or_default() += 1;
-                *passive_distrib
-                    .entry(state.swarm.passive_view.len())
-                    .or_default() += 1;
-                payload_recv += stats.payload_messages_received;
-                control_recv += stats.control_messages_received;
-            }
-        }
-        // eprintln!("distributions {round_distrib:?}");
-        eprintln!("payload_recv {payload_recv} control_recv {control_recv}");
-        eprintln!("eager_distrib {eager_distrib:?}");
-        eprintln!("lazy_distrib {lazy_distrib:?}");
-        eprintln!("active_distrib {active_distrib:?}");
-        eprintln!("passive_distrib {passive_distrib:?}");
     }
 }
