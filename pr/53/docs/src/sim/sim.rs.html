@@ -642,7 +642,7 @@
         <span class="macro">info!</span>(<span class="string">"start"</span>);
         <span class="kw">let </span>outcome = simulator.bootstrap(bootstrap);
 
-        <span class="kw">if </span>outcome.min_active_len == <span class="number">0 </span>{
+        <span class="kw">if </span>outcome.has_peers_with_no_neighbors() {
             <span class="macro">warn!</span>(<span class="string">"not all nodes active after bootstrap: {outcome:?}"</span>);
         } <span class="kw">else </span>{
             <span class="macro">info!</span>(<span class="string">"bootstrapped, all nodes active"</span>);
@@ -707,7 +707,7 @@
             <span class="kw">let </span>messages = <span class="macro">vec!</span>[(from, message)];
             simulator.gossip_round(messages);
         }
-        simulator.report_round_average()
+        simulator.round_stats_average()
     }
 }
 
@@ -720,7 +720,7 @@
             <span class="kw">let </span>messages = <span class="macro">vec!</span>[(from, message)];
             simulator.gossip_round(messages);
         }
-        simulator.report_round_average()
+        simulator.round_stats_average()
     }
 }
 
@@ -738,7 +738,7 @@
             }
             simulator.gossip_round(messages);
         }
-        simulator.report_round_average()
+        simulator.round_stats_average()
     }
 }
 

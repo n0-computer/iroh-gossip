@@ -325,7 +325,8 @@
 <a href="#324" id="324">324</a>
 <a href="#325" id="325">325</a>
 <a href="#326" id="326">326</a>
-<a href="#327" id="327">327</a></pre></div><pre class="rust"><code><span class="doccomment">//! Implementation of the iroh-gossip protocol, as an IO-less state machine
+<a href="#327" id="327">327</a>
+<a href="#328" id="328">328</a></pre></div><pre class="rust"><code><span class="doccomment">//! Implementation of the iroh-gossip protocol, as an IO-less state machine
 //!
 //! This module implements the iroh-gossip protocol. The entry point is [`State`], which contains
 //! the protocol state for a node.
@@ -456,10 +457,7 @@
     <span class="kw">use </span>tracing_test::traced_test;
 
     <span class="kw">use super</span>::{Command, Config, Event};
-    <span class="kw">use </span><span class="kw">crate</span>::proto::{
-        sim::{report_round_distribution, sort, Network},
-        Scope, TopicId,
-    };
+    <span class="kw">use </span><span class="kw">crate</span>::proto::{sim::Network, Scope, TopicId};
 
     <span class="attr">#[test]
     #[traced_test]
@@ -501,7 +499,7 @@
         // Node 0 is full, so it will disconnect from either node 1 or node 2.
         </span>network.command(<span class="number">3</span>, t, Command::Join(<span class="macro">vec!</span>[<span class="number">0</span>]));
 
-        network.run_roundtrips(<span class="number">3</span>);
+        network.run_roundtrips(<span class="number">2</span>);
 
         <span class="comment">// Confirm emitted events. There's two options because whether node 0 disconnects from
         // node 1 or node 2 is random.
@@ -552,7 +550,7 @@
         (<span class="number">4</span>..<span class="number">6</span>).for_each(|i| network.command(i, t, Command::Join(<span class="macro">vec!</span>[<span class="number">3</span>])));
         <span class="comment">// run ticks and drain events
 
-        </span>network.run_roundtrips(<span class="number">2</span>);
+        </span>network.run_roundtrips(<span class="number">4</span>);
 
         <span class="kw">let _ </span>= network.events();
         <span class="macro">assert!</span>(network.check_synchronicity());
@@ -576,7 +574,7 @@
         </span>network.command(<span class="number">2</span>, t, Command::Join(<span class="macro">vec!</span>[<span class="number">5</span>]));
         network.run_roundtrips(<span class="number">3</span>);
         <span class="kw">let _ </span>= network.events();
-        report_round_distribution(<span class="kw-2">&amp;</span>network);
+        <span class="macro">println!</span>(<span class="string">"{}"</span>, network.report());
 
         <span class="comment">// now broadcast again
         </span>network.command(
@@ -590,7 +588,7 @@
         <span class="comment">// message should be received by all 5 other nodes
         </span><span class="macro">assert_eq!</span>(received.count(), <span class="number">5</span>);
         <span class="macro">assert!</span>(network.check_synchronicity());
-        report_round_distribution(<span class="kw-2">&amp;</span>network);
+        <span class="macro">println!</span>(<span class="string">"{}"</span>, network.report());
     }
 
     <span class="attr">#[test]
@@ -618,8 +616,7 @@
         <span class="comment">// assert all peers appear in the connections
         </span><span class="kw">let </span>all_conns: HashSet&lt;u64&gt; = HashSet::from_iter((<span class="number">0u64</span>..<span class="number">4</span>).flat_map(|p| {
             network
-                .active_view(<span class="kw-2">&amp;</span>p, <span class="kw-2">&amp;</span>t)
-                .unwrap()
+                .neighbors(<span class="kw-2">&amp;</span>p, <span class="kw-2">&amp;</span>t)
                 .into_iter()
                 .flat_map(|x| x.into_iter())
         }));
@@ -634,8 +631,7 @@
         <span class="comment">// assert all peers without peer 3 appear in the connections
         </span><span class="kw">let </span>all_conns: HashSet&lt;u64&gt; = HashSet::from_iter((<span class="number">0</span>..num).flat_map(|p| {
             network
-                .active_view(<span class="kw-2">&amp;</span>p, <span class="kw-2">&amp;</span>t)
-                .unwrap()
+                .neighbors(<span class="kw-2">&amp;</span>p, <span class="kw-2">&amp;</span>t)
                 .into_iter()
                 .flat_map(|x| x.into_iter())
         }));
@@ -650,6 +646,12 @@
                     .unwrap_or_else(|<span class="kw">_</span>| <span class="macro">panic!</span>(<span class="string">"Failed to parse environment variable {name}"</span>))
             })
             .unwrap_or(default)
+    }
+
+    <span class="kw">fn </span>sort&lt;T: Ord + Clone&gt;(items: Vec&lt;T&gt;) -&gt; Vec&lt;T&gt; {
+        <span class="kw">let </span><span class="kw-2">mut </span>sorted = items;
+        sorted.sort();
+        sorted
     }
 }
 </code></pre></div></section></main></body></html>
