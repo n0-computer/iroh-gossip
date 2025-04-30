@@ -1126,7 +1126,11 @@
 <a href="#1125" id="1125">1125</a>
 <a href="#1126" id="1126">1126</a>
 <a href="#1127" id="1127">1127</a>
-<a href="#1128" id="1128">1128</a></pre></div><pre class="rust"><code><span class="doccomment">//! Simulation framework for testing the protocol implementation
+<a href="#1128" id="1128">1128</a>
+<a href="#1129" id="1129">1129</a>
+<a href="#1130" id="1130">1130</a>
+<a href="#1131" id="1131">1131</a>
+<a href="#1132" id="1132">1132</a></pre></div><pre class="rust"><code><span class="doccomment">//! Simulation framework for testing the protocol implementation
 
 </span><span class="kw">use </span>std::{
     collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque},
@@ -1145,7 +1149,8 @@
 <span class="kw">use super</span>::{Command, Config, Event, InEvent, OutEvent, PeerIdentity, State, TopicId};
 <span class="kw">use </span><span class="kw">crate</span>::proto::{PeerData, Scope};
 
-<span class="kw">const </span>DEFAULT_LATENCY: Duration = Duration::from_millis(<span class="number">50</span>);
+<span class="kw">const </span>DEFAULT_LATENCY_MIN: Duration = Duration::from_millis(<span class="number">10</span>);
+<span class="kw">const </span>DEFAULT_LATENCY_MAX: Duration = Duration::from_millis(<span class="number">100</span>);
 
 <span class="doccomment">/// Configuration for a [`Network`].
 </span><span class="attr">#[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1213,7 +1218,10 @@
 
 <span class="kw">impl </span>Default <span class="kw">for </span>LatencyConfig {
     <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
-        <span class="self">Self</span>::Static(DEFAULT_LATENCY)
+        <span class="self">Self</span>::Random {
+            min: DEFAULT_LATENCY_MIN,
+            max: DEFAULT_LATENCY_MAX,
+        }
     }
 }
 
