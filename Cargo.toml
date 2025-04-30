@@ -39,7 +39,7 @@ derive_more = { version = "1.0.0", features = ["add", "debug", "deref", "display
 ed25519-dalek = { version = "2.0.0", features = ["serde", "rand_core"] }
 hex = "0.4.3"
 indexmap = "2.0"
-iroh-metrics = { version = "0.33" }
+iroh-metrics = { git = "https://github.com/n0-computer/iroh-metrics", branch = "main" }
 n0-future = "0.1.2"
 postcard = { version = "1", default-features = false, features = ["alloc", "use-std", "experimental-derive"] }
 rand = { version = "0.8.5", features = ["std_rng"] }
@@ -52,7 +52,7 @@ anyhow = { version = "1", optional = true }
 futures-lite = { version = "2.3", optional = true }
 futures-concurrency = { version = "7.6.1", optional = true }
 futures-util = { version = "0.3.30", optional = true }
-iroh = { version = "0.34", default-features = false, optional = true }
+iroh = { git = "https://github.com/n0-computer/iroh", branch = "Frando/metrics", default-features = false, optional = true }
 tokio = { version = "1", optional = true, features = ["io-util", "sync"] }
 tokio-util = { version = "0.7.12", optional = true, features = ["codec"] }
 tracing = "0.1"
@@ -69,7 +69,7 @@ clap = { version = "4", features = ["derive"], optional = true }
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util", "sync", "rt", "macros", "net", "fs"] }
 clap = { version = "4", features = ["derive"] }
-iroh = { version = "0.34", default-features = false, features = ["metrics", "test-utils"] }
+iroh = { git = "https://github.com/n0-computer/iroh", branch = "Frando/metrics", default-features = false, features = ["metrics", "test-utils"] }
 rand_chacha = "0.3.1"
 testresult = "0.4.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -114,6 +114,3 @@ required-features = ["examples"]
 all-features = true
 rustdoc-args = ["--cfg", "iroh_docsrs"]
 
-[patch.crates-io]
-iroh = { git = "https://github.com/n0-computer/iroh", branch = "Frando/metrics" }
-iroh-metrics = { git = "https://github.com/n0-computer/iroh-metrics", branch = "main" }
