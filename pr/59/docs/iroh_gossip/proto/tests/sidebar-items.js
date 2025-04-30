@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["TOPIC"],"enum":["BootstrapMode"],"fn":["report_round_distribution","sort"],"struct":["ConnId","DynamicBootstrap","Network","RoundStats","RoundStatsAvg","Simulator","SimulatorConfig","StaticBootstrap","TickReport"],"type":["PeerId"]};

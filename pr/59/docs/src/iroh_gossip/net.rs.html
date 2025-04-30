@@ -2603,11 +2603,11 @@
                 <span class="kw">let </span>event = event.expect(<span class="string">"unreachable: in_event_tx is never dropped before receiver"</span>);
                 <span class="self">self</span>.handle_in_event(event, Instant::now()).<span class="kw">await</span><span class="question-mark">?</span>;
             }
-            drain = <span class="self">self</span>.timers.wait_and_drain() =&gt; {
+            <span class="kw">_ </span>= <span class="self">self</span>.timers.wait_next() =&gt; {
                 <span class="macro">trace!</span>(<span class="question-mark">?</span>i, <span class="string">"tick: timers"</span>);
                 <span class="macro">inc!</span>(Metrics, actor_tick_timers);
                 <span class="kw">let </span>now = Instant::now();
-                <span class="kw">for </span>(_instant, timer) <span class="kw">in </span>drain {
+                <span class="kw">while let </span><span class="prelude-val">Some</span>((_instant, timer)) = <span class="self">self</span>.timers.pop_before(now) {
                     <span class="self">self</span>.handle_in_event(InEvent::TimerExpired(timer), now).<span class="kw">await</span><span class="question-mark">?</span>;
                 }
             }
