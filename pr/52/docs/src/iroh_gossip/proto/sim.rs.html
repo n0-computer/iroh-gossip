@@ -1083,7 +1083,50 @@
 <a href="#1082" id="1082">1082</a>
 <a href="#1083" id="1083">1083</a>
 <a href="#1084" id="1084">1084</a>
-<a href="#1085" id="1085">1085</a></pre></div><pre class="rust"><code><span class="doccomment">//! Simulation framework for testing the protocol implementation
+<a href="#1085" id="1085">1085</a>
+<a href="#1086" id="1086">1086</a>
+<a href="#1087" id="1087">1087</a>
+<a href="#1088" id="1088">1088</a>
+<a href="#1089" id="1089">1089</a>
+<a href="#1090" id="1090">1090</a>
+<a href="#1091" id="1091">1091</a>
+<a href="#1092" id="1092">1092</a>
+<a href="#1093" id="1093">1093</a>
+<a href="#1094" id="1094">1094</a>
+<a href="#1095" id="1095">1095</a>
+<a href="#1096" id="1096">1096</a>
+<a href="#1097" id="1097">1097</a>
+<a href="#1098" id="1098">1098</a>
+<a href="#1099" id="1099">1099</a>
+<a href="#1100" id="1100">1100</a>
+<a href="#1101" id="1101">1101</a>
+<a href="#1102" id="1102">1102</a>
+<a href="#1103" id="1103">1103</a>
+<a href="#1104" id="1104">1104</a>
+<a href="#1105" id="1105">1105</a>
+<a href="#1106" id="1106">1106</a>
+<a href="#1107" id="1107">1107</a>
+<a href="#1108" id="1108">1108</a>
+<a href="#1109" id="1109">1109</a>
+<a href="#1110" id="1110">1110</a>
+<a href="#1111" id="1111">1111</a>
+<a href="#1112" id="1112">1112</a>
+<a href="#1113" id="1113">1113</a>
+<a href="#1114" id="1114">1114</a>
+<a href="#1115" id="1115">1115</a>
+<a href="#1116" id="1116">1116</a>
+<a href="#1117" id="1117">1117</a>
+<a href="#1118" id="1118">1118</a>
+<a href="#1119" id="1119">1119</a>
+<a href="#1120" id="1120">1120</a>
+<a href="#1121" id="1121">1121</a>
+<a href="#1122" id="1122">1122</a>
+<a href="#1123" id="1123">1123</a>
+<a href="#1124" id="1124">1124</a>
+<a href="#1125" id="1125">1125</a>
+<a href="#1126" id="1126">1126</a>
+<a href="#1127" id="1127">1127</a>
+<a href="#1128" id="1128">1128</a></pre></div><pre class="rust"><code><span class="doccomment">//! Simulation framework for testing the protocol implementation
 
 </span><span class="kw">use </span>std::{
     collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque},
@@ -1182,7 +1225,7 @@
     start: Instant,
     time: Instant,
     tick: usize,
-    <span class="kw">pub</span>(<span class="kw">crate</span>) peers: BTreeMap&lt;PI, State&lt;PI, R&gt;&gt;,
+    peers: BTreeMap&lt;PI, State&lt;PI, R&gt;&gt;,
     conns: BTreeSet&lt;ConnId&lt;PI&gt;&gt;,
     events: VecDeque&lt;(PI, TopicId, Event&lt;PI&gt;)&gt;,
     latencies: BTreeMap&lt;ConnId&lt;PI&gt;, Duration&gt;,
@@ -1210,7 +1253,7 @@
     }
 }
 
-<span class="kw">impl</span>&lt;PI: PeerIdentity + Ord + std::fmt::Display, R: Rng + SeedableRng + Clone&gt; Network&lt;PI, R&gt; {
+<span class="kw">impl</span>&lt;PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng + Clone&gt; Network&lt;PI, R&gt; {
     <span class="doccomment">/// Inserts a new peer.
     ///
     /// Panics if the peer already exists.
@@ -1239,7 +1282,9 @@
         <span class="self">self</span>.insert(peer_id);
         <span class="self">self</span>.command(peer_id, topic, Command::Join(bootstrap));
     }
+}
 
+<span class="kw">impl</span>&lt;PI: PeerIdentity + fmt::Display, R: Rng + Clone&gt; Network&lt;PI, R&gt; {
     <span class="doccomment">/// Drains all queued events.
     </span><span class="kw">pub fn </span>events(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="kw">impl </span>Iterator&lt;Item = (PI, TopicId, Event&lt;PI&gt;)&gt; + <span class="lifetime">'_ </span>{
         <span class="self">self</span>.events.drain(..)
@@ -1271,6 +1316,32 @@
     <span class="doccomment">/// Returns an iterator over the node ids of all peers.
     </span><span class="kw">pub fn </span>peer_ids(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw">impl </span>Iterator&lt;Item = PI&gt; + <span class="lifetime">'_ </span>{
         <span class="self">self</span>.peers.keys().cloned()
+    }
+
+    <span class="doccomment">/// Returns the [`State`] for a peer, if it exists.
+    </span><span class="kw">pub fn </span>peer(<span class="kw-2">&amp;</span><span class="self">self</span>, peer: <span class="kw-2">&amp;</span>PI) -&gt; <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>State&lt;PI, R&gt;&gt; {
+        <span class="self">self</span>.peers.get(peer)
+    }
+
+    <span class="doccomment">/// Returns the neighbors a peer has on the swarm membership layer.
+    </span><span class="kw">pub fn </span>neighbors(<span class="kw-2">&amp;</span><span class="self">self</span>, peer: <span class="kw-2">&amp;</span>PI, topic: <span class="kw-2">&amp;</span>TopicId) -&gt; <span class="prelude-ty">Option</span>&lt;Vec&lt;PI&gt;&gt; {
+        <span class="kw">let </span>peer = <span class="self">self</span>.peer(peer)<span class="question-mark">?</span>;
+        <span class="kw">let </span>state = peer.state(topic)<span class="question-mark">?</span>;
+        <span class="prelude-val">Some</span>(state.swarm.active_view.iter().cloned().collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;())
+    }
+
+    <span class="doccomment">/// Removes a peer, breaking all connections to other peers.
+    </span><span class="kw">pub fn </span>remove(<span class="kw-2">&amp;mut </span><span class="self">self</span>, peer: <span class="kw-2">&amp;</span>PI) {
+        <span class="kw">let </span>remove_conns: Vec&lt;<span class="kw">_</span>&gt; = <span class="self">self
+            </span>.conns
+            .iter()
+            .filter(|<span class="kw-2">&amp;</span>c| c.peers().contains(peer))
+            .cloned()
+            .collect();
+        <span class="kw">for </span>conn <span class="kw">in </span>remove_conns.into_iter() {
+            <span class="self">self</span>.kill_connection(<span class="kw-2">*</span>peer, conn.other(<span class="kw-2">*</span>peer).unwrap());
+        }
+        <span class="self">self</span>.peers.remove(peer);
     }
 
     <span class="doccomment">/// Returns the time elapsed since starting the network.
@@ -1413,35 +1484,15 @@
         }
     }
 
-    <span class="doccomment">/// Returns the [`State`] for a peer, if it exists.
-    </span><span class="kw">pub fn </span>peer(<span class="kw-2">&amp;</span><span class="self">self</span>, peer: <span class="kw-2">&amp;</span>PI) -&gt; <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>State&lt;PI, R&gt;&gt; {
-        <span class="self">self</span>.peers.get(peer)
-    }
-
-    <span class="doccomment">/// Returns the neighbors a peer has on the swarm membership layer.
-    </span><span class="kw">pub fn </span>neighbors(<span class="kw-2">&amp;</span><span class="self">self</span>, peer: <span class="kw-2">&amp;</span>PI, topic: <span class="kw-2">&amp;</span>TopicId) -&gt; <span class="prelude-ty">Option</span>&lt;Vec&lt;PI&gt;&gt; {
-        <span class="kw">let </span>peer = <span class="self">self</span>.peer(peer)<span class="question-mark">?</span>;
-        <span class="kw">let </span>state = peer.state(topic)<span class="question-mark">?</span>;
-        <span class="prelude-val">Some</span>(state.swarm.active_view.iter().cloned().collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;())
-    }
-
-    <span class="doccomment">/// Removes a peer, breaking all connections to other peers.
-    </span><span class="kw">pub fn </span>remove(<span class="kw-2">&amp;mut </span><span class="self">self</span>, peer: <span class="kw-2">&amp;</span>PI) {
-        <span class="kw">let </span>remove_conns: Vec&lt;<span class="kw">_</span>&gt; = <span class="self">self
-            </span>.conns
-            .iter()
-            .filter(|<span class="kw-2">&amp;</span>c| c.peers().contains(peer))
-            .cloned()
-            .collect();
-        <span class="kw">for </span>conn <span class="kw">in </span>remove_conns.into_iter() {
-            <span class="self">self</span>.kill_connection(<span class="kw-2">*</span>peer, conn.other(<span class="kw-2">*</span>peer).unwrap());
-        }
-        <span class="self">self</span>.peers.remove(peer);
-    }
-
-    <span class="doccomment">/// Checks if all neighbor relations are synchronous.
+    <span class="doccomment">/// Checks if all neighbor and eager relations are synchronous.
     ///
-    /// Returns `true` if, for all peers, each neighbor has the peer among its neighbors as well.
+    /// Iterates over all peers, and checks for each peer X:
+    /// - that all active view members (neighbors) have X listed as a neighbor as well
+    /// - that all eager peers have X listed as eager as well
+    ///
+    /// Returns `true` if this is holds, otherwise returns `false`.
+    ///
+    /// Logs, at debug level, the cases where the above doesn't hold.
     </span><span class="kw">pub fn </span>check_synchronicity(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
         <span class="kw">let </span><span class="kw-2">mut </span>ok = <span class="bool-val">true</span>;
         <span class="kw">for </span>state <span class="kw">in </span><span class="self">self</span>.peers.values() {
@@ -1479,23 +1530,27 @@
         }
         ok
     }
-}
 
-<span class="kw">impl</span>&lt;R: Rng + Clone&gt; Network&lt;PeerId, R&gt; {
-    <span class="kw">fn </span>state_stats(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; NetworkStats {
-        <span class="kw">let </span><span class="kw-2">mut </span>stats = NetworkStats::default();
+    <span class="doccomment">/// Returns a report with histograms on active, passive, eager and lazy counts.
+    </span><span class="kw">pub fn </span>report(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; NetworkReport&lt;PI&gt; {
+        <span class="kw">let </span><span class="kw-2">mut </span>histograms = NetworkHistograms::default();
+        <span class="kw">let </span><span class="kw-2">mut </span>peers_without_neighbors = Vec::new();
         <span class="kw">for </span>(id, peer) <span class="kw">in </span><span class="self">self</span>.peers.iter() {
             <span class="kw">let </span>state = peer.state(<span class="kw-2">&amp;</span>TOPIC).unwrap();
-            add_one(<span class="kw-2">&amp;mut </span>stats.active, state.swarm.active_view.len());
-            add_one(<span class="kw-2">&amp;mut </span>stats.passive, state.swarm.passive_view.len());
-            add_one(<span class="kw-2">&amp;mut </span>stats.eager, state.gossip.eager_push_peers.len());
-            add_one(<span class="kw-2">&amp;mut </span>stats.lazy, state.gossip.lazy_push_peers.len());
+            add_one(<span class="kw-2">&amp;mut </span>histograms.active, state.swarm.active_view.len());
+            add_one(<span class="kw-2">&amp;mut </span>histograms.passive, state.swarm.passive_view.len());
+            add_one(<span class="kw-2">&amp;mut </span>histograms.eager, state.gossip.eager_push_peers.len());
+            add_one(<span class="kw-2">&amp;mut </span>histograms.lazy, state.gossip.lazy_push_peers.len());
             <span class="kw">if </span>state.swarm.active_view.is_empty() {
-                stats.empty.insert(<span class="kw-2">*</span>id);
+                peers_without_neighbors.push(<span class="kw-2">*</span>id);
                 <span class="macro">trace!</span>(node=%id, active = <span class="question-mark">?</span>state.swarm.active_view.iter().collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;(), passive=<span class="question-mark">?</span>state.swarm.passive_view.iter().collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;(), <span class="string">"active view empty^"</span>);
             }
         }
-        stats
+        NetworkReport {
+            histograms,
+            peer_count: <span class="self">self</span>.peers.len(),
+            peers_without_neighbors,
+        }
     }
 }
 
@@ -1588,7 +1643,7 @@
 }
 
 <span class="doccomment">/// The peer id type used in the simulator.
-</span><span class="kw">pub type </span>PeerId = u64;
+</span><span class="kw">type </span>PeerId = u64;
 
 <span class="doccomment">/// Configuration for the [`Simulator`].
 </span><span class="attr">#[derive(Debug, Serialize, Deserialize)]
@@ -1619,14 +1674,14 @@
 <span class="kw">impl </span>SimulatorConfig {
     <span class="doccomment">/// Creates a [`SimulatorConfig`] by reading from environment variables.
     ///
-    /// [`Self::peers`] is read from `NODES`, defaulting to `100` if unset.
+    /// [`Self::peers`] is read from `PEERS`, defaulting to `100` if unset.
     /// [`Self::rng_seed`] is read from `SEED`, defaulting to `0` if unset.
     /// [`Self::gossip_round_timeout`] is read, as seconds, from `GOSSIP_ROUND_TIMEOUT`, defaulting to `5` if unset.
     </span><span class="kw">pub fn </span>from_env() -&gt; <span class="self">Self </span>{
-        <span class="kw">let </span>nodes = read_var(<span class="string">"NODES"</span>, <span class="number">100</span>);
+        <span class="kw">let </span>peer = read_var(<span class="string">"PEERS"</span>, <span class="number">100</span>);
         <span class="self">Self </span>{
             rng_seed: read_var(<span class="string">"SEED"</span>, <span class="number">0</span>),
-            peers: nodes,
+            peers: peer,
             gossip_round_timeout: Duration::from_secs(read_var(<span class="string">"GOSSIP_ROUND_TIMEOUT"</span>, <span class="number">5</span>)),
         }
     }
@@ -1738,10 +1793,16 @@
 
     <span class="doccomment">/// Calculates the minimum, maximum, and mean for each value in a list of [`RoundStats`].
     </span><span class="kw">pub fn </span>avg(rounds: <span class="kw-2">&amp;</span>[RoundStats]) -&gt; RoundStatsAvg {
+        <span class="kw">let </span>len = rounds.len();
         <span class="kw">let </span>min = <span class="self">Self</span>::min(rounds);
         <span class="kw">let </span>max = <span class="self">Self</span>::max(rounds);
         <span class="kw">let </span>mean = <span class="self">Self</span>::mean(rounds);
-        RoundStatsAvg { min, max, mean }
+        RoundStatsAvg {
+            len,
+            min,
+            max,
+            mean,
+        }
     }
 
     <span class="doccomment">/// Calculates the difference factors for each value between `self` and `other`.
@@ -1770,6 +1831,8 @@
 <span class="doccomment">/// Summary values for a list of [`RoundStats`].
 </span><span class="attr">#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 </span><span class="kw">pub struct </span>RoundStatsAvg {
+    <span class="doccomment">/// The number of rounds for which this average is calculated.
+    </span><span class="kw">pub </span>len: usize,
     <span class="doccomment">/// The minimum values of the list.
     </span><span class="kw">pub </span>min: RoundStats,
     <span class="doccomment">/// The maximum values of the list.
@@ -1801,10 +1864,16 @@
 
     <span class="doccomment">/// Calculates the average between a list of [`RoundStatsAvg`].
     </span><span class="kw">pub fn </span>avg(rows: <span class="kw-2">&amp;</span>[<span class="self">Self</span>]) -&gt; <span class="self">Self </span>{
+        <span class="kw">let </span>len = rows.iter().map(|row| row.len).sum();
         <span class="kw">let </span>min = RoundStats::min(rows.iter().map(|x| <span class="kw-2">&amp;</span>x.min));
         <span class="kw">let </span>max = RoundStats::min(rows.iter().map(|x| <span class="kw-2">&amp;</span>x.max));
         <span class="kw">let </span>mean = RoundStats::min(rows.iter().map(|x| <span class="kw-2">&amp;</span>x.mean));
-        <span class="self">Self </span>{ min, max, mean }
+        <span class="self">Self </span>{
+            min,
+            max,
+            mean,
+            len,
+        }
     }
 }
 
@@ -1813,17 +1882,15 @@
 /// For each field, the map's key is the bucket value, and the map's value is
 /// the number of peers that fall into that bucket.
 </span><span class="attr">#[derive(Debug, Default)]
-</span><span class="kw">pub struct </span>NetworkStats {
-    <span class="doccomment">/// Distribution of active neighbor counts.
-    </span>active: BTreeMap&lt;usize, usize&gt;,
-    <span class="doccomment">/// Distribution of passive neighbor counts.
-    </span>passive: BTreeMap&lt;usize, usize&gt;,
+</span><span class="kw">pub struct </span>NetworkHistograms {
+    <span class="doccomment">/// Distribution of active view (neighbor) counts.
+    </span><span class="kw">pub </span>active: BTreeMap&lt;usize, usize&gt;,
+    <span class="doccomment">/// Distribution of passive view counts.
+    </span><span class="kw">pub </span>passive: BTreeMap&lt;usize, usize&gt;,
     <span class="doccomment">/// Distribution of eager peer counts.
-    </span>eager: BTreeMap&lt;usize, usize&gt;,
+    </span><span class="kw">pub </span>eager: BTreeMap&lt;usize, usize&gt;,
     <span class="doccomment">/// Distribution of lazy peer counts.
-    </span>lazy: BTreeMap&lt;usize, usize&gt;,
-    <span class="doccomment">/// List of peers that don't have any neighbors.
-    </span>empty: BTreeSet&lt;PeerId&gt;,
+    </span><span class="kw">pub </span>lazy: BTreeMap&lt;usize, usize&gt;,
 }
 
 <span class="kw">fn </span>avg(map: <span class="kw-2">&amp;</span>BTreeMap&lt;usize, usize&gt;) -&gt; f32 {
@@ -1836,14 +1903,16 @@
         <span class="number">0.
     </span>}
 }
+
 <span class="kw">fn </span>min(map: <span class="kw-2">&amp;</span>BTreeMap&lt;usize, usize&gt;) -&gt; usize {
     map.first_key_value().map(|(k, _v)| <span class="kw-2">*</span>k).unwrap_or_default()
 }
+
 <span class="kw">fn </span>max(map: <span class="kw-2">&amp;</span>BTreeMap&lt;usize, usize&gt;) -&gt; usize {
     map.last_key_value().map(|(k, _v)| <span class="kw-2">*</span>k).unwrap_or_default()
 }
 
-<span class="kw">impl </span>fmt::Display <span class="kw">for </span>NetworkStats {
+<span class="kw">impl </span>fmt::Display <span class="kw">for </span>NetworkHistograms {
     <span class="kw">fn </span>fmt(<span class="kw-2">&amp;</span><span class="self">self</span>, f: <span class="kw-2">&amp;mut </span>fmt::Formatter&lt;<span class="lifetime">'_</span>&gt;) -&gt; fmt::Result {
         <span class="macro">write!</span>(
             f,
@@ -1855,18 +1924,40 @@
 
 <span class="doccomment">/// A report on the state of a [`Network`].
 </span><span class="attr">#[derive(Debug)]
-</span><span class="kw">pub struct </span>NetworkReport {
-    <span class="doccomment">/// The minimum number of neighbors that any peer has.
-    ///
-    /// If this is `0`, it means that at least one peer is not connected to any other peers.
-    </span><span class="kw">pub </span>min_active_len: usize,
-    <span class="doccomment">/// The [`NetworkStats`] at this point in time.
-    </span><span class="kw">pub </span>stats: NetworkStats,
+</span><span class="kw">pub struct </span>NetworkReport&lt;PI&gt; {
+    <span class="doccomment">/// The number of peers in the network.
+    </span><span class="kw">pub </span>peer_count: usize,
+    <span class="doccomment">/// List of peers that don't have any neighbors.
+    </span><span class="kw">pub </span>peers_without_neighbors: Vec&lt;PI&gt;,
+    <span class="doccomment">/// Histograms of peer distribution metrics.
+    </span><span class="kw">pub </span>histograms: NetworkHistograms,
+}
+
+<span class="kw">impl</span>&lt;PI&gt; NetworkReport&lt;PI&gt; {
+    <span class="doccomment">/// Returns `true` if the network contains peers that have no active neighbors.
+    </span><span class="kw">pub fn </span>has_peers_with_no_neighbors(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
+        <span class="kw-2">*</span><span class="self">self</span>.histograms.active.get(<span class="kw-2">&amp;</span><span class="number">0</span>).unwrap_or(<span class="kw-2">&amp;</span><span class="number">0</span>) &gt; <span class="number">0
+    </span>}
+}
+
+<span class="kw">impl</span>&lt;PI&gt; fmt::Display <span class="kw">for </span>NetworkReport&lt;PI&gt; {
+    <span class="kw">fn </span>fmt(<span class="kw-2">&amp;</span><span class="self">self</span>, f: <span class="kw-2">&amp;mut </span>fmt::Formatter&lt;<span class="lifetime">'_</span>&gt;) -&gt; fmt::Result {
+        <span class="macro">writeln!</span>(f, <span class="string">"peers: {}\n{}"</span>, <span class="self">self</span>.peer_count, <span class="self">self</span>.histograms)<span class="question-mark">?</span>;
+        <span class="kw">if </span><span class="self">self</span>.peers_without_neighbors.is_empty() {
+            <span class="macro">writeln!</span>(f, <span class="string">"(all have neighbors)"</span>)
+        } <span class="kw">else </span>{
+            <span class="macro">writeln!</span>(
+                f,
+                <span class="string">"({} peers have no neighbors)"</span>,
+                <span class="self">self</span>.peers_without_neighbors.len()
+            )
+        }
+    }
 }
 
 <span class="kw">const </span>TOPIC: TopicId = TopicId::from_bytes([<span class="number">0u8</span>; <span class="number">32</span>]);
 
-<span class="doccomment">/// A simple simulator for the gossip protocol
+<span class="doccomment">/// A simulator for the gossip protocol
 </span><span class="attr">#[derive(Debug)]
 </span><span class="kw">pub struct </span>Simulator {
     <span class="doccomment">/// Configuration of the simulator.
@@ -1914,7 +2005,7 @@
     }
 
     <span class="doccomment">/// Removes `n` peers from the network.
-    </span><span class="kw">pub fn </span>kill(<span class="kw-2">&amp;mut </span><span class="self">self</span>, n: usize) {
+    </span><span class="kw">pub fn </span>remove_peers(<span class="kw-2">&amp;mut </span><span class="self">self</span>, n: usize) {
         <span class="kw">for </span>_i <span class="kw">in </span><span class="number">0</span>..n {
             <span class="kw">let </span>key = <span class="self">self</span>.random_peer();
             <span class="self">self</span>.network.remove(<span class="kw-2">&amp;</span>key);
@@ -1922,20 +2013,17 @@
     }
 
     <span class="doccomment">/// Returns a report on the current state of the network.
-    </span><span class="kw">pub fn </span>report_swarm(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; NetworkReport {
-        <span class="kw">let </span>stats = <span class="self">self</span>.network.state_stats();
-        <span class="kw">let </span>min_active_len = min(<span class="kw-2">&amp;</span>stats.active);
-        <span class="kw">let </span>max_active_len = max(<span class="kw-2">&amp;</span>stats.active);
-        <span class="kw">let </span>avg = avg(<span class="kw-2">&amp;</span>stats.active);
-        <span class="kw">let </span>len = <span class="self">self</span>.network.peers.len();
+    </span><span class="kw">pub fn </span>report(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; NetworkReport&lt;PeerId&gt; {
+        <span class="kw">let </span>report = <span class="self">self</span>.network.report();
+        <span class="kw">let </span>min_active_len = min(<span class="kw-2">&amp;</span>report.histograms.active);
+        <span class="kw">let </span>max_active_len = max(<span class="kw-2">&amp;</span>report.histograms.active);
+        <span class="kw">let </span>avg = avg(<span class="kw-2">&amp;</span>report.histograms.active);
+        <span class="kw">let </span>len = report.peer_count;
         <span class="macro">debug!</span>(
             <span class="string">"nodes {len} active: avg {avg:2.2} min {min_active_len} max {max_active_len} empty {}"</span>,
-            stats.empty.len()
+            report.peers_without_neighbors.len()
         );
-        NetworkReport {
-            min_active_len,
-            stats,
-        }
+        report
     }
 
     <span class="doccomment">/// Bootstraps the network.
@@ -1943,7 +2031,7 @@
     /// See [`BootstrapMode`] for details.
     ///
     /// Returns the [`NetworkReport`] after finishing the bootstrap.
-    </span><span class="kw">pub fn </span>bootstrap(<span class="kw-2">&amp;mut </span><span class="self">self</span>, bootstrap_mode: BootstrapMode) -&gt; NetworkReport {
+    </span><span class="kw">pub fn </span>bootstrap(<span class="kw-2">&amp;mut </span><span class="self">self</span>, bootstrap_mode: BootstrapMode) -&gt; NetworkReport&lt;PeerId&gt; {
         <span class="kw">let </span>span = <span class="macro">info_span!</span>(<span class="string">"bootstrap"</span>);
         <span class="kw">let </span>_guard = span.enter();
         <span class="macro">info!</span>(<span class="string">"bootstrap {bootstrap_mode:?}"</span>);
@@ -1975,8 +2063,8 @@
             }
         }
 
-        <span class="kw">let </span>report = <span class="self">self</span>.report_swarm();
-        <span class="kw">if </span>report.min_active_len == <span class="number">0 </span>{
+        <span class="kw">let </span>report = <span class="self">self</span>.report();
+        <span class="kw">if </span>report.has_peers_with_no_neighbors() {
             <span class="macro">warn!</span>(<span class="string">"failed to keep all nodes active after warmup: {report:?}"</span>);
         } <span class="kw">else </span>{
             <span class="macro">info!</span>(<span class="string">"bootstrap complete, all nodes active"</span>);
@@ -1984,17 +2072,14 @@
         report
     }
 
-    <span class="doccomment">/// Drops all queued events.
-    </span><span class="kw">pub fn </span>drop_events(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
-        <span class="kw">let _ </span>= <span class="self">self</span>.network.events();
-    }
-
     <span class="doccomment">/// Runs a round of gossiping.
     ///
     /// `messages` is a list of `(sender, message)` pairs. All messages will be sent simultaneously.
     /// The round will run until all peers received all messages, or until [`SimulatorConfig::gossip_round_timeout`]
     /// is elapsed.
-    </span><span class="kw">pub fn </span>gossip_round(<span class="kw-2">&amp;mut </span><span class="self">self</span>, messages: Vec&lt;(PeerId, Bytes)&gt;) {
+    ///
+    /// Returns the number of undelivered messages.
+    </span><span class="kw">pub fn </span>gossip_round(<span class="kw-2">&amp;mut </span><span class="self">self</span>, messages: Vec&lt;(PeerId, Bytes)&gt;) -&gt; usize {
         <span class="kw">let </span>span = <span class="macro">debug_span!</span>(<span class="string">"g"</span>, r = <span class="self">self</span>.round_stats.len());
         <span class="kw">let </span>_guard = span.enter();
         <span class="self">self</span>.reset_stats();
@@ -2042,6 +2127,7 @@
         }
         <span class="kw">let </span>elapsed = <span class="self">self</span>.network.time.duration_since(start);
         <span class="self">self</span>.report_gossip_round(expected_count, missing_count, elapsed);
+        missing_count
     }
 
     <span class="kw">fn </span>report_gossip_round(
@@ -2062,9 +2148,9 @@
             ldh: ldh <span class="kw">as </span>f32,
             missed: missed <span class="kw">as </span>f32,
         };
-        <span class="kw">let </span>network_stats = <span class="self">self</span>.network.state_stats();
+        <span class="kw">let </span>histograms = <span class="self">self</span>.network.report().histograms;
         <span class="macro">info!</span>(
-            <span class="string">"round {}: pay {} ctrl {} {round_stats} \n{network_stats}"</span>,
+            <span class="string">"round {}: pay {} ctrl {} {round_stats} \n{histograms}"</span>,
             <span class="self">self</span>.round_stats.len(),
             payloud_msg_count,
             ctrl_msg_count,
@@ -2073,7 +2159,7 @@
     }
 
     <span class="doccomment">/// Calculates the [`RoundStatsAvg`] of all gossip rounds.
-    </span><span class="kw">pub fn </span>report_round_average(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; RoundStatsAvg {
+    </span><span class="kw">pub fn </span>round_stats_average(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; RoundStatsAvg {
         RoundStats::avg(<span class="kw-2">&amp;</span><span class="self">self</span>.round_stats)
     }
 
