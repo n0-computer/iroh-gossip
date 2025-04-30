@@ -224,7 +224,7 @@ fn run_simulation(seeds: &[u64], scenario: ScenarioDescription) -> SimulationRes
         info!("start");
         let outcome = simulator.bootstrap(bootstrap);
 
-        if outcome.min_active_len == 0 {
+        if outcome.has_peers_with_no_neighbors() {
             warn!("not all nodes active after bootstrap: {outcome:?}");
         } else {
             info!("bootstrapped, all nodes active");
@@ -289,7 +289,7 @@ impl Scenario for BigSingle {
             let messages = vec![(from, message)];
             simulator.gossip_round(messages);
         }
-        simulator.report_round_average()
+        simulator.round_stats_average()
     }
 }
 
@@ -302,7 +302,7 @@ impl Scenario for BigMulti {
             let messages = vec![(from, message)];
             simulator.gossip_round(messages);
         }
-        simulator.report_round_average()
+        simulator.round_stats_average()
     }
 }
 
@@ -320,7 +320,7 @@ impl Scenario for BigAll {
             }
             simulator.gossip_round(messages);
         }
-        simulator.report_round_average()
+        simulator.round_stats_average()
     }
 }
 
