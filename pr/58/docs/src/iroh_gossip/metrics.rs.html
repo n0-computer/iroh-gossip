@@ -48,7 +48,7 @@
 </span><span class="kw">use </span>iroh_metrics::{Counter, MetricsGroup};
 
 <span class="doccomment">/// Enum of metrics for the module
-</span><span class="attr">#[derive(Debug, Clone, MetricsGroup)]
+</span><span class="attr">#[derive(Debug, Default, MetricsGroup)]
 #[metrics(name = <span class="string">"gossip"</span>)]
 </span><span class="kw">pub struct </span>Metrics {
     <span class="doccomment">/// Number of control messages sent

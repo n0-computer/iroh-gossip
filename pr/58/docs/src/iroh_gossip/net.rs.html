@@ -2297,7 +2297,7 @@
     }
 
     <span class="doccomment">/// Returns the metrics tracked for this gossip instance.
-    </span><span class="kw">pub fn </span>metrics(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>Metrics {
+    </span><span class="kw">pub fn </span>metrics(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>Arc&lt;Metrics&gt; {
         <span class="kw-2">&amp;</span><span class="self">self</span>.inner.metrics
     }
 }
