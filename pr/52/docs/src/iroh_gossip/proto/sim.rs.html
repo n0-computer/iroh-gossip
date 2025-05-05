@@ -1140,8 +1140,7 @@
 <a href="#1139" id="1139">1139</a>
 <a href="#1140" id="1140">1140</a>
 <a href="#1141" id="1141">1141</a>
-<a href="#1142" id="1142">1142</a>
-<a href="#1143" id="1143">1143</a></pre></div><pre class="rust"><code><span class="doccomment">//! Simulation framework for testing the protocol implementation
+<a href="#1142" id="1142">1142</a></pre></div><pre class="rust"><code><span class="doccomment">//! Simulation framework for testing the protocol implementation
 
 </span><span class="kw">use </span>std::{
     collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque},
@@ -2195,8 +2194,7 @@
 
     <span class="kw">fn </span>reset_stats(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
         <span class="kw">for </span>state <span class="kw">in </span><span class="self">self</span>.network.peers.values_mut() {
-            <span class="kw">let </span>state = state.state_mut(<span class="kw-2">&amp;</span>TOPIC).unwrap();
-            state.gossip.stats = Default::default();
+            state.reset_stats(<span class="kw-2">&amp;</span>TOPIC);
         }
     }
 
