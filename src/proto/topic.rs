@@ -227,9 +227,11 @@ impl<PI, R> State<PI, R> {
 impl<PI: PeerIdentity, R: Rng> State<PI, R> {
     /// Initialize the local state with a custom random number generator.
     pub fn with_rng(me: PI, me_data: Option<PeerData>, config: Config, rng: R) -> Self {
+        let max_payload_size =
+            config.max_message_size - super::Message::<PI>::postcard_header_size();
         Self {
             swarm: hyparview::State::new(me, me_data, config.membership, rng),
-            gossip: plumtree::State::new(me, config.broadcast),
+            gossip: plumtree::State::new(me, config.broadcast, max_payload_size),
             me,
             outbox: VecDeque::new(),
             stats: Stats::default(),

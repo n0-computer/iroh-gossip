@@ -15,7 +15,7 @@ use bytes::Bytes;
 use derive_more::{Add, From, Sub};
 use n0_future::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::{
     util::{idbytes_impls, TimeBoundCache},
@@ -206,9 +206,19 @@ impl Gossip {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct IHave {
     /// Id of the message.
-    id: MessageId,
+    pub(crate) id: MessageId,
     /// Delivery round of the message.
-    round: Round,
+    pub(crate) round: Round,
+}
+
+impl IHave {
+    pub(crate) fn postcard_encoded_size() -> usize {
+        postcard::experimental::serialized_size(&Self {
+            id: MessageId([1u8; 32]),
+            round: Round(u16::MAX),
+        })
+        .unwrap()
+    }
 }
 
 /// Control message to signal a peer that they have been moved to the eager set, and to ask the
@@ -363,11 +373,13 @@ pub struct State<PI> {
 
     /// [`Stats`] of this plumtree.
     pub(crate) stats: Stats,
+
+    max_message_size: usize,
 }
 
 impl<PI: PeerIdentity> State<PI> {
     /// Initialize the [`State`] of a plumtree.
-    pub fn new(me: PI, config: Config) -> Self {
+    pub fn new(me: PI, config: Config, max_message_size: usize) -> Self {
         Self {
             me,
             eager_push_peers: Default::default(),
@@ -381,6 +393,7 @@ impl<PI: PeerIdentity> State<PI> {
             cache: Default::default(),
             init: false,
             stats: Default::default(),
+            max_message_size,
         }
     }
 
@@ -427,8 +440,16 @@ impl<PI: PeerIdentity> State<PI> {
 
     /// Dispatches messages from lazy queue over to lazy peers.
     fn on_dispatch_timer(&mut self, io: &mut impl IO<PI>) {
-        for (peer, list) in self.lazy_push_queue.drain() {
-            io.push(OutEvent::SendMessage(peer, Message::IHave(list)));
+        let chunk_size = self.max_message_size
+            // Space for discriminator
+            - 1
+            // Space for length prefix
+            - 2;
+        let chunk_len = chunk_size / IHave::postcard_encoded_size();
+        while let Some((peer, list)) = self.lazy_push_queue.pop_first() {
+            for chunk in list.chunks(chunk_len) {
+                io.push(OutEvent::SendMessage(peer, Message::IHave(chunk.to_vec())));
+            }
         }
 
         self.dispatch_timer_scheduled = false;
@@ -625,6 +646,8 @@ impl<PI: PeerIdentity> State<PI> {
                     sender,
                     Message::Gossip(message.clone()),
                 ));
+            } else {
+                debug!(?id, peer=?sender, "on_graft failed to graft: message not in cache");
             }
         }
     }
@@ -710,7 +733,7 @@ mod test {
     fn optimize_tree() {
         let mut io = VecDeque::new();
         let config: Config = Default::default();
-        let mut state = State::new(1, config.clone());
+        let mut state = State::new(1, config.clone(), 1024);
         let now = Instant::now();
 
         // we receive an IHave message from peer 2
@@ -808,7 +831,7 @@ mod test {
     #[test]
     fn spoofed_messages_are_ignored() {
         let config: Config = Default::default();
-        let mut state = State::new(1, config.clone());
+        let mut state = State::new(1, config.clone(), 1024);
         let now = Instant::now();
 
         // we recv a correct gossip message and expect the Received event to be emitted
@@ -855,7 +878,7 @@ mod test {
     #[test]
     fn cache_is_evicted() {
         let config: Config = Default::default();
-        let mut state = State::new(1, config.clone());
+        let mut state = State::new(1, config.clone(), 1024);
         let now = Instant::now();
         let content: Bytes = b"hello1".to_vec().into();
         let message = Message::Gossip(Gossip {
