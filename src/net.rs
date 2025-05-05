@@ -26,7 +26,7 @@ use n0_future::{
 use rand::rngs::StdRng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, error_span, trace, warn, Instrument};
 
@@ -160,6 +160,15 @@ impl ProtocolHandler for Gossip {
         Box::pin(async move {
             inner.handle_connection(conn).await?;
             Ok(())
+        })
+    }
+
+    fn shutdown(&self) -> BoxFuture<()> {
+        let this = self.clone();
+        Box::pin(async move {
+            if let Err(err) = this.shutdown().await {
+                warn!("error while shutting down gossip: {err:#}");
+            }
         })
     }
 }
@@ -323,6 +332,17 @@ impl Gossip {
     pub fn metrics(&self) -> &Arc<Metrics> {
         &self.inner.metrics
     }
+
+    /// Shutdown the gossip instance.
+    ///
+    /// This leaves all topics, sending `Disconnect` messages to peers, and then
+    /// stops the gossip actor loop and drops all state and connections.
+    pub async fn shutdown(&self) -> anyhow::Result<()> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.inner.send(ToActor::Shutdown { reply }).await?;
+        reply_rx.await?;
+        Ok(())
+    }
 }
 
 impl Inner {
@@ -457,6 +477,9 @@ enum ToActor {
         topic: TopicId,
         receiver_id: ReceiverId,
     },
+    Shutdown {
+        reply: oneshot::Sender<()>,
+    },
 }
 
 /// Actor that sends and handles messages between the connection and main state loops
@@ -590,7 +613,17 @@ impl Actor {
                 trace!(?i, "tick: to_actor_rx");
                 self.metrics.actor_tick_rx.inc();
                 match msg {
-                    Some(msg) => self.handle_to_actor_msg(msg, Instant::now()).await?,
+                    Some(ToActor::Shutdown { reply }) => {
+                        debug!("received shutdown message, quit all topics");
+                        self.quit_queue.extend(self.topics.keys().copied());
+                        self.process_quit_queue().await.ok();
+                        debug!("all topics quit, stop gossip actor");
+                        reply.send(()).ok();
+                        return Ok(None)
+                    },
+                    Some(msg) => {
+                        self.handle_to_actor_msg(msg, Instant::now()).await?;
+                    }
                     None => {
                         debug!("all gossip handles dropped, stop gossip actor");
                         return Ok(None)
@@ -818,6 +851,7 @@ impl Actor {
             ToActor::ReceiverGone { topic, receiver_id } => {
                 self.handle_receiver_gone(topic, receiver_id).await?;
             }
+            ToActor::Shutdown { .. } => unreachable!("handled in main loop"),
         }
         Ok(())
     }
