@@ -349,7 +349,9 @@
 <a href="#348" id="348">348</a>
 <a href="#349" id="349">349</a>
 <a href="#350" id="350">350</a>
-<a href="#351" id="351">351</a></pre></div><pre class="rust"><code><span class="doccomment">//! This module contains the implementation of the gossiping protocol for an individual topic
+<a href="#351" id="351">351</a>
+<a href="#352" id="352">352</a>
+<a href="#353" id="353">353</a></pre></div><pre class="rust"><code><span class="doccomment">//! This module contains the implementation of the gossiping protocol for an individual topic
 
 </span><span class="kw">use </span>std::collections::VecDeque;
 
@@ -579,9 +581,11 @@
 <span class="kw">impl</span>&lt;PI: PeerIdentity, R: Rng&gt; State&lt;PI, R&gt; {
     <span class="doccomment">/// Initialize the local state with a custom random number generator.
     </span><span class="kw">pub fn </span>with_rng(me: PI, me_data: <span class="prelude-ty">Option</span>&lt;PeerData&gt;, config: Config, rng: R) -&gt; <span class="self">Self </span>{
+        <span class="kw">let </span>max_payload_size =
+            config.max_message_size - <span class="kw">super</span>::Message::&lt;PI&gt;::postcard_header_size();
         <span class="self">Self </span>{
             swarm: hyparview::State::new(me, me_data, config.membership, rng),
-            gossip: plumtree::State::new(me, config.broadcast),
+            gossip: plumtree::State::new(me, config.broadcast, max_payload_size),
             me,
             outbox: VecDeque::new(),
             stats: Stats::default(),
