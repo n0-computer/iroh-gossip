@@ -1130,7 +1130,18 @@
 <a href="#1129" id="1129">1129</a>
 <a href="#1130" id="1130">1130</a>
 <a href="#1131" id="1131">1131</a>
-<a href="#1132" id="1132">1132</a></pre></div><pre class="rust"><code><span class="doccomment">//! Simulation framework for testing the protocol implementation
+<a href="#1132" id="1132">1132</a>
+<a href="#1133" id="1133">1133</a>
+<a href="#1134" id="1134">1134</a>
+<a href="#1135" id="1135">1135</a>
+<a href="#1136" id="1136">1136</a>
+<a href="#1137" id="1137">1137</a>
+<a href="#1138" id="1138">1138</a>
+<a href="#1139" id="1139">1139</a>
+<a href="#1140" id="1140">1140</a>
+<a href="#1141" id="1141">1141</a>
+<a href="#1142" id="1142">1142</a>
+<a href="#1143" id="1143">1143</a></pre></div><pre class="rust"><code><span class="doccomment">//! Simulation framework for testing the protocol implementation
 
 </span><span class="kw">use </span>std::{
     collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque},
@@ -1149,6 +1160,7 @@
 <span class="kw">use super</span>::{Command, Config, Event, InEvent, OutEvent, PeerIdentity, State, TopicId};
 <span class="kw">use </span><span class="kw">crate</span>::proto::{PeerData, Scope};
 
+<span class="kw">const </span>DEFAULT_LATENCY_STATIC: Duration = Duration::from_millis(<span class="number">50</span>);
 <span class="kw">const </span>DEFAULT_LATENCY_MIN: Duration = Duration::from_millis(<span class="number">10</span>);
 <span class="kw">const </span>DEFAULT_LATENCY_MAX: Duration = Duration::from_millis(<span class="number">100</span>);
 
@@ -1179,7 +1191,7 @@
     <span class="doccomment">/// Use the same latency, always.
     </span>Static(<span class="attr">#[serde(with = <span class="string">"humantime_serde"</span>)] </span>Duration),
     <span class="doccomment">/// Chose a random latency for each connection within the specified bounds.
-    </span>Random {
+    </span>Dynamic {
         <span class="doccomment">/// The lower bound for the latency between two peers.
         </span><span class="attr">#[serde(with = <span class="string">"humantime_serde"</span>)]
         </span>min: Duration,
@@ -1190,9 +1202,22 @@
 }
 
 <span class="kw">impl </span>LatencyConfig {
+    <span class="doccomment">/// Returns a default latency config with a static latency.
+    </span><span class="kw">pub fn </span>default_static() -&gt; <span class="self">Self </span>{
+        <span class="self">Self</span>::Static(DEFAULT_LATENCY_STATIC)
+    }
+
+    <span class="doccomment">/// Returns a default latency config with a dynamic latency.
+    </span><span class="kw">pub fn </span>default_dynamic() -&gt; <span class="self">Self </span>{
+        <span class="self">Self</span>::Dynamic {
+            min: DEFAULT_LATENCY_MIN,
+            max: DEFAULT_LATENCY_MAX,
+        }
+    }
+
     <span class="doccomment">/// Creates a new latency config with the provided min and max values in milliseconds.
     </span><span class="kw">pub fn </span>random_ms(min: u64, max: u64) -&gt; <span class="self">Self </span>{
-        <span class="self">Self</span>::Random {
+        <span class="self">Self</span>::Dynamic {
             min: Duration::from_millis(min),
             max: Duration::from_millis(max),
         }
@@ -1202,7 +1227,7 @@
     </span><span class="kw">pub fn </span>max(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Duration {
         <span class="kw">match </span><span class="self">self </span>{
             <span class="self">Self</span>::Static(dur) =&gt; <span class="kw-2">*</span>dur,
-            <span class="self">Self</span>::Random { max, .. } =&gt; <span class="kw-2">*</span>max,
+            <span class="self">Self</span>::Dynamic { max, .. } =&gt; <span class="kw-2">*</span>max,
         }
     }
 
@@ -1211,17 +1236,14 @@
         <span class="kw">match </span><span class="self">self </span>{
             <span class="self">Self</span>::Static(d) =&gt; <span class="kw-2">*</span>d,
             <span class="comment">// TODO(frando): use uniform distribution?
-            </span><span class="self">Self</span>::Random { min, max } =&gt; rng.gen_range(<span class="kw-2">*</span>min..<span class="kw-2">*</span>max),
+            </span><span class="self">Self</span>::Dynamic { min, max } =&gt; rng.gen_range(<span class="kw-2">*</span>min..<span class="kw-2">*</span>max),
         }
     }
 }
 
 <span class="kw">impl </span>Default <span class="kw">for </span>LatencyConfig {
     <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
-        <span class="self">Self</span>::Random {
-            min: DEFAULT_LATENCY_MIN,
-            max: DEFAULT_LATENCY_MAX,
-        }
+        <span class="self">Self</span>::default_dynamic()
     }
 }
 
