@@ -512,6 +512,7 @@ where
         for node in message.nodes {
             self.add_passive(node.id, node.data, io);
         }
+        self.refill_active_from_passive(&[], io);
     }
 
     fn handle_shuffle_timer(&mut self, io: &mut impl IO<PI>) {
@@ -530,6 +531,11 @@ where
                 .iter()
                 .chain(passive.iter())
                 .map(|id| self.peer_info(id));
+            let me = PeerInfo {
+                id: self.me,
+                data: self.me_data.clone(),
+            };
+            let nodes = nodes.chain([me]);
             let message = Shuffle {
                 origin: self.me,
                 nodes: nodes.collect(),
