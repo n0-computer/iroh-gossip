@@ -446,7 +446,7 @@ impl<PI: PeerIdentity> State<PI> {
             // Space for length prefix
             - 2;
         let chunk_len = chunk_size / IHave::postcard_encoded_size();
-        while let Some((peer, list)) = self.lazy_push_queue.pop_first() {
+        for (peer, list) in self.lazy_push_queue.drain() {
             for chunk in list.chunks(chunk_len) {
                 io.push(OutEvent::SendMessage(peer, Message::IHave(chunk.to_vec())));
             }
