@@ -27,14 +27,26 @@ idbytes_impls!(TopicId, "TopicId");
 /// This is the wire frame of the `iroh-gossip` protocol.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Message<PI> {
-    topic: TopicId,
-    message: topic::Message<PI>,
+    pub(crate) topic: TopicId,
+    pub(crate) message: topic::Message<PI>,
 }
 
 impl<PI> Message<PI> {
     /// Get the kind of this message
     pub fn kind(&self) -> MessageKind {
         self.message.kind()
+    }
+}
+
+impl<PI: Serialize> Message<PI> {
+    pub(crate) fn postcard_header_size() -> usize {
+        // We create a message that has no payload (gossip::Message::Prune), calculate the encoded size,
+        // and subtract 1 for the discriminator of the inner gossip::Message enum.
+        let m = Self {
+            topic: TopicId(Default::default()),
+            message: topic::Message::<PI>::Gossip(super::plumtree::Message::Prune),
+        };
+        postcard::experimental::serialized_size(&m).unwrap() - 1
     }
 }
 
