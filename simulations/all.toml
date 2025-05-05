@@ -1,5 +1,5 @@
 seeds = [0, 1, 212312388123, 123]
-config.latency.random = { min = "10ms", max = "50ms" }
+config.latency.dynamic = { min = "10ms", max = "50ms" }
 
 [[scenario]]
 sim = "GossipSingle"
