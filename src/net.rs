@@ -1348,6 +1348,7 @@ impl Dialer {
 mod test {
     use std::time::Duration;
 
+    use anyhow::{anyhow, bail};
     use bytes::Bytes;
     use futures_concurrency::future::TryJoin;
     use iroh::{protocol::Router, RelayMap, RelayMode, SecretKey};
@@ -2016,20 +2017,32 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    // #[traced_test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn gossip_net_big() -> TestResult {
-        tracing_subscriber::fmt::try_init().ok();
         let mut rng = rand_chacha::ChaCha12Rng::seed_from_u64(1);
         let (relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
         let dns = iroh::test_utils::DnsPkarrServer::run().await?;
 
-        let node_count = std::env::var("NODE_COUNT")
-            .map(|x| x.parse().unwrap())
-            .unwrap_or(10);
-        let message_count = std::env::var("MESSAGE_COUNT")
+        let node_count: usize = std::env::var("NODE_COUNT")
             .map(|x| x.parse().unwrap())
             .unwrap_or(100);
+        let message_count: usize = std::env::var("MESSAGE_COUNT")
+            .map(|x| x.parse().unwrap())
+            .unwrap_or(2);
+
+        let warmup_sleep_s = std::env::var("WARMUP_SLEEP")
+            .map(|x| x.parse().unwrap())
+            .unwrap_or(1);
+
+        let send_interval_ms = std::env::var("SEND_INTERVAL")
+            .map(|x| x.parse().unwrap())
+            .unwrap_or(50);
+
+        let timeout_ms = std::env::var("TIMEOUT")
+            .map(|x| x.parse().unwrap())
+            .unwrap_or(10000);
+        let timeout = Duration::from_millis(timeout_ms);
+        info!("recv timeout: {timeout:?}");
 
         // spawn
         info!("spawn {node_count} nodes");
@@ -2051,8 +2064,7 @@ mod test {
                 let gossip = Gossip::builder().spawn(endpoint.clone()).await?;
                 let router = Router::builder(endpoint)
                     .accept(GOSSIP_ALPN, gossip.clone())
-                    .spawn()
-                    .await?;
+                    .spawn();
                 anyhow::Ok((router, gossip))
             })
         }));
@@ -2074,86 +2086,187 @@ mod test {
         let bootstrap_node = routers[0].endpoint().node_id();
 
         let mut senders = vec![];
-        let mut receivers = FuturesUnordered::new();
 
+        let bootstrap_count = node_count.min(10).max(node_count / 50);
+        info!("start with {bootstrap_count} bootstrap nodes");
+        let mut joining = FuturesUnordered::new();
         #[allow(clippy::needless_range_loop)]
-        for i in 0..node_count {
+        for i in 0..bootstrap_count {
             let bootstrap = if i == 0 { vec![] } else { vec![bootstrap_node] };
             let (sender, mut receiver) = gossips[i].subscribe(topic_id, bootstrap)?.split();
-            senders.push(sender);
-            receivers.push(async move {
-                receiver.joined().await?;
-                Ok(receiver)
-            });
+            let endpoint = routers[i].endpoint().clone();
+            senders.push((sender, endpoint.node_id()));
+            joining.push(
+                async move {
+                    receiver.joined().await?;
+                    Ok((receiver, endpoint))
+                }
+                .boxed(),
+            );
         }
 
-        let receivers: anyhow::Result<Vec<GossipReceiver>> = receivers.try_collect().await;
-        let receivers = receivers.context("failed to join all nodes")?;
-        info!("all joined");
+        let joined: anyhow::Result<Vec<_>> = joining.try_collect().await;
+        let mut receivers = joined.context("failed to join all nodes")?;
+        info!("bootstrap nodes joined");
 
-        let sleep_seconds = std::env::var("WARMUP_SLEEP")
-            .map(|x| x.parse().unwrap())
-            .unwrap_or(1);
-        info!("sleep {sleep_seconds}s for swarm to stabilize");
-        tokio::time::sleep(Duration::from_secs(sleep_seconds)).await;
+        info!("sleep {warmup_sleep_s}s for swarm to stabilize");
+        tokio::time::sleep(Duration::from_secs(warmup_sleep_s)).await;
 
-        let send_interval_ms = std::env::var("SEND_INTERVAL")
-            .map(|x| x.parse().unwrap())
-            .unwrap_or(5);
+        info!("join {} remaining nodes", node_count - bootstrap_count);
+        let chunks = node_count / bootstrap_count;
+        for chunk in 1..chunks {
+            let mut joining = FuturesUnordered::new();
+            #[allow(clippy::needless_range_loop)]
+            for j in 0..bootstrap_count {
+                let i = (chunk * bootstrap_count) + j;
+                if i >= node_count {
+                    break;
+                }
+                let bootstrap = vec![routers[i % bootstrap_count].endpoint().node_id()];
+                let (sender, mut receiver) = gossips[i].subscribe(topic_id, bootstrap)?.split();
+                let endpoint = routers[i].endpoint().clone();
+                senders.push((sender, endpoint.node_id()));
+                joining.push(
+                    async move {
+                        receiver.joined().await?;
+                        Ok((receiver, endpoint))
+                    }
+                    .boxed(),
+                );
+            }
+
+            let joined: anyhow::Result<Vec<_>> = joining.try_collect().await;
+            receivers.extend(joined.context("failed to join all nodes")?);
+            info!("joined chunk {chunk} of {chunks} with {bootstrap_count}");
+        }
+
+        info!("sleep {warmup_sleep_s}s for swarm to stabilize");
+        tokio::time::sleep(Duration::from_secs(warmup_sleep_s)).await;
 
         info!("sending & receiving {message_count} messages on each node");
         // spawn send tasks
-        let sending = senders.into_iter().enumerate().map(|(i, sender)| {
+        let sending = senders.into_iter().enumerate().map(|(i, (sender, me))| {
             task(async move {
                 for j in 0..message_count {
-                    let message = format!("{i}:{j}");
+                    let message = format!("{}:{}", me.fmt_short(), j);
                     let message: Bytes = message.as_bytes().to_vec().into();
                     sender.broadcast(message).await?;
-                    if j % (message_count / 10.min(message_count)) == 0 {
-                        info!("{i}: sent {j} of {message_count}") //     // #[tokio::test]
-                    }
                     tokio::time::sleep(Duration::from_millis(send_interval_ms)).await
                 }
-                info!("{i}: sent all");
-                anyhow::Ok(())
+                debug!("{i}: sent all");
+                anyhow::Ok((me, sender))
             })
         });
         let sending = FuturesUnordered::from_iter(sending);
+
+        let all_messages: BTreeSet<Bytes> = routers
+            .iter()
+            .map(|r| r.endpoint().node_id())
+            .flat_map(|node_id| {
+                (0..message_count)
+                    .map(move |i| format!("{}:{}", node_id.fmt_short(), i).into_bytes().into())
+            })
+            .collect();
+        let all_messages = Arc::new(all_messages);
+
+        // closure to create a set of expected messages at a peer
+        let expected = move |all_messages: &BTreeSet<Bytes>, me: NodeId| -> BTreeSet<Bytes> {
+            let me = me.fmt_short();
+            all_messages
+                .iter()
+                .filter(|m| !m.starts_with(me.as_bytes()))
+                .cloned()
+                .collect()
+        };
+
         // spawn recv tasks
-        let receiving = receivers.into_iter().enumerate().map(|(i, mut receiver)| {
+        let receiving = receivers.into_iter().map(|(mut receiver, endpoint)| {
+            let all_messages = Arc::clone(&all_messages);
+            let me = endpoint.node_id();
             task(async move {
-                let total = message_count * (node_count - 1);
-                let mut received = 0;
-                while let Some(event) = receiver.try_next().await? {
-                    if let Event::Gossip(GossipEvent::Received(_message)) = event {
-                        received += 1;
-                        if received % ((message_count / 10.min(message_count)) * node_count) == 0 {
-                            info!("{i}: received {received} of {total}");
+                let mut missing = expected(&all_messages, endpoint.node_id());
+                let timeout = tokio::time::sleep(timeout);
+                tokio::pin!(timeout);
+                let res = loop {
+                    let event = tokio::select! {
+                        res = receiver.next() => {
+                            match res {
+                                None => break Err(anyhow!("receiver closed")),
+                                Some(Err(err)) => break Err(err.into()),
+                                Some(Ok(event)) => event,
+                            }
+                        },
+                        _ = &mut timeout => break Err(anyhow!("timeout"))
+                    };
+                    if let Event::Gossip(GossipEvent::Received(message)) = event {
+                        if !missing.remove(&message.content) {
+                            break Err(anyhow!(
+                                "duplicate message: {:?} delivered from {}",
+                                String::from_utf8_lossy(&message.content),
+                                message.delivered_from.fmt_short()
+                            ));
                         }
-                        if received == total {
-                            info!("{i}: received all");
-                            break;
+                        if missing.is_empty() {
+                            break Ok(());
                         }
                     }
-                }
-                anyhow::Ok(receiver)
+                };
+                (receiver, missing, res)
             })
+            .map(move |res| (me, res))
         });
-        let receiving = FuturesUnordered::from_iter(receiving);
+        let mut receiving = FuturesUnordered::from_iter(receiving);
 
-        let count_send = async move {
-            let res: Vec<_> = sending.try_collect().await?;
-            anyhow::Ok(res.len())
+        let senders_fut = async move {
+            let senders: Vec<_> = sending.try_collect().await?;
+            anyhow::Ok(senders)
         };
-        let count_recv = async move {
-            let res: Vec<_> = receiving.try_collect().await?;
-            anyhow::Ok(res.len())
-        };
+        let expected_count = message_count * (node_count - 1);
+        let receivers_fut = task(async move {
+            let mut failed = 0;
+            let mut missing_total = 0;
+            let mut receivers = vec![];
+            while let Some(res) = receiving.next().await {
+                let (node_id, (receiver, missing, res)) = res;
+                receivers.push(receiver);
+                match res {
+                    Err(err) => {
+                        missing_total += missing.len();
+                        failed += 1;
+                        warn!(me=%node_id.fmt_short(), ?missing, "recv task failed: {err:#}");
+                        for m in missing {
+                            let hash = blake3::hash(&m);
+                            warn!(me=%node_id.fmt_short(), ?hash, "missing");
+                        }
+                    }
+                    Ok(()) => {
+                        assert!(missing.is_empty());
+                    }
+                }
+            }
+            if failed > 0 {
+                bail!("Receive side failed: {failed} nodes together missed {missing_total} messages of {expected_count}");
+            } else {
+                Ok(receivers)
+            }
+        });
 
-        let (count_send, count_recv) = (count_send, count_recv).try_join().await?;
+        let (senders, receivers) = (senders_fut, receivers_fut).try_join().await?;
         info!("all done");
-        assert_eq!(count_send, node_count);
-        assert_eq!(count_recv, node_count);
+        assert_eq!(senders.len(), node_count);
+        assert_eq!(receivers.len(), node_count);
+        drop(senders);
+        drop(receivers);
+        let _ = FuturesUnordered::from_iter(gossips.iter().map(|gossip| gossip.shutdown()))
+            .count()
+            .await;
+        let mut shutdown =
+            FuturesUnordered::from_iter(routers.into_iter().map(|router| async move {
+                (router.endpoint().node_id(), router.shutdown().await)
+            }));
+        while let Some((node_id, res)) = shutdown.next().await {
+            res.with_context(|| format!("shutdown failed for {}", node_id.fmt_short()))?;
+        }
 
         Ok(())
     }
