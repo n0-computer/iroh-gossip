@@ -1347,7 +1347,7 @@
             </span><span class="comment">// Space for length prefix
             </span>- <span class="number">2</span>;
         <span class="kw">let </span>chunk_len = chunk_size / IHave::postcard_encoded_size();
-        <span class="kw">while let </span><span class="prelude-val">Some</span>((peer, list)) = <span class="self">self</span>.lazy_push_queue.pop_first() {
+        <span class="kw">for </span>(peer, list) <span class="kw">in </span><span class="self">self</span>.lazy_push_queue.drain() {
             <span class="kw">for </span>chunk <span class="kw">in </span>list.chunks(chunk_len) {
                 io.push(OutEvent::SendMessage(peer, Message::IHave(chunk.to_vec())));
             }
