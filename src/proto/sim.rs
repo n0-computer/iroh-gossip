@@ -1052,8 +1052,7 @@ impl Simulator {
 
     fn reset_stats(&mut self) {
         for state in self.network.peers.values_mut() {
-            let state = state.state_mut(&TOPIC).unwrap();
-            state.gossip.stats = Default::default();
+            state.reset_stats(&TOPIC);
         }
     }
 
