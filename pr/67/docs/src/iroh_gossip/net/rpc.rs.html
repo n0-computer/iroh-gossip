@@ -100,43 +100,16 @@
 <a href="#99" id="99">99</a>
 <a href="#100" id="100">100</a>
 <a href="#101" id="101">101</a>
-<a href="#102" id="102">102</a>
-<a href="#103" id="103">103</a>
-<a href="#104" id="104">104</a>
-<a href="#105" id="105">105</a>
-<a href="#106" id="106">106</a>
-<a href="#107" id="107">107</a>
-<a href="#108" id="108">108</a>
-<a href="#109" id="109">109</a>
-<a href="#110" id="110">110</a>
-<a href="#111" id="111">111</a>
-<a href="#112" id="112">112</a>
-<a href="#113" id="113">113</a>
-<a href="#114" id="114">114</a>
-<a href="#115" id="115">115</a>
-<a href="#116" id="116">116</a>
-<a href="#117" id="117">117</a>
-<a href="#118" id="118">118</a>
-<a href="#119" id="119">119</a>
-<a href="#120" id="120">120</a>
-<a href="#121" id="121">121</a>
-<a href="#122" id="122">122</a>
-<a href="#123" id="123">123</a>
-<a href="#124" id="124">124</a>
-<a href="#125" id="125">125</a>
-<a href="#126" id="126">126</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::collections::BTreeSet;
+<a href="#102" id="102">102</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::collections::BTreeSet;
 
 <span class="kw">use </span>iroh::NodeId;
-<span class="kw">use </span>irpc::{
-    channel::{oneshot, spsc},
-    Client, LocalSender,
-};
+<span class="kw">use </span>irpc::{channel::spsc, Client, LocalSender};
 <span class="kw">use </span>irpc_derive::rpc_requests;
 <span class="kw">use </span>serde::{Deserialize, Serialize};
 
 <span class="kw">use </span><span class="kw">crate</span>::proto::TopicId;
 
-<span class="kw">use super</span>::{Command, Error, GossipTopic, JoinOptions, ReceiverId};
+<span class="kw">use super</span>::{Command, Error, Event, GossipTopic, JoinOptions, ReceiverId};
 
 <span class="attr">#[derive(Debug, Clone, Copy)]
 </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">struct </span>Service;
@@ -147,13 +120,8 @@
 </span><span class="attr">#[rpc_requests(Service, message = Message)]
 #[derive(Debug, Serialize, Deserialize)]
 </span><span class="kw">pub enum </span>Protocol {
-    <span class="doccomment">/// Handle a new QUIC connection, either from accept (external to the actor) or from connect
-    /// (happens internally in the actor).
-    </span><span class="comment">// HandleConnection(PublicKey, ConnOrigin, #[debug("Connection")] Connection),
-    </span><span class="attr">#[rpc(tx=spsc::Sender&lt;TopicEvent&gt;, rx=spsc::Receiver&lt;TopicUpdate&gt;)]
+    <span class="attr">#[rpc(tx=spsc::Sender&lt;Event&gt;, rx=spsc::Receiver&lt;Command&gt;)]
     </span>Join(JoinRequest),
-    <span class="attr">#[rpc(tx=oneshot::Sender&lt;()&gt;)]
-    </span>ReceiverDropped(DropRequest),
 }
 
 <span class="attr">#[derive(Debug, Serialize, Deserialize)]
@@ -162,22 +130,7 @@
     <span class="kw">pub </span>bootstrap: BTreeSet&lt;NodeId&gt;,
 }
 
-<span class="comment">// #[derive(Debug, Serialize, Deserialize)]
-// pub struct ChannelId(u32);
-
-// pub struct JoinResponse {
-//     ch: ChannelId
-// }
-
-</span><span class="kw">pub type </span>TopicUpdate = Command;
-<span class="kw">pub type </span>TopicEvent = <span class="kw">super</span>::Event;
-<span class="comment">// #[derive(Debug, Serialize, Deserialize)]
-// pub struct TopicUpdate;
-
-// #[derive(Debug, Serialize, Deserialize)]
-// pub struct TopicEvent;
-
-</span><span class="attr">#[derive(Debug, Serialize, Deserialize)]
+<span class="attr">#[derive(Debug, Serialize, Deserialize)]
 </span><span class="kw">pub struct </span>DropRequest {
     topic: TopicId,
     receiver_id: ReceiverId,
@@ -195,6 +148,7 @@
             inner: local.into(),
         }
     }
+
     <span class="doccomment">/// Join a gossip topic with options.
     ///
     /// Returns a [`GossipTopic`] instantly. To wait for at least one connection to be established,
@@ -216,11 +170,7 @@
             .bidi_streaming(req, <span class="number">16</span>, opts.subscription_capacity)
             .<span class="kw">await</span><span class="question-mark">?</span>;
         <span class="prelude-val">Ok</span>(GossipTopic::new(tx, rx))
-        <span class="comment">// let (command_tx, command_rx) = async_channel::bounded(TOPIC_COMMANDS_DEFAULT_CAP);
-        // let command_rx: CommandStream = Box::pin(command_rx);
-        // let event_rx = self.subscribe_with_stream(topic_id, opts, command_rx);
-        // GossipTopic::new(command_tx, event_rx)
-    </span>}
+    }
 
     <span class="doccomment">/// Join a gossip topic with the default options and wait for at least one active connection.
     </span><span class="kw">pub async fn </span>subscribe_and_join(
@@ -237,7 +187,9 @@
 
     <span class="doccomment">/// Join a gossip topic with the default options.
     ///
-    /// Note that this will not wait for any bootstrap node to be available. To ensure the topic is connected to at least one node, use [`GossipTopic::joined`] or [`Gossip::subscribe_and_join`]
+    /// Note that this will not wait for any bootstrap node to be available.
+    /// To ensure the topic is connected to at least one node, use [`GossipTopic::joined`]
+    /// or [`Gossip::subscribe_and_join`]
     </span><span class="kw">pub async fn </span>subscribe(
         <span class="kw-2">&amp;</span><span class="self">self</span>,
         topic_id: TopicId,
