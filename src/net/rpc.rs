@@ -5,9 +5,8 @@ use irpc::{channel::spsc, Client, LocalSender};
 use irpc_derive::rpc_requests;
 use serde::{Deserialize, Serialize};
 
+use super::{Command, Error, Event, GossipTopic, JoinOptions, ReceiverId, TOPIC_COMMANDS_CAP};
 use crate::proto::TopicId;
-
-use super::{Command, Error, Event, GossipTopic, JoinOptions, ReceiverId};
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Service;
@@ -65,7 +64,7 @@ impl GossipApi {
         };
         let (tx, rx) = self
             .inner
-            .bidi_streaming(req, 16, opts.subscription_capacity)
+            .bidi_streaming(req, TOPIC_COMMANDS_CAP, opts.subscription_capacity)
             .await?;
         Ok(GossipTopic::new(tx, rx))
     }
