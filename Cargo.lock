@@ -1904,6 +1904,8 @@ dependencies = [
  "iroh",
  "iroh-blake3",
  "iroh-metrics",
+ "irpc",
+ "irpc-derive",
  "n0-future",
  "nested_enum_utils 0.1.0",
  "postcard",
@@ -2074,6 +2076,37 @@ dependencies = [
  "webpki-roots 0.26.11",
  "ws_stream_wasm",
  "z32",
+]
+
+[[package]]
+name = "irpc"
+version = "0.2.3"
+dependencies = [
+ "anyhow",
+ "futures-buffered",
+ "futures-util",
+ "iroh-quinn",
+ "n0-future",
+ "postcard",
+ "rcgen",
+ "rustls",
+ "serde",
+ "smallvec",
+ "thiserror 2.0.12",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "irpc-derive"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4baf7b0393dd59148aa229f4edae1ada439bd2b67e979233c5c678ec381f3c56"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
 ]
 
 [[package]]

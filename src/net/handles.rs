@@ -5,41 +5,50 @@
 use std::{
     collections::{BTreeSet, HashSet},
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 
 use bytes::Bytes;
 use futures_lite::{Stream, StreamExt};
 use iroh::NodeId;
+use irpc::channel::spsc;
+use n0_future::TryStreamExt;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 
-use super::{Error, EventStream};
+use super::Error;
 use crate::{net::TOPIC_EVENTS_DEFAULT_CAP, proto::DeliveryScope};
 
 /// Sender for a gossip topic.
 #[derive(Debug, Clone)]
-pub struct GossipSender(async_channel::Sender<Command>);
+pub struct GossipSender(Arc<Mutex<spsc::Sender<Command>>>);
 
 impl GossipSender {
-    pub(crate) fn new(sender: async_channel::Sender<Command>) -> Self {
-        Self(sender)
+    pub(crate) fn new(sender: spsc::Sender<Command>) -> Self {
+        Self(Arc::new(Mutex::new(sender)))
     }
 
     /// Broadcast a message to all nodes.
     pub async fn broadcast(&self, message: Bytes) -> Result<(), Error> {
-        self.0.send(Command::Broadcast(message)).await?;
+        self.send(Command::Broadcast(message)).await?;
         Ok(())
     }
 
     /// Broadcast a message to our direct neighbors.
     pub async fn broadcast_neighbors(&self, message: Bytes) -> Result<(), Error> {
-        self.0.send(Command::BroadcastNeighbors(message)).await?;
+        self.send(Command::BroadcastNeighbors(message)).await?;
         Ok(())
     }
 
     /// Join a set of peers.
     pub async fn join_peers(&self, peers: Vec<NodeId>) -> Result<(), Error> {
-        self.0.send(Command::JoinPeers(peers)).await?;
+        self.send(Command::JoinPeers(peers)).await?;
+        Ok(())
+    }
+
+    async fn send(&self, command: Command) -> Result<(), irpc::channel::SendError> {
+        self.0.lock().await.send(command).await?;
         Ok(())
     }
 }
@@ -56,10 +65,11 @@ pub struct GossipTopic {
 }
 
 impl GossipTopic {
-    pub(crate) fn new(sender: async_channel::Sender<Command>, receiver: EventStream) -> Self {
+    pub(crate) fn new(sender: spsc::Sender<Command>, receiver: spsc::Receiver<Event>) -> Self {
+        let sender = GossipSender::new(sender);
         Self {
-            sender: GossipSender::new(sender),
-            receiver: GossipReceiver::new(receiver),
+            sender: sender.clone(),
+            receiver: GossipReceiver::new(receiver, sender),
         }
     }
 
@@ -102,18 +112,29 @@ impl Stream for GossipTopic {
 /// This is a [`Stream`] of [`Event`]s emitted from the topic.
 #[derive(derive_more::Debug)]
 pub struct GossipReceiver {
+    // stream: EventStream,
     #[debug("EventStream")]
-    stream: EventStream,
+    stream: n0_future::boxed::BoxStream<Result<Event, Error>>,
+    _sender: GossipSender,
     neighbors: HashSet<NodeId>,
     joined: bool,
 }
 
 impl GossipReceiver {
-    pub(crate) fn new(events_rx: EventStream) -> Self {
+    pub(crate) fn new(events_rx: spsc::Receiver<Event>, sender: GossipSender) -> Self {
+        let stream = events_rx.into_stream().map_err(Error::from);
+        let stream = Box::pin(stream);
+        // let stream = EventStream {
+        //     topic: topic_id,
+        //     receiver_id,
+        //     inner,
+        //     to_actor_tx: api,
+        // };
         Self {
-            stream: events_rx,
+            stream,
             neighbors: Default::default(),
             joined: false,
+            _sender: sender,
         }
     }
 
@@ -228,7 +249,8 @@ pub struct Message {
 }
 
 /// A stream of commands for a gossip subscription.
-pub type CommandStream = Pin<Box<dyn Stream<Item = Command> + Send + Sync + 'static>>;
+pub type CommandStream =
+    Pin<Box<dyn Stream<Item = Result<Command, irpc::channel::RecvError>> + Send + 'static>>;
 
 /// Send a gossip message
 #[derive(Serialize, Deserialize, derive_more::Debug)]
@@ -266,3 +288,60 @@ impl JoinOptions {
         }
     }
 }
+
+// /// Stream of events for a topic.
+// #[derive(derive_more::Debug)]
+// pub struct EventStream {
+//     /// The actual stream polled to return [`Event`]s to the application.
+//     #[debug("Stream")]
+//     inner: Pin<Box<dyn Stream<Item = Result<Event, Error>> + Send + 'static>>,
+//     // /// Channel to the actor task.
+//     // ///
+//     // /// This is used to handle the receiver being dropped. When all receiver and publishers are
+//     // /// gone the topic will be unsubscribed.
+//     // to_actor_tx: GossipApi,
+//     // /// The topic for which this stream is reporting events.
+//     // ///
+//     // /// This is sent on drop to the actor to handle the receiver going away.
+//     // topic: TopicId,
+//     // /// An Id identifying this specific receiver.
+//     // ///
+//     // /// This is sent on drop to the actor to handle the receiver going away.
+//     // receiver_id: ReceiverId,
+// }
+
+// impl Stream for EventStream {
+//     type Item = Result<Event, Error>;
+
+//     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+//         self.inner.poll_next(cx)
+//     }
+// }
+
+// impl Drop for EventStream {
+//     fn drop(&mut self) {
+//         // NOTE: unexpectedly, this works without a tokio runtime, so we leverage that to avoid yet
+//         // another spawned task
+//         if let Err(e) = self.to_actor_tx.try_send(ToActor::ReceiverGone {
+//             topic: self.topic,
+//             receiver_id: self.receiver_id,
+//         }) {
+//             match e {
+//                 mpsc::error::TrySendError::Full(msg) => {
+//                     // if we can't immediately inform then try to spawn a task that handles it
+//                     if let Ok(handle) = tokio::runtime::Handle::try_current() {
+//                         let to_actor_tx = self.to_actor_tx.clone();
+//                         handle.spawn(async move {
+//                             let _ = to_actor_tx.send(msg).await;
+//                         });
+//                     } else {
+//                         // full but no runtime oh no
+//                     }
+//                 }
+//                 mpsc::error::TrySendError::Closed(_) => {
+//                     // we are probably shutting down so ignore the error
+//                 }
+//             }
+//         }
+//     }
+// }
