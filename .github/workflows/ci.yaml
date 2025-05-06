@@ -150,6 +150,8 @@ jobs:
   wasm_build:
       name: Build wasm32
       runs-on: ubuntu-latest
+      env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
       steps:
         - name: Checkout sources
           uses: actions/checkout@v4
