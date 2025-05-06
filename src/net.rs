@@ -52,7 +52,8 @@ pub use self::handles::{
 pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/0";
 /// Default channel capacity for topic subscription channels (one per topic)
 const TOPIC_EVENTS_DEFAULT_CAP: usize = 2048;
-/// Default channel capacity for topic subscription channels (one per topic)
+/// Channel capacity for topic command send channels.
+const TOPIC_COMMANDS_CAP: usize = 64;
 
 /// Channel capacity for the send queue (one per connection)
 const SEND_QUEUE_CAP: usize = 64;
@@ -1244,8 +1245,6 @@ mod test {
                     max_message_size,
                 }
                 .into(),
-                #[cfg(feature = "rpc")]
-                rpc_handler: Default::default(),
             };
 
             let endpoing_task = task::spawn(endpoint_loop(
