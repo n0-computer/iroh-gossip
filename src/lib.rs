@@ -9,12 +9,13 @@
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 #![cfg_attr(iroh_docsrs, feature(doc_auto_cfg))]
 
-pub mod metrics;
-#[cfg(feature = "net")]
-pub mod net;
-
 #[cfg(feature = "net")]
 #[doc(inline)]
 pub use net::GOSSIP_ALPN as ALPN;
 
+#[cfg(any(feature = "net", feature = "rpc"))]
+pub mod api;
+pub mod metrics;
+#[cfg(feature = "net")]
+pub mod net;
 pub mod proto;
