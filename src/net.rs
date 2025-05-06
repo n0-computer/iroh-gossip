@@ -169,9 +169,9 @@ pub(crate) struct Inner {
 
 impl ProtocolHandler for Gossip {
     fn accept(&self, conn: Connection) -> BoxFuture<anyhow::Result<()>> {
-        let inner = self.inner.clone();
+        let this = self.clone();
         Box::pin(async move {
-            inner.handle_connection(conn).await?;
+            this.handle_connection(conn).await?;
             Ok(())
         })
     }
@@ -273,94 +273,10 @@ impl Gossip {
     ///
     /// Make sure to check the ALPN protocol yourself before passing the connection.
     pub async fn handle_connection(&self, conn: Connection) -> Result<(), Error> {
-        self.inner.handle_connection(conn).await
-    }
-
-    // /// Join a gossip topic with options and an externally-created update stream.
-    // ///
-    // /// This method differs from [`Self::subscribe_with_opts`] by letting you pass in a `updates` command stream yourself
-    // /// instead of using a channel created for you.
-    // ///
-    // /// It returns a stream of events. If you want to wait for the topic to become active, wait for
-    // /// the [`GossipEvent::Joined`] event.
-    // pub fn subscribe_with_stream(
-    //     &self,
-    //     topic_id: TopicId,
-    //     options: JoinOptions,
-    //     updates: CommandStream,
-    // ) -> EventStream {
-    //     self.inner.subscribe_with_stream(topic_id, options, updates)
-    // }
-}
-
-impl Inner {
-    // pub fn subscribe_with_stream(
-    //     &self,
-    //     topic_id: TopicId,
-    //     options: JoinOptions,
-    //     updates: CommandStream,
-    // ) -> EventStream {
-    //     let (event_tx, event_rx) = async_channel::bounded(options.subscription_capacity);
-    //     let to_actor_tx = self.to_actor_tx.clone();
-    //     let receiver_id = ReceiverId(
-    //         self.next_receiver_id
-    //             .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-    //     );
-    //     let channels = SubscriberChannels {
-    //         receiver_id,
-    //         command_rx: updates,
-    //         event_tx,
-    //     };
-    //     // We spawn a task to send the subscribe action to the actor, because we want the send to
-    //     // succeed even if the returned stream is dropped right away without being polled, because
-    //     // it is legit to keep only the `updates` stream and drop the event stream. This situation
-    //     // is handled fine within the actor, but we have to make sure that the message reaches the
-    //     // actor.
-    //     let task = task::spawn(async move {
-    //         to_actor_tx
-    //             .send(ToActor::Join {
-    //                 topic_id,
-    //                 bootstrap: options.bootstrap,
-    //                 channels,
-    //             })
-    //             .await
-    //             .map_err(Error::from)
-    //     });
-    //     let stream = async move {
-    //         task.await??;
-    //         Ok(event_rx)
-    //     }
-    //     .try_flatten_stream();
-    //     EventStream {
-    //         inner: Box::pin(stream),
-    //         to_actor_tx: self.to_actor_tx.clone(),
-    //         topic: topic_id,
-    //         receiver_id,
-    //     }
-    // }
-
-    async fn handle_connection(&self, conn: Connection) -> Result<(), Error> {
-        self.conn_tx.send(conn).await?;
+        self.inner.conn_tx.send(conn).await?;
         Ok(())
     }
 }
-
-// /// Input messages for the gossip [`Actor`].
-// #[derive(derive_more::Debug)]
-// enum ToActor {
-//     /// Handle a new QUIC connection, either from accept (external to the actor) or from connect
-//     /// (happens internally in the actor).
-//     HandleConnection(PublicKey, ConnOrigin, #[debug("Connection")] Connection),
-//     Join {
-//         topic_id: TopicId,
-//         bootstrap: BTreeSet<NodeId>,
-//         channels: SubscriberChannels,
-//     },
-//     ReceiverGone {
-//         topic: TopicId,
-//         receiver_id: ReceiverId,
-//     },
-// }
 
 /// Actor that sends and handles messages between the connection and main state loops
 struct Actor {
@@ -702,9 +618,6 @@ impl Actor {
         use rpc::Message::*;
         trace!("handle to_actor  {msg:?}");
         match msg {
-            // ToActor::HandleConnection(peer_id, origin, conn) => {
-            //     self.handle_connection(peer_id, origin, conn)
-            // }
             Join(msg) => {
                 let WithChannels {
                     inner,
@@ -747,9 +660,6 @@ impl Actor {
                 )
                 .await?;
             }
-            _ => {} // ToActor::ReceiverGone { topic, receiver_id } => {
-                    //     self.handle_receiver_gone(topic, receiver_id).await?;
-                    // }
         }
         Ok(())
     }
