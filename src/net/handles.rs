@@ -112,9 +112,13 @@ impl Stream for GossipTopic {
 /// This is a [`Stream`] of [`Event`]s emitted from the topic.
 #[derive(derive_more::Debug)]
 pub struct GossipReceiver {
-    // stream: EventStream,
-    #[debug("EventStream")]
+    #[debug("BoxStream")]
     stream: n0_future::boxed::BoxStream<Result<Event, Error>>,
+    /// We store a `GossipSender here as a drop guard for the topic: Once the last sender is dropped,
+    /// the actor will receive a notification that the corresponding command receiver closed, and
+    /// can clean up the topic state if it was the last sender being dropped.
+    /// By storing a sender within the receiver, we make sure that the topic stays open as long as
+    /// any `GossipReceiver` is alive.
     _sender: GossipSender,
     neighbors: HashSet<NodeId>,
     joined: bool,
@@ -124,12 +128,6 @@ impl GossipReceiver {
     pub(crate) fn new(events_rx: spsc::Receiver<Event>, sender: GossipSender) -> Self {
         let stream = events_rx.into_stream().map_err(Error::from);
         let stream = Box::pin(stream);
-        // let stream = EventStream {
-        //     topic: topic_id,
-        //     receiver_id,
-        //     inner,
-        //     to_actor_tx: api,
-        // };
         Self {
             stream,
             neighbors: Default::default(),
@@ -288,60 +286,3 @@ impl JoinOptions {
         }
     }
 }
-
-// /// Stream of events for a topic.
-// #[derive(derive_more::Debug)]
-// pub struct EventStream {
-//     /// The actual stream polled to return [`Event`]s to the application.
-//     #[debug("Stream")]
-//     inner: Pin<Box<dyn Stream<Item = Result<Event, Error>> + Send + 'static>>,
-//     // /// Channel to the actor task.
-//     // ///
-//     // /// This is used to handle the receiver being dropped. When all receiver and publishers are
-//     // /// gone the topic will be unsubscribed.
-//     // to_actor_tx: GossipApi,
-//     // /// The topic for which this stream is reporting events.
-//     // ///
-//     // /// This is sent on drop to the actor to handle the receiver going away.
-//     // topic: TopicId,
-//     // /// An Id identifying this specific receiver.
-//     // ///
-//     // /// This is sent on drop to the actor to handle the receiver going away.
-//     // receiver_id: ReceiverId,
-// }
-
-// impl Stream for EventStream {
-//     type Item = Result<Event, Error>;
-
-//     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-//         self.inner.poll_next(cx)
-//     }
-// }
-
-// impl Drop for EventStream {
-//     fn drop(&mut self) {
-//         // NOTE: unexpectedly, this works without a tokio runtime, so we leverage that to avoid yet
-//         // another spawned task
-//         if let Err(e) = self.to_actor_tx.try_send(ToActor::ReceiverGone {
-//             topic: self.topic,
-//             receiver_id: self.receiver_id,
-//         }) {
-//             match e {
-//                 mpsc::error::TrySendError::Full(msg) => {
-//                     // if we can't immediately inform then try to spawn a task that handles it
-//                     if let Ok(handle) = tokio::runtime::Handle::try_current() {
-//                         let to_actor_tx = self.to_actor_tx.clone();
-//                         handle.spawn(async move {
-//                             let _ = to_actor_tx.send(msg).await;
-//                         });
-//                     } else {
-//                         // full but no runtime oh no
-//                     }
-//                 }
-//                 mpsc::error::TrySendError::Closed(_) => {
-//                     // we are probably shutting down so ignore the error
-//                 }
-//             }
-//         }
-//     }
-// }

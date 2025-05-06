@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::proto::TopicId;
 
-use super::{Command, Error, GossipTopic, JoinOptions, ReceiverId};
+use super::{Command, Error, Event, GossipTopic, JoinOptions, ReceiverId};
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Service;
@@ -18,10 +18,7 @@ impl irpc::Service for Service {}
 #[rpc_requests(Service, message = Message)]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Protocol {
-    /// Handle a new QUIC connection, either from accept (external to the actor) or from connect
-    /// (happens internally in the actor).
-    // HandleConnection(PublicKey, ConnOrigin, #[debug("Connection")] Connection),
-    #[rpc(tx=spsc::Sender<TopicEvent>, rx=spsc::Receiver<TopicUpdate>)]
+    #[rpc(tx=spsc::Sender<Event>, rx=spsc::Receiver<Command>)]
     Join(JoinRequest),
 }
 
@@ -30,21 +27,6 @@ pub struct JoinRequest {
     pub topic_id: TopicId,
     pub bootstrap: BTreeSet<NodeId>,
 }
-
-// #[derive(Debug, Serialize, Deserialize)]
-// pub struct ChannelId(u32);
-
-// pub struct JoinResponse {
-//     ch: ChannelId
-// }
-
-pub type TopicUpdate = Command;
-pub type TopicEvent = super::Event;
-// #[derive(Debug, Serialize, Deserialize)]
-// pub struct TopicUpdate;
-
-// #[derive(Debug, Serialize, Deserialize)]
-// pub struct TopicEvent;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DropRequest {
@@ -64,6 +46,7 @@ impl GossipApi {
             inner: local.into(),
         }
     }
+
     /// Join a gossip topic with options.
     ///
     /// Returns a [`GossipTopic`] instantly. To wait for at least one connection to be established,
@@ -85,10 +68,6 @@ impl GossipApi {
             .bidi_streaming(req, 16, opts.subscription_capacity)
             .await?;
         Ok(GossipTopic::new(tx, rx))
-        // let (command_tx, command_rx) = async_channel::bounded(TOPIC_COMMANDS_DEFAULT_CAP);
-        // let command_rx: CommandStream = Box::pin(command_rx);
-        // let event_rx = self.subscribe_with_stream(topic_id, opts, command_rx);
-        // GossipTopic::new(command_tx, event_rx)
     }
 
     /// Join a gossip topic with the default options and wait for at least one active connection.
@@ -106,7 +85,9 @@ impl GossipApi {
 
     /// Join a gossip topic with the default options.
     ///
-    /// Note that this will not wait for any bootstrap node to be available. To ensure the topic is connected to at least one node, use [`GossipTopic::joined`] or [`Gossip::subscribe_and_join`]
+    /// Note that this will not wait for any bootstrap node to be available.
+    /// To ensure the topic is connected to at least one node, use [`GossipTopic::joined`]
+    /// or [`Gossip::subscribe_and_join`]
     pub async fn subscribe(
         &self,
         topic_id: TopicId,
