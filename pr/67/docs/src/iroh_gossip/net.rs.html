@@ -1795,8 +1795,7 @@
 <a href="#1794" id="1794">1794</a>
 <a href="#1795" id="1795">1795</a>
 <a href="#1796" id="1796">1796</a>
-<a href="#1797" id="1797">1797</a>
-<a href="#1798" id="1798">1798</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
+<a href="#1797" id="1797">1797</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
@@ -1850,9 +1849,10 @@
 </span><span class="kw">pub const </span>GOSSIP_ALPN: <span class="kw-2">&amp;</span>[u8] = <span class="string">b"/iroh-gossip/0"</span>;
 <span class="doccomment">/// Default channel capacity for topic subscription channels (one per topic)
 </span><span class="kw">const </span>TOPIC_EVENTS_DEFAULT_CAP: usize = <span class="number">2048</span>;
-<span class="doccomment">/// Default channel capacity for topic subscription channels (one per topic)
+<span class="doccomment">/// Channel capacity for topic command send channels.
+</span><span class="kw">const </span>TOPIC_COMMANDS_CAP: usize = <span class="number">64</span>;
 
-/// Channel capacity for the send queue (one per connection)
+<span class="doccomment">/// Channel capacity for the send queue (one per connection)
 </span><span class="kw">const </span>SEND_QUEUE_CAP: usize = <span class="number">64</span>;
 <span class="doccomment">/// Channel capacity for the ToActor message queue (single)
 </span><span class="kw">const </span>TO_ACTOR_CAP: usize = <span class="number">64</span>;
@@ -3042,8 +3042,6 @@
                     max_message_size,
                 }
                 .into(),
-                <span class="attr">#[cfg(feature = <span class="string">"rpc"</span>)]
-                </span>rpc_handler: Default::default(),
             };
 
             <span class="kw">let </span>endpoing_task = task::spawn(endpoint_loop(

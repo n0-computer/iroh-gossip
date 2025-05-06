@@ -99,17 +99,15 @@
 <a href="#98" id="98">98</a>
 <a href="#99" id="99">99</a>
 <a href="#100" id="100">100</a>
-<a href="#101" id="101">101</a>
-<a href="#102" id="102">102</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::collections::BTreeSet;
+<a href="#101" id="101">101</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::collections::BTreeSet;
 
 <span class="kw">use </span>iroh::NodeId;
 <span class="kw">use </span>irpc::{channel::spsc, Client, LocalSender};
 <span class="kw">use </span>irpc_derive::rpc_requests;
 <span class="kw">use </span>serde::{Deserialize, Serialize};
 
+<span class="kw">use super</span>::{Command, Error, Event, GossipTopic, JoinOptions, ReceiverId, TOPIC_COMMANDS_CAP};
 <span class="kw">use </span><span class="kw">crate</span>::proto::TopicId;
-
-<span class="kw">use super</span>::{Command, Error, Event, GossipTopic, JoinOptions, ReceiverId};
 
 <span class="attr">#[derive(Debug, Clone, Copy)]
 </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">struct </span>Service;
@@ -167,7 +165,7 @@
         };
         <span class="kw">let </span>(tx, rx) = <span class="self">self
             </span>.inner
-            .bidi_streaming(req, <span class="number">16</span>, opts.subscription_capacity)
+            .bidi_streaming(req, TOPIC_COMMANDS_CAP, opts.subscription_capacity)
             .<span class="kw">await</span><span class="question-mark">?</span>;
         <span class="prelude-val">Ok</span>(GossipTopic::new(tx, rx))
     }
