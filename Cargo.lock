@@ -2084,7 +2084,7 @@ dependencies = [
 [[package]]
 name = "irpc"
 version = "0.2.2"
-source = "git+https://github.com/n0-computer/irpc#af32517bdf4c95a53cb8dd7b6cf9d9acd01f3959"
+source = "git+https://github.com/n0-computer/irpc?branch=Frando/wasm#8ef52df3b65d8ae0e34e8c9eba48e00e34f0b02f"
 dependencies = [
  "anyhow",
  "futures-buffered",
@@ -2105,7 +2105,7 @@ dependencies = [
 [[package]]
 name = "irpc-derive"
 version = "0.2.2"
-source = "git+https://github.com/n0-computer/irpc#af32517bdf4c95a53cb8dd7b6cf9d9acd01f3959"
+source = "git+https://github.com/n0-computer/irpc?branch=Frando/wasm#8ef52df3b65d8ae0e34e8c9eba48e00e34f0b02f"
 dependencies = [
  "proc-macro2",
  "quote",
