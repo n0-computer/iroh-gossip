@@ -27,9 +27,8 @@ use n0_future::{
 };
 use rand::rngs::StdRng;
 use rand_core::SeedableRng;
-use rpc::{GossipApi, JoinRequest};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, error_span, trace, warn, Instrument};
 
@@ -39,21 +38,12 @@ use crate::{
     proto::{self, HyparviewConfig, PeerData, PlumtreeConfig, Scope, TopicId},
 };
 
-mod handles;
-mod rpc;
 pub mod util;
 
-pub use self::handles::{
-    Command, CommandStream, Event, GossipEvent, GossipReceiver, GossipSender, GossipTopic,
-    JoinOptions, Message,
-};
+use crate::api::{self, Command, Event, GossipApi, GossipEvent};
 
 /// ALPN protocol name
 pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/0";
-/// Default channel capacity for topic subscription channels (one per topic)
-const TOPIC_EVENTS_DEFAULT_CAP: usize = 2048;
-/// Channel capacity for topic command send channels.
-const TOPIC_COMMANDS_CAP: usize = 64;
 
 /// Channel capacity for the send queue (one per connection)
 const SEND_QUEUE_CAP: usize = 64;
@@ -61,6 +51,8 @@ const SEND_QUEUE_CAP: usize = 64;
 const TO_ACTOR_CAP: usize = 64;
 /// Channel capacity for the InEvent message queue (single)
 const IN_EVENT_CAP: usize = 1024;
+/// Channel capacity for broadcast subscriber event queue (one per topic)
+const TOPIC_EVENT_CAP: usize = 256;
 /// Name used for logging when new node addresses are added from gossip.
 const SOURCE_NAME: &str = "gossip";
 
@@ -265,6 +257,12 @@ impl Gossip {
         }
     }
 
+    /// Listen on a quinn endpoint for incoming RPC connections.
+    #[cfg(feature = "rpc")]
+    pub async fn listen(self, endpoint: quinn::Endpoint) {
+        self.inner.api.listen(endpoint).await
+    }
+
     /// Get the maximum message size configured for this gossip actor.
     pub fn max_message_size(&self) -> usize {
         self.inner.max_message_size
@@ -288,7 +286,7 @@ struct Actor {
     /// Dial machine to connect to peers
     dialer: Dialer,
     /// Input messages to the actor
-    to_actor_rx: mpsc::Receiver<self::rpc::Message>,
+    to_actor_rx: mpsc::Receiver<api::RpcMessage>,
     conn_rx: mpsc::Receiver<Connection>,
     /// Sender for the state input (cloned into the connection loops)
     in_event_tx: mpsc::Sender<InEvent>,
@@ -306,7 +304,7 @@ struct Actor {
     quit_queue: VecDeque<TopicId>,
     /// Tasks for the connection loops, to keep track of panics.
     connection_tasks: JoinSet<(NodeId, Connection, anyhow::Result<()>)>,
-    next_receiver_id: usize,
+    topic_event_forwarders: JoinSet<TopicId>,
 }
 
 impl Actor {
@@ -316,7 +314,7 @@ impl Actor {
         my_addr: &AddrInfo,
     ) -> (
         Self,
-        mpsc::Sender<self::rpc::Message>,
+        mpsc::Sender<api::RpcMessage>,
         mpsc::Sender<Connection>,
     ) {
         let peer_id = endpoint.node_id();
@@ -345,7 +343,7 @@ impl Actor {
             quit_queue: Default::default(),
             connection_tasks: Default::default(),
             conn_rx,
-            next_receiver_id: 0,
+            topic_event_forwarders: Default::default(),
         };
 
         (actor, to_actor_tx, conn_tx)
@@ -495,6 +493,15 @@ impl Actor {
                 let (peer_id, conn, result) = res.expect("connection task panicked");
                 self.handle_connection_task_finished(peer_id, conn, result).await?;
             }
+            Some(res) = self.topic_event_forwarders.join_next(), if !self.topic_event_forwarders.is_empty() => {
+                let topic_id = res.expect("topic event forwarder panicked");
+                if let Some(state) = self.topics.get_mut(&topic_id) {
+                    if !state.still_needed() {
+                        self.quit_queue.push_back(topic_id);
+                        self.process_quit_queue().await?;
+                    }
+                }
+            }
         }
 
         Ok(Some(()))
@@ -615,11 +622,14 @@ impl Actor {
         Ok(())
     }
 
-    async fn handle_to_actor_msg(&mut self, msg: rpc::Message, now: Instant) -> Result<(), Error> {
-        use rpc::Message::*;
+    async fn handle_to_actor_msg(
+        &mut self,
+        msg: api::RpcMessage,
+        now: Instant,
+    ) -> Result<(), Error> {
         trace!("handle to_actor  {msg:?}");
         match msg {
-            Join(msg) => {
+            api::RpcMessage::Join(msg) => {
                 let WithChannels {
                     inner,
                     rx,
@@ -627,19 +637,16 @@ impl Actor {
                     // TODO(frando): make use of span?
                     span: _,
                 } = msg;
-                let JoinRequest {
+                let api::JoinRequest {
                     topic_id,
                     bootstrap,
                 } = inner;
-                let state = self.topics.entry(topic_id).or_default();
                 let TopicState {
                     neighbors,
-                    event_senders,
+                    event_sender,
                     command_rx_keys,
                     joined,
-                } = state;
-                let receiver_id = ReceiverId(self.next_receiver_id);
-                self.next_receiver_id += 1;
+                } = self.topics.entry(topic_id).or_default();
                 if *joined {
                     let neighbors = neighbors.iter().copied().collect();
                     tx.try_send(Event::Gossip(GossipEvent::Joined(neighbors)))
@@ -647,7 +654,10 @@ impl Actor {
                         .ok();
                 }
 
-                event_senders.push(receiver_id, tx);
+                let fut =
+                    topic_subscriber_loop(tx, event_sender.subscribe()).map(move |_| topic_id);
+                self.topic_event_forwarders.spawn(fut);
+
                 let command_rx = TopicCommandStream::new(topic_id, Box::pin(rx.into_stream()));
                 let key = self.command_rx.insert(command_rx);
                 command_rx_keys.insert(key);
@@ -730,7 +740,7 @@ impl Actor {
                     let TopicState {
                         joined,
                         neighbors,
-                        event_senders,
+                        event_sender,
                         ..
                     } = state;
                     let event = if let ProtoEvent::NeighborUp(neighbor) = event {
@@ -744,7 +754,7 @@ impl Actor {
                     } else {
                         event.into()
                     };
-                    event_senders.send(&event).await;
+                    event_sender.send(event).ok();
                     if !state.still_needed() {
                         self.quit_queue.push_back(topic_id);
                     }
@@ -835,24 +845,33 @@ impl Default for PeerState {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct TopicState {
     joined: bool,
     neighbors: BTreeSet<NodeId>,
-    /// Sender side to report events to a [`GossipReceiver`].
-    ///
-    /// This is the internal counter part of gossip's subscribe public API.
-    event_senders: EventSenders,
+    event_sender: broadcast::Sender<GossipEvent>,
     /// Keys identifying [`GossipSender`]s.
     ///
     /// This represents the receiver side of gossip's publish public API.
     command_rx_keys: HashSet<stream_group::Key>,
 }
 
+impl Default for TopicState {
+    fn default() -> Self {
+        let (event_sender, _) = broadcast::channel(TOPIC_EVENT_CAP);
+        Self {
+            joined: false,
+            neighbors: Default::default(),
+            command_rx_keys: Default::default(),
+            event_sender,
+        }
+    }
+}
+
 impl TopicState {
     /// Check if the topic still has any publisher or subscriber.
     fn still_needed(&self) -> bool {
-        !self.command_rx_keys.is_empty()
+        !self.command_rx_keys.is_empty() && self.event_sender.receiver_count() > 0
         // !self.event_senders.is_empty() || !self.command_rx_keys.is_empty()
     }
 }
@@ -950,81 +969,41 @@ fn decode_peer_data(peer_data: &PeerData) -> Result<AddrInfo, Error> {
     Ok(info)
 }
 
-#[derive(Debug, Default)]
-struct EventSenders {
-    /// Channels to communicate [`Event`] to [`EventStream`]s.
-    ///
-    /// This is indexed by receiver id. The boolean indicates a lagged channel ([`Event::Lagged`]).
-    senders: HashMap<ReceiverId, (spsc::Sender<Event>, bool)>,
-}
-
-/// Id for a gossip receiver.
-///
-/// This is assigned to each [`EventStream`] obtained by the application.
-#[derive(
-    derive_more::Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Clone, Copy, Serialize, Deserialize,
-)]
-struct ReceiverId(usize);
-
-impl EventSenders {
-    // fn is_empty(&self) -> bool {
-    //     self.senders.is_empty()
-    // }
-
-    fn push(&mut self, id: ReceiverId, sender: spsc::Sender<Event>) {
-        self.senders.insert(id, (sender, false));
-    }
-
-    /// Send an event to all subscribers.
-    ///
-    /// This will not wait until the sink is full, but send a `Lagged` response if the sink is almost full.
-    async fn send(&mut self, event: &GossipEvent) {
-        let mut remove = Vec::new();
-        for (&id, (sender, lagged)) in self.senders.iter_mut() {
-            if *lagged {
-                match sender.try_send(Event::Lagged).await {
-                    Ok(true) => {
-                        *lagged = false;
-                    }
-                    Ok(false) => {
-                        continue;
-                    }
-                    Err(_err) => {
-                        remove.push(id);
-                        continue;
-                    }
-                }
-            }
-            match sender.try_send(Event::Gossip(event.clone())).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    *lagged = true;
-                }
-                Err(_err) => remove.push(id), // *lagged = true;
-            }
-        }
-
-        for id in remove.into_iter() {
-            self.senders.remove(&id);
+async fn topic_subscriber_loop(
+    mut sender: spsc::Sender<Event>,
+    mut topic_events: broadcast::Receiver<GossipEvent>,
+) {
+    loop {
+        tokio::select! {
+           biased;
+           msg = topic_events.recv() => {
+               let event = match msg {
+                   Err(broadcast::error::RecvError::Closed) => break,
+                   Err(broadcast::error::RecvError::Lagged(_)) => Event::Lagged,
+                   Ok(event) => Event::Gossip(event)
+               };
+               if let Err(_) = sender.send(event).await {
+                   break;
+               }
+           }
+           _ = sender.closed() => break,
         }
     }
-
-    // /// Removes a sender based on the corresponding receiver's id.
-    // fn remove(&mut self, id: &ReceiverId) {
-    //     self.senders.remove(id);
-    // }
 }
+
+/// A stream of commands for a gossip subscription.
+type BoxedCommandReceiver = n0_future::stream::Boxed<Result<Command, irpc::channel::RecvError>>;
 
 #[derive(derive_more::Debug)]
 struct TopicCommandStream {
     topic_id: TopicId,
     #[debug("CommandStream")]
-    stream: CommandStream,
+    stream: BoxedCommandReceiver,
     closed: bool,
 }
 
 impl TopicCommandStream {
-    fn new(topic_id: TopicId, stream: CommandStream) -> Self {
+    fn new(topic_id: TopicId, stream: BoxedCommandReceiver) -> Self {
         Self {
             topic_id,
             stream,
@@ -1369,7 +1348,7 @@ mod test {
         .await
         .unwrap();
 
-        let (sink1, _stream1) = sub1.split();
+        let (mut sink1, _stream1) = sub1.split();
 
         let len = 2;
 
@@ -1720,7 +1699,7 @@ mod test {
             info!(node_id = %router.endpoint().node_id().fmt_short(), "broadcast node spawned");
             let bootstrap = vec![bootstrap_addr.node_id];
             router.endpoint().add_node_addr(bootstrap_addr)?;
-            let topic = gossip.subscribe_and_join(topic_id, bootstrap).await?;
+            let mut topic = gossip.subscribe_and_join(topic_id, bootstrap).await?;
             topic.broadcast(message.as_bytes().to_vec().into()).await?;
             std::future::pending::<()>().await;
             Ok(())
