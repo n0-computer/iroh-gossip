@@ -18,7 +18,8 @@
 <a href="#17" id="17">17</a>
 <a href="#18" id="18">18</a>
 <a href="#19" id="19">19</a>
-<a href="#20" id="20">20</a></pre></div><pre class="rust"><code><span class="attr">#![cfg_attr(feature = <span class="string">"net"</span>, doc = <span class="macro">include_str!</span>(<span class="string">"../README.md"</span>))]
+<a href="#20" id="20">20</a>
+<a href="#21" id="21">21</a></pre></div><pre class="rust"><code><span class="attr">#![cfg_attr(feature = <span class="string">"net"</span>, doc = <span class="macro">include_str!</span>(<span class="string">"../README.md"</span>))]
 </span><span class="doccomment">//! Broadcast messages to peers subscribed to a topic
 //!
 //! The crate is designed to be used from the [iroh] crate, which provides a
@@ -33,7 +34,8 @@
 #[doc(inline)]
 </span><span class="kw">pub use </span>net::GOSSIP_ALPN <span class="kw">as </span>ALPN;
 
-<span class="kw">pub mod </span>api;
+<span class="attr">#[cfg(any(feature = <span class="string">"net"</span>, feature = <span class="string">"rpc"</span>))]
+</span><span class="kw">pub mod </span>api;
 <span class="kw">pub mod </span>metrics;
 <span class="attr">#[cfg(feature = <span class="string">"net"</span>)]
 </span><span class="kw">pub mod </span>net;

@@ -519,11 +519,10 @@
 };
 
 <span class="kw">use </span>bytes::Bytes;
-<span class="kw">use </span>futures_lite::{Stream, StreamExt};
-<span class="kw">use </span>iroh::NodeId;
-<span class="kw">use </span>irpc::{channel::spsc, Client, LocalSender};
+<span class="kw">use </span>iroh_base::NodeId;
+<span class="kw">use </span>irpc::{channel::spsc, Client};
 <span class="kw">use </span>irpc_derive::rpc_requests;
-<span class="kw">use </span>n0_future::TryStreamExt;
+<span class="kw">use </span>n0_future::{Stream, StreamExt, TryStreamExt};
 <span class="kw">use </span>serde::{Deserialize, Serialize};
 
 <span class="kw">use </span><span class="kw">crate</span>::proto::{DeliveryScope, TopicId};
@@ -552,7 +551,7 @@
     <span class="kw">pub </span>bootstrap: BTreeSet&lt;NodeId&gt;,
 }
 
-<span class="doccomment">/// Errors returned from methods in [`GossipApi`].
+<span class="doccomment">/// Errors returned from methods in [`GossipApi`]
 </span><span class="attr">#[derive(Debug, thiserror::Error)]
 </span><span class="kw">pub enum </span>ApiError {
     <span class="doccomment">/// RPC error
@@ -582,8 +581,9 @@
 }
 
 <span class="kw">impl </span>GossipApi {
-    <span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>local(tx: tokio::sync::mpsc::Sender&lt;RpcMessage&gt;) -&gt; <span class="self">Self </span>{
-        <span class="kw">let </span>local = LocalSender::&lt;RpcMessage, Service&gt;::from(tx);
+    <span class="attr">#[cfg(feature = <span class="string">"net"</span>)]
+    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>local(tx: tokio::sync::mpsc::Sender&lt;RpcMessage&gt;) -&gt; <span class="self">Self </span>{
+        <span class="kw">let </span>local = irpc::LocalSender::&lt;RpcMessage, Service&gt;::from(tx);
         <span class="self">Self </span>{
             client: local.into(),
         }
@@ -597,7 +597,7 @@
     }
 
     <span class="doccomment">/// Listen on a quinn endpoint for incoming RPC connections.
-    </span><span class="attr">#[cfg(feature = <span class="string">"rpc"</span>)]
+    </span><span class="attr">#[cfg(all(feature = <span class="string">"rpc"</span>, feature = <span class="string">"net"</span>))]
     </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">async fn </span>listen(<span class="kw-2">&amp;</span><span class="self">self</span>, endpoint: quinn::Endpoint) {
         <span class="kw">use </span>std::sync::Arc;
 
