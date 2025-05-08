@@ -508,7 +508,15 @@
 <a href="#507" id="507">507</a>
 <a href="#508" id="508">508</a>
 <a href="#509" id="509">509</a>
-<a href="#510" id="510">510</a></pre></div><pre class="rust"><code><span class="doccomment">//! Public API for using iroh-gossip
+<a href="#510" id="510">510</a>
+<a href="#511" id="511">511</a>
+<a href="#512" id="512">512</a>
+<a href="#513" id="513">513</a>
+<a href="#514" id="514">514</a>
+<a href="#515" id="515">515</a>
+<a href="#516" id="516">516</a>
+<a href="#517" id="517">517</a>
+<a href="#518" id="518">518</a></pre></div><pre class="rust"><code><span class="doccomment">//! Public API for using iroh-gossip
 //!
 //! The API is usable both locally and over RPC.
 
@@ -932,22 +940,29 @@
 
 <span class="attr">#[cfg(test)]
 </span><span class="kw">mod </span>tests {
-    <span class="attr">#[cfg(feature = <span class="string">"rpc"</span>)]
+    <span class="attr">#[cfg(all(feature = <span class="string">"rpc"</span>, feature = <span class="string">"net"</span>))]
     #[tokio::test]
     #[tracing_test::traced_test]
     </span><span class="kw">async fn </span>test_rpc() -&gt; testresult::TestResult {
-        <span class="kw">use </span>iroh::{protocol::Router, Endpoint};
+        <span class="kw">use </span>iroh::{protocol::Router, RelayMap};
         <span class="kw">use </span>n0_future::{time::Duration, StreamExt};
+        <span class="kw">use </span>rand::SeedableRng;
 
         <span class="kw">use crate</span>::{
             api::{Event, GossipApi, GossipEvent},
-            net::Gossip,
+            net::{test::create_endpoint, Gossip},
             proto::TopicId,
             ALPN,
         };
 
-        <span class="kw">async fn </span>create_gossip_endpoint() -&gt; anyhow::Result&lt;(Router, Gossip)&gt; {
-            <span class="kw">let </span>endpoint = Endpoint::builder().discovery_n0().bind().<span class="kw">await</span><span class="question-mark">?</span>;
+        <span class="kw">let </span><span class="kw-2">mut </span>rng = rand_chacha::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
+        <span class="kw">let </span>(relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().<span class="kw">await</span>.unwrap();
+
+        <span class="kw">async fn </span>create_gossip_endpoint(
+            rng: <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng,
+            relay_map: RelayMap,
+        ) -&gt; anyhow::Result&lt;(Router, Gossip)&gt; {
+            <span class="kw">let </span>endpoint = create_endpoint(rng, relay_map).<span class="kw">await</span><span class="question-mark">?</span>;
             <span class="kw">let </span>gossip = Gossip::builder().spawn(endpoint.clone()).<span class="kw">await</span><span class="question-mark">?</span>;
             <span class="kw">let </span>router = Router::builder(endpoint)
                 .accept(ALPN, gossip.clone())
@@ -959,19 +974,22 @@
         <span class="kw">let </span>topic_id = TopicId::from_bytes([<span class="number">0u8</span>; <span class="number">32</span>]);
 
         <span class="comment">// create our gossip node
-        </span><span class="kw">let </span>(router, gossip) = create_gossip_endpoint().<span class="kw">await</span><span class="question-mark">?</span>;
+        </span><span class="kw">let </span>(router, gossip) = create_gossip_endpoint(<span class="kw-2">&amp;mut </span>rng, relay_map.clone()).<span class="kw">await</span><span class="question-mark">?</span>;
 
         <span class="comment">// create a second node so that we can test actually joining
-        </span><span class="kw">let </span>(node2_id, node2_task) = {
-            <span class="kw">let </span>(router, gossip) = create_gossip_endpoint().<span class="kw">await</span><span class="question-mark">?</span>;
+        </span><span class="kw">let </span>(node2_id, node2_addr, node2_task) = {
+            <span class="kw">let </span>(router, gossip) = create_gossip_endpoint(<span class="kw-2">&amp;mut </span>rng, relay_map.clone()).<span class="kw">await</span><span class="question-mark">?</span>;
+            <span class="kw">let </span>node_addr = router.endpoint().node_addr().<span class="kw">await</span><span class="question-mark">?</span>;
             <span class="kw">let </span>node_id = router.endpoint().node_id();
             <span class="kw">let </span>task = tokio::task::spawn(<span class="kw">async move </span>{
                 <span class="kw">let </span><span class="kw-2">mut </span>topic = gossip.subscribe_and_join(topic_id, <span class="macro">vec!</span>[]).<span class="kw">await</span><span class="question-mark">?</span>;
                 topic.broadcast(<span class="string">b"hello"</span>.to_vec().into()).<span class="kw">await</span><span class="question-mark">?</span>;
                 anyhow::Ok(router)
             });
-            (node_id, task)
+            (node_id, node_addr, task)
         };
+
+        router.endpoint().add_node_addr(node2_addr)<span class="question-mark">?</span>;
 
         <span class="comment">// expose the gossip node over RPC
         </span><span class="kw">let </span>(rpc_server_endpoint, rpc_server_cert) =
@@ -994,14 +1012,12 @@
             <span class="comment">// wait for a message
             </span><span class="kw">while let </span><span class="prelude-val">Some</span>(event) = topic.try_next().<span class="kw">await</span><span class="question-mark">? </span>{
                 <span class="kw">match </span>event {
-                    Event::Gossip(event) =&gt; <span class="kw">match </span>event {
-                        GossipEvent::Received(message) =&gt; {
-                            <span class="macro">assert_eq!</span>(<span class="kw-2">&amp;</span>message.content[..], <span class="string">b"hello"</span>);
-                            <span class="kw">break</span>;
-                        }
-                        <span class="kw">_ </span>=&gt; {}
-                    },
+                    Event::Gossip(GossipEvent::Received(message)) =&gt; {
+                        <span class="macro">assert_eq!</span>(<span class="kw-2">&amp;</span>message.content[..], <span class="string">b"hello"</span>);
+                        <span class="kw">break</span>;
+                    }
                     Event::Lagged =&gt; <span class="macro">panic!</span>(<span class="string">"unexpected lagged event"</span>),
+                    <span class="kw">_ </span>=&gt; {}
                 }
             }
             anyhow::Ok(())
