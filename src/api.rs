@@ -9,11 +9,10 @@ use std::{
 };
 
 use bytes::Bytes;
-use futures_lite::{Stream, StreamExt};
-use iroh::NodeId;
-use irpc::{channel::spsc, Client, LocalSender};
+use iroh_base::NodeId;
+use irpc::{channel::spsc, Client};
 use irpc_derive::rpc_requests;
-use n0_future::TryStreamExt;
+use n0_future::{Stream, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::proto::{DeliveryScope, TopicId};
@@ -42,13 +41,13 @@ pub(crate) struct JoinRequest {
     pub bootstrap: BTreeSet<NodeId>,
 }
 
-///
+/// Errors returned from methods in [`GossipApi`]
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     /// RPC error
     #[error(transparent)]
     Rpc(#[from] irpc::Error),
-    ///
+    /// Received an unexpected event.
     #[error("received unexpected event")]
     UnexpectedEvent,
 }
@@ -72,8 +71,9 @@ pub struct GossipApi {
 }
 
 impl GossipApi {
+    #[cfg(feature = "net")]
     pub(crate) fn local(tx: tokio::sync::mpsc::Sender<RpcMessage>) -> Self {
-        let local = LocalSender::<RpcMessage, Service>::from(tx);
+        let local = irpc::LocalSender::<RpcMessage, Service>::from(tx);
         Self {
             client: local.into(),
         }
@@ -87,7 +87,7 @@ impl GossipApi {
     }
 
     /// Listen on a quinn endpoint for incoming RPC connections.
-    #[cfg(feature = "rpc")]
+    #[cfg(all(feature = "rpc", feature = "net"))]
     pub(crate) async fn listen(&self, endpoint: quinn::Endpoint) {
         use std::sync::Arc;
 
@@ -422,22 +422,29 @@ impl JoinOptions {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "rpc")]
+    #[cfg(all(feature = "rpc", feature = "net"))]
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn test_rpc() -> testresult::TestResult {
-        use iroh::{protocol::Router, Endpoint};
+        use iroh::{protocol::Router, RelayMap};
         use n0_future::{time::Duration, StreamExt};
+        use rand::SeedableRng;
 
         use crate::{
             api::{Event, GossipApi, GossipEvent},
-            net::Gossip,
+            net::{test::create_endpoint, Gossip},
             proto::TopicId,
             ALPN,
         };
 
-        async fn create_gossip_endpoint() -> anyhow::Result<(Router, Gossip)> {
-            let endpoint = Endpoint::builder().discovery_n0().bind().await?;
+        let mut rng = rand_chacha::ChaCha12Rng::seed_from_u64(1);
+        let (relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+
+        async fn create_gossip_endpoint(
+            rng: &mut rand_chacha::ChaCha12Rng,
+            relay_map: RelayMap,
+        ) -> anyhow::Result<(Router, Gossip)> {
+            let endpoint = create_endpoint(rng, relay_map).await?;
             let gossip = Gossip::builder().spawn(endpoint.clone()).await?;
             let router = Router::builder(endpoint)
                 .accept(ALPN, gossip.clone())
@@ -449,19 +456,22 @@ mod tests {
         let topic_id = TopicId::from_bytes([0u8; 32]);
 
         // create our gossip node
-        let (router, gossip) = create_gossip_endpoint().await?;
+        let (router, gossip) = create_gossip_endpoint(&mut rng, relay_map.clone()).await?;
 
         // create a second node so that we can test actually joining
-        let (node2_id, node2_task) = {
-            let (router, gossip) = create_gossip_endpoint().await?;
+        let (node2_id, node2_addr, node2_task) = {
+            let (router, gossip) = create_gossip_endpoint(&mut rng, relay_map.clone()).await?;
+            let node_addr = router.endpoint().node_addr().await?;
             let node_id = router.endpoint().node_id();
             let task = tokio::task::spawn(async move {
                 let mut topic = gossip.subscribe_and_join(topic_id, vec![]).await?;
                 topic.broadcast(b"hello".to_vec().into()).await?;
                 anyhow::Ok(router)
             });
-            (node_id, task)
+            (node_id, node_addr, task)
         };
+
+        router.endpoint().add_node_addr(node2_addr)?;
 
         // expose the gossip node over RPC
         let (rpc_server_endpoint, rpc_server_cert) =
@@ -484,14 +494,12 @@ mod tests {
             // wait for a message
             while let Some(event) = topic.try_next().await? {
                 match event {
-                    Event::Gossip(event) => match event {
-                        GossipEvent::Received(message) => {
-                            assert_eq!(&message.content[..], b"hello");
-                            break;
-                        }
-                        _ => {}
-                    },
+                    Event::Gossip(GossipEvent::Received(message)) => {
+                        assert_eq!(&message.content[..], b"hello");
+                        break;
+                    }
                     Event::Lagged => panic!("unexpected lagged event"),
+                    _ => {}
                 }
             }
             anyhow::Ok(())
