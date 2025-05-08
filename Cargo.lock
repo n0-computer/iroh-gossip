@@ -1873,6 +1873,7 @@ dependencies = [
  "iroh",
  "iroh-blake3",
  "iroh-metrics",
+ "iroh-quinn",
  "irpc",
  "irpc-derive",
  "n0-future",
@@ -2049,8 +2050,8 @@ dependencies = [
 
 [[package]]
 name = "irpc"
-version = "0.2.2"
-source = "git+https://github.com/n0-computer/irpc?branch=Frando/wasm#85e5e905ae945289867561347a5ce91738a5b578"
+version = "0.2.3"
+source = "git+https://github.com/n0-computer/irpc#1c0e2e9cf75c89fe0979bc4924724552f8717d80"
 dependencies = [
  "anyhow",
  "futures-buffered",
@@ -2070,8 +2071,8 @@ dependencies = [
 
 [[package]]
 name = "irpc-derive"
-version = "0.2.2"
-source = "git+https://github.com/n0-computer/irpc?branch=Frando/wasm#85e5e905ae945289867561347a5ce91738a5b578"
+version = "0.2.3"
+source = "git+https://github.com/n0-computer/irpc#1c0e2e9cf75c89fe0979bc4924724552f8717d80"
 dependencies = [
  "proc-macro2",
  "quote",
