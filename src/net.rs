@@ -898,7 +898,7 @@ struct TopicState {
     joined: bool,
     neighbors: BTreeSet<NodeId>,
     event_sender: broadcast::Sender<GossipEvent>,
-    /// Keys identifying [`GossipSender`]s.
+    /// Keys identifying command receivers in [`Actor::command_rx`].
     ///
     /// This represents the receiver side of gossip's publish public API.
     command_rx_keys: HashSet<stream_group::Key>,
@@ -1030,7 +1030,7 @@ async fn topic_subscriber_loop(
                    Err(broadcast::error::RecvError::Lagged(_)) => Event::Lagged,
                    Ok(event) => Event::Gossip(event)
                };
-               if let Err(_) = sender.send(event).await {
+               if sender.send(event).await.is_err() {
                    break;
                }
            }
@@ -1156,7 +1156,7 @@ impl Dialer {
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use std::time::Duration;
 
     use anyhow::{anyhow, bail};
@@ -1312,7 +1312,7 @@ mod test {
         }
     }
 
-    async fn create_endpoint(
+    pub(crate) async fn create_endpoint(
         rng: &mut rand_chacha::ChaCha12Rng,
         relay_map: RelayMap,
     ) -> Result<Endpoint, Error> {
