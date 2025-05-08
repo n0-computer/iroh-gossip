@@ -29,13 +29,13 @@
 </span><span class="attr">#![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 #![cfg_attr(iroh_docsrs, feature(doc_auto_cfg))]
 
-</span><span class="kw">pub mod </span>metrics;
-<span class="attr">#[cfg(feature = <span class="string">"net"</span>)]
-</span><span class="kw">pub mod </span>net;
-
-<span class="attr">#[cfg(feature = <span class="string">"net"</span>)]
+#[cfg(feature = <span class="string">"net"</span>)]
 #[doc(inline)]
 </span><span class="kw">pub use </span>net::GOSSIP_ALPN <span class="kw">as </span>ALPN;
 
+<span class="kw">pub mod </span>api;
+<span class="kw">pub mod </span>metrics;
+<span class="attr">#[cfg(feature = <span class="string">"net"</span>)]
+</span><span class="kw">pub mod </span>net;
 <span class="kw">pub mod </span>proto;
 </code></pre></div></section></main></body></html>

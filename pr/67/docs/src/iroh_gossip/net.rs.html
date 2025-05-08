@@ -1774,28 +1774,7 @@
 <a href="#1773" id="1773">1773</a>
 <a href="#1774" id="1774">1774</a>
 <a href="#1775" id="1775">1775</a>
-<a href="#1776" id="1776">1776</a>
-<a href="#1777" id="1777">1777</a>
-<a href="#1778" id="1778">1778</a>
-<a href="#1779" id="1779">1779</a>
-<a href="#1780" id="1780">1780</a>
-<a href="#1781" id="1781">1781</a>
-<a href="#1782" id="1782">1782</a>
-<a href="#1783" id="1783">1783</a>
-<a href="#1784" id="1784">1784</a>
-<a href="#1785" id="1785">1785</a>
-<a href="#1786" id="1786">1786</a>
-<a href="#1787" id="1787">1787</a>
-<a href="#1788" id="1788">1788</a>
-<a href="#1789" id="1789">1789</a>
-<a href="#1790" id="1790">1790</a>
-<a href="#1791" id="1791">1791</a>
-<a href="#1792" id="1792">1792</a>
-<a href="#1793" id="1793">1793</a>
-<a href="#1794" id="1794">1794</a>
-<a href="#1795" id="1795">1795</a>
-<a href="#1796" id="1796">1796</a>
-<a href="#1797" id="1797">1797</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
+<a href="#1776" id="1776">1776</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
@@ -1824,9 +1803,8 @@
 };
 <span class="kw">use </span>rand::rngs::StdRng;
 <span class="kw">use </span>rand_core::SeedableRng;
-<span class="kw">use </span>rpc::{GossipApi, JoinRequest};
 <span class="kw">use </span>serde::{Deserialize, Serialize};
-<span class="kw">use </span>tokio::sync::mpsc;
+<span class="kw">use </span>tokio::sync::{broadcast, mpsc};
 <span class="kw">use </span>tokio_util::sync::CancellationToken;
 <span class="kw">use </span>tracing::{debug, error, error_span, trace, warn, Instrument};
 
@@ -1836,21 +1814,12 @@
     proto::{<span class="self">self</span>, HyparviewConfig, PeerData, PlumtreeConfig, Scope, TopicId},
 };
 
-<span class="kw">mod </span>handles;
-<span class="kw">mod </span>rpc;
 <span class="kw">pub mod </span>util;
 
-<span class="kw">pub use </span><span class="self">self</span>::handles::{
-    Command, CommandStream, Event, GossipEvent, GossipReceiver, GossipSender, GossipTopic,
-    JoinOptions, Message,
-};
+<span class="kw">use </span><span class="kw">crate</span>::api::{<span class="self">self</span>, Command, Event, GossipApi, GossipEvent};
 
 <span class="doccomment">/// ALPN protocol name
 </span><span class="kw">pub const </span>GOSSIP_ALPN: <span class="kw-2">&amp;</span>[u8] = <span class="string">b"/iroh-gossip/0"</span>;
-<span class="doccomment">/// Default channel capacity for topic subscription channels (one per topic)
-</span><span class="kw">const </span>TOPIC_EVENTS_DEFAULT_CAP: usize = <span class="number">2048</span>;
-<span class="doccomment">/// Channel capacity for topic command send channels.
-</span><span class="kw">const </span>TOPIC_COMMANDS_CAP: usize = <span class="number">64</span>;
 
 <span class="doccomment">/// Channel capacity for the send queue (one per connection)
 </span><span class="kw">const </span>SEND_QUEUE_CAP: usize = <span class="number">64</span>;
@@ -1858,6 +1827,8 @@
 </span><span class="kw">const </span>TO_ACTOR_CAP: usize = <span class="number">64</span>;
 <span class="doccomment">/// Channel capacity for the InEvent message queue (single)
 </span><span class="kw">const </span>IN_EVENT_CAP: usize = <span class="number">1024</span>;
+<span class="doccomment">/// Channel capacity for broadcast subscriber event queue (one per topic)
+</span><span class="kw">const </span>TOPIC_EVENT_CAP: usize = <span class="number">256</span>;
 <span class="doccomment">/// Name used for logging when new node addresses are added from gossip.
 </span><span class="kw">const </span>SOURCE_NAME: <span class="kw-2">&amp;</span>str = <span class="string">"gossip"</span>;
 
@@ -2062,6 +2033,12 @@
         }
     }
 
+    <span class="doccomment">/// Listen on a quinn endpoint for incoming RPC connections.
+    </span><span class="attr">#[cfg(feature = <span class="string">"rpc"</span>)]
+    </span><span class="kw">pub async fn </span>listen(<span class="self">self</span>, endpoint: quinn::Endpoint) {
+        <span class="self">self</span>.inner.api.listen(endpoint).<span class="kw">await
+    </span>}
+
     <span class="doccomment">/// Get the maximum message size configured for this gossip actor.
     </span><span class="kw">pub fn </span>max_message_size(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
         <span class="self">self</span>.inner.max_message_size
@@ -2085,7 +2062,7 @@
     <span class="doccomment">/// Dial machine to connect to peers
     </span>dialer: Dialer,
     <span class="doccomment">/// Input messages to the actor
-    </span>to_actor_rx: mpsc::Receiver&lt;<span class="self">self</span>::rpc::Message&gt;,
+    </span>to_actor_rx: mpsc::Receiver&lt;api::RpcMessage&gt;,
     conn_rx: mpsc::Receiver&lt;Connection&gt;,
     <span class="doccomment">/// Sender for the state input (cloned into the connection loops)
     </span>in_event_tx: mpsc::Sender&lt;InEvent&gt;,
@@ -2103,7 +2080,7 @@
     </span>quit_queue: VecDeque&lt;TopicId&gt;,
     <span class="doccomment">/// Tasks for the connection loops, to keep track of panics.
     </span>connection_tasks: JoinSet&lt;(NodeId, Connection, anyhow::Result&lt;()&gt;)&gt;,
-    next_receiver_id: usize,
+    topic_event_forwarders: JoinSet&lt;TopicId&gt;,
 }
 
 <span class="kw">impl </span>Actor {
@@ -2113,7 +2090,7 @@
         my_addr: <span class="kw-2">&amp;</span>AddrInfo,
     ) -&gt; (
         <span class="self">Self</span>,
-        mpsc::Sender&lt;<span class="self">self</span>::rpc::Message&gt;,
+        mpsc::Sender&lt;api::RpcMessage&gt;,
         mpsc::Sender&lt;Connection&gt;,
     ) {
         <span class="kw">let </span>peer_id = endpoint.node_id();
@@ -2142,7 +2119,7 @@
             quit_queue: Default::default(),
             connection_tasks: Default::default(),
             conn_rx,
-            next_receiver_id: <span class="number">0</span>,
+            topic_event_forwarders: Default::default(),
         };
 
         (actor, to_actor_tx, conn_tx)
@@ -2292,6 +2269,15 @@
                 <span class="kw">let </span>(peer_id, conn, result) = res.expect(<span class="string">"connection task panicked"</span>);
                 <span class="self">self</span>.handle_connection_task_finished(peer_id, conn, result).<span class="kw">await</span><span class="question-mark">?</span>;
             }
+            <span class="prelude-val">Some</span>(res) = <span class="self">self</span>.topic_event_forwarders.join_next(), <span class="kw">if </span>!<span class="self">self</span>.topic_event_forwarders.is_empty() =&gt; {
+                <span class="kw">let </span>topic_id = res.expect(<span class="string">"topic event forwarder panicked"</span>);
+                <span class="kw">if let </span><span class="prelude-val">Some</span>(state) = <span class="self">self</span>.topics.get_mut(<span class="kw-2">&amp;</span>topic_id) {
+                    <span class="kw">if </span>!state.still_needed() {
+                        <span class="self">self</span>.quit_queue.push_back(topic_id);
+                        <span class="self">self</span>.process_quit_queue().<span class="kw">await</span><span class="question-mark">?</span>;
+                    }
+                }
+            }
         }
 
         <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(()))
@@ -2412,11 +2398,14 @@
         <span class="prelude-val">Ok</span>(())
     }
 
-    <span class="kw">async fn </span>handle_to_actor_msg(<span class="kw-2">&amp;mut </span><span class="self">self</span>, msg: rpc::Message, now: Instant) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
-        <span class="kw">use </span>rpc::Message::<span class="kw-2">*</span>;
+    <span class="kw">async fn </span>handle_to_actor_msg(
+        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
+        msg: api::RpcMessage,
+        now: Instant,
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
         <span class="macro">trace!</span>(<span class="string">"handle to_actor  {msg:?}"</span>);
         <span class="kw">match </span>msg {
-            Join(msg) =&gt; {
+            api::RpcMessage::Join(msg) =&gt; {
                 <span class="kw">let </span>WithChannels {
                     inner,
                     rx,
@@ -2424,19 +2413,16 @@
                     <span class="comment">// TODO(frando): make use of span?
                     </span>span: <span class="kw">_</span>,
                 } = msg;
-                <span class="kw">let </span>JoinRequest {
+                <span class="kw">let </span>api::JoinRequest {
                     topic_id,
                     bootstrap,
                 } = inner;
-                <span class="kw">let </span>state = <span class="self">self</span>.topics.entry(topic_id).or_default();
                 <span class="kw">let </span>TopicState {
                     neighbors,
-                    event_senders,
+                    event_sender,
                     command_rx_keys,
                     joined,
-                } = state;
-                <span class="kw">let </span>receiver_id = ReceiverId(<span class="self">self</span>.next_receiver_id);
-                <span class="self">self</span>.next_receiver_id += <span class="number">1</span>;
+                } = <span class="self">self</span>.topics.entry(topic_id).or_default();
                 <span class="kw">if </span><span class="kw-2">*</span>joined {
                     <span class="kw">let </span>neighbors = neighbors.iter().copied().collect();
                     tx.try_send(Event::Gossip(GossipEvent::Joined(neighbors)))
@@ -2444,7 +2430,10 @@
                         </span>.ok();
                 }
 
-                event_senders.push(receiver_id, tx);
+                <span class="kw">let </span>fut =
+                    topic_subscriber_loop(tx, event_sender.subscribe()).map(<span class="kw">move </span>|<span class="kw">_</span>| topic_id);
+                <span class="self">self</span>.topic_event_forwarders.spawn(fut);
+
                 <span class="kw">let </span>command_rx = TopicCommandStream::new(topic_id, Box::pin(rx.into_stream()));
                 <span class="kw">let </span>key = <span class="self">self</span>.command_rx.insert(command_rx);
                 command_rx_keys.insert(key);
@@ -2527,7 +2516,7 @@
                     <span class="kw">let </span>TopicState {
                         joined,
                         neighbors,
-                        event_senders,
+                        event_sender,
                         ..
                     } = state;
                     <span class="kw">let </span>event = <span class="kw">if let </span>ProtoEvent::NeighborUp(neighbor) = event {
@@ -2541,7 +2530,7 @@
                     } <span class="kw">else </span>{
                         event.into()
                     };
-                    event_senders.send(<span class="kw-2">&amp;</span>event).<span class="kw">await</span>;
+                    event_sender.send(event).ok();
                     <span class="kw">if </span>!state.still_needed() {
                         <span class="self">self</span>.quit_queue.push_back(topic_id);
                     }
@@ -2632,25 +2621,34 @@
     }
 }
 
-<span class="attr">#[derive(Debug, Default)]
+<span class="attr">#[derive(Debug)]
 </span><span class="kw">struct </span>TopicState {
     joined: bool,
     neighbors: BTreeSet&lt;NodeId&gt;,
-    <span class="doccomment">/// Sender side to report events to a [`GossipReceiver`].
-    ///
-    /// This is the internal counter part of gossip's subscribe public API.
-    </span>event_senders: EventSenders,
+    event_sender: broadcast::Sender&lt;GossipEvent&gt;,
     <span class="doccomment">/// Keys identifying [`GossipSender`]s.
     ///
     /// This represents the receiver side of gossip's publish public API.
     </span>command_rx_keys: HashSet&lt;stream_group::Key&gt;,
 }
 
+<span class="kw">impl </span>Default <span class="kw">for </span>TopicState {
+    <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
+        <span class="kw">let </span>(event_sender, <span class="kw">_</span>) = broadcast::channel(TOPIC_EVENT_CAP);
+        <span class="self">Self </span>{
+            joined: <span class="bool-val">false</span>,
+            neighbors: Default::default(),
+            command_rx_keys: Default::default(),
+            event_sender,
+        }
+    }
+}
+
 <span class="kw">impl </span>TopicState {
     <span class="doccomment">/// Check if the topic still has any publisher or subscriber.
     </span><span class="kw">fn </span>still_needed(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
-        !<span class="self">self</span>.command_rx_keys.is_empty()
-        <span class="comment">// !self.event_senders.is_empty() || !self.command_rx_keys.is_empty()
+        !<span class="self">self</span>.command_rx_keys.is_empty() &amp;&amp; <span class="self">self</span>.event_sender.receiver_count() &gt; <span class="number">0
+        </span><span class="comment">// !self.event_senders.is_empty() || !self.command_rx_keys.is_empty()
     </span>}
 }
 
@@ -2747,81 +2745,41 @@
     <span class="prelude-val">Ok</span>(info)
 }
 
-<span class="attr">#[derive(Debug, Default)]
-</span><span class="kw">struct </span>EventSenders {
-    <span class="doccomment">/// Channels to communicate [`Event`] to [`EventStream`]s.
-    ///
-    /// This is indexed by receiver id. The boolean indicates a lagged channel ([`Event::Lagged`]).
-    </span>senders: HashMap&lt;ReceiverId, (spsc::Sender&lt;Event&gt;, bool)&gt;,
+<span class="kw">async fn </span>topic_subscriber_loop(
+    <span class="kw-2">mut </span>sender: spsc::Sender&lt;Event&gt;,
+    <span class="kw-2">mut </span>topic_events: broadcast::Receiver&lt;GossipEvent&gt;,
+) {
+    <span class="kw">loop </span>{
+        <span class="macro">tokio::select!</span> {
+           biased;
+           msg = topic_events.recv() =&gt; {
+               <span class="kw">let </span>event = <span class="kw">match </span>msg {
+                   <span class="prelude-val">Err</span>(broadcast::error::RecvError::Closed) =&gt; <span class="kw">break</span>,
+                   <span class="prelude-val">Err</span>(broadcast::error::RecvError::Lagged(<span class="kw">_</span>)) =&gt; Event::Lagged,
+                   <span class="prelude-val">Ok</span>(event) =&gt; Event::Gossip(event)
+               };
+               <span class="kw">if let </span><span class="prelude-val">Err</span>(<span class="kw">_</span>) = sender.send(event).<span class="kw">await </span>{
+                   <span class="kw">break</span>;
+               }
+           }
+           <span class="kw">_ </span>= sender.closed() =&gt; <span class="kw">break</span>,
+        }
+    }
 }
 
-<span class="doccomment">/// Id for a gossip receiver.
-///
-/// This is assigned to each [`EventStream`] obtained by the application.
-</span><span class="attr">#[derive(
-    derive_more::Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Clone, Copy, Serialize, Deserialize,
-)]
-</span><span class="kw">struct </span>ReceiverId(usize);
-
-<span class="kw">impl </span>EventSenders {
-    <span class="comment">// fn is_empty(&amp;self) -&gt; bool {
-    //     self.senders.is_empty()
-    // }
-
-    </span><span class="kw">fn </span>push(<span class="kw-2">&amp;mut </span><span class="self">self</span>, id: ReceiverId, sender: spsc::Sender&lt;Event&gt;) {
-        <span class="self">self</span>.senders.insert(id, (sender, <span class="bool-val">false</span>));
-    }
-
-    <span class="doccomment">/// Send an event to all subscribers.
-    ///
-    /// This will not wait until the sink is full, but send a `Lagged` response if the sink is almost full.
-    </span><span class="kw">async fn </span>send(<span class="kw-2">&amp;mut </span><span class="self">self</span>, event: <span class="kw-2">&amp;</span>GossipEvent) {
-        <span class="kw">let </span><span class="kw-2">mut </span>remove = Vec::new();
-        <span class="kw">for </span>(<span class="kw-2">&amp;</span>id, (sender, lagged)) <span class="kw">in </span><span class="self">self</span>.senders.iter_mut() {
-            <span class="kw">if </span><span class="kw-2">*</span>lagged {
-                <span class="kw">match </span>sender.try_send(Event::Lagged).<span class="kw">await </span>{
-                    <span class="prelude-val">Ok</span>(<span class="bool-val">true</span>) =&gt; {
-                        <span class="kw-2">*</span>lagged = <span class="bool-val">false</span>;
-                    }
-                    <span class="prelude-val">Ok</span>(<span class="bool-val">false</span>) =&gt; {
-                        <span class="kw">continue</span>;
-                    }
-                    <span class="prelude-val">Err</span>(_err) =&gt; {
-                        remove.push(id);
-                        <span class="kw">continue</span>;
-                    }
-                }
-            }
-            <span class="kw">match </span>sender.try_send(Event::Gossip(event.clone())).<span class="kw">await </span>{
-                <span class="prelude-val">Ok</span>(<span class="bool-val">true</span>) =&gt; {}
-                <span class="prelude-val">Ok</span>(<span class="bool-val">false</span>) =&gt; {
-                    <span class="kw-2">*</span>lagged = <span class="bool-val">true</span>;
-                }
-                <span class="prelude-val">Err</span>(_err) =&gt; remove.push(id), <span class="comment">// *lagged = true;
-            </span>}
-        }
-
-        <span class="kw">for </span>id <span class="kw">in </span>remove.into_iter() {
-            <span class="self">self</span>.senders.remove(<span class="kw-2">&amp;</span>id);
-        }
-    }
-
-    <span class="comment">// /// Removes a sender based on the corresponding receiver's id.
-    // fn remove(&amp;mut self, id: &amp;ReceiverId) {
-    //     self.senders.remove(id);
-    // }
-</span>}
+<span class="doccomment">/// A stream of commands for a gossip subscription.
+</span><span class="kw">type </span>BoxedCommandReceiver = n0_future::stream::Boxed&lt;<span class="prelude-ty">Result</span>&lt;Command, irpc::channel::RecvError&gt;&gt;;
 
 <span class="attr">#[derive(derive_more::Debug)]
 </span><span class="kw">struct </span>TopicCommandStream {
     topic_id: TopicId,
     <span class="attr">#[debug(<span class="string">"CommandStream"</span>)]
-    </span>stream: CommandStream,
+    </span>stream: BoxedCommandReceiver,
     closed: bool,
 }
 
 <span class="kw">impl </span>TopicCommandStream {
-    <span class="kw">fn </span>new(topic_id: TopicId, stream: CommandStream) -&gt; <span class="self">Self </span>{
+    <span class="kw">fn </span>new(topic_id: TopicId, stream: BoxedCommandReceiver) -&gt; <span class="self">Self </span>{
         <span class="self">Self </span>{
             topic_id,
             stream,
@@ -3166,7 +3124,7 @@
         .<span class="kw">await
         </span>.unwrap();
 
-        <span class="kw">let </span>(sink1, _stream1) = sub1.split();
+        <span class="kw">let </span>(<span class="kw-2">mut </span>sink1, _stream1) = sub1.split();
 
         <span class="kw">let </span>len = <span class="number">2</span>;
 
@@ -3517,7 +3475,7 @@
             <span class="macro">info!</span>(node_id = %router.endpoint().node_id().fmt_short(), <span class="string">"broadcast node spawned"</span>);
             <span class="kw">let </span>bootstrap = <span class="macro">vec!</span>[bootstrap_addr.node_id];
             router.endpoint().add_node_addr(bootstrap_addr)<span class="question-mark">?</span>;
-            <span class="kw">let </span>topic = gossip.subscribe_and_join(topic_id, bootstrap).<span class="kw">await</span><span class="question-mark">?</span>;
+            <span class="kw">let </span><span class="kw-2">mut </span>topic = gossip.subscribe_and_join(topic_id, bootstrap).<span class="kw">await</span><span class="question-mark">?</span>;
             topic.broadcast(message.as_bytes().to_vec().into()).<span class="kw">await</span><span class="question-mark">?</span>;
             std::future::pending::&lt;()&gt;().<span class="kw">await</span>;
             <span class="prelude-val">Ok</span>(())
