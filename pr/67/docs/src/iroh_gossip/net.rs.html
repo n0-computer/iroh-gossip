@@ -2626,7 +2626,7 @@
     joined: bool,
     neighbors: BTreeSet&lt;NodeId&gt;,
     event_sender: broadcast::Sender&lt;GossipEvent&gt;,
-    <span class="doccomment">/// Keys identifying [`GossipSender`]s.
+    <span class="doccomment">/// Keys identifying command receivers in [`Actor::command_rx`].
     ///
     /// This represents the receiver side of gossip's publish public API.
     </span>command_rx_keys: HashSet&lt;stream_group::Key&gt;,
@@ -2758,7 +2758,7 @@
                    <span class="prelude-val">Err</span>(broadcast::error::RecvError::Lagged(<span class="kw">_</span>)) =&gt; Event::Lagged,
                    <span class="prelude-val">Ok</span>(event) =&gt; Event::Gossip(event)
                };
-               <span class="kw">if let </span><span class="prelude-val">Err</span>(<span class="kw">_</span>) = sender.send(event).<span class="kw">await </span>{
+               <span class="kw">if </span>sender.send(event).<span class="kw">await</span>.is_err() {
                    <span class="kw">break</span>;
                }
            }
