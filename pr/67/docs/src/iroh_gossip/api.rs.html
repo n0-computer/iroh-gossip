@@ -507,7 +507,8 @@
 <a href="#506" id="506">506</a>
 <a href="#507" id="507">507</a>
 <a href="#508" id="508">508</a>
-<a href="#509" id="509">509</a></pre></div><pre class="rust"><code><span class="doccomment">//! Public API for using iroh-gossip
+<a href="#509" id="509">509</a>
+<a href="#510" id="510">510</a></pre></div><pre class="rust"><code><span class="doccomment">//! Public API for using iroh-gossip
 //!
 //! The API is usable both locally and over RPC.
 
@@ -933,6 +934,7 @@
 </span><span class="kw">mod </span>tests {
     <span class="attr">#[cfg(feature = <span class="string">"rpc"</span>)]
     #[tokio::test]
+    #[tracing_test::traced_test]
     </span><span class="kw">async fn </span>test_rpc() -&gt; testresult::TestResult {
         <span class="kw">use </span>iroh::{protocol::Router, Endpoint};
         <span class="kw">use </span>n0_future::{time::Duration, StreamExt};
@@ -1006,7 +1008,7 @@
         };
 
         <span class="comment">// timeout to not hang in case of failure
-        </span>tokio::time::timeout(Duration::from_secs(<span class="number">5</span>), recv).<span class="kw">await</span><span class="question-mark">??</span>;
+        </span>tokio::time::timeout(Duration::from_secs(<span class="number">10</span>), recv).<span class="kw">await</span><span class="question-mark">??</span>;
 
         <span class="comment">// shutdown
         </span>rpc_server_task.abort();
