@@ -14,6 +14,7 @@ use std::{
 use bytes::Bytes;
 use derive_more::{Add, From, Sub};
 use n0_future::time::{Duration, Instant};
+use postcard::experimental::max_size::MaxSize;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -23,7 +24,7 @@ use super::{
 };
 
 /// A message identifier, which is the message content's blake3 hash.
-#[derive(Serialize, Deserialize, Clone, Hash, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Hash, Copy, PartialEq, Eq, MaxSize)]
 pub struct MessageId([u8; 32]);
 idbytes_impls!(MessageId, "MessageId");
 
@@ -108,7 +109,20 @@ impl<PI> GossipEvent<PI> {
 
 /// Number of delivery hops a message has taken.
 #[derive(
-    From, Add, Sub, Serialize, Deserialize, Eq, PartialEq, PartialOrd, Ord, Clone, Copy, Debug, Hash,
+    From,
+    Add,
+    Sub,
+    Serialize,
+    Deserialize,
+    Eq,
+    PartialEq,
+    PartialOrd,
+    Ord,
+    Clone,
+    Copy,
+    Debug,
+    Hash,
+    MaxSize,
 )]
 pub struct Round(u16);
 
@@ -203,22 +217,12 @@ impl Gossip {
 }
 
 /// Control message to inform peers we have a message without transmitting the whole payload.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, MaxSize)]
 pub struct IHave {
     /// Id of the message.
     pub(crate) id: MessageId,
     /// Delivery round of the message.
     pub(crate) round: Round,
-}
-
-impl IHave {
-    pub(crate) fn postcard_encoded_size() -> usize {
-        postcard::experimental::serialized_size(&Self {
-            id: MessageId([1u8; 32]),
-            round: Round(u16::MAX),
-        })
-        .unwrap()
-    }
 }
 
 /// Control message to signal a peer that they have been moved to the eager set, and to ask the
@@ -445,7 +449,7 @@ impl<PI: PeerIdentity> State<PI> {
             - 1
             // Space for length prefix
             - 2;
-        let chunk_len = chunk_size / IHave::postcard_encoded_size();
+        let chunk_len = chunk_size / IHave::POSTCARD_MAX_SIZE;
         for (peer, list) in self.lazy_push_queue.drain() {
             for chunk in list.chunks(chunk_len) {
                 io.push(OutEvent::SendMessage(peer, Message::IHave(chunk.to_vec())));
