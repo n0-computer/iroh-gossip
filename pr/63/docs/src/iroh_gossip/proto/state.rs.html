@@ -366,7 +366,6 @@
 
 </span><span class="kw">use </span>std::collections::{hash_map, HashMap, HashSet};
 
-<span class="kw">use </span>iroh_metrics::{inc, inc_by};
 <span class="kw">use </span>n0_future::time::{Duration, Instant};
 <span class="kw">use </span>rand::Rng;
 <span class="kw">use </span>serde::{Deserialize, Serialize};
@@ -582,9 +581,12 @@
         <span class="kw-2">&amp;mut </span><span class="self">self</span>,
         event: InEvent&lt;PI&gt;,
         now: Instant,
+        metrics: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>Metrics&gt;,
     ) -&gt; <span class="kw">impl </span>Iterator&lt;Item = OutEvent&lt;PI&gt;&gt; + <span class="lifetime">'_ </span>{
         <span class="macro">trace!</span>(<span class="string">"in_event: {event:?}"</span>);
-        track_in_event(<span class="kw-2">&amp;</span>event);
+        <span class="kw">if let </span><span class="prelude-val">Some</span>(metrics) = <span class="kw-2">&amp;</span>metrics {
+            track_in_event(<span class="kw-2">&amp;</span>event, metrics);
+        }
 
         <span class="kw">let </span>event: InEventMapped&lt;PI&gt; = event.into();
 
@@ -638,7 +640,9 @@
         }
 
         <span class="comment">// track metrics
-        </span>track_out_events(<span class="kw-2">&amp;</span><span class="self">self</span>.outbox);
+        </span><span class="kw">if let </span><span class="prelude-val">Some</span>(metrics) = <span class="kw-2">&amp;</span>metrics {
+            track_out_events(<span class="kw-2">&amp;</span><span class="self">self</span>.outbox, metrics);
+        }
 
         <span class="self">self</span>.outbox.drain(..)
     }
@@ -673,30 +677,30 @@
     }
 }
 
-<span class="kw">fn </span>track_out_events&lt;PI: Serialize&gt;(events: <span class="kw-2">&amp;</span>[OutEvent&lt;PI&gt;]) {
+<span class="kw">fn </span>track_out_events&lt;PI: Serialize&gt;(events: <span class="kw-2">&amp;</span>[OutEvent&lt;PI&gt;], metrics: <span class="kw-2">&amp;</span>Metrics) {
     <span class="kw">for </span>event <span class="kw">in </span>events {
         <span class="kw">match </span>event {
             OutEvent::SendMessage(_to, message) =&gt; <span class="kw">match </span>message.kind() {
                 MessageKind::Data =&gt; {
-                    <span class="macro">inc!</span>(Metrics, msgs_data_sent);
-                    <span class="macro">inc_by!</span>(
-                        Metrics,
-                        msgs_data_sent_size,
-                        message.size().unwrap_or(<span class="number">0</span>) <span class="kw">as </span>u64
-                    );
+                    metrics.msgs_data_sent.inc();
+                    metrics
+                        .msgs_data_sent_size
+                        .inc_by(message.size().unwrap_or(<span class="number">0</span>) <span class="kw">as </span>u64);
                 }
                 MessageKind::Control =&gt; {
-                    <span class="macro">inc!</span>(Metrics, msgs_ctrl_sent);
-                    <span class="macro">inc_by!</span>(
-                        Metrics,
-                        msgs_ctrl_sent_size,
-                        message.size().unwrap_or(<span class="number">0</span>) <span class="kw">as </span>u64
-                    );
+                    metrics.msgs_ctrl_sent.inc();
+                    metrics
+                        .msgs_ctrl_sent_size
+                        .inc_by(message.size().unwrap_or(<span class="number">0</span>) <span class="kw">as </span>u64);
                 }
             },
             OutEvent::EmitEvent(_topic, event) =&gt; <span class="kw">match </span>event {
-                <span class="kw">super</span>::Event::NeighborUp(_peer) =&gt; <span class="macro">inc!</span>(Metrics, neighbor_up),
-                <span class="kw">super</span>::Event::NeighborDown(_peer) =&gt; <span class="macro">inc!</span>(Metrics, neighbor_down),
+                <span class="kw">super</span>::Event::NeighborUp(_peer) =&gt; {
+                    metrics.neighbor_up.inc();
+                }
+                <span class="kw">super</span>::Event::NeighborDown(_peer) =&gt; {
+                    metrics.neighbor_down.inc();
+                }
                 <span class="kw">_ </span>=&gt; {}
             },
             <span class="kw">_ </span>=&gt; {}
@@ -704,24 +708,20 @@
     }
 }
 
-<span class="kw">fn </span>track_in_event&lt;PI: Serialize&gt;(event: <span class="kw-2">&amp;</span>InEvent&lt;PI&gt;) {
+<span class="kw">fn </span>track_in_event&lt;PI: Serialize&gt;(event: <span class="kw-2">&amp;</span>InEvent&lt;PI&gt;, metrics: <span class="kw-2">&amp;</span>Metrics) {
     <span class="kw">if let </span>InEvent::RecvMessage(_from, message) = event {
         <span class="kw">match </span>message.kind() {
             MessageKind::Data =&gt; {
-                <span class="macro">inc!</span>(Metrics, msgs_data_recv);
-                <span class="macro">inc_by!</span>(
-                    Metrics,
-                    msgs_data_recv_size,
-                    message.size().unwrap_or(<span class="number">0</span>) <span class="kw">as </span>u64
-                );
+                metrics.msgs_data_recv.inc();
+                metrics
+                    .msgs_data_recv_size
+                    .inc_by(message.size().unwrap_or(<span class="number">0</span>) <span class="kw">as </span>u64);
             }
             MessageKind::Control =&gt; {
-                <span class="macro">inc!</span>(Metrics, msgs_ctrl_recv);
-                <span class="macro">inc_by!</span>(
-                    Metrics,
-                    msgs_ctrl_recv_size,
-                    message.size().unwrap_or(<span class="number">0</span>) <span class="kw">as </span>u64
-                );
+                metrics.msgs_ctrl_recv.inc();
+                metrics
+                    .msgs_ctrl_recv_size
+                    .inc_by(message.size().unwrap_or(<span class="number">0</span>) <span class="kw">as </span>u64);
             }
         }
     }

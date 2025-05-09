@@ -1963,7 +1963,19 @@
 <a href="#1962" id="1962">1962</a>
 <a href="#1963" id="1963">1963</a>
 <a href="#1964" id="1964">1964</a>
-<a href="#1965" id="1965">1965</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
+<a href="#1965" id="1965">1965</a>
+<a href="#1966" id="1966">1966</a>
+<a href="#1967" id="1967">1967</a>
+<a href="#1968" id="1968">1968</a>
+<a href="#1969" id="1969">1969</a>
+<a href="#1970" id="1970">1970</a>
+<a href="#1971" id="1971">1971</a>
+<a href="#1972" id="1972">1972</a>
+<a href="#1973" id="1973">1973</a>
+<a href="#1974" id="1974">1974</a>
+<a href="#1975" id="1975">1975</a>
+<a href="#1976" id="1976">1976</a>
+<a href="#1977" id="1977">1977</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
@@ -1982,7 +1994,6 @@
     protocol::ProtocolHandler,
     Endpoint, NodeAddr, NodeId, PublicKey, RelayUrl,
 };
-<span class="kw">use </span>iroh_metrics::inc;
 <span class="kw">use </span>n0_future::{
     boxed::BoxFuture,
     task::{<span class="self">self</span>, AbortOnDropHandle, JoinSet},
@@ -2117,6 +2128,7 @@
     max_message_size: usize,
     <span class="doccomment">/// Next [`ReceiverId`] to be assigned when a receiver is registered for a topic.
     </span>next_receiver_id: AtomicUsize,
+    metrics: Arc&lt;Metrics&gt;,
 }
 
 <span class="kw">impl </span>ProtocolHandler <span class="kw">for </span>Gossip {
@@ -2157,6 +2169,7 @@
 
     <span class="doccomment">/// Spawn a gossip actor and get a handle for it
     </span><span class="kw">pub async fn </span>spawn(<span class="self">self</span>, endpoint: Endpoint) -&gt; <span class="prelude-ty">Result</span>&lt;Gossip, Error&gt; {
+        <span class="kw">let </span>metrics = Arc::new(Metrics::default());
         <span class="comment">// We want to wait for our endpoint to be addressable by other nodes before launching gossip,
         // because otherwise our Join messages, which will be forwarded into the swarm through a random
         // walk, might not include an address to talk back to us.
@@ -2181,7 +2194,7 @@
             NodeAddr::from_parts(endpoint.node_id(), home_relay, addrs)
         };
 
-        <span class="kw">let </span>(actor, to_actor_tx) = Actor::new(endpoint, <span class="self">self</span>.config, <span class="kw-2">&amp;</span>addr.into());
+        <span class="kw">let </span>(actor, to_actor_tx) = Actor::new(endpoint, <span class="self">self</span>.config, metrics.clone(), <span class="kw-2">&amp;</span>addr.into());
         <span class="kw">let </span>me = actor.endpoint.node_id().fmt_short();
         <span class="kw">let </span>max_message_size = actor.state.max_message_size();
 
@@ -2200,6 +2213,7 @@
                 _actor_handle: AbortOnDropHandle::new(actor_handle),
                 max_message_size,
                 next_receiver_id: Default::default(),
+                metrics,
             }
             .into(),
             <span class="attr">#[cfg(feature = <span class="string">"rpc"</span>)]
@@ -2280,6 +2294,11 @@
         updates: CommandStream,
     ) -&gt; EventStream {
         <span class="self">self</span>.inner.subscribe_with_stream(topic_id, options, updates)
+    }
+
+    <span class="doccomment">/// Returns the metrics tracked for this gossip instance.
+    </span><span class="kw">pub fn </span>metrics(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>Arc&lt;Metrics&gt; {
+        <span class="kw-2">&amp;</span><span class="self">self</span>.inner.metrics
     }
 }
 
@@ -2443,12 +2462,14 @@
     </span>quit_queue: VecDeque&lt;TopicId&gt;,
     <span class="doccomment">/// Tasks for the connection loops, to keep track of panics.
     </span>connection_tasks: JoinSet&lt;(NodeId, Connection, anyhow::Result&lt;()&gt;)&gt;,
+    metrics: Arc&lt;Metrics&gt;,
 }
 
 <span class="kw">impl </span>Actor {
     <span class="kw">fn </span>new(
         endpoint: Endpoint,
         config: proto::Config,
+        metrics: Arc&lt;Metrics&gt;,
         my_addr: <span class="kw-2">&amp;</span>AddrInfo,
     ) -&gt; (<span class="self">Self</span>, mpsc::Sender&lt;ToActor&gt;) {
         <span class="kw">let </span>peer_id = endpoint.node_id();
@@ -2475,6 +2496,7 @@
             topics: Default::default(),
             quit_queue: Default::default(),
             connection_tasks: Default::default(),
+            metrics,
         };
 
         (actor, to_actor_tx)
@@ -2538,12 +2560,12 @@
         direct_addresses_stream: <span class="kw-2">&amp;mut </span>(<span class="kw">impl </span>Stream&lt;Item = BTreeSet&lt;DirectAddr&gt;&gt; + Unpin),
         i: usize,
     ) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="prelude-ty">Option</span>&lt;()&gt;, Error&gt; {
-        <span class="macro">inc!</span>(Metrics, actor_tick_main);
+        <span class="self">self</span>.metrics.actor_tick_main.inc();
         <span class="macro">tokio::select!</span> {
             biased;
             msg = <span class="self">self</span>.to_actor_rx.recv() =&gt; {
                 <span class="macro">trace!</span>(<span class="question-mark">?</span>i, <span class="string">"tick: to_actor_rx"</span>);
-                <span class="macro">inc!</span>(Metrics, actor_tick_rx);
+                <span class="self">self</span>.metrics.actor_tick_rx.inc();
                 <span class="kw">match </span>msg {
                     <span class="prelude-val">Some</span>(msg) =&gt; <span class="self">self</span>.handle_to_actor_msg(msg, Instant::now()).<span class="kw">await</span><span class="question-mark">?</span>,
                     <span class="prelude-val">None </span>=&gt; {
@@ -2558,7 +2580,7 @@
             },
             <span class="prelude-val">Some</span>(new_addresses) = direct_addresses_stream.next() =&gt; {
                 <span class="macro">trace!</span>(<span class="question-mark">?</span>i, <span class="string">"tick: new_endpoints"</span>);
-                <span class="macro">inc!</span>(Metrics, actor_tick_endpoint);
+                <span class="self">self</span>.metrics.actor_tick_endpoint.inc();
                 <span class="kw-2">*</span>current_addresses = new_addresses;
                 <span class="self">self</span>.handle_addr_update(current_addresses).<span class="kw">await</span><span class="question-mark">?</span>;
             }
@@ -2568,32 +2590,32 @@
             }
             (peer_id, res) = <span class="self">self</span>.dialer.next_conn() =&gt; {
                 <span class="macro">trace!</span>(<span class="question-mark">?</span>i, <span class="string">"tick: dialer"</span>);
-                <span class="macro">inc!</span>(Metrics, actor_tick_dialer);
+                <span class="self">self</span>.metrics.actor_tick_dialer.inc();
                 <span class="kw">match </span>res {
                     <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(conn)) =&gt; {
                         <span class="macro">debug!</span>(peer = %peer_id.fmt_short(), <span class="string">"dial successful"</span>);
-                        <span class="macro">inc!</span>(Metrics, actor_tick_dialer_success);
+                        <span class="self">self</span>.metrics.actor_tick_dialer_success.inc();
                         <span class="self">self</span>.handle_connection(peer_id, ConnOrigin::Dial, conn);
                     }
                     <span class="prelude-val">Some</span>(<span class="prelude-val">Err</span>(err)) =&gt; {
                         <span class="macro">warn!</span>(peer = %peer_id.fmt_short(), <span class="string">"dial failed: {err}"</span>);
-                        <span class="macro">inc!</span>(Metrics, actor_tick_dialer_failure);
+                        <span class="self">self</span>.metrics.actor_tick_dialer_failure.inc();
                     }
                     <span class="prelude-val">None </span>=&gt; {
                         <span class="macro">warn!</span>(peer = %peer_id.fmt_short(), <span class="string">"dial disconnected"</span>);
-                        <span class="macro">inc!</span>(Metrics, actor_tick_dialer_failure);
+                        <span class="self">self</span>.metrics.actor_tick_dialer_failure.inc();
                     }
                 }
             }
             event = <span class="self">self</span>.in_event_rx.recv() =&gt; {
                 <span class="macro">trace!</span>(<span class="question-mark">?</span>i, <span class="string">"tick: in_event_rx"</span>);
-                <span class="macro">inc!</span>(Metrics, actor_tick_in_event_rx);
+                <span class="self">self</span>.metrics.actor_tick_in_event_rx.inc();
                 <span class="kw">let </span>event = event.expect(<span class="string">"unreachable: in_event_tx is never dropped before receiver"</span>);
                 <span class="self">self</span>.handle_in_event(event, Instant::now()).<span class="kw">await</span><span class="question-mark">?</span>;
             }
             drain = <span class="self">self</span>.timers.wait_and_drain() =&gt; {
                 <span class="macro">trace!</span>(<span class="question-mark">?</span>i, <span class="string">"tick: timers"</span>);
-                <span class="macro">inc!</span>(Metrics, actor_tick_timers);
+                <span class="self">self</span>.metrics.actor_tick_timers.inc();
                 <span class="kw">let </span>now = Instant::now();
                 <span class="kw">for </span>(_instant, timer) <span class="kw">in </span>drain {
                     <span class="self">self</span>.handle_in_event(InEvent::TimerExpired(timer), now).<span class="kw">await</span><span class="question-mark">?</span>;
@@ -2797,7 +2819,7 @@
         } <span class="kw">else </span>{
             <span class="macro">debug!</span>(<span class="question-mark">?</span>event, <span class="string">"handle in_event"</span>);
         };
-        <span class="kw">let </span>out = <span class="self">self</span>.state.handle(event, now);
+        <span class="kw">let </span>out = <span class="self">self</span>.state.handle(event, now, <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span><span class="self">self</span>.metrics));
         <span class="kw">for </span>event <span class="kw">in </span>out {
             <span class="kw">if </span><span class="macro">matches!</span>(event, OutEvent::ScheduleTimer(<span class="kw">_</span>, <span class="kw">_</span>)) {
                 <span class="macro">trace!</span>(<span class="question-mark">?</span>event, <span class="string">"handle out_event"</span>);
@@ -3362,8 +3384,9 @@
                 direct_addresses: Default::default(),
             };
             <span class="kw">let </span>endpoint = create_endpoint(rng, relay_map).<span class="kw">await</span><span class="question-mark">?</span>;
+            <span class="kw">let </span>metrics = Arc::new(Metrics::default());
 
-            <span class="kw">let </span>(actor, to_actor_tx) = Actor::new(endpoint, config, <span class="kw-2">&amp;</span>my_addr);
+            <span class="kw">let </span>(actor, to_actor_tx) = Actor::new(endpoint, config, metrics.clone(), <span class="kw-2">&amp;</span>my_addr);
             <span class="kw">let </span>max_message_size = actor.state.max_message_size();
 
             <span class="kw">let </span>_actor_handle =
@@ -3374,6 +3397,7 @@
                     _actor_handle,
                     max_message_size,
                     next_receiver_id: Default::default(),
+                    metrics,
                 }
                 .into(),
                 <span class="attr">#[cfg(feature = <span class="string">"rpc"</span>)]
