@@ -26,8 +26,7 @@ The <code>net</code> module connects the protocol to the networking stack from <
     <span class="comment">// setup router
     </span><span class="kw">let </span>router = Router::builder(endpoint.clone())
         .accept(ALPN, gossip.clone())
-        .spawn()
-        .<span class="kw">await</span><span class="question-mark">?</span>;
+        .spawn();
     <span class="comment">// do fun stuff with the gossip protocol
     </span>router.shutdown().<span class="kw">await</span><span class="question-mark">?</span>;
     <span class="prelude-val">Ok</span>(())
