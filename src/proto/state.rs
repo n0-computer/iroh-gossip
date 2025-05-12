@@ -13,7 +13,7 @@ use crate::{
     proto::{
         topic::{self, Command},
         util::idbytes_impls,
-        Config, PeerData, PeerIdentity,
+        Config, PeerData, PeerIdentity, MIN_MAX_MESSAGE_SIZE,
     },
 };
 
@@ -161,7 +161,16 @@ impl<PI: PeerIdentity, R: Rng + Clone> State<PI, R> {
     /// (which can be updated over time).
     /// For the protocol to perform as recommended in the papers, the [`Config`] should be
     /// identical for all nodes in the network.
+    ///
+    /// ## Panics
+    ///
+    /// Panics if [`Config::max_message_size`] is below [`MIN_MAX_MESSAGE_SIZE`].
     pub fn new(me: PI, me_data: PeerData, config: Config, rng: R) -> Self {
+        assert!(
+            config.max_message_size >= MIN_MAX_MESSAGE_SIZE,
+            "max_message_size must be at least {}",
+            MIN_MAX_MESSAGE_SIZE
+        );
         Self {
             me,
             me_data,
