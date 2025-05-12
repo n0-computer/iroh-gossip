@@ -1974,8 +1974,7 @@
 <a href="#1973" id="1973">1973</a>
 <a href="#1974" id="1974">1974</a>
 <a href="#1975" id="1975">1975</a>
-<a href="#1976" id="1976">1976</a>
-<a href="#1977" id="1977">1977</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
+<a href="#1976" id="1976">1976</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
@@ -3852,8 +3851,7 @@
             <span class="kw">let </span>gossip = Gossip::builder().spawn(ep.clone()).<span class="kw">await</span><span class="question-mark">?</span>;
             <span class="kw">let </span>router = Router::builder(ep.clone())
                 .accept(GOSSIP_ALPN, gossip.clone())
-                .spawn()
-                .<span class="kw">await</span><span class="question-mark">?</span>;
+                .spawn();
             <span class="prelude-val">Ok</span>((router, gossip))
         }
 
