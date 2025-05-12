@@ -10,7 +10,7 @@ use bytes::Bytes;
 use clap::Parser;
 use ed25519_dalek::Signature;
 use futures_lite::StreamExt;
-use iroh::{Endpoint, NodeAddr, PublicKey, RelayMap, RelayMode, RelayUrl, SecretKey};
+use iroh::{Endpoint, NodeAddr, PublicKey, RelayMode, RelayUrl, SecretKey};
 use iroh_gossip::{
     net::{Event, Gossip, GossipEvent, GossipReceiver, GOSSIP_ALPN},
     proto::TopicId,
@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
     // configure our relay map
     let relay_mode = match (args.no_relay, args.relay) {
         (false, None) => RelayMode::Default,
-        (false, Some(url)) => RelayMode::Custom(RelayMap::from_url(url)),
+        (false, Some(url)) => RelayMode::Custom(url.into()),
         (true, None) => RelayMode::Disabled,
         (true, Some(_)) => bail!("You cannot set --no-relay and --relay at the same time"),
     };
@@ -124,8 +124,7 @@ async fn main() -> Result<()> {
     // setup router
     let router = iroh::protocol::Router::builder(endpoint.clone())
         .accept(GOSSIP_ALPN, gossip.clone())
-        .spawn()
-        .await?;
+        .spawn();
 
     // join the gossip topic by connecting to known peers, if any
     let peer_ids = peers.iter().map(|p| p.node_id).collect();
