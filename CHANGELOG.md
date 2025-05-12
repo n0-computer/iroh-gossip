@@ -2,6 +2,21 @@
 
 All notable changes to iroh-gossip will be documented in this file.
 
+## [0.35.0](https://github.com/n0-computer/iroh-gossip/compare/v0.34.1..0.35.0) - 2025-05-12
+
+### 🐛 Bug Fixes
+
+- Respect max message size when constructing IHave messages ([#63](https://github.com/n0-computer/iroh-gossip/issues/63)) - ([77c56f1](https://github.com/n0-computer/iroh-gossip/commit/77c56f1a769e561d1c8b91ebed6e02e7792bc2cb))
+
+### 🚜 Refactor
+
+- [**breaking**] Use new iroh-metrics version, no more global tracking ([#58](https://github.com/n0-computer/iroh-gossip/issues/58)) - ([2a37214](https://github.com/n0-computer/iroh-gossip/commit/2a372144b08f6db43f67536e8694659b4b326698))
+
+### ⚙️ Miscellaneous Tasks
+
+- Update dependencies ([#66](https://github.com/n0-computer/iroh-gossip/issues/66)) - ([dbec9b0](https://github.com/n0-computer/iroh-gossip/commit/dbec9b033cded5aa3e09b0c80d52bed697dfe880))
+- Update to `iroh` v0.35 ([#68](https://github.com/n0-computer/iroh-gossip/issues/68)) - ([e6af27d](https://github.com/n0-computer/iroh-gossip/commit/e6af27d924db780e00b10017b18d4da3ef8db18a))
+
 ## [0.34.1](https://github.com/n0-computer/iroh-gossip/compare/v0.34.0..0.34.1) - 2025-03-24
 
 ### 🐛 Bug Fixes
