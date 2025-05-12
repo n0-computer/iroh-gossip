@@ -1875,8 +1875,7 @@ mod test {
             let gossip = Gossip::builder().spawn(ep.clone()).await?;
             let router = Router::builder(ep.clone())
                 .accept(GOSSIP_ALPN, gossip.clone())
-                .spawn()
-                .await?;
+                .spawn();
             Ok((router, gossip))
         }
 

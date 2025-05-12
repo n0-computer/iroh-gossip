@@ -13,8 +13,7 @@ async fn main() -> anyhow::Result<()> {
     // setup router
     let router = Router::builder(endpoint.clone())
         .accept(ALPN, gossip.clone())
-        .spawn()
-        .await?;
+        .spawn();
     // do fun stuff with the gossip protocol
     router.shutdown().await?;
     Ok(())
