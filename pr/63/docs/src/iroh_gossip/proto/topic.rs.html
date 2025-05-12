@@ -354,8 +354,7 @@
 <a href="#353" id="353">353</a>
 <a href="#354" id="354">354</a>
 <a href="#355" id="355">355</a>
-<a href="#356" id="356">356</a>
-<a href="#357" id="357">357</a></pre></div><pre class="rust"><code><span class="doccomment">//! This module contains the implementation of the gossiping protocol for an individual topic
+<a href="#356" id="356">356</a></pre></div><pre class="rust"><code><span class="doccomment">//! This module contains the implementation of the gossiping protocol for an individual topic
 
 </span><span class="kw">use </span>std::collections::VecDeque;
 
@@ -366,14 +365,13 @@
 <span class="kw">use </span>rand_core::SeedableRng;
 <span class="kw">use </span>serde::{Deserialize, Serialize};
 
-<span class="kw">use </span><span class="kw">crate</span>::proto::MIN_MAX_MESSAGE_SIZE;
-
 <span class="kw">use super</span>::{
     hyparview::{<span class="self">self</span>, InEvent <span class="kw">as </span>SwarmIn},
     plumtree::{<span class="self">self</span>, GossipEvent, InEvent <span class="kw">as </span>GossipIn, Scope},
     state::MessageKind,
     PeerData, PeerIdentity, DEFAULT_MAX_MESSAGE_SIZE,
 };
+<span class="kw">use </span><span class="kw">crate</span>::proto::MIN_MAX_MESSAGE_SIZE;
 
 <span class="doccomment">/// Input event to the topic state handler.
 </span><span class="attr">#[derive(Clone, Debug)]
