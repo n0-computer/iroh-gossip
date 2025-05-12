@@ -377,7 +377,14 @@
 <a href="#376" id="376">376</a>
 <a href="#377" id="377">377</a>
 <a href="#378" id="378">378</a>
-<a href="#379" id="379">379</a></pre></div><pre class="rust"><code><span class="doccomment">//! Implementation of the iroh-gossip protocol, as an IO-less state machine
+<a href="#379" id="379">379</a>
+<a href="#380" id="380">380</a>
+<a href="#381" id="381">381</a>
+<a href="#382" id="382">382</a>
+<a href="#383" id="383">383</a>
+<a href="#384" id="384">384</a>
+<a href="#385" id="385">385</a>
+<a href="#386" id="386">386</a></pre></div><pre class="rust"><code><span class="doccomment">//! Implementation of the iroh-gossip protocol, as an IO-less state machine
 //!
 //! This module implements the iroh-gossip protocol. The entry point is [`State`], which contains
 //! the protocol state for a node.
@@ -442,6 +449,13 @@
 <span class="kw">pub use </span>plumtree::{Config <span class="kw">as </span>PlumtreeConfig, DeliveryScope, Scope};
 <span class="kw">pub use </span>state::{InEvent, Message, OutEvent, State, Timer, TopicId};
 <span class="kw">pub use </span>topic::{Command, Config, Event, IO};
+
+<span class="doccomment">/// The default maximum size in bytes for a gossip message.
+/// This is a sane but arbitrary default and can be changed in the [`Config`].
+</span><span class="kw">pub const </span>DEFAULT_MAX_MESSAGE_SIZE: usize = <span class="number">4096</span>;
+
+<span class="doccomment">/// The minimum allowed value for [`Config::max_message_size`].
+</span><span class="kw">pub const </span>MIN_MAX_MESSAGE_SIZE: usize = <span class="number">512</span>;
 
 <span class="doccomment">/// The identifier for a peer.
 ///

@@ -362,7 +362,16 @@
 <a href="#361" id="361">361</a>
 <a href="#362" id="362">362</a>
 <a href="#363" id="363">363</a>
-<a href="#364" id="364">364</a></pre></div><pre class="rust"><code><span class="doccomment">//! The protocol state of the `iroh-gossip` protocol.
+<a href="#364" id="364">364</a>
+<a href="#365" id="365">365</a>
+<a href="#366" id="366">366</a>
+<a href="#367" id="367">367</a>
+<a href="#368" id="368">368</a>
+<a href="#369" id="369">369</a>
+<a href="#370" id="370">370</a>
+<a href="#371" id="371">371</a>
+<a href="#372" id="372">372</a>
+<a href="#373" id="373">373</a></pre></div><pre class="rust"><code><span class="doccomment">//! The protocol state of the `iroh-gossip` protocol.
 
 </span><span class="kw">use </span>std::collections::{hash_map, HashMap, HashSet};
 
@@ -376,7 +385,7 @@
     proto::{
         topic::{<span class="self">self</span>, Command},
         util::idbytes_impls,
-        Config, PeerData, PeerIdentity,
+        Config, PeerData, PeerIdentity, MIN_MAX_MESSAGE_SIZE,
     },
 };
 
@@ -524,7 +533,16 @@
     /// (which can be updated over time).
     /// For the protocol to perform as recommended in the papers, the [`Config`] should be
     /// identical for all nodes in the network.
+    ///
+    /// ## Panics
+    ///
+    /// Panics if [`Config::max_message_size`] is below [`MIN_MAX_MESSAGE_SIZE`].
     </span><span class="kw">pub fn </span>new(me: PI, me_data: PeerData, config: Config, rng: R) -&gt; <span class="self">Self </span>{
+        <span class="macro">assert!</span>(
+            config.max_message_size &gt;= MIN_MAX_MESSAGE_SIZE,
+            <span class="string">"max_message_size must be at least {}"</span>,
+            MIN_MAX_MESSAGE_SIZE
+        );
         <span class="self">Self </span>{
             me,
             me_data,
