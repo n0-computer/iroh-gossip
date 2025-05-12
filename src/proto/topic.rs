@@ -9,14 +9,13 @@ use rand::Rng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 
-use crate::proto::MIN_MAX_MESSAGE_SIZE;
-
 use super::{
     hyparview::{self, InEvent as SwarmIn},
     plumtree::{self, GossipEvent, InEvent as GossipIn, Scope},
     state::MessageKind,
     PeerData, PeerIdentity, DEFAULT_MAX_MESSAGE_SIZE,
 };
+use crate::proto::MIN_MAX_MESSAGE_SIZE;
 
 /// Input event to the topic state handler.
 #[derive(Clone, Debug)]
