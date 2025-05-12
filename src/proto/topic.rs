@@ -13,12 +13,9 @@ use super::{
     hyparview::{self, InEvent as SwarmIn},
     plumtree::{self, GossipEvent, InEvent as GossipIn, Scope},
     state::MessageKind,
-    PeerData, PeerIdentity,
+    PeerData, PeerIdentity, DEFAULT_MAX_MESSAGE_SIZE,
 };
-
-/// The default maximum size in bytes for a gossip message.
-/// This is a sane but arbitrary default and can be changed in the [`Config`].
-pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 4096;
+use crate::proto::MIN_MAX_MESSAGE_SIZE;
 
 /// Input event to the topic state handler.
 #[derive(Clone, Debug)]
@@ -212,6 +209,10 @@ pub struct State<PI, R> {
 
 impl<PI: PeerIdentity> State<PI, rand::rngs::StdRng> {
     /// Initialize the local state with the default random number generator.
+    ///
+    /// ## Panics
+    ///
+    /// Panics if [`Config::max_message_size`] is below [`MIN_MAX_MESSAGE_SIZE`].
     pub fn new(me: PI, me_data: Option<PeerData>, config: Config) -> Self {
         Self::with_rng(me, me_data, config, rand::rngs::StdRng::from_entropy())
     }
@@ -226,10 +227,21 @@ impl<PI, R> State<PI, R> {
 
 impl<PI: PeerIdentity, R: Rng> State<PI, R> {
     /// Initialize the local state with a custom random number generator.
+    ///
+    /// ## Panics
+    ///
+    /// Panics if [`Config::max_message_size`] is below [`MIN_MAX_MESSAGE_SIZE`].
     pub fn with_rng(me: PI, me_data: Option<PeerData>, config: Config, rng: R) -> Self {
+        assert!(
+            config.max_message_size >= MIN_MAX_MESSAGE_SIZE,
+            "max_message_size must be at least {}",
+            MIN_MAX_MESSAGE_SIZE
+        );
+        let max_payload_size =
+            config.max_message_size - super::Message::<PI>::postcard_header_size();
         Self {
             swarm: hyparview::State::new(me, me_data, config.membership, rng),
-            gossip: plumtree::State::new(me, config.broadcast),
+            gossip: plumtree::State::new(me, config.broadcast, max_payload_size),
             me,
             outbox: VecDeque::new(),
             stats: Stats::default(),

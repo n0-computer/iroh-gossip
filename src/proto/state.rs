@@ -12,7 +12,7 @@ use crate::{
     proto::{
         topic::{self, Command},
         util::idbytes_impls,
-        Config, PeerData, PeerIdentity,
+        Config, PeerData, PeerIdentity, MIN_MAX_MESSAGE_SIZE,
     },
 };
 
@@ -26,14 +26,26 @@ idbytes_impls!(TopicId, "TopicId");
 /// This is the wire frame of the `iroh-gossip` protocol.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Message<PI> {
-    topic: TopicId,
-    message: topic::Message<PI>,
+    pub(crate) topic: TopicId,
+    pub(crate) message: topic::Message<PI>,
 }
 
 impl<PI> Message<PI> {
     /// Get the kind of this message
     pub fn kind(&self) -> MessageKind {
         self.message.kind()
+    }
+}
+
+impl<PI: Serialize> Message<PI> {
+    pub(crate) fn postcard_header_size() -> usize {
+        // We create a message that has no payload (gossip::Message::Prune), calculate the encoded size,
+        // and subtract 1 for the discriminator of the inner gossip::Message enum.
+        let m = Self {
+            topic: TopicId(Default::default()),
+            message: topic::Message::<PI>::Gossip(super::plumtree::Message::Prune),
+        };
+        postcard::experimental::serialized_size(&m).unwrap() - 1
     }
 }
 
@@ -148,7 +160,16 @@ impl<PI: PeerIdentity, R: Rng + Clone> State<PI, R> {
     /// (which can be updated over time).
     /// For the protocol to perform as recommended in the papers, the [`Config`] should be
     /// identical for all nodes in the network.
+    ///
+    /// ## Panics
+    ///
+    /// Panics if [`Config::max_message_size`] is below [`MIN_MAX_MESSAGE_SIZE`].
     pub fn new(me: PI, me_data: PeerData, config: Config, rng: R) -> Self {
+        assert!(
+            config.max_message_size >= MIN_MAX_MESSAGE_SIZE,
+            "max_message_size must be at least {}",
+            MIN_MAX_MESSAGE_SIZE
+        );
         Self {
             me,
             me_data,
