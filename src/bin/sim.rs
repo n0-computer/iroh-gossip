@@ -17,8 +17,11 @@ use tracing::{error_span, info, warn};
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[allow(clippy::enum_variant_names)]
 enum Simulation {
+    /// A single sender broadcasts a single message per round.
     GossipSingle,
+    /// Each round a different sender is chosen at random, and broadcasts a single message
     GossipMulti,
+    /// Each round, all peers broadcast a single message simultaneously.
     GossipAll,
 }
 
@@ -28,7 +31,6 @@ struct ScenarioDescription {
     nodes: u32,
     #[serde(default)]
     bootstrap: BootstrapMode,
-    // bootstrap_nodes: Option<u32>,
     #[serde(default = "defaults::rounds")]
     rounds: u32,
     config: Option<NetworkConfig>,
@@ -208,9 +210,7 @@ enum SimulationError {
 fn run_simulation(seeds: &[u64], scenario: ScenarioDescription) -> SimulationResults {
     let mut results = HashMap::new();
     let network_config = scenario.config.clone().unwrap_or_default();
-    for seed in seeds {
-        let seed = *seed;
-
+    for &seed in seeds {
         let span = error_span!("sim", name=%scenario.label(), %seed);
         let _guard = span.enter();
 
