@@ -263,21 +263,20 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
             InEvent::Command(command) => match command {
                 Command::Join(peers) => {
                     for peer in peers {
-                        self.swarm.handle(SwarmIn::RequestJoin(peer), now, io);
+                        self.swarm.handle(SwarmIn::RequestJoin(peer), io);
                     }
                 }
                 Command::Broadcast(data, scope) => {
                     self.gossip
                         .handle(GossipIn::Broadcast(data, scope), now, io)
                 }
-                Command::Quit => self.swarm.handle(SwarmIn::Quit, now, io),
+                Command::Quit => self.swarm.handle(SwarmIn::Quit, io),
             },
             InEvent::RecvMessage(from, message) => {
                 self.stats.messages_received += 1;
                 match message {
                     Message::Swarm(message) => {
-                        self.swarm
-                            .handle(SwarmIn::RecvMessage(from, message), now, io)
+                        self.swarm.handle(SwarmIn::RecvMessage(from, message), io)
                     }
                     Message::Gossip(message) => {
                         self.gossip
@@ -286,16 +285,14 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
                 }
             }
             InEvent::TimerExpired(timer) => match timer {
-                Timer::Swarm(timer) => self.swarm.handle(SwarmIn::TimerExpired(timer), now, io),
+                Timer::Swarm(timer) => self.swarm.handle(SwarmIn::TimerExpired(timer), io),
                 Timer::Gossip(timer) => self.gossip.handle(GossipIn::TimerExpired(timer), now, io),
             },
             InEvent::PeerDisconnected(peer) => {
-                self.swarm.handle(SwarmIn::PeerDisconnected(peer), now, io);
+                self.swarm.handle(SwarmIn::PeerDisconnected(peer), io);
                 self.gossip.handle(GossipIn::NeighborDown(peer), now, io);
             }
-            InEvent::UpdatePeerData(data) => {
-                self.swarm.handle(SwarmIn::UpdatePeerData(data), now, io)
-            }
+            InEvent::UpdatePeerData(data) => self.swarm.handle(SwarmIn::UpdatePeerData(data), io),
         }
 
         // Forward NeighborUp and NeighborDown events from hyparview to plumtree
