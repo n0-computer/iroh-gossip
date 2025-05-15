@@ -903,7 +903,11 @@
 <a href="#902" id="902">902</a>
 <a href="#903" id="903">903</a>
 <a href="#904" id="904">904</a>
-<a href="#905" id="905">905</a></pre></div><pre class="rust"><code><span class="doccomment">//! Implementation of the Plumtree epidemic broadcast tree protocol
+<a href="#905" id="905">905</a>
+<a href="#906" id="906">906</a>
+<a href="#907" id="907">907</a>
+<a href="#908" id="908">908</a>
+<a href="#909" id="909">909</a></pre></div><pre class="rust"><code><span class="doccomment">//! Implementation of the Plumtree epidemic broadcast tree protocol
 //!
 //! The implementation is based on [this paper][paper] by Joao Leitao, Jose Pereira, Luıs Rodrigues
 //! and the [example implementation][impl] by Bartosz Sypytkowski
@@ -919,6 +923,7 @@
 <span class="kw">use </span>bytes::Bytes;
 <span class="kw">use </span>derive_more::{Add, From, Sub};
 <span class="kw">use </span>n0_future::time::{Duration, Instant};
+<span class="kw">use </span>postcard::experimental::max_size::MaxSize;
 <span class="kw">use </span>serde::{Deserialize, Serialize};
 <span class="kw">use </span>tracing::{debug, warn};
 
@@ -928,7 +933,7 @@
 };
 
 <span class="doccomment">/// A message identifier, which is the message content's blake3 hash.
-</span><span class="attr">#[derive(Serialize, Deserialize, Clone, Hash, Copy, PartialEq, Eq)]
+</span><span class="attr">#[derive(Serialize, Deserialize, Clone, Hash, Copy, PartialEq, Eq, MaxSize)]
 </span><span class="kw">pub struct </span>MessageId([u8; <span class="number">32</span>]);
 <span class="macro">idbytes_impls!</span>(MessageId, <span class="string">"MessageId"</span>);
 
@@ -1013,7 +1018,20 @@
 
 <span class="doccomment">/// Number of delivery hops a message has taken.
 </span><span class="attr">#[derive(
-    From, Add, Sub, Serialize, Deserialize, Eq, PartialEq, PartialOrd, Ord, Clone, Copy, Debug, Hash,
+    From,
+    Add,
+    Sub,
+    Serialize,
+    Deserialize,
+    Eq,
+    PartialEq,
+    PartialOrd,
+    Ord,
+    Clone,
+    Copy,
+    Debug,
+    Hash,
+    MaxSize,
 )]
 </span><span class="kw">pub struct </span>Round(u16);
 
@@ -1108,22 +1126,12 @@
 }
 
 <span class="doccomment">/// Control message to inform peers we have a message without transmitting the whole payload.
-</span><span class="attr">#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+</span><span class="attr">#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, MaxSize)]
 </span><span class="kw">pub struct </span>IHave {
     <span class="doccomment">/// Id of the message.
     </span><span class="kw">pub</span>(<span class="kw">crate</span>) id: MessageId,
     <span class="doccomment">/// Delivery round of the message.
     </span><span class="kw">pub</span>(<span class="kw">crate</span>) round: Round,
-}
-
-<span class="kw">impl </span>IHave {
-    <span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>postcard_encoded_size() -&gt; usize {
-        postcard::experimental::serialized_size(<span class="kw-2">&amp;</span><span class="self">Self </span>{
-            id: MessageId([<span class="number">1u8</span>; <span class="number">32</span>]),
-            round: Round(u16::MAX),
-        })
-        .unwrap()
-    }
 }
 
 <span class="doccomment">/// Control message to signal a peer that they have been moved to the eager set, and to ask the
@@ -1351,7 +1359,7 @@
             </span>- <span class="number">1
             </span><span class="comment">// Space for length prefix
             </span>- <span class="number">2</span>;
-        <span class="kw">let </span>chunk_len = chunk_size / IHave::postcard_encoded_size();
+        <span class="kw">let </span>chunk_len = chunk_size / IHave::POSTCARD_MAX_SIZE;
         <span class="kw">while let </span><span class="prelude-val">Some</span>((peer, list)) = <span class="self">self</span>.lazy_push_queue.pop_first() {
             <span class="kw">for </span>chunk <span class="kw">in </span>list.chunks(chunk_len) {
                 io.push(OutEvent::SendMessage(peer, Message::IHave(chunk.to_vec())));
