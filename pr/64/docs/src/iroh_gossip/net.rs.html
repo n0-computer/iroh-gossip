@@ -2014,8 +2014,7 @@
 <a href="#2013" id="2013">2013</a>
 <a href="#2014" id="2014">2014</a>
 <a href="#2015" id="2015">2015</a>
-<a href="#2016" id="2016">2016</a>
-<a href="#2017" id="2017">2017</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
+<a href="#2016" id="2016">2016</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
@@ -2630,17 +2629,16 @@
                 <span class="macro">trace!</span>(<span class="question-mark">?</span>i, <span class="string">"tick: to_actor_rx"</span>);
                 <span class="self">self</span>.metrics.actor_tick_rx.inc();
                 <span class="kw">match </span>msg {
+                    <span class="prelude-val">Some</span>(ToActor::Shutdown { reply }) =&gt; {
+                        <span class="macro">debug!</span>(<span class="string">"received shutdown message, quit all topics"</span>);
+                        <span class="self">self</span>.quit_queue.extend(<span class="self">self</span>.topics.keys().copied());
+                        <span class="self">self</span>.process_quit_queue().<span class="kw">await</span>.ok();
+                        <span class="macro">debug!</span>(<span class="string">"all topics quit, stop gossip actor"</span>);
+                        reply.send(()).ok();
+                        <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>)
+                    },
                     <span class="prelude-val">Some</span>(msg) =&gt; {
-                        <span class="kw">if let </span>ToActor::Shutdown { reply } = msg {
-                            <span class="macro">debug!</span>(<span class="string">"received shutdown message, quit all topics"</span>);
-                            <span class="self">self</span>.quit_queue.extend(<span class="self">self</span>.topics.keys().copied());
-                            <span class="self">self</span>.process_quit_queue().<span class="kw">await</span>.ok();
-                            <span class="macro">debug!</span>(<span class="string">"all topics quit, stop gossip actor"</span>);
-                            reply.send(()).ok();
-                            <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>)
-                        } <span class="kw">else </span>{
-                            <span class="self">self</span>.handle_to_actor_msg(msg, Instant::now()).<span class="kw">await</span><span class="question-mark">?</span>;
-                        }
+                        <span class="self">self</span>.handle_to_actor_msg(msg, Instant::now()).<span class="kw">await</span><span class="question-mark">?</span>;
                     }
                     <span class="prelude-val">None </span>=&gt; {
                         <span class="macro">debug!</span>(<span class="string">"all gossip handles dropped, stop gossip actor"</span>);
