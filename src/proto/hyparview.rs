@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 
 use derive_more::{From, Sub};
-use n0_future::time::{Duration, Instant};
+use n0_future::time::Duration;
 use rand::{rngs::ThreadRng, Rng};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
@@ -273,9 +273,9 @@ where
         }
     }
 
-    pub fn handle(&mut self, event: InEvent<PI>, now: Instant, io: &mut impl IO<PI>) {
+    pub fn handle(&mut self, event: InEvent<PI>, io: &mut impl IO<PI>) {
         match event {
-            InEvent::RecvMessage(from, message) => self.handle_message(from, message, now, io),
+            InEvent::RecvMessage(from, message) => self.handle_message(from, message, io),
             InEvent::TimerExpired(timer) => match timer {
                 Timer::DoShuffle => self.handle_shuffle_timer(io),
                 Timer::PendingNeighborRequest(peer) => self.handle_pending_neighbor_timer(peer, io),
@@ -298,23 +298,17 @@ where
         }
     }
 
-    fn handle_message(
-        &mut self,
-        from: PI,
-        message: Message<PI>,
-        now: Instant,
-        io: &mut impl IO<PI>,
-    ) {
+    fn handle_message(&mut self, from: PI, message: Message<PI>, io: &mut impl IO<PI>) {
         let is_disconnect = matches!(message, Message::Disconnect(Disconnect { .. }));
         if !is_disconnect && !self.active_view.contains(&from) {
             self.stats.total_connections += 1;
         }
         match message {
-            Message::Join(data) => self.on_join(from, data, now, io),
-            Message::ForwardJoin(details) => self.on_forward_join(from, details, now, io),
+            Message::Join(data) => self.on_join(from, data, io),
+            Message::ForwardJoin(details) => self.on_forward_join(from, details, io),
             Message::Shuffle(details) => self.on_shuffle(from, details, io),
             Message::ShuffleReply(details) => self.on_shuffle_reply(details, io),
-            Message::Neighbor(details) => self.on_neighbor(from, details, now, io),
+            Message::Neighbor(details) => self.on_neighbor(from, details, io),
             Message::Disconnect(details) => self.on_disconnect(from, details, io),
         }
 
@@ -383,10 +377,10 @@ where
         io.push(OutEvent::DisconnectPeer(peer));
     }
 
-    fn on_join(&mut self, peer: PI, data: Option<PeerData>, now: Instant, io: &mut impl IO<PI>) {
+    fn on_join(&mut self, peer: PI, data: Option<PeerData>, io: &mut impl IO<PI>) {
         // "A node that receives a join request will start by adding the new
         // node to its active view, even if it has to drop a random node from it. (6)"
-        self.add_active(peer, data.clone(), Priority::High, true, now, io);
+        self.add_active(peer, data.clone(), Priority::High, true, io);
 
         // "The contact node c will then send to all other nodes in its active view a ForwardJoin
         // request containing the new node identifier. Associated to the join procedure,
@@ -406,13 +400,7 @@ where
         }
     }
 
-    fn on_forward_join(
-        &mut self,
-        sender: PI,
-        message: ForwardJoin<PI>,
-        _now: Instant,
-        io: &mut impl IO<PI>,
-    ) {
+    fn on_forward_join(&mut self, sender: PI, message: ForwardJoin<PI>, io: &mut impl IO<PI>) {
         let peer_id = message.peer.id;
         // If the peer is already in our active view, we renew our neighbor relationship.
         if self.active_view.contains(&peer_id) {
@@ -459,14 +447,14 @@ where
         }
     }
 
-    fn on_neighbor(&mut self, from: PI, details: Neighbor, now: Instant, io: &mut impl IO<PI>) {
+    fn on_neighbor(&mut self, from: PI, details: Neighbor, io: &mut impl IO<PI>) {
         let is_reply = self.pending_neighbor_requests.remove(&from);
         let do_reply = !is_reply;
         // "A node q that receives a high priority neighbor request will always accept the request, even
         // if it has to drop a random member from its active view (again, the member that is dropped will
         // receive a Disconnect notification). If a node q receives a low priority Neighbor request, it will
         // only accept the request if it has a free slot in its active view, otherwise it will refuse the request."
-        if !self.add_active(from, details.data, details.priority, do_reply, now, io) {
+        if !self.add_active(from, details.data, details.priority, do_reply, io) {
             self.send_disconnect(from, true, io);
         }
     }
@@ -710,7 +698,6 @@ where
         data: Option<PeerData>,
         priority: Priority,
         reply: bool,
-        _now: Instant,
         io: &mut impl IO<PI>,
     ) -> bool {
         if peer == self.me {
