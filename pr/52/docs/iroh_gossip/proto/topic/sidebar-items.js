@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["DEFAULT_MAX_MESSAGE_SIZE"],"enum":["Command","Event","InEvent","Message","OutEvent","Timer"],"struct":["Config","State","Stats"],"trait":["IO"]};
+window.SIDEBAR_ITEMS = {"enum":["Command","Event","InEvent","Message","OutEvent","Timer"],"struct":["Config","State","Stats"],"trait":["IO"]};

@@ -1458,7 +1458,7 @@
         <span class="kw">if let </span>InEvent::RecvMessage(from, _message) = <span class="kw-2">&amp;</span>event {
             <span class="self">self</span>.conns.insert((<span class="kw-2">*</span>from, peer).into());
         }
-        <span class="kw">let </span>out = state.handle(event, <span class="self">self</span>.time);
+        <span class="kw">let </span>out = state.handle(event, <span class="self">self</span>.time, <span class="prelude-val">None</span>);
         <span class="kw">let </span><span class="kw-2">mut </span>kill = <span class="macro">vec!</span>[];
         <span class="kw">for </span>event <span class="kw">in </span>out {
             <span class="kw">match </span>event {
