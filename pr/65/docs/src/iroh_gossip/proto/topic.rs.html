@@ -358,10 +358,7 @@
 <a href="#357" id="357">357</a>
 <a href="#358" id="358">358</a>
 <a href="#359" id="359">359</a>
-<a href="#360" id="360">360</a>
-<a href="#361" id="361">361</a>
-<a href="#362" id="362">362</a>
-<a href="#363" id="363">363</a></pre></div><pre class="rust"><code><span class="doccomment">//! This module contains the implementation of the gossiping protocol for an individual topic
+<a href="#360" id="360">360</a></pre></div><pre class="rust"><code><span class="doccomment">//! This module contains the implementation of the gossiping protocol for an individual topic
 
 </span><span class="kw">use </span>std::collections::VecDeque;
 
@@ -626,21 +623,20 @@
             InEvent::Command(command) =&gt; <span class="kw">match </span>command {
                 Command::Join(peers) =&gt; {
                     <span class="kw">for </span>peer <span class="kw">in </span>peers {
-                        <span class="self">self</span>.swarm.handle(SwarmIn::RequestJoin(peer), now, io);
+                        <span class="self">self</span>.swarm.handle(SwarmIn::RequestJoin(peer), io);
                     }
                 }
                 Command::Broadcast(data, scope) =&gt; {
                     <span class="self">self</span>.gossip
                         .handle(GossipIn::Broadcast(data, scope), now, io)
                 }
-                Command::Quit =&gt; <span class="self">self</span>.swarm.handle(SwarmIn::Quit, now, io),
+                Command::Quit =&gt; <span class="self">self</span>.swarm.handle(SwarmIn::Quit, io),
             },
             InEvent::RecvMessage(from, message) =&gt; {
                 <span class="self">self</span>.stats.messages_received += <span class="number">1</span>;
                 <span class="kw">match </span>message {
                     Message::Swarm(message) =&gt; {
-                        <span class="self">self</span>.swarm
-                            .handle(SwarmIn::RecvMessage(from, message), now, io)
+                        <span class="self">self</span>.swarm.handle(SwarmIn::RecvMessage(from, message), io)
                     }
                     Message::Gossip(message) =&gt; {
                         <span class="self">self</span>.gossip
@@ -649,16 +645,14 @@
                 }
             }
             InEvent::TimerExpired(timer) =&gt; <span class="kw">match </span>timer {
-                Timer::Swarm(timer) =&gt; <span class="self">self</span>.swarm.handle(SwarmIn::TimerExpired(timer), now, io),
+                Timer::Swarm(timer) =&gt; <span class="self">self</span>.swarm.handle(SwarmIn::TimerExpired(timer), io),
                 Timer::Gossip(timer) =&gt; <span class="self">self</span>.gossip.handle(GossipIn::TimerExpired(timer), now, io),
             },
             InEvent::PeerDisconnected(peer) =&gt; {
-                <span class="self">self</span>.swarm.handle(SwarmIn::PeerDisconnected(peer), now, io);
+                <span class="self">self</span>.swarm.handle(SwarmIn::PeerDisconnected(peer), io);
                 <span class="self">self</span>.gossip.handle(GossipIn::NeighborDown(peer), now, io);
             }
-            InEvent::UpdatePeerData(data) =&gt; {
-                <span class="self">self</span>.swarm.handle(SwarmIn::UpdatePeerData(data), now, io)
-            }
+            InEvent::UpdatePeerData(data) =&gt; <span class="self">self</span>.swarm.handle(SwarmIn::UpdatePeerData(data), io),
         }
 
         <span class="comment">// Forward NeighborUp and NeighborDown events from hyparview to plumtree
