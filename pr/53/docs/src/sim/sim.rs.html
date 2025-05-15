@@ -435,9 +435,12 @@
 <span class="attr">#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[allow(clippy::enum_variant_names)]
 </span><span class="kw">enum </span>Simulation {
-    GossipSingle,
-    GossipMulti,
-    GossipAll,
+    <span class="doccomment">/// A single sender broadcasts a single message per round.
+    </span>GossipSingle,
+    <span class="doccomment">/// Each round a different sender is chosen at random, and broadcasts a single message
+    </span>GossipMulti,
+    <span class="doccomment">/// Each round, all peers broadcast a single message simultaneously.
+    </span>GossipAll,
 }
 
 <span class="attr">#[derive(Debug, Clone, Serialize, Deserialize)]
@@ -446,8 +449,7 @@
     nodes: u32,
     <span class="attr">#[serde(default)]
     </span>bootstrap: BootstrapMode,
-    <span class="comment">// bootstrap_nodes: Option&lt;u32&gt;,
-    </span><span class="attr">#[serde(default = <span class="string">"defaults::rounds"</span>)]
+    <span class="attr">#[serde(default = <span class="string">"defaults::rounds"</span>)]
     </span>rounds: u32,
     config: <span class="prelude-ty">Option</span>&lt;NetworkConfig&gt;,
 }
@@ -626,9 +628,7 @@
 <span class="kw">fn </span>run_simulation(seeds: <span class="kw-2">&amp;</span>[u64], scenario: ScenarioDescription) -&gt; SimulationResults {
     <span class="kw">let </span><span class="kw-2">mut </span>results = HashMap::new();
     <span class="kw">let </span>network_config = scenario.config.clone().unwrap_or_default();
-    <span class="kw">for </span>seed <span class="kw">in </span>seeds {
-        <span class="kw">let </span>seed = <span class="kw-2">*</span>seed;
-
+    <span class="kw">for </span><span class="kw-2">&amp;</span>seed <span class="kw">in </span>seeds {
         <span class="kw">let </span>span = <span class="macro">error_span!</span>(<span class="string">"sim"</span>, name=%scenario.label(), %seed);
         <span class="kw">let </span>_guard = span.enter();
 
