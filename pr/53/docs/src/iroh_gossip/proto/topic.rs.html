@@ -351,7 +351,17 @@
 <a href="#350" id="350">350</a>
 <a href="#351" id="351">351</a>
 <a href="#352" id="352">352</a>
-<a href="#353" id="353">353</a></pre></div><pre class="rust"><code><span class="doccomment">//! This module contains the implementation of the gossiping protocol for an individual topic
+<a href="#353" id="353">353</a>
+<a href="#354" id="354">354</a>
+<a href="#355" id="355">355</a>
+<a href="#356" id="356">356</a>
+<a href="#357" id="357">357</a>
+<a href="#358" id="358">358</a>
+<a href="#359" id="359">359</a>
+<a href="#360" id="360">360</a>
+<a href="#361" id="361">361</a>
+<a href="#362" id="362">362</a>
+<a href="#363" id="363">363</a></pre></div><pre class="rust"><code><span class="doccomment">//! This module contains the implementation of the gossiping protocol for an individual topic
 
 </span><span class="kw">use </span>std::collections::VecDeque;
 
@@ -366,12 +376,9 @@
     hyparview::{<span class="self">self</span>, InEvent <span class="kw">as </span>SwarmIn},
     plumtree::{<span class="self">self</span>, GossipEvent, InEvent <span class="kw">as </span>GossipIn, Scope},
     state::MessageKind,
-    PeerData, PeerIdentity,
+    PeerData, PeerIdentity, DEFAULT_MAX_MESSAGE_SIZE,
 };
-
-<span class="doccomment">/// The default maximum size in bytes for a gossip message.
-/// This is a sane but arbitrary default and can be changed in the [`Config`].
-</span><span class="kw">pub const </span>DEFAULT_MAX_MESSAGE_SIZE: usize = <span class="number">4096</span>;
+<span class="kw">use </span><span class="kw">crate</span>::proto::MIN_MAX_MESSAGE_SIZE;
 
 <span class="doccomment">/// Input event to the topic state handler.
 </span><span class="attr">#[derive(Clone, Debug)]
@@ -566,6 +573,10 @@
 
 <span class="kw">impl</span>&lt;PI: PeerIdentity&gt; State&lt;PI, rand::rngs::StdRng&gt; {
     <span class="doccomment">/// Initialize the local state with the default random number generator.
+    ///
+    /// ## Panics
+    ///
+    /// Panics if [`Config::max_message_size`] is below [`MIN_MAX_MESSAGE_SIZE`].
     </span><span class="kw">pub fn </span>new(me: PI, me_data: <span class="prelude-ty">Option</span>&lt;PeerData&gt;, config: Config) -&gt; <span class="self">Self </span>{
         <span class="self">Self</span>::with_rng(me, me_data, config, rand::rngs::StdRng::from_entropy())
     }
@@ -580,7 +591,16 @@
 
 <span class="kw">impl</span>&lt;PI: PeerIdentity, R: Rng&gt; State&lt;PI, R&gt; {
     <span class="doccomment">/// Initialize the local state with a custom random number generator.
+    ///
+    /// ## Panics
+    ///
+    /// Panics if [`Config::max_message_size`] is below [`MIN_MAX_MESSAGE_SIZE`].
     </span><span class="kw">pub fn </span>with_rng(me: PI, me_data: <span class="prelude-ty">Option</span>&lt;PeerData&gt;, config: Config, rng: R) -&gt; <span class="self">Self </span>{
+        <span class="macro">assert!</span>(
+            config.max_message_size &gt;= MIN_MAX_MESSAGE_SIZE,
+            <span class="string">"max_message_size must be at least {}"</span>,
+            MIN_MAX_MESSAGE_SIZE
+        );
         <span class="kw">let </span>max_payload_size =
             config.max_message_size - <span class="kw">super</span>::Message::&lt;PI&gt;::postcard_header_size();
         <span class="self">Self </span>{
