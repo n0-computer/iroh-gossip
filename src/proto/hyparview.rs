@@ -164,7 +164,7 @@ pub struct Disconnect {
     /// Whether we are actually shutting down or closing the connection only because our limits are
     /// reached.
     alive: bool,
-    /// Obsolete field (kept in the struct to not break wire compatibility).
+    /// Obsolete field (kept in the struct to maintain wire compatibility).
     _respond: bool,
 }
 
@@ -335,7 +335,13 @@ where
     fn on_disconnect(&mut self, peer: PI, details: Disconnect, io: &mut impl IO<PI>) {
         self.pending_neighbor_requests.remove(&peer);
         if self.active_view.contains(&peer) {
-            self.remove_active(&peer, RemovalReason::DisconnectReceived(details.alive), io);
+            self.remove_active(
+                &peer,
+                RemovalReason::DisconnectReceived {
+                    is_alive: details.alive,
+                },
+                io,
+            );
         } else if details.alive && self.passive_view.contains(&peer) {
             self.alive_disconnect_peers.insert(peer);
         }
@@ -569,7 +575,7 @@ where
 
     /// Remove a peer from the active view.
     ///
-    /// If respond is true, a Disconnect message will be sent to the peer.
+    /// If `reason` is [`RemovalReason::Random`], a [`Disconnect`] message will be sent to the peer.
     fn remove_active(&mut self, peer: &PI, reason: RemovalReason, io: &mut impl IO<PI>) {
         if let Some(idx) = self.active_view.get_index_of(peer) {
             let removed_peer = self.remove_active_by_index(idx, reason, io).unwrap();
@@ -631,21 +637,23 @@ where
                 // send a disconnect message, then close connection.
                 RemovalReason::Random => self.send_disconnect(peer, true, io),
                 // close connection without sending anything further.
-                RemovalReason::DisconnectReceived(_) => io.push(OutEvent::DisconnectPeer(peer)),
+                RemovalReason::DisconnectReceived { is_alive: _ } => {
+                    io.push(OutEvent::DisconnectPeer(peer))
+                }
                 // do nothing, connection already closed.
                 RemovalReason::ConnectionClosed => {}
             }
 
-            let keep_alive_as_passive = match reason {
+            let keep_as_passive = match reason {
                 // keep alive if previously marked as alive.
                 RemovalReason::ConnectionClosed => self.alive_disconnect_peers.remove(&peer),
                 // keep alive if other peer said to be still alive.
-                RemovalReason::DisconnectReceived(alive) => alive,
+                RemovalReason::DisconnectReceived { is_alive } => is_alive,
                 // keep alive (only we are removing for now)
                 RemovalReason::Random => true,
             };
 
-            if keep_alive_as_passive {
+            if keep_as_passive {
                 let data = self.peer_data.remove(&peer);
                 self.add_passive(peer, data, io);
                 // mark peer as alive, so it doesn't get removed from the passive view if the conn closes.
@@ -737,7 +745,10 @@ where
 
 #[derive(Debug)]
 enum RemovalReason {
+    /// A peer is removed because the connection was closed ungracefully.
     ConnectionClosed,
-    DisconnectReceived(bool),
+    /// A peer is removed because we received a disconnect message.
+    DisconnectReceived { is_alive: bool },
+    /// A peer is removed after random selection to make room for a newly joined peer.
     Random,
 }
