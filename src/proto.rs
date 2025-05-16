@@ -164,7 +164,7 @@ mod test {
         network.command(1, t, Command::Join(vec![2]));
         network.command(2, t, Command::Join(vec![]));
 
-        network.run_roundtrips(3);
+        network.run_trips(3);
 
         // Confirm emitted events
         let actual = network.events_sorted();
@@ -185,7 +185,7 @@ mod test {
         // Node 0 is full, so it will disconnect from either node 1 or node 2.
         network.command(3, t, Command::Join(vec![0]));
 
-        network.run_roundtrips(2);
+        network.run_trips(2);
 
         // Confirm emitted events. There's two options because whether node 0 disconnects from
         // node 1 or node 2 is random.
@@ -239,7 +239,7 @@ mod test {
         (4..6).for_each(|i| network.command(i, t, Command::Join(vec![3])));
         // run ticks and drain events
 
-        network.run_roundtrips(4);
+        network.run_trips(4);
 
         let _ = network.events();
         assert!(network.check_synchronicity());
@@ -251,7 +251,7 @@ mod test {
             Command::Broadcast(b"hi1".to_vec().into(), Scope::Swarm),
         );
 
-        network.run_roundtrips(4);
+        network.run_trips(4);
 
         let events = network.events();
         let received = events.filter(|x| matches!(x, (_, _, Event::Received(_))));
@@ -261,7 +261,7 @@ mod test {
 
         // now connect the two sections of the swarm
         network.command(2, t, Command::Join(vec![5]));
-        network.run_roundtrips(3);
+        network.run_trips(3);
         let _ = network.events();
         println!("{}", network.report());
 
@@ -271,7 +271,7 @@ mod test {
             t,
             Command::Broadcast(b"hi2".to_vec().into(), Scope::Swarm),
         );
-        network.run_roundtrips(5);
+        network.run_trips(5);
         let events = network.events();
         let received = events.filter(|x| matches!(x, (_, _, Event::Received(_))));
         // message should be received by all 5 other nodes
@@ -300,7 +300,7 @@ mod test {
         network.command(1, t, Command::Join(vec![0]));
         network.command(2, t, Command::Join(vec![1]));
         network.command(3, t, Command::Join(vec![2]));
-        network.run_roundtrips(2);
+        network.run_trips(2);
 
         // assert all peers appear in the connections
         let all_conns: HashSet<u64> = HashSet::from_iter((0u64..4).flat_map(|p| {
@@ -314,7 +314,7 @@ mod test {
 
         //  let node 3 leave the swarm
         network.command(3, t, Command::Quit);
-        network.run_roundtrips(4);
+        network.run_trips(4);
         assert!(network.peer(&3).unwrap().state(&t).is_none());
 
         // assert all peers without peer 3 appear in the connections

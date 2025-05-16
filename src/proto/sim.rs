@@ -242,7 +242,7 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + Clone> Network<PI, R> {
     }
 
     /// Runs the simulation for `n` times the maximum latency between peers.
-    pub fn run_roundtrips(&mut self, n: usize) {
+    pub fn run_trips(&mut self, n: usize) {
         let duration = self.config.latency.max() * n as u32;
         self.run_duration(duration)
     }
@@ -931,7 +931,7 @@ impl Simulator {
                 for i in 1..node_count {
                     self.network.insert_and_join(i, TOPIC, vec![0]);
                 }
-                self.network.run_roundtrips(20);
+                self.network.run_trips(20);
             }
             BootstrapMode::Set { count } => {
                 self.network.insert_and_join(0, TOPIC, vec![]);
@@ -939,14 +939,14 @@ impl Simulator {
                     self.network.insert_and_join(i, TOPIC, vec![0]);
                 }
 
-                self.network.run_roundtrips(7);
+                self.network.run_trips(7);
 
                 for i in count..node_count {
                     let contact = self.network.rng.gen_range(0..count);
                     self.network.insert_and_join(i, TOPIC, vec![contact]);
                 }
 
-                self.network.run_roundtrips(20);
+                self.network.run_trips(20);
             }
         }
 
