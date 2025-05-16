@@ -509,7 +509,7 @@
         network.command(<span class="number">1</span>, t, Command::Join(<span class="macro">vec!</span>[<span class="number">2</span>]));
         network.command(<span class="number">2</span>, t, Command::Join(<span class="macro">vec!</span>[]));
 
-        network.run_roundtrips(<span class="number">3</span>);
+        network.run_trips(<span class="number">3</span>);
 
         <span class="comment">// Confirm emitted events
         </span><span class="kw">let </span>actual = network.events_sorted();
@@ -530,7 +530,7 @@
         // Node 0 is full, so it will disconnect from either node 1 or node 2.
         </span>network.command(<span class="number">3</span>, t, Command::Join(<span class="macro">vec!</span>[<span class="number">0</span>]));
 
-        network.run_roundtrips(<span class="number">2</span>);
+        network.run_trips(<span class="number">2</span>);
 
         <span class="comment">// Confirm emitted events. There's two options because whether node 0 disconnects from
         // node 1 or node 2 is random.
@@ -584,7 +584,7 @@
         (<span class="number">4</span>..<span class="number">6</span>).for_each(|i| network.command(i, t, Command::Join(<span class="macro">vec!</span>[<span class="number">3</span>])));
         <span class="comment">// run ticks and drain events
 
-        </span>network.run_roundtrips(<span class="number">4</span>);
+        </span>network.run_trips(<span class="number">4</span>);
 
         <span class="kw">let _ </span>= network.events();
         <span class="macro">assert!</span>(network.check_synchronicity());
@@ -596,7 +596,7 @@
             Command::Broadcast(<span class="string">b"hi1"</span>.to_vec().into(), Scope::Swarm),
         );
 
-        network.run_roundtrips(<span class="number">4</span>);
+        network.run_trips(<span class="number">4</span>);
 
         <span class="kw">let </span>events = network.events();
         <span class="kw">let </span>received = events.filter(|x| <span class="macro">matches!</span>(x, (<span class="kw">_</span>, <span class="kw">_</span>, Event::Received(<span class="kw">_</span>))));
@@ -606,7 +606,7 @@
 
         <span class="comment">// now connect the two sections of the swarm
         </span>network.command(<span class="number">2</span>, t, Command::Join(<span class="macro">vec!</span>[<span class="number">5</span>]));
-        network.run_roundtrips(<span class="number">3</span>);
+        network.run_trips(<span class="number">3</span>);
         <span class="kw">let _ </span>= network.events();
         <span class="macro">println!</span>(<span class="string">"{}"</span>, network.report());
 
@@ -616,7 +616,7 @@
             t,
             Command::Broadcast(<span class="string">b"hi2"</span>.to_vec().into(), Scope::Swarm),
         );
-        network.run_roundtrips(<span class="number">5</span>);
+        network.run_trips(<span class="number">5</span>);
         <span class="kw">let </span>events = network.events();
         <span class="kw">let </span>received = events.filter(|x| <span class="macro">matches!</span>(x, (<span class="kw">_</span>, <span class="kw">_</span>, Event::Received(<span class="kw">_</span>))));
         <span class="comment">// message should be received by all 5 other nodes
@@ -645,7 +645,7 @@
         network.command(<span class="number">1</span>, t, Command::Join(<span class="macro">vec!</span>[<span class="number">0</span>]));
         network.command(<span class="number">2</span>, t, Command::Join(<span class="macro">vec!</span>[<span class="number">1</span>]));
         network.command(<span class="number">3</span>, t, Command::Join(<span class="macro">vec!</span>[<span class="number">2</span>]));
-        network.run_roundtrips(<span class="number">2</span>);
+        network.run_trips(<span class="number">2</span>);
 
         <span class="comment">// assert all peers appear in the connections
         </span><span class="kw">let </span>all_conns: HashSet&lt;u64&gt; = HashSet::from_iter((<span class="number">0u64</span>..<span class="number">4</span>).flat_map(|p| {
@@ -659,7 +659,7 @@
 
         <span class="comment">//  let node 3 leave the swarm
         </span>network.command(<span class="number">3</span>, t, Command::Quit);
-        network.run_roundtrips(<span class="number">4</span>);
+        network.run_trips(<span class="number">4</span>);
         <span class="macro">assert!</span>(network.peer(<span class="kw-2">&amp;</span><span class="number">3</span>).unwrap().state(<span class="kw-2">&amp;</span>t).is_none());
 
         <span class="comment">// assert all peers without peer 3 appear in the connections
