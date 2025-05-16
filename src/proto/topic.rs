@@ -171,7 +171,8 @@ impl<PI: Clone> IO<PI> for VecDeque<OutEvent<PI>> {
 }
 
 /// Protocol configuration
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     /// Configuration for the swarm membership layer
     pub membership: hyparview::Config,
@@ -326,11 +327,17 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
         self.outbox.drain(..)
     }
 
-    /// Get stats on how many messages were sent and received
-    ///
-    /// TODO: Remove/replace with metrics?
+    /// Get stats on how many messages were sent and received.
+    // TODO: Remove/replace with metrics?
     pub fn stats(&self) -> &Stats {
         &self.stats
+    }
+
+    /// Reset all statistics.
+    pub fn reset_stats(&mut self) {
+        self.gossip.stats = Default::default();
+        self.swarm.stats = Default::default();
+        self.stats = Default::default();
     }
 
     /// Get statistics for the gossip broadcast state

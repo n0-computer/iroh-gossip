@@ -33,15 +33,27 @@ unused-async = "warn"
 
 [dependencies]
 async-channel = { version = "2.3.1", optional = true }
-blake3 = { package = "iroh-blake3", version = "1.4.5"}
+blake3 = { package = "iroh-blake3", version = "1.4.5" }
 bytes = { version = "1.7", features = ["serde"] }
-derive_more = { version = "1.0.0", features = ["add", "debug", "deref", "display", "from", "try_into", "into"] }
+derive_more = { version = "1.0.0", features = [
+    "add",
+    "debug",
+    "deref",
+    "display",
+    "from",
+    "try_into",
+    "into",
+] }
 ed25519-dalek = { version = "2.0.0", features = ["serde", "rand_core"] }
 hex = "0.4.3"
 indexmap = "2.0"
 iroh-metrics = { version = "0.34", default-features = false }
 n0-future = "0.1.2"
-postcard = { version = "1", default-features = false, features = ["alloc", "use-std", "experimental-derive"] }
+postcard = { version = "1", default-features = false, features = [
+    "alloc",
+    "use-std",
+    "experimental-derive",
+] }
 rand = { version = "0.8.5", features = ["std_rng"] }
 rand_core = "0.6.4"
 serde = { version = "1.0.164", features = ["derive"] }
@@ -64,12 +76,36 @@ nested_enum_utils = { version = "0.1.0", optional = true }
 quic-rpc = { version = "0.20", optional = true }
 quic-rpc-derive = { version = "0.20", optional = true }
 strum = { version = "0.26", optional = true }
+
+# test-utils dependencies (optional)
+rand_chacha = { version = "0.3.1", optional = true }
+humantime-serde = { version = "1.1.1", optional = true }
+
+# simulator dependencies (optional)
 clap = { version = "4", features = ["derive"], optional = true }
+toml = { version = "0.8.20", optional = true }
+tracing-subscriber = { version = "0.3", features = [
+    "env-filter",
+], optional = true }
+serde_json = { version = "1", optional = true }
+rayon = { version = "1.10.0", optional = true }
+comfy-table = { version = "7.1.4", optional = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["io-util", "sync", "rt", "macros", "net", "fs"] }
+tokio = { version = "1", features = [
+    "io-util",
+    "sync",
+    "rt",
+    "macros",
+    "net",
+    "fs",
+] }
 clap = { version = "4", features = ["derive"] }
-iroh = { version = "0.35", default-features = false, features = ["metrics", "test-utils"] }
+humantime-serde = { version = "1.1.1" }
+iroh = { version = "0.35", default-features = false, features = [
+    "metrics",
+    "test-utils",
+] }
 rand_chacha = "0.3.1"
 testresult = "0.4.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -95,13 +131,28 @@ rpc = [
     "dep:quic-rpc-derive",
     "dep:strum",
 ]
-cli = [
-    "rpc",
+cli = ["rpc", "dep:clap"]
+test-utils = ["dep:rand_chacha", "dep:humantime-serde"]
+simulator = [
+    "test-utils",
+    "dep:tracing-subscriber",
+    "dep:toml",
     "dep:clap",
+    "dep:serde_json",
+    "dep:rayon",
+    "dep:comfy-table",
 ]
 metrics = ["iroh-metrics/metrics"]
-
 examples = ["net", "dep:data-encoding"]
+
+[[test]]
+name = "sim"
+path = "tests/sim.rs"
+required-features = ["test-utils"]
+
+[[bin]]
+name = "sim"
+required-features = ["simulator"]
 
 [[example]]
 name = "chat"
@@ -114,3 +165,9 @@ required-features = ["examples"]
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "iroh_docsrs"]
+
+[profile.bench]
+debug = true
+
+[profile.release]
+debug = true

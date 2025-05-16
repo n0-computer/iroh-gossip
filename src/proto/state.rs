@@ -191,10 +191,11 @@ impl<PI: PeerIdentity, R: Rng + Clone> State<PI, R> {
         self.states.get(topic)
     }
 
-    /// Get a reference to the protocol state for a topic.
-    #[cfg(test)]
-    pub fn state_mut(&mut self, topic: &TopicId) -> Option<&mut topic::State<PI, R>> {
-        self.states.get_mut(topic)
+    /// Resets the tracked stats for a topic.
+    pub fn reset_stats(&mut self, topic: &TopicId) {
+        if let Some(state) = self.states.get_mut(topic) {
+            state.reset_stats();
+        }
     }
 
     /// Get an iterator of all joined topics.
@@ -228,7 +229,7 @@ impl<PI: PeerIdentity, R: Rng + Clone> State<PI, R> {
         now: Instant,
         metrics: Option<&Metrics>,
     ) -> impl Iterator<Item = OutEvent<PI>> + '_ {
-        trace!("in_event: {event:?}");
+        trace!("in : {event:?}");
         if let Some(metrics) = &metrics {
             track_in_event(&event, metrics);
         }
@@ -299,7 +300,7 @@ fn handle_out_event<PI: PeerIdentity>(
     conns: &mut ConnsMap<PI>,
     outbox: &mut Outbox<PI>,
 ) {
-    trace!("out_event: {event:?}");
+    trace!("out: {event:?}");
     match event {
         topic::OutEvent::SendMessage(to, message) => {
             outbox.push(OutEvent::SendMessage(to, Message { topic, message }))
