@@ -56,8 +56,8 @@ pub mod state;
 pub mod topic;
 pub mod util;
 
-#[cfg(test)]
-mod tests;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod sim;
 
 pub use hyparview::Config as HyparviewConfig;
 pub use plumtree::{Config as PlumtreeConfig, DeliveryScope, Scope};
@@ -82,8 +82,11 @@ pub const MIN_MAX_MESSAGE_SIZE: usize = 512;
 ///
 /// TODO: Rename to `PeerId`? It does not necessarily refer to a peer's address, as long as the
 /// networking layer can translate the value of its concrete type into an address.
-pub trait PeerIdentity: Hash + Eq + Copy + fmt::Debug + Serialize + DeserializeOwned {}
-impl<T> PeerIdentity for T where T: Hash + Eq + Copy + fmt::Debug + Serialize + DeserializeOwned {}
+pub trait PeerIdentity: Hash + Eq + Ord + Copy + fmt::Debug + Serialize + DeserializeOwned {}
+impl<T> PeerIdentity for T where
+    T: Hash + Eq + Ord + Copy + fmt::Debug + Serialize + DeserializeOwned
+{
+}
 
 /// Opaque binary data that is transmitted on messages that introduce new peers.
 ///
@@ -126,18 +129,15 @@ impl<PI> From<(PI, Option<PeerData>)> for PeerInfo<PI> {
 #[cfg(test)]
 mod test {
 
-    use std::{collections::HashSet, env};
+    use std::{collections::HashSet, env, fmt, str::FromStr};
 
-    use n0_future::time::Instant;
     use rand::SeedableRng;
+    use rand_chacha::ChaCha12Rng;
     use tracing_test::traced_test;
 
-    use super::{Command, Config, Event, State};
+    use super::{Command, Config, Event};
     use crate::proto::{
-        tests::{
-            assert_synchronous_active, report_round_distribution, sort, Network, Simulator,
-            SimulatorConfig,
-        },
+        sim::{LatencyConfig, Network, NetworkConfig},
         Scope, TopicId,
     };
 
@@ -145,27 +145,26 @@ mod test {
     #[traced_test]
     fn hyparview_smoke() {
         // Create a network with 4 nodes and active_view_capacity 2
+        let rng = ChaCha12Rng::seed_from_u64(read_var("SEED", 0));
         let mut config = Config::default();
         config.membership.active_view_capacity = 2;
-        let mut network = Network::new(Instant::now());
-        let rng = rand_chacha::ChaCha12Rng::seed_from_u64(99);
+        let network_config = NetworkConfig {
+            proto: config,
+            latency: LatencyConfig::default_static(),
+        };
+        let mut network = Network::new(network_config, rng);
         for i in 0..4 {
-            network.push(State::new(
-                i,
-                Default::default(),
-                config.clone(),
-                rng.clone(),
-            ));
+            network.insert(i);
         }
 
         let t: TopicId = [0u8; 32].into();
 
         // Do some joins between nodes 0,1,2
-        network.command(0, t, Command::Join(vec![1]));
-        network.command(0, t, Command::Join(vec![2]));
+        network.command(0, t, Command::Join(vec![1, 2]));
         network.command(1, t, Command::Join(vec![2]));
         network.command(2, t, Command::Join(vec![]));
-        network.ticks(10);
+
+        network.run_trips(3);
 
         // Confirm emitted events
         let actual = network.events_sorted();
@@ -185,12 +184,13 @@ mod test {
         // Now let node 3 join node 0.
         // Node 0 is full, so it will disconnect from either node 1 or node 2.
         network.command(3, t, Command::Join(vec![0]));
-        network.ticks(8);
+
+        network.run_trips(2);
 
         // Confirm emitted events. There's two options because whether node 0 disconnects from
         // node 1 or node 2 is random.
         let actual = network.events_sorted();
-        eprintln!("actual {actual:?}");
+        eprintln!("actual {actual:#?}");
         let expected1 = sort(vec![
             (3, t, Event::NeighborUp(0)),
             (0, t, Event::NeighborUp(3)),
@@ -211,25 +211,21 @@ mod test {
         } else {
             assert_eq!(network.conns(), vec![(0, 1), (0, 3), (1, 2)]);
         }
-        assert!(assert_synchronous_active(&network));
+        assert!(network.check_synchronicity());
     }
 
     #[test]
     #[traced_test]
     fn plumtree_smoke() {
-        let config = Config::default();
-        let mut network = Network::new(Instant::now());
-        let broadcast_ticks = 12;
-        let join_ticks = 12;
+        let rng = ChaCha12Rng::seed_from_u64(read_var("SEED", 0));
+        let network_config = NetworkConfig {
+            proto: Config::default(),
+            latency: LatencyConfig::default_static(),
+        };
+        let mut network = Network::new(network_config, rng);
         // build a network with 6 nodes
-        let rng = rand_chacha::ChaCha12Rng::seed_from_u64(99);
         for i in 0..6 {
-            network.push(State::new(
-                i,
-                Default::default(),
-                config.clone(),
-                rng.clone(),
-            ));
+            network.insert(i);
         }
 
         let t = [0u8; 32].into();
@@ -242,9 +238,11 @@ mod test {
         network.command(3, t, Command::Join(vec![]));
         (4..6).for_each(|i| network.command(i, t, Command::Join(vec![3])));
         // run ticks and drain events
-        network.ticks(join_ticks);
+
+        network.run_trips(4);
+
         let _ = network.events();
-        assert!(assert_synchronous_active(&network));
+        assert!(network.check_synchronicity());
 
         // now broadcast a first message
         network.command(
@@ -252,18 +250,20 @@ mod test {
             t,
             Command::Broadcast(b"hi1".to_vec().into(), Scope::Swarm),
         );
-        network.ticks(broadcast_ticks);
+
+        network.run_trips(4);
+
         let events = network.events();
         let received = events.filter(|x| matches!(x, (_, _, Event::Received(_))));
         // message should be received by two other nodes
         assert_eq!(received.count(), 2);
-        assert!(assert_synchronous_active(&network));
+        assert!(network.check_synchronicity());
 
         // now connect the two sections of the swarm
         network.command(2, t, Command::Join(vec![5]));
-        network.ticks(join_ticks);
+        network.run_trips(3);
         let _ = network.events();
-        report_round_distribution(&network);
+        println!("{}", network.report());
 
         // now broadcast again
         network.command(
@@ -271,73 +271,26 @@ mod test {
             t,
             Command::Broadcast(b"hi2".to_vec().into(), Scope::Swarm),
         );
-        network.ticks(broadcast_ticks);
+        network.run_trips(5);
         let events = network.events();
         let received = events.filter(|x| matches!(x, (_, _, Event::Received(_))));
         // message should be received by all 5 other nodes
         assert_eq!(received.count(), 5);
-        assert!(assert_synchronous_active(&network));
-        report_round_distribution(&network);
-    }
-
-    #[test]
-    #[traced_test]
-    fn big_multiple_sender() {
-        let mut gossip_config = Config::default();
-        gossip_config.broadcast.optimization_threshold = (read_var("OPTIM", 7) as u16).into();
-        let config = SimulatorConfig {
-            peers_count: read_var("PEERS", 100),
-            ..Default::default()
-        };
-        let rounds = read_var("ROUNDS", 10);
-        let mut simulator = Simulator::new(config, gossip_config);
-        simulator.init();
-        simulator.bootstrap();
-        for i in 0..rounds {
-            let from = i + 1;
-            let message = format!("m{i}").into_bytes().into();
-            simulator.gossip_round(from, message)
-        }
-        simulator.report_round_sums();
-    }
-
-    #[test]
-    #[traced_test]
-    fn big_single_sender() {
-        let mut gossip_config = Config::default();
-        gossip_config.broadcast.optimization_threshold = (read_var("OPTIM", 7) as u16).into();
-        let config = SimulatorConfig {
-            peers_count: read_var("PEERS", 100),
-            ..Default::default()
-        };
-        let rounds = read_var("ROUNDS", 10);
-        let mut simulator = Simulator::new(config, gossip_config);
-        simulator.init();
-        simulator.bootstrap();
-        for i in 0..rounds {
-            let from = 2;
-            let message = format!("m{i}").into_bytes().into();
-            simulator.gossip_round(from, message)
-        }
-        simulator.report_round_sums();
+        assert!(network.check_synchronicity());
+        println!("{}", network.report());
     }
 
     #[test]
     #[traced_test]
     fn quit() {
         // Create a network with 4 nodes and active_view_capacity 2
+        let rng = ChaCha12Rng::seed_from_u64(read_var("SEED", 0));
         let mut config = Config::default();
         config.membership.active_view_capacity = 2;
-        let mut network = Network::new(Instant::now());
+        let mut network = Network::new(config.into(), rng);
         let num = 4;
-        let rng = rand_chacha::ChaCha12Rng::seed_from_u64(99);
         for i in 0..num {
-            network.push(State::new(
-                i,
-                Default::default(),
-                config.clone(),
-                rng.clone(),
-            ));
+            network.insert(i);
         }
 
         let t: TopicId = [0u8; 32].into();
@@ -347,40 +300,46 @@ mod test {
         network.command(1, t, Command::Join(vec![0]));
         network.command(2, t, Command::Join(vec![1]));
         network.command(3, t, Command::Join(vec![2]));
-        network.ticks(10);
+        network.run_trips(2);
 
         // assert all peers appear in the connections
-        let all_conns: HashSet<i32> = HashSet::from_iter((0..4).flat_map(|pa| {
+        let all_conns: HashSet<u64> = HashSet::from_iter((0u64..4).flat_map(|p| {
             network
-                .get_active(&pa, &t)
-                .unwrap()
+                .neighbors(&p, &t)
                 .into_iter()
                 .flat_map(|x| x.into_iter())
         }));
         assert_eq!(all_conns, HashSet::from_iter([0, 1, 2, 3]));
-        assert!(assert_synchronous_active(&network));
+        assert!(network.check_synchronicity());
 
         //  let node 3 leave the swarm
         network.command(3, t, Command::Quit);
-        network.ticks(4);
+        network.run_trips(4);
         assert!(network.peer(&3).unwrap().state(&t).is_none());
 
         // assert all peers without peer 3 appear in the connections
-        let all_conns: HashSet<i32> = HashSet::from_iter((0..num).flat_map(|pa| {
+        let all_conns: HashSet<u64> = HashSet::from_iter((0..num).flat_map(|p| {
             network
-                .get_active(&pa, &t)
-                .unwrap()
+                .neighbors(&p, &t)
                 .into_iter()
                 .flat_map(|x| x.into_iter())
         }));
         assert_eq!(all_conns, HashSet::from_iter([0, 1, 2]));
-        assert!(assert_synchronous_active(&network));
+        assert!(network.check_synchronicity());
     }
 
-    fn read_var(name: &str, default: usize) -> usize {
+    fn read_var<T: FromStr<Err: fmt::Display + fmt::Debug>>(name: &str, default: T) -> T {
         env::var(name)
-            .unwrap_or_else(|_| default.to_string())
-            .parse()
-            .unwrap()
+            .map(|x| {
+                x.parse()
+                    .unwrap_or_else(|_| panic!("Failed to parse environment variable {name}"))
+            })
+            .unwrap_or(default)
+    }
+
+    fn sort<T: Ord + Clone>(items: Vec<T>) -> Vec<T> {
+        let mut sorted = items;
+        sorted.sort();
+        sorted
     }
 }

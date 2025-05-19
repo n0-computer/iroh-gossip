@@ -1,11 +1,11 @@
 //! Utilities used in the protocol implementation
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{hash_map, BinaryHeap, HashMap},
     hash::Hash,
 };
 
-use n0_future::time::{Duration, Instant};
+use n0_future::time::Instant;
 use rand::{
     seq::{IteratorRandom, SliceRandom},
     Rng,
@@ -210,56 +210,102 @@ where
     }
 }
 
-/// A [`BTreeMap`] with [`Instant`] as key. Allows to process expired items.
+/// A [`BinaryHeap`] with entries sorted by [`Instant`]. Allows to process expired items.
 #[derive(Debug)]
-pub struct TimerMap<T>(BTreeMap<Instant, Vec<T>>);
+pub struct TimerMap<T> {
+    heap: BinaryHeap<TimerMapEntry<T>>,
+    seq: u64,
+}
 
+// Can't derive default because we don't want a `T: Default` bound.
 impl<T> Default for TimerMap<T> {
     fn default() -> Self {
-        Self::new()
+        Self {
+            heap: Default::default(),
+            seq: 0,
+        }
     }
 }
 
 impl<T> TimerMap<T> {
     /// Create a new, empty TimerMap.
     pub fn new() -> Self {
-        Self(Default::default())
+        Self::default()
     }
+
     /// Insert a new entry at the specified instant.
     pub fn insert(&mut self, instant: Instant, item: T) {
-        let entry = self.0.entry(instant).or_default();
-        entry.push(item);
+        let seq = self.seq;
+        self.seq += 1;
+        let entry = TimerMapEntry {
+            seq,
+            time: instant,
+            item,
+        };
+        self.heap.push(entry);
     }
 
     /// Remove and return all entries before and equal to `from`.
-    pub fn drain_until(&mut self, from: &Instant) -> impl Iterator<Item = (Instant, T)> {
-        let split_point = *from + Duration::from_nanos(1);
-        let later_half = self.0.split_off(&split_point);
-        let expired = std::mem::replace(&mut self.0, later_half);
-        expired
+    pub fn drain_until(&mut self, from: &Instant) -> impl Iterator<Item = (Instant, T)> + '_ {
+        let from = *from;
+        std::iter::from_fn(move || self.pop_before(from))
+    }
+
+    /// Pop the first entry, if equal or before `limit`.
+    pub fn pop_before(&mut self, limit: Instant) -> Option<(Instant, T)> {
+        match self.heap.peek() {
+            Some(item) if item.time <= limit => self.heap.pop().map(|item| (item.time, item.item)),
+            _ => None,
+        }
+    }
+
+    /// Get a reference to the earliest entry in the `TimerMap`.
+    pub fn first(&self) -> Option<&Instant> {
+        self.heap.peek().map(|x| &x.time)
+    }
+
+    #[cfg(test)]
+    fn to_vec(&self) -> Vec<(Instant, T)>
+    where
+        T: Clone,
+    {
+        self.heap
+            .clone()
+            .into_sorted_vec()
             .into_iter()
-            .flat_map(|(t, v)| v.into_iter().map(move |v| (t, v)))
-    }
-
-    /// Get a reference to the earliest entry in the TimerMap.
-    pub fn first(&self) -> Option<(&Instant, &Vec<T>)> {
-        self.0.iter().next()
-    }
-
-    /// Iterate over all items in the timer map.
-    pub fn iter(&self) -> impl Iterator<Item = (&Instant, &T)> {
-        self.0
-            .iter()
-            .flat_map(|(t, v)| v.iter().map(move |v| (t, v)))
+            .rev()
+            .map(|x| (x.time, x.item))
+            .collect()
     }
 }
 
-impl<T: PartialEq> TimerMap<T> {
-    /// Remove an entry from the specified instant.
-    pub fn remove(&mut self, instant: &Instant, item: &T) {
-        if let Some(items) = self.0.get_mut(instant) {
-            items.retain(|x| x != item)
-        }
+#[derive(Debug, Clone)]
+struct TimerMapEntry<T> {
+    time: Instant,
+    seq: u64,
+    item: T,
+}
+
+impl<T> PartialEq for TimerMapEntry<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.time == other.time && self.seq == other.seq
+    }
+}
+
+impl<T> Eq for TimerMapEntry<T> {}
+
+impl<T> PartialOrd for TimerMapEntry<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T> Ord for TimerMapEntry<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.time
+            .cmp(&other.time)
+            .reverse()
+            .then_with(|| self.seq.cmp(&other.seq).reverse())
     }
 }
 
@@ -282,7 +328,6 @@ impl<K, V> Default for TimeBoundCache<K, V> {
 impl<K: Hash + Eq + Clone, V> TimeBoundCache<K, V> {
     /// Insert an item into the cache, marked with an expiration time.
     pub fn insert(&mut self, key: K, value: V, expires: Instant) {
-        self.remove(&key);
         self.map.insert(key.clone(), (expires, value));
         self.expiry.insert(expires, key);
     }
@@ -290,16 +335,6 @@ impl<K: Hash + Eq + Clone, V> TimeBoundCache<K, V> {
     /// Returns `true` if the map contains a value for the specified key.
     pub fn contains_key(&self, key: &K) -> bool {
         self.map.contains_key(key)
-    }
-
-    /// Remove an item from the cache.
-    pub fn remove(&mut self, key: &K) -> Option<V> {
-        if let Some((expires, value)) = self.map.remove(key) {
-            self.expiry.remove(&expires, key);
-            Some(value)
-        } else {
-            None
-        }
     }
 
     /// Get the number of entries in the cache.
@@ -333,9 +368,23 @@ impl<K: Hash + Eq + Clone, V> TimeBoundCache<K, V> {
     pub fn expire_until(&mut self, instant: Instant) -> usize {
         let drain = self.expiry.drain_until(&instant);
         let mut count = 0;
-        for (_instant, key) in drain {
-            count += 1;
-            let _value = self.map.remove(&key);
+        for (time, key) in drain {
+            match self.map.entry(key) {
+                hash_map::Entry::Occupied(entry) if entry.get().0 == time => {
+                    // If the entry's time matches that of the item we are draining from the expiry list,
+                    // remove the entry from the map and increase the count of items we removed.
+                    entry.remove();
+                    count += 1;
+                }
+                hash_map::Entry::Occupied(_entry) => {
+                    // If the entry's time does not match the time of the item we are draining,
+                    // do not remove the entry: It means that it was re-added with a later time.
+                }
+                hash_map::Entry::Vacant(_) => {
+                    // If the entry is not in the map, it means that it was already removed,
+                    // which can happen if it was inserted multiple times.
+                }
+            }
         }
         count
     }
@@ -398,18 +447,18 @@ mod test {
         map.insert(times[3], 3);
 
         assert_eq!(
-            map.iter().collect::<Vec<_>>(),
+            map.to_vec(),
             vec![
-                (&times[0], &-1),
-                (&times[0], &-2),
-                (&times[1], &0),
-                (&times[2], &1),
-                (&times[3], &2),
-                (&times[3], &3)
+                (times[0], -1),
+                (times[0], -2),
+                (times[1], 0),
+                (times[2], 1),
+                (times[3], 2),
+                (times[3], 3)
             ]
         );
 
-        assert_eq!(map.first(), Some((&times[0], &vec![-1, -2])));
+        assert_eq!(map.first(), Some(&times[0]));
 
         let drain = map.drain_until(&now);
         assert_eq!(
@@ -417,8 +466,15 @@ mod test {
             vec![(times[0], -1), (times[0], -2), (times[1], 0),]
         );
         assert_eq!(
-            map.iter().collect::<Vec<_>>(),
-            vec![(&times[2], &1), (&times[3], &2), (&times[3], &3)]
+            map.to_vec(),
+            vec![(times[2], 1), (times[3], 2), (times[3], 3)]
+        );
+        let drain = map.drain_until(&now);
+        assert_eq!(drain.collect::<Vec<_>>(), vec![]);
+        let drain = map.drain_until(&(now + Duration::from_secs(10)));
+        assert_eq!(
+            drain.collect::<Vec<_>>(),
+            vec![(times[2], 1), (times[3], 2), (times[3], 3)]
         );
     }
 
