@@ -309,7 +309,7 @@ impl Gossip {
     /// instead of using a channel created for you.
     ///
     /// It returns a stream of events. If you want to wait for the topic to become active, wait for
-    /// the [`GossipEvent::Joined`] event.
+    /// the first [`GossipEvent::NeighborUp`].
     pub fn subscribe_with_stream(
         &self,
         topic_id: TopicId,
@@ -791,17 +791,24 @@ impl Actor {
                     neighbors,
                     event_senders,
                     command_rx_keys,
-                    joined,
                 } = state;
-                if *joined {
-                    let neighbors = neighbors.iter().copied().collect();
-                    channels
-                        .event_tx
-                        .try_send(Ok(Event::Gossip(GossipEvent::Joined(neighbors))))
-                        .ok();
+                let mut sender_dead = false;
+                if !neighbors.is_empty() {
+                    for neighbor in neighbors.iter() {
+                        if let Err(_err) = channels
+                            .event_tx
+                            .send(Ok(Event::Gossip(GossipEvent::NeighborUp(*neighbor))))
+                            .await
+                        {
+                            sender_dead = true;
+                            break;
+                        }
+                    }
                 }
 
-                event_senders.push(channels.receiver_id, channels.event_tx);
+                if !sender_dead {
+                    event_senders.push(channels.receiver_id, channels.event_tx);
+                }
                 let command_rx = TopicCommandStream::new(topic_id, channels.command_rx);
                 let key = self.command_rx.insert(command_rx);
                 command_rx_keys.insert(key);
@@ -885,22 +892,20 @@ impl Actor {
                         continue;
                     };
                     let TopicState {
-                        joined,
                         neighbors,
                         event_senders,
                         ..
                     } = state;
-                    let event = if let ProtoEvent::NeighborUp(neighbor) = event {
-                        neighbors.insert(neighbor);
-                        if !*joined {
-                            *joined = true;
-                            GossipEvent::Joined(vec![neighbor])
-                        } else {
-                            GossipEvent::NeighborUp(neighbor)
+                    match &event {
+                        ProtoEvent::NeighborUp(neighbor) => {
+                            neighbors.insert(*neighbor);
                         }
-                    } else {
-                        event.into()
-                    };
+                        ProtoEvent::NeighborDown(neighbor) => {
+                            neighbors.remove(neighbor);
+                        }
+                        _ => {}
+                    }
+                    let event: GossipEvent = event.into();
                     event_senders.send(&event);
                     if !state.still_needed() {
                         self.quit_queue.push_back(topic_id);
@@ -1013,7 +1018,6 @@ impl Default for PeerState {
 
 #[derive(Debug, Default)]
 struct TopicState {
-    joined: bool,
     neighbors: BTreeSet<NodeId>,
     /// Sender side to report events to a [`GossipReceiver`].
     ///
@@ -1029,6 +1033,11 @@ impl TopicState {
     /// Check if the topic still has any publisher or subscriber.
     fn still_needed(&self) -> bool {
         !self.event_senders.is_empty() || !self.command_rx_keys.is_empty()
+    }
+
+    #[cfg(test)]
+    fn joined(&self) -> bool {
+        !self.neighbors.is_empty()
     }
 }
 
@@ -1733,13 +1742,13 @@ mod test {
                                // get peer connection;
                                // receive the other peer's information for a NeighborUp
         let state = actor.topics.get(&topic).expect("get registered topic");
-        assert!(state.joined);
+        assert!(state.joined());
 
         // signal the second subscribe, we should remain subscribed
         tx.send(()).await?;
         actor.steps(3).await?; // subscribe; first receiver gone; first sender gone
         let state = actor.topics.get(&topic).expect("get registered topic");
-        assert!(state.joined);
+        assert!(state.joined());
 
         // signal to drop the second handle, the topic should no longer be subscribed
         tx.send(()).await?;
