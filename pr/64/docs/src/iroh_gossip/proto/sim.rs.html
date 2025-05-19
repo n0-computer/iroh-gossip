@@ -1384,7 +1384,7 @@
     }
 
     <span class="doccomment">/// Runs the simulation for `n` times the maximum latency between peers.
-    </span><span class="kw">pub fn </span>run_roundtrips(<span class="kw-2">&amp;mut </span><span class="self">self</span>, n: usize) {
+    </span><span class="kw">pub fn </span>run_trips(<span class="kw-2">&amp;mut </span><span class="self">self</span>, n: usize) {
         <span class="kw">let </span>duration = <span class="self">self</span>.config.latency.max() * n <span class="kw">as </span>u32;
         <span class="self">self</span>.run_duration(duration)
     }
@@ -2073,7 +2073,7 @@
                 <span class="kw">for </span>i <span class="kw">in </span><span class="number">1</span>..node_count {
                     <span class="self">self</span>.network.insert_and_join(i, TOPIC, <span class="macro">vec!</span>[<span class="number">0</span>]);
                 }
-                <span class="self">self</span>.network.run_roundtrips(<span class="number">20</span>);
+                <span class="self">self</span>.network.run_trips(<span class="number">20</span>);
             }
             BootstrapMode::Set { count } =&gt; {
                 <span class="self">self</span>.network.insert_and_join(<span class="number">0</span>, TOPIC, <span class="macro">vec!</span>[]);
@@ -2081,14 +2081,14 @@
                     <span class="self">self</span>.network.insert_and_join(i, TOPIC, <span class="macro">vec!</span>[<span class="number">0</span>]);
                 }
 
-                <span class="self">self</span>.network.run_roundtrips(<span class="number">7</span>);
+                <span class="self">self</span>.network.run_trips(<span class="number">7</span>);
 
                 <span class="kw">for </span>i <span class="kw">in </span>count..node_count {
                     <span class="kw">let </span>contact = <span class="self">self</span>.network.rng.gen_range(<span class="number">0</span>..count);
                     <span class="self">self</span>.network.insert_and_join(i, TOPIC, <span class="macro">vec!</span>[contact]);
                 }
 
-                <span class="self">self</span>.network.run_roundtrips(<span class="number">20</span>);
+                <span class="self">self</span>.network.run_trips(<span class="number">20</span>);
             }
         }
 
