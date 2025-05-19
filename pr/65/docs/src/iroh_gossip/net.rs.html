@@ -2277,7 +2277,8 @@
 <a href="#2276" id="2276">2276</a>
 <a href="#2277" id="2277">2277</a>
 <a href="#2278" id="2278">2278</a>
-<a href="#2279" id="2279">2279</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
+<a href="#2279" id="2279">2279</a>
+<a href="#2280" id="2280">2280</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
@@ -4298,6 +4299,7 @@
 
     <span class="attr">#[tokio::test(flavor = <span class="string">"multi_thread"</span>)]
     </span><span class="kw">async fn </span>gossip_net_big() -&gt; TestResult {
+        tracing_subscriber::fmt::try_init().ok();
         <span class="kw">let </span><span class="kw-2">mut </span>rng = rand_chacha::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
         <span class="kw">let </span>(relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().<span class="kw">await</span>.unwrap();
         <span class="kw">let </span>dns = iroh::test_utils::DnsPkarrServer::run().<span class="kw">await</span><span class="question-mark">?</span>;
