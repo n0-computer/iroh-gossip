@@ -387,7 +387,36 @@
 <a href="#386" id="386">386</a>
 <a href="#387" id="387">387</a>
 <a href="#388" id="388">388</a>
-<a href="#389" id="389">389</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::{
+<a href="#389" id="389">389</a>
+<a href="#390" id="390">390</a>
+<a href="#391" id="391">391</a>
+<a href="#392" id="392">392</a>
+<a href="#393" id="393">393</a>
+<a href="#394" id="394">394</a>
+<a href="#395" id="395">395</a>
+<a href="#396" id="396">396</a>
+<a href="#397" id="397">397</a>
+<a href="#398" id="398">398</a>
+<a href="#399" id="399">399</a>
+<a href="#400" id="400">400</a>
+<a href="#401" id="401">401</a>
+<a href="#402" id="402">402</a>
+<a href="#403" id="403">403</a>
+<a href="#404" id="404">404</a>
+<a href="#405" id="405">405</a>
+<a href="#406" id="406">406</a>
+<a href="#407" id="407">407</a>
+<a href="#408" id="408">408</a>
+<a href="#409" id="409">409</a>
+<a href="#410" id="410">410</a>
+<a href="#411" id="411">411</a>
+<a href="#412" id="412">412</a>
+<a href="#413" id="413">413</a>
+<a href="#414" id="414">414</a>
+<a href="#415" id="415">415</a>
+<a href="#416" id="416">416</a>
+<a href="#417" id="417">417</a>
+<a href="#418" id="418">418</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::{
     collections::HashMap,
     path::{Path, PathBuf},
 };
@@ -395,31 +424,34 @@
 <span class="kw">use </span>anyhow::{Context, <span class="prelude-ty">Result</span>};
 <span class="kw">use </span>clap::Parser;
 <span class="kw">use </span>comfy_table::{presets::NOTHING, Cell, CellAlignment, Table};
-<span class="kw">use </span>iroh_gossip::proto::{
-    tests::{BootstrapMode, RoundStats, RoundStatsAvg, Simulator, SimulatorConfig},
-    Config,
+<span class="kw">use </span>iroh_gossip::proto::sim::{
+    BootstrapMode, NetworkConfig, RoundStats, RoundStatsAvg, RoundStatsDiff, Simulator,
+    SimulatorConfig,
 };
 <span class="kw">use </span>rayon::iter::{IntoParallelIterator, ParallelIterator};
 <span class="kw">use </span>serde::{Deserialize, Serialize};
-<span class="kw">use </span>tracing::{error_span, warn};
+<span class="kw">use </span>tracing::{error_span, info, warn};
 
-<span class="attr">#[derive(Debug, Serialize, Deserialize)]
+<span class="attr">#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[allow(clippy::enum_variant_names)]
 </span><span class="kw">enum </span>Simulation {
-    GossipSingle,
-    GossipMulti,
-    GossipAll,
+    <span class="doccomment">/// A single sender broadcasts a single message per round.
+    </span>GossipSingle,
+    <span class="doccomment">/// Each round a different sender is chosen at random, and broadcasts a single message
+    </span>GossipMulti,
+    <span class="doccomment">/// Each round, all peers broadcast a single message simultaneously.
+    </span>GossipAll,
 }
 
-<span class="attr">#[derive(Debug, Serialize, Deserialize)]
+<span class="attr">#[derive(Debug, Clone, Serialize, Deserialize)]
 </span><span class="kw">struct </span>ScenarioDescription {
     sim: Simulation,
     nodes: u32,
     <span class="attr">#[serde(default)]
     </span>bootstrap: BootstrapMode,
-    <span class="comment">// bootstrap_nodes: Option&lt;u32&gt;,
-    </span><span class="attr">#[serde(default = <span class="string">"defaults::rounds"</span>)]
+    <span class="attr">#[serde(default = <span class="string">"defaults::rounds"</span>)]
     </span>rounds: u32,
-    config: <span class="prelude-ty">Option</span>&lt;Config&gt;,
+    config: <span class="prelude-ty">Option</span>&lt;NetworkConfig&gt;,
 }
 
 <span class="kw">impl </span>ScenarioDescription {
@@ -444,7 +476,7 @@
 <span class="attr">#[derive(Debug, Serialize, Deserialize)]
 </span><span class="kw">struct </span>SimConfig {
     seeds: Vec&lt;u64&gt;,
-    config: <span class="prelude-ty">Option</span>&lt;Config&gt;,
+    config: <span class="prelude-ty">Option</span>&lt;NetworkConfig&gt;,
     scenario: Vec&lt;ScenarioDescription&gt;,
 }
 
@@ -461,7 +493,7 @@
         <span class="attr">#[clap(short, long)]
         </span>config_path: PathBuf,
         <span class="attr">#[clap(short, long)]
-        </span>out_dir: PathBuf,
+        </span>out_dir: <span class="prelude-ty">Option</span>&lt;PathBuf&gt;,
         <span class="attr">#[clap(short, long)]
         </span>baseline: <span class="prelude-ty">Option</span>&lt;PathBuf&gt;,
         <span class="attr">#[clap(short, long)]
@@ -493,13 +525,16 @@
             <span class="kw">let </span>config: SimConfig = toml::from_str(<span class="kw-2">&amp;</span>config_text)<span class="question-mark">?</span>;
 
             <span class="kw">let </span>base_config = config.config.unwrap_or_default();
+            <span class="macro">info!</span>(<span class="string">"base config: {base_config:?}"</span>);
             <span class="kw">let </span>seeds = config.seeds;
             <span class="kw">let </span><span class="kw-2">mut </span>scenarios = config.scenario;
             <span class="kw">for </span>scenario <span class="kw">in </span>scenarios.iter_mut() {
                 scenario.config.get_or_insert_with(|| base_config.clone());
             }
 
-            std::fs::create_dir_all(<span class="kw-2">&amp;</span>out_dir)<span class="question-mark">?</span>;
+            <span class="kw">if let </span><span class="prelude-val">Some</span>(out_dir) = out_dir.as_ref() {
+                std::fs::create_dir_all(out_dir)<span class="question-mark">?</span>;
+            }
 
             <span class="kw">let </span>filter_fn = |s: <span class="kw-2">&amp;</span>ScenarioDescription| {
                 <span class="kw">let </span>label = s.label();
@@ -510,18 +545,25 @@
                 }
             };
 
-            <span class="kw">if </span>!single_threaded {
+            <span class="kw">let </span>results: <span class="prelude-ty">Result</span>&lt;Vec&lt;<span class="kw">_</span>&gt;&gt; = <span class="kw">if </span>!single_threaded {
                 scenarios
                     .into_par_iter()
                     .filter(filter_fn)
-                    .try_for_each(|scenario| run_and_save_simulation(scenario, <span class="kw-2">&amp;</span>seeds, <span class="kw-2">&amp;</span>out_dir))<span class="question-mark">?</span>;
+                    .map(|scenario| run_and_save_simulation(scenario, <span class="kw-2">&amp;</span>seeds, out_dir.as_ref()))
+                    .collect()
             } <span class="kw">else </span>{
                 scenarios
                     .into_iter()
                     .filter(filter_fn)
-                    .try_for_each(|scenario| run_and_save_simulation(scenario, <span class="kw-2">&amp;</span>seeds, <span class="kw-2">&amp;</span>out_dir))<span class="question-mark">?</span>;
+                    .map(|scenario| run_and_save_simulation(scenario, <span class="kw-2">&amp;</span>seeds, out_dir.as_ref()))
+                    .collect()
+            };
+            <span class="kw">let </span><span class="kw-2">mut </span>results = results<span class="question-mark">?</span>;
+            results.sort_by(|a, b| a.scenario.label().cmp(<span class="kw-2">&amp;</span>b.scenario.label()));
+            <span class="kw">for </span>result <span class="kw">in </span>results {
+                print_result(<span class="kw-2">&amp;</span>result);
             }
-            <span class="kw">if let </span><span class="prelude-val">Some</span>(baseline) = baseline {
+            <span class="kw">if let </span>(<span class="prelude-val">Some</span>(baseline), <span class="prelude-val">Some</span>(out_dir)) = (baseline, out_dir) {
                 compare_dirs(baseline, out_dir, filter)<span class="question-mark">?</span>;
             }
         }
@@ -540,30 +582,32 @@
 <span class="kw">fn </span>run_and_save_simulation(
     scenario: ScenarioDescription,
     seeds: <span class="kw-2">&amp;</span>[u64],
-    out_path: <span class="kw">impl </span>AsRef&lt;Path&gt;,
-) -&gt; <span class="prelude-ty">Result</span>&lt;()&gt; {
-    <span class="kw">let </span>span = <span class="macro">error_span!</span>(<span class="string">"sim"</span>, s=%scenario.label());
-    <span class="kw">let </span>_guard = span.enter();
-
+    out_dir: <span class="prelude-ty">Option</span>&lt;<span class="kw">impl </span>AsRef&lt;Path&gt;&gt;,
+) -&gt; <span class="prelude-ty">Result</span>&lt;SimulationResults&gt; {
     <span class="kw">let </span>label = scenario.label();
 
-    <span class="kw">let </span>path = out_path.as_ref().join(<span class="macro">format!</span>(<span class="string">"{label}.config.toml"</span>));
-    <span class="kw">let </span>encoded = toml::to_string(<span class="kw-2">&amp;</span>scenario)<span class="question-mark">?</span>;
-    std::fs::write(path, encoded)<span class="question-mark">?</span>;
+    <span class="kw">if let </span><span class="prelude-val">Some</span>(out_dir) = out_dir.as_ref() {
+        <span class="kw">let </span>path = out_dir.as_ref().join(<span class="macro">format!</span>(<span class="string">"{label}.config.toml"</span>));
+        <span class="kw">let </span>encoded = toml::to_string(<span class="kw-2">&amp;</span>scenario)<span class="question-mark">?</span>;
+        std::fs::write(path, encoded)<span class="question-mark">?</span>;
+    }
 
-    <span class="kw">let </span>result = run_simulation(<span class="kw-2">&amp;</span>seeds, scenario);
+    <span class="kw">let </span>result = run_simulation(seeds, scenario);
 
-    <span class="kw">let </span>path = out_path.as_ref().join(<span class="macro">format!</span>(<span class="string">"{label}.results.json"</span>));
-    <span class="kw">let </span>encoded = serde_json::to_string(<span class="kw-2">&amp;</span>result)<span class="question-mark">?</span>;
-    std::fs::write(path, encoded)<span class="question-mark">?</span>;
+    <span class="kw">if let </span><span class="prelude-val">Some</span>(out_dir) = out_dir.as_ref() {
+        <span class="kw">let </span>path = out_dir.as_ref().join(<span class="macro">format!</span>(<span class="string">"{label}.results.json"</span>));
+        <span class="kw">let </span>encoded = serde_json::to_string(<span class="kw-2">&amp;</span>result)<span class="question-mark">?</span>;
+        std::fs::write(path, encoded)<span class="question-mark">?</span>;
+    }
 
-    anyhow::Ok(())
+    anyhow::Ok(result)
 }
 
 <span class="attr">#[derive(Debug, Serialize, Deserialize, Clone)]
 </span><span class="kw">struct </span>SimulationResults {
+    scenario: ScenarioDescription,
     <span class="doccomment">/// Maps seeds to results
-    </span>results: HashMap&lt;u64, <span class="prelude-ty">Result</span>&lt;RoundStats, SimulationError&gt;&gt;,
+    </span>results: HashMap&lt;u64, RoundStatsAvg&gt;,
     average: <span class="prelude-ty">Option</span>&lt;RoundStatsAvg&gt;,
 }
 
@@ -583,96 +627,106 @@
 
 <span class="kw">fn </span>run_simulation(seeds: <span class="kw-2">&amp;</span>[u64], scenario: ScenarioDescription) -&gt; SimulationResults {
     <span class="kw">let </span><span class="kw-2">mut </span>results = HashMap::new();
-    <span class="kw">let </span>label = scenario.label();
-    <span class="kw">let </span>proto_config = scenario.config.unwrap_or_default();
-    <span class="kw">for </span>seed <span class="kw">in </span>seeds {
-        <span class="kw">let </span>seed = <span class="kw-2">*</span>seed;
+    <span class="kw">let </span>network_config = scenario.config.clone().unwrap_or_default();
+    <span class="kw">for </span><span class="kw-2">&amp;</span>seed <span class="kw">in </span>seeds {
+        <span class="kw">let </span>span = <span class="macro">error_span!</span>(<span class="string">"sim"</span>, name=%scenario.label(), %seed);
+        <span class="kw">let </span>_guard = span.enter();
+
         <span class="kw">let </span>sim_config = SimulatorConfig {
             rng_seed: seed,
             peers: scenario.nodes <span class="kw">as </span>usize,
             ..Default::default()
         };
         <span class="kw">let </span>bootstrap = scenario.bootstrap.clone();
-        <span class="kw">let </span><span class="kw-2">mut </span>simulator = Simulator::new(sim_config, proto_config.clone());
-        <span class="kw">let </span>result = <span class="kw">if </span>!simulator.bootstrap(bootstrap) {
-            <span class="macro">warn!</span>(<span class="string">"{label} failed to bootstrap with seed {seed}"</span>);
-            <span class="prelude-val">Err</span>(SimulationError::FailedToBootstrap)
+        <span class="kw">let </span><span class="kw-2">mut </span>simulator = Simulator::new(sim_config, network_config.clone());
+        <span class="macro">info!</span>(<span class="string">"start"</span>);
+        <span class="kw">let </span>outcome = simulator.bootstrap(bootstrap);
+
+        <span class="kw">if </span>outcome.has_peers_with_no_neighbors() {
+            <span class="macro">warn!</span>(<span class="string">"not all nodes active after bootstrap: {outcome:?}"</span>);
         } <span class="kw">else </span>{
-            <span class="prelude-val">Ok</span>(<span class="kw">match </span>scenario.sim {
-                Simulation::GossipSingle =&gt; BigSingle.run(simulator, scenario.rounds <span class="kw">as </span>usize),
-                Simulation::GossipMulti =&gt; BigMulti.run(simulator, scenario.rounds <span class="kw">as </span>usize),
-                Simulation::GossipAll =&gt; BigAll.run(simulator, scenario.rounds <span class="kw">as </span>usize),
-            })
+            <span class="macro">info!</span>(<span class="string">"bootstrapped, all nodes active"</span>);
+        }
+        <span class="kw">let </span>result = <span class="kw">match </span>scenario.sim {
+            Simulation::GossipSingle =&gt; BigSingle.run(simulator, scenario.rounds <span class="kw">as </span>usize),
+            Simulation::GossipMulti =&gt; BigMulti.run(simulator, scenario.rounds <span class="kw">as </span>usize),
+            Simulation::GossipAll =&gt; BigAll.run(simulator, scenario.rounds <span class="kw">as </span>usize),
         };
+        <span class="macro">info!</span>(<span class="string">"done"</span>);
         results.insert(seed, result);
     }
 
-    <span class="kw">let </span>stats: Vec&lt;<span class="kw">_</span>&gt; = results
-        .values()
-        .filter_map(|x| x.as_ref().ok())
-        .cloned()
-        .collect();
+    <span class="kw">let </span>stats: Vec&lt;<span class="kw">_</span>&gt; = results.values().cloned().collect();
     <span class="kw">let </span>average = <span class="kw">if </span>!stats.is_empty() {
-        <span class="kw">let </span>avg = RoundStats::avg(<span class="kw-2">&amp;</span>stats);
-        <span class="macro">println!</span>(<span class="string">"{label} with {} seeds"</span>, seeds.len());
-        <span class="comment">// println!("mean: {}", avg.mean);
-        // println!("min:  {}", avg.min);
-        // println!("max:  {}", avg.max);
-        // println!("");
-
-        </span><span class="kw">let </span><span class="kw-2">mut </span>table = Table::new();
-        <span class="kw">let </span>header = [<span class="string">""</span>, <span class="string">"RMR"</span>, <span class="string">"LDH"</span>, <span class="string">"ticks"</span>, <span class="string">"missing"</span>]
-            .into_iter()
-            .map(|s| Cell::new(s).set_alignment(CellAlignment::Right));
-        table
-            .load_preset(NOTHING)
-            .set_header(header)
-            .add_row(fmt_round(<span class="string">"mean"</span>, <span class="kw-2">&amp;</span>avg.mean))
-            .add_row(fmt_round(<span class="string">"max"</span>, <span class="kw-2">&amp;</span>avg.max))
-            .add_row(fmt_round(<span class="string">"min"</span>, <span class="kw-2">&amp;</span>avg.min));
-        <span class="macro">println!</span>(<span class="string">"{table}"</span>);
-        <span class="macro">println!</span>(<span class="string">""</span>);
+        <span class="kw">let </span>avg = RoundStatsAvg::avg(<span class="kw-2">&amp;</span>stats);
         <span class="prelude-val">Some</span>(avg)
     } <span class="kw">else </span>{
-        <span class="macro">println!</span>(<span class="string">"all seeds failed"</span>);
         <span class="prelude-val">None
     </span>};
-    SimulationResults { average, results }
+    SimulationResults {
+        average,
+        results,
+        scenario,
+    }
+}
+
+<span class="kw">fn </span>print_result(r: <span class="kw-2">&amp;</span>SimulationResults) {
+    <span class="kw">let </span>seeds = r.results.len();
+    <span class="macro">println!</span>(<span class="string">"{} with {seeds} seeds"</span>, r.scenario.label());
+    <span class="kw">let </span><span class="prelude-val">Some</span>(avg) = r.average.as_ref() <span class="kw">else </span>{
+        <span class="macro">println!</span>(<span class="string">"no results, simulation did not complete"</span>);
+        <span class="kw">return</span>;
+    };
+    <span class="kw">let </span><span class="kw-2">mut </span>table = Table::new();
+    <span class="kw">let </span>header = [<span class="string">""</span>, <span class="string">"RMR"</span>, <span class="string">"LDH"</span>, <span class="string">"missed"</span>, <span class="string">"duration"</span>]
+        .into_iter()
+        .map(|s| Cell::new(s).set_alignment(CellAlignment::Right));
+    table
+        .load_preset(NOTHING)
+        .set_header(header)
+        .add_row(fmt_round(<span class="string">"mean"</span>, <span class="kw-2">&amp;</span>avg.mean))
+        .add_row(fmt_round(<span class="string">"max"</span>, <span class="kw-2">&amp;</span>avg.max))
+        .add_row(fmt_round(<span class="string">"min"</span>, <span class="kw-2">&amp;</span>avg.min));
+    <span class="macro">println!</span>(<span class="string">"{table}"</span>);
+    <span class="kw">if </span>avg.max.missed &gt; <span class="number">0.0 </span>{
+        <span class="macro">println!</span>(<span class="string">"WARN: Messages were missed!"</span>)
+    }
+    <span class="macro">println!</span>();
 }
 
 <span class="kw">trait </span>Scenario {
-    <span class="kw">fn </span>run(<span class="self">self</span>, sim: Simulator, rounds: usize) -&gt; RoundStats;
+    <span class="kw">fn </span>run(<span class="self">self</span>, sim: Simulator, rounds: usize) -&gt; RoundStatsAvg;
 }
 
 <span class="kw">struct </span>BigSingle;
 <span class="kw">impl </span>Scenario <span class="kw">for </span>BigSingle {
-    <span class="kw">fn </span>run(<span class="self">self</span>, <span class="kw-2">mut </span>simulator: Simulator, rounds: usize) -&gt; RoundStats {
+    <span class="kw">fn </span>run(<span class="self">self</span>, <span class="kw-2">mut </span>simulator: Simulator, rounds: usize) -&gt; RoundStatsAvg {
         <span class="kw">let </span>from = simulator.random_peer();
         <span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..rounds {
             <span class="kw">let </span>message = <span class="macro">format!</span>(<span class="string">"m{i}"</span>).into_bytes().into();
             <span class="kw">let </span>messages = <span class="macro">vec!</span>[(from, message)];
             simulator.gossip_round(messages);
         }
-        simulator.report_round_average()
+        simulator.round_stats_average()
     }
 }
 
 <span class="kw">struct </span>BigMulti;
 <span class="kw">impl </span>Scenario <span class="kw">for </span>BigMulti {
-    <span class="kw">fn </span>run(<span class="self">self</span>, <span class="kw-2">mut </span>simulator: Simulator, rounds: usize) -&gt; RoundStats {
+    <span class="kw">fn </span>run(<span class="self">self</span>, <span class="kw-2">mut </span>simulator: Simulator, rounds: usize) -&gt; RoundStatsAvg {
         <span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..rounds {
             <span class="kw">let </span>from = simulator.random_peer();
             <span class="kw">let </span>message = <span class="macro">format!</span>(<span class="string">"m{i}"</span>).into_bytes().into();
             <span class="kw">let </span>messages = <span class="macro">vec!</span>[(from, message)];
             simulator.gossip_round(messages);
         }
-        simulator.report_round_average()
+        simulator.round_stats_average()
     }
 }
 
 <span class="kw">struct </span>BigAll;
 <span class="kw">impl </span>Scenario <span class="kw">for </span>BigAll {
-    <span class="kw">fn </span>run(<span class="self">self</span>, <span class="kw-2">mut </span>simulator: Simulator, rounds: usize) -&gt; RoundStats {
+    <span class="kw">fn </span>run(<span class="self">self</span>, <span class="kw-2">mut </span>simulator: Simulator, rounds: usize) -&gt; RoundStatsAvg {
         <span class="kw">let </span>messages_per_peer = <span class="number">1</span>;
         <span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..rounds {
             <span class="kw">let </span><span class="kw-2">mut </span>messages = <span class="macro">vec!</span>[];
@@ -684,16 +738,17 @@
             }
             simulator.gossip_round(messages);
         }
-        simulator.report_round_average()
+        simulator.round_stats_average()
     }
 }
 
 <span class="kw">fn </span>compare_dirs(baseline_dir: PathBuf, current_path: PathBuf, filter: Vec&lt;String&gt;) -&gt; <span class="prelude-ty">Result</span>&lt;()&gt; {
+    <span class="kw">let </span><span class="kw-2">mut </span>paths = <span class="macro">vec!</span>[];
     <span class="kw">for </span>entry <span class="kw">in </span>std::fs::read_dir(<span class="kw-2">&amp;</span>current_path)<span class="question-mark">?
         </span>.filter_map(Result::ok)
         .filter(|x| x.path().is_file())
     {
-        <span class="kw">let </span>current_file = entry.path();
+        <span class="kw">let </span>current_file = entry.path().to_owned();
         <span class="kw">let </span><span class="prelude-val">Some</span>(filename) = current_file.file_name().and_then(|s| s.to_str()) <span class="kw">else </span>{
             <span class="kw">continue</span>;
         };
@@ -707,7 +762,10 @@
         <span class="kw">if </span>!baseline_file.exists() {
             <span class="macro">println!</span>(<span class="string">"skip {} (not in baseline)"</span>, filename);
         }
-        <span class="macro">println!</span>(<span class="string">""</span>);
+        paths.push((basename.to_string(), baseline_file, current_file));
+    }
+    paths.sort();
+    <span class="kw">for </span>(basename, baseline_file, current_file) <span class="kw">in </span>paths {
         <span class="macro">println!</span>(<span class="string">"comparing {}"</span>, basename);
         <span class="kw">if let </span><span class="prelude-val">Err</span>(err) = compare_files(<span class="kw-2">&amp;</span>baseline_file, <span class="kw-2">&amp;</span>current_file) {
             <span class="macro">println!</span>(<span class="string">"  skip (reason: {err:#}"</span>);
@@ -737,7 +795,7 @@
         (<span class="prelude-val">Some</span>(baseline), <span class="prelude-val">Some</span>(current)) =&gt; {
             <span class="kw">let </span>diff = baseline.diff(<span class="kw-2">&amp;</span>current);
             <span class="kw">let </span><span class="kw-2">mut </span>table = Table::new();
-            <span class="kw">let </span>header = [<span class="string">""</span>, <span class="string">"RMR"</span>, <span class="string">"LDH"</span>, <span class="string">"ticks"</span>, <span class="string">"missing"</span>]
+            <span class="kw">let </span>header = [<span class="string">""</span>, <span class="string">"RMR"</span>, <span class="string">"LDH"</span>, <span class="string">"missed"</span>, <span class="string">"duration"</span>]
                 .into_iter()
                 .map(|s| Cell::new(s).set_alignment(CellAlignment::Right));
             table
@@ -756,20 +814,20 @@
         label.to_string(),
         <span class="macro">format!</span>(<span class="string">"{:.2}"</span>, round.rmr),
         <span class="macro">format!</span>(<span class="string">"{:.2}"</span>, round.ldh),
-        <span class="macro">format!</span>(<span class="string">"{:.2}"</span>, round.ticks),
-        <span class="macro">format!</span>(<span class="string">"{:.2}"</span>, round.missing_receives),
+        <span class="macro">format!</span>(<span class="string">"{:.2}"</span>, round.missed),
+        <span class="macro">format!</span>(<span class="string">"{}ms"</span>, round.duration.as_millis()),
     ]
     .into_iter()
     .map(|s| Cell::new(s).set_alignment(CellAlignment::Right))
     .collect()
 }
-<span class="kw">fn </span>fmt_diff_round(label: <span class="kw-2">&amp;</span>str, round: <span class="kw-2">&amp;</span>RoundStats) -&gt; Vec&lt;String&gt; {
+<span class="kw">fn </span>fmt_diff_round(label: <span class="kw-2">&amp;</span>str, round: <span class="kw-2">&amp;</span>RoundStatsDiff) -&gt; Vec&lt;String&gt; {
     <span class="macro">vec!</span>[
         label.to_string(),
         fmt_percent(round.rmr),
         fmt_percent(round.ldh),
-        fmt_percent(round.ticks),
-        fmt_percent(round.missing_receives),
+        fmt_percent(round.missed),
+        fmt_percent(round.duration),
     ]
 }
 
