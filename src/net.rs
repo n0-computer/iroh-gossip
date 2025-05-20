@@ -1706,24 +1706,16 @@ pub(crate) mod test {
     async fn can_die_and_reconnect() -> testresult::TestResult {
         /// Runs a future in a separate runtime on a separate thread, cancelling everything
         /// abruptly once `cancel` is invoked.
-        fn run_in_thread<T, F, Fut>(
+        fn run_in_thread<T: Send + 'static>(
             cancel: CancellationToken,
-            f: F,
-        ) -> std::thread::JoinHandle<Option<T>>
-        where
-            T: Send + 'static,
-            F: 'static + Send + FnOnce() -> Fut,
-            Fut: 'static + std::future::Future<Output = T>,
-        {
+            fut: impl std::future::Future<Output = T> + Send + 'static,
+        ) -> std::thread::JoinHandle<Option<T>> {
             std::thread::spawn(move || {
-                let fut = f();
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .unwrap();
-                let res = rt.block_on(async move { cancel.run_until_cancelled(fut).await });
-                tracing::info!("run_in_thread terminate");
-                res
+                rt.block_on(async move { cancel.run_until_cancelled(fut).await })
             })
         }
 
@@ -1797,12 +1789,16 @@ pub(crate) mod test {
         // after the message was received on our receiver node.
         let cancel = CancellationToken::new();
         let secret = SecretKey::generate(&mut rng);
-        let join_handle_1 = run_in_thread(cancel.clone(), {
-            let secret = secret.clone();
-            let relay_map = relay_map.clone();
-            let node0_addr = node0_addr.clone();
-            move || broadcast_once(secret, relay_map, node0_addr, topic_id, "msg1".to_string())
-        });
+        let join_handle_1 = run_in_thread(
+            cancel.clone(),
+            broadcast_once(
+                secret.clone(),
+                relay_map.clone(),
+                node0_addr.clone(),
+                topic_id,
+                "msg1".to_string(),
+            ),
+        );
         // assert that we received the message on the receiver node.
         let msg = timeout(max_wait, msgs_recv_rx.recv()).await?.unwrap();
         assert_eq!(&msg, "msg1");
@@ -1811,12 +1807,16 @@ pub(crate) mod test {
 
         // spawns the node again with the same node id, and send another message
         let cancel = CancellationToken::new();
-        let join_handle_2 = run_in_thread(cancel.clone(), {
-            let secret = secret.clone();
-            let relay_map = relay_map.clone();
-            let node0_addr = node0_addr.clone();
-            move || broadcast_once(secret, relay_map, node0_addr, topic_id, "msg2".to_string())
-        });
+        let join_handle_2 = run_in_thread(
+            cancel.clone(),
+            broadcast_once(
+                secret.clone(),
+                relay_map.clone(),
+                node0_addr.clone(),
+                topic_id,
+                "msg2".to_string(),
+            ),
+        );
         // assert that we received the message on the receiver node.
         // this means that the reconnect with the same node id worked.
         let msg = timeout(max_wait, msgs_recv_rx.recv()).await?.unwrap();
