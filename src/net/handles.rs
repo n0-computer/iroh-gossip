@@ -64,7 +64,19 @@ impl From<irpc::channel::RecvError> for ApiError {
     }
 }
 
-/// todo
+/// API to control a [`Gossip`] instance.
+///
+/// This has methods to subscribe and join gossip topics, which return handles to publish
+/// and receive messages on topics.
+///
+/// [`Gossip`] derefs to [`GossipApi`], so all functions on [`GossipApi`] are directly callable
+/// from [`Gossip`].
+///
+/// Additionally, a [`GossipApi`] can be created by connecting to an RPC server. See [`Gossip::listen`]
+/// and [`GossipApi::connect`] (*requires the `rpc` feature).
+///
+/// [`Gossip`]: crate::net::Gossip
+/// [`Gossip::listen`]: crate::net::Gossip::listen
 #[derive(Debug, Clone)]
 pub struct GossipApi {
     client: Client<RpcMessage, Request, Service>,
