@@ -431,8 +431,7 @@ mod tests {
         use rand::SeedableRng;
 
         use crate::{
-            api::{Event, GossipApi, GossipEvent},
-            net::{test::create_endpoint, Gossip},
+            net::{test::create_endpoint, Event, Gossip, GossipApi, GossipEvent},
             proto::TopicId,
             ALPN,
         };

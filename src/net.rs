@@ -12,6 +12,7 @@ use anyhow::Context as _;
 use bytes::BytesMut;
 use futures_concurrency::stream::{stream_group, StreamGroup};
 use futures_util::FutureExt as _;
+use handles::RpcMessage;
 use iroh::{
     endpoint::{Connection, DirectAddr},
     protocol::ProtocolHandler,
@@ -37,9 +38,10 @@ use crate::{
     proto::{self, HyparviewConfig, PeerData, PlumtreeConfig, Scope, TopicId},
 };
 
-pub mod util;
+pub use self::handles::{Command, Event, GossipApi, GossipEvent, GossipReceiver, GossipSender};
 
-use crate::api::{self, Command, Event, GossipApi, GossipEvent};
+pub mod handles;
+pub mod util;
 
 /// ALPN protocol name
 pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/0";
@@ -326,7 +328,7 @@ struct Actor {
     /// Dial machine to connect to peers
     dialer: Dialer,
     /// Input messages to the actor
-    rpc_rx: mpsc::Receiver<api::RpcMessage>,
+    rpc_rx: mpsc::Receiver<RpcMessage>,
     local_rx: mpsc::Receiver<LocalActorMessage>,
     /// Sender for the state input (cloned into the connection loops)
     in_event_tx: mpsc::Sender<InEvent>,
@@ -356,7 +358,7 @@ impl Actor {
         my_addr: &AddrInfo,
     ) -> (
         Self,
-        mpsc::Sender<api::RpcMessage>,
+        mpsc::Sender<RpcMessage>,
         mpsc::Sender<LocalActorMessage>,
     ) {
         let peer_id = endpoint.node_id();
@@ -674,10 +676,10 @@ impl Actor {
         Ok(())
     }
 
-    async fn handle_rpc_msg(&mut self, msg: api::RpcMessage, now: Instant) -> Result<(), Error> {
+    async fn handle_rpc_msg(&mut self, msg: RpcMessage, now: Instant) -> Result<(), Error> {
         trace!("handle to_actor  {msg:?}");
         match msg {
-            api::RpcMessage::Join(msg) => {
+            RpcMessage::Join(msg) => {
                 let WithChannels {
                     inner,
                     rx,
@@ -685,7 +687,7 @@ impl Actor {
                     // TODO(frando): make use of span?
                     span: _,
                 } = msg;
-                let api::JoinRequest {
+                let handles::JoinRequest {
                     topic_id,
                     bootstrap,
                 } = inner;

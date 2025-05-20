@@ -13,8 +13,6 @@
 #[doc(inline)]
 pub use net::GOSSIP_ALPN as ALPN;
 
-#[cfg(any(feature = "net", feature = "rpc"))]
-pub mod api;
 pub mod metrics;
 #[cfg(feature = "net")]
 pub mod net;
