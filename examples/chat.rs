@@ -12,7 +12,8 @@ use ed25519_dalek::Signature;
 use futures_lite::StreamExt;
 use iroh::{Endpoint, NodeAddr, PublicKey, RelayMode, RelayUrl, SecretKey};
 use iroh_gossip::{
-    net::{Event, Gossip, GossipEvent, GossipReceiver, GOSSIP_ALPN},
+    api::{Event, GossipEvent, GossipReceiver},
+    net::{Gossip, GOSSIP_ALPN},
     proto::TopicId,
 };
 use n0_future::task;
