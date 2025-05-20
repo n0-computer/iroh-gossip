@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `src/api.rs`."><title>api.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2" crossorigin href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-dbdb5eec.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="iroh_gossip" data-themes="" data-resource-suffix="" data-rustdoc-version="1.85.0-nightly (d10a6823f 2024-11-29)" data-channel="nightly" data-search-js="search-92e6798f.js" data-settings-js="settings-0f613d39.js" ><script src="../../static.files/storage-59e33391.js"></script><script defer src="../../static.files/src-script-56102188.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-5f194d8c.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-893ab5e7.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-6580c154.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer"></div><main><rustdoc-search></rustdoc-search><section id="main-content" class="content"><div class="main-heading"><h1><div class="sub-heading">iroh_gossip/</div>api.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap"><div data-nosnippet><pre class="src-line-numbers">
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `src/net/handles.rs`."><title>handles.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-dbdb5eec.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="iroh_gossip" data-themes="" data-resource-suffix="" data-rustdoc-version="1.85.0-nightly (d10a6823f 2024-11-29)" data-channel="nightly" data-search-js="search-92e6798f.js" data-settings-js="settings-0f613d39.js" ><script src="../../../static.files/storage-59e33391.js"></script><script defer src="../../../static.files/src-script-56102188.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-5f194d8c.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-893ab5e7.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-6580c154.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer"></div><main><rustdoc-search></rustdoc-search><section id="main-content" class="content"><div class="main-heading"><h1><div class="sub-heading">iroh_gossip/net/</div>handles.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap"><div data-nosnippet><pre class="src-line-numbers">
 <a href="#1" id="1">1</a>
 <a href="#2" id="2">2</a>
 <a href="#3" id="3">3</a>
@@ -504,18 +504,7 @@
 <a href="#503" id="503">503</a>
 <a href="#504" id="504">504</a>
 <a href="#505" id="505">505</a>
-<a href="#506" id="506">506</a>
-<a href="#507" id="507">507</a>
-<a href="#508" id="508">508</a>
-<a href="#509" id="509">509</a>
-<a href="#510" id="510">510</a>
-<a href="#511" id="511">511</a>
-<a href="#512" id="512">512</a>
-<a href="#513" id="513">513</a>
-<a href="#514" id="514">514</a>
-<a href="#515" id="515">515</a>
-<a href="#516" id="516">516</a>
-<a href="#517" id="517">517</a></pre></div><pre class="rust"><code><span class="doccomment">//! Public API for using iroh-gossip
+<a href="#506" id="506">506</a></pre></div><pre class="rust"><code><span class="doccomment">//! Public API for using iroh-gossip
 //!
 //! The API is usable both locally and over RPC.
 
@@ -564,9 +553,9 @@
     <span class="doccomment">/// RPC error
     </span><span class="attr">#[error(transparent)]
     </span>Rpc(<span class="attr">#[from] </span>irpc::Error),
-    <span class="doccomment">/// Received an unexpected event.
-    </span><span class="attr">#[error(<span class="string">"received unexpected event"</span>)]
-    </span>UnexpectedEvent,
+    <span class="doccomment">/// The gossip topic was closed.
+    </span><span class="attr">#[error(<span class="string">"topic closed"</span>)]
+    </span>Closed,
 }
 
 <span class="kw">impl </span>From&lt;irpc::channel::SendError&gt; <span class="kw">for </span>ApiError {
@@ -690,19 +679,19 @@
         <span class="self">Self</span>(sender)
     }
 
-    <span class="doccomment">/// Broadcast a message to all nodes.
+    <span class="doccomment">/// Broadcasts a message to all nodes.
     </span><span class="kw">pub async fn </span>broadcast(<span class="kw-2">&amp;mut </span><span class="self">self</span>, message: Bytes) -&gt; <span class="prelude-ty">Result</span>&lt;(), ApiError&gt; {
         <span class="self">self</span>.send(Command::Broadcast(message)).<span class="kw">await</span><span class="question-mark">?</span>;
         <span class="prelude-val">Ok</span>(())
     }
 
-    <span class="doccomment">/// Broadcast a message to our direct neighbors.
+    <span class="doccomment">/// Broadcasts a message to our direct neighbors.
     </span><span class="kw">pub async fn </span>broadcast_neighbors(<span class="kw-2">&amp;mut </span><span class="self">self</span>, message: Bytes) -&gt; <span class="prelude-ty">Result</span>&lt;(), ApiError&gt; {
         <span class="self">self</span>.send(Command::BroadcastNeighbors(message)).<span class="kw">await</span><span class="question-mark">?</span>;
         <span class="prelude-val">Ok</span>(())
     }
 
-    <span class="doccomment">/// Join a set of peers.
+    <span class="doccomment">/// Joins a set of peers.
     </span><span class="kw">pub async fn </span>join_peers(<span class="kw-2">&amp;mut </span><span class="self">self</span>, peers: Vec&lt;NodeId&gt;) -&gt; <span class="prelude-ty">Result</span>&lt;(), ApiError&gt; {
         <span class="self">self</span>.send(Command::JoinPeers(peers)).<span class="kw">await</span><span class="question-mark">?</span>;
         <span class="prelude-val">Ok</span>(())
@@ -718,7 +707,10 @@
 ///
 /// This handle is a [`Stream`] of [`Event`]s from the topic, and can be used to send messages.
 ///
-/// It may be split into sender and receiver parts with [`Self::split`].
+/// Once the [`GossipTopic`] is dropped, the network actor will leave the gossip topic.
+///
+/// It may be split into sender and receiver parts with [`Self::split`]. In this case, the topic will
+/// be left once both the [`GossipSender`] and [`GossipReceiver`] halves are dropped.
 </span><span class="attr">#[derive(Debug)]
 </span><span class="kw">pub struct </span>GossipTopic {
     sender: GossipSender,
@@ -750,11 +742,13 @@
     </span>}
 
     <span class="doccomment">/// Waits until we are connected to at least one node.
+    ///
+    /// See [`GossipReceiver::joined`] for details.
     </span><span class="kw">pub async fn </span>joined(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;(), ApiError&gt; {
         <span class="self">self</span>.receiver.joined().<span class="kw">await
     </span>}
 
-    <span class="doccomment">/// Returns true if we are connected to at least one node.
+    <span class="doccomment">/// Returns `true` if we are connected to at least one node.
     </span><span class="kw">pub fn </span>is_joined(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
         <span class="self">self</span>.receiver.is_joined()
     }
@@ -776,7 +770,6 @@
     <span class="attr">#[debug(<span class="string">"BoxStream"</span>)]
     </span>stream: Pin&lt;Box&lt;<span class="kw">dyn </span>Stream&lt;Item = <span class="prelude-ty">Result</span>&lt;Event, ApiError&gt;&gt; + Send + <span class="lifetime">'static</span>&gt;&gt;,
     neighbors: HashSet&lt;NodeId&gt;,
-    joined: bool,
 }
 
 <span class="kw">impl </span>GossipReceiver {
@@ -786,7 +779,6 @@
         <span class="self">Self </span>{
             stream,
             neighbors: Default::default(),
-            joined: <span class="bool-val">false</span>,
         }
     }
 
@@ -797,24 +789,19 @@
 
     <span class="doccomment">/// Waits until we are connected to at least one node.
     ///
-    /// This progresses the stream until we received [`GossipEvent::Joined`], which is the first
-    /// item emitted on the stream.
+    /// Progresses the event stream to the first [`GossipEvent::NeighborUp`] event.
     ///
-    /// Note that this consumes the [`GossipEvent::Joined`] event. If you want to act on these
-    /// initial neighbors, use [`Self::neighbors`] after awaiting [`Self::joined`].
+    /// Note that this consumes this initial `NeighborUp` event. If you want to track
+    /// neighbors, use [`Self::neighbors`] after awaiting [`Self::joined`], and then
+    /// continue to track `NeighborUp` events on the event stream.
     </span><span class="kw">pub async fn </span>joined(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;(), ApiError&gt; {
-        <span class="kw">if </span>!<span class="self">self</span>.joined {
-            <span class="kw">match </span><span class="self">self</span>.next().<span class="kw">await</span>.ok_or(ApiError::UnexpectedEvent)<span class="question-mark">?? </span>{
-                Event::Gossip(GossipEvent::Joined(<span class="kw">_</span>)) =&gt; {}
-                <span class="kw">_ </span>=&gt; {
-                    <span class="kw">return </span><span class="prelude-val">Err</span>(ApiError::UnexpectedEvent);
-                }
-            }
+        <span class="kw">while </span>!<span class="self">self</span>.is_joined() {
+            <span class="kw">let </span>_event = <span class="self">self</span>.next().<span class="kw">await</span>.ok_or(ApiError::Closed)<span class="question-mark">??</span>;
         }
         <span class="prelude-val">Ok</span>(())
     }
 
-    <span class="doccomment">/// Returns true if we are connected to at least one node.
+    <span class="doccomment">/// Returns `true` if we are connected to at least one node.
     </span><span class="kw">pub fn </span>is_joined(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
         !<span class="self">self</span>.neighbors.is_empty()
     }
@@ -827,10 +814,6 @@
         <span class="kw">let </span>item = <span class="macro">std::task::ready!</span>(Pin::new(<span class="kw-2">&amp;mut </span><span class="self">self</span>.stream).poll_next(cx));
         <span class="kw">if let </span><span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(item)) = <span class="kw-2">&amp;</span>item {
             <span class="kw">match </span>item {
-                Event::Gossip(GossipEvent::Joined(neighbors)) =&gt; {
-                    <span class="self">self</span>.joined = <span class="bool-val">true</span>;
-                    <span class="self">self</span>.neighbors.extend(neighbors.iter().copied());
-                }
                 Event::Gossip(GossipEvent::NeighborUp(node_id)) =&gt; {
                     <span class="self">self</span>.neighbors.insert(<span class="kw-2">*</span>node_id);
                 }
@@ -861,10 +844,6 @@
 /// These are the events emitted from a [`GossipReceiver`], wrapped in [`Event::Gossip`].
 </span><span class="attr">#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 </span><span class="kw">pub enum </span>GossipEvent {
-    <span class="doccomment">/// We joined the topic with at least one peer.
-    ///
-    /// This is the first event on a [`GossipReceiver`] and will only be emitted once.
-    </span>Joined(Vec&lt;NodeId&gt;),
     <span class="doccomment">/// We have a new, direct neighbor in the swarm membership layer for this topic.
     </span>NeighborUp(NodeId),
     <span class="doccomment">/// We dropped direct neighbor in the swarm membership layer for this topic.
@@ -900,21 +879,21 @@
     </span><span class="kw">pub </span>delivered_from: NodeId,
 }
 
-<span class="doccomment">/// Send a gossip message
+<span class="doccomment">/// Command for a gossip topic.
 </span><span class="attr">#[derive(Serialize, Deserialize, derive_more::Debug)]
 </span><span class="kw">pub enum </span>Command {
-    <span class="doccomment">/// Broadcast a message to all nodes in the swarm
+    <span class="doccomment">/// Broadcasts a message to all nodes in the swarm.
     </span>Broadcast(<span class="attr">#[debug(<span class="string">"Bytes({})"</span>, _0.len())] </span>Bytes),
-    <span class="doccomment">/// Broadcast a message to all direct neighbors
+    <span class="doccomment">/// Broadcasts a message to all direct neighbors.
     </span>BroadcastNeighbors(<span class="attr">#[debug(<span class="string">"Bytes({})"</span>, _0.len())] </span>Bytes),
-    <span class="doccomment">/// Connect to a set of peers
+    <span class="doccomment">/// Connects to a set of peers.
     </span>JoinPeers(Vec&lt;NodeId&gt;),
 }
 
 <span class="doccomment">/// Options for joining a gossip topic.
 </span><span class="attr">#[derive(Serialize, Deserialize, Debug)]
 </span><span class="kw">pub struct </span>JoinOptions {
-    <span class="doccomment">/// The initial bootstrap nodes
+    <span class="doccomment">/// The initial bootstrap nodes.
     </span><span class="kw">pub </span>bootstrap: BTreeSet&lt;NodeId&gt;,
     <span class="doccomment">/// The maximum number of messages that can be buffered in a subscription.
     ///
@@ -948,8 +927,7 @@
         <span class="kw">use </span>rand::SeedableRng;
 
         <span class="kw">use crate</span>::{
-            api::{Event, GossipApi, GossipEvent},
-            net::{test::create_endpoint, Gossip},
+            net::{test::create_endpoint, Event, Gossip, GossipApi, GossipEvent},
             proto::TopicId,
             ALPN,
         };
