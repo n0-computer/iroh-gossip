@@ -12,7 +12,6 @@ use anyhow::Context as _;
 use bytes::BytesMut;
 use futures_concurrency::stream::{stream_group, StreamGroup};
 use futures_util::FutureExt as _;
-use handles::RpcMessage;
 use iroh::{
     endpoint::{Connection, DirectAddr},
     protocol::ProtocolHandler,
@@ -32,15 +31,15 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, error_span, trace, warn, Instrument};
 
-pub use self::handles::{Command, Event, GossipApi, GossipEvent, GossipReceiver, GossipSender};
 use self::util::{read_message, write_message, Timers};
 use crate::{
     metrics::Metrics,
     proto::{self, HyparviewConfig, PeerData, PlumtreeConfig, Scope, TopicId},
 };
 
-pub mod handles;
 pub mod util;
+
+use crate::api::{self, Command, Event, GossipApi, GossipEvent};
 
 /// ALPN protocol name
 pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/0";
@@ -327,7 +326,7 @@ struct Actor {
     /// Dial machine to connect to peers
     dialer: Dialer,
     /// Input messages to the actor
-    rpc_rx: mpsc::Receiver<RpcMessage>,
+    rpc_rx: mpsc::Receiver<api::RpcMessage>,
     local_rx: mpsc::Receiver<LocalActorMessage>,
     /// Sender for the state input (cloned into the connection loops)
     in_event_tx: mpsc::Sender<InEvent>,
@@ -357,7 +356,7 @@ impl Actor {
         my_addr: &AddrInfo,
     ) -> (
         Self,
-        mpsc::Sender<RpcMessage>,
+        mpsc::Sender<api::RpcMessage>,
         mpsc::Sender<LocalActorMessage>,
     ) {
         let peer_id = endpoint.node_id();
@@ -675,10 +674,10 @@ impl Actor {
         Ok(())
     }
 
-    async fn handle_rpc_msg(&mut self, msg: RpcMessage, now: Instant) -> Result<(), Error> {
+    async fn handle_rpc_msg(&mut self, msg: api::RpcMessage, now: Instant) -> Result<(), Error> {
         trace!("handle to_actor  {msg:?}");
         match msg {
-            RpcMessage::Join(msg) => {
+            api::RpcMessage::Join(msg) => {
                 let WithChannels {
                     inner,
                     rx,
@@ -686,7 +685,7 @@ impl Actor {
                     // TODO(frando): make use of span?
                     span: _,
                 } = msg;
-                let handles::JoinRequest {
+                let api::JoinRequest {
                     topic_id,
                     bootstrap,
                 } = inner;
