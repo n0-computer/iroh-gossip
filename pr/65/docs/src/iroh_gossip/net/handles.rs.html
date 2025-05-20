@@ -256,17 +256,7 @@
 <a href="#255" id="255">255</a>
 <a href="#256" id="256">256</a>
 <a href="#257" id="257">257</a>
-<a href="#258" id="258">258</a>
-<a href="#259" id="259">259</a>
-<a href="#260" id="260">260</a>
-<a href="#261" id="261">261</a>
-<a href="#262" id="262">262</a>
-<a href="#263" id="263">263</a>
-<a href="#264" id="264">264</a>
-<a href="#265" id="265">265</a>
-<a href="#266" id="266">266</a>
-<a href="#267" id="267">267</a>
-<a href="#268" id="268">268</a></pre></div><pre class="rust"><code><span class="doccomment">//! Topic handles for sending and receiving on a gossip topic.
+<a href="#258" id="258">258</a></pre></div><pre class="rust"><code><span class="doccomment">//! Topic handles for sending and receiving on a gossip topic.
 //!
 //! These are returned from [`super::Gossip`].
 
@@ -293,19 +283,19 @@
         <span class="self">Self</span>(sender)
     }
 
-    <span class="doccomment">/// Broadcast a message to all nodes.
+    <span class="doccomment">/// Broadcasts a message to all nodes.
     </span><span class="kw">pub async fn </span>broadcast(<span class="kw-2">&amp;</span><span class="self">self</span>, message: Bytes) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
         <span class="self">self</span>.<span class="number">0</span>.send(Command::Broadcast(message)).<span class="kw">await</span><span class="question-mark">?</span>;
         <span class="prelude-val">Ok</span>(())
     }
 
-    <span class="doccomment">/// Broadcast a message to our direct neighbors.
+    <span class="doccomment">/// Broadcasts a message to our direct neighbors.
     </span><span class="kw">pub async fn </span>broadcast_neighbors(<span class="kw-2">&amp;</span><span class="self">self</span>, message: Bytes) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
         <span class="self">self</span>.<span class="number">0</span>.send(Command::BroadcastNeighbors(message)).<span class="kw">await</span><span class="question-mark">?</span>;
         <span class="prelude-val">Ok</span>(())
     }
 
-    <span class="doccomment">/// Join a set of peers.
+    <span class="doccomment">/// Joins a set of peers.
     </span><span class="kw">pub async fn </span>join_peers(<span class="kw-2">&amp;</span><span class="self">self</span>, peers: Vec&lt;NodeId&gt;) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
         <span class="self">self</span>.<span class="number">0</span>.send(Command::JoinPeers(peers)).<span class="kw">await</span><span class="question-mark">?</span>;
         <span class="prelude-val">Ok</span>(())
@@ -316,7 +306,10 @@
 ///
 /// This handle is a [`Stream`] of [`Event`]s from the topic, and can be used to send messages.
 ///
-/// It may be split into sender and receiver parts with [`Self::split`].
+/// Once the [`GossipTopic`] is dropped, the network actor will leave the gossip topic.
+///
+/// It may be split into sender and receiver parts with [`Self::split`]. In this case, the topic will
+/// be left once both the [`GossipSender`] and [`GossipReceiver`] halves are dropped.
 </span><span class="attr">#[derive(Debug)]
 </span><span class="kw">pub struct </span>GossipTopic {
     sender: GossipSender,
@@ -347,11 +340,13 @@
     </span>}
 
     <span class="doccomment">/// Waits until we are connected to at least one node.
+    ///
+    /// See [`GossipReceiver::joined`] for details.
     </span><span class="kw">pub async fn </span>joined(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
         <span class="self">self</span>.receiver.joined().<span class="kw">await
     </span>}
 
-    <span class="doccomment">/// Returns true if we are connected to at least one node.
+    <span class="doccomment">/// Returns `true` if we are connected to at least one node.
     </span><span class="kw">pub fn </span>is_joined(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
         <span class="self">self</span>.receiver.is_joined()
     }
@@ -373,7 +368,6 @@
     <span class="attr">#[debug(<span class="string">"EventStream"</span>)]
     </span>stream: EventStream,
     neighbors: HashSet&lt;NodeId&gt;,
-    joined: bool,
 }
 
 <span class="kw">impl </span>GossipReceiver {
@@ -381,7 +375,6 @@
         <span class="self">Self </span>{
             stream: events_rx,
             neighbors: Default::default(),
-            joined: <span class="bool-val">false</span>,
         }
     }
 
@@ -392,24 +385,19 @@
 
     <span class="doccomment">/// Waits until we are connected to at least one node.
     ///
-    /// This progresses the stream until we received [`GossipEvent::Joined`], which is the first
-    /// item emitted on the stream.
+    /// Progresses the event stream to the first [`GossipEvent::NeighborUp`] event.
     ///
-    /// Note that this consumes the [`GossipEvent::Joined`] event. If you want to act on these
-    /// initial neighbors, use [`Self::neighbors`] after awaiting [`Self::joined`].
+    /// Note that this consumes this initial `NeighborUp` event. If you want to track
+    /// neighbors, use [`Self::neighbors`] after awaiting [`Self::joined`], and then
+    /// continue to track `NeighborUp` events on the event stream.
     </span><span class="kw">pub async fn </span>joined(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
-        <span class="kw">if </span>!<span class="self">self</span>.joined {
-            <span class="kw">match </span><span class="self">self</span>.next().<span class="kw">await</span>.ok_or(Error::ReceiverClosed)<span class="question-mark">?? </span>{
-                Event::Gossip(GossipEvent::Joined(<span class="kw">_</span>)) =&gt; {}
-                <span class="kw">_ </span>=&gt; {
-                    <span class="kw">return </span><span class="prelude-val">Err</span>(Error::UnexpectedEvent);
-                }
-            }
+        <span class="kw">while </span>!<span class="self">self</span>.is_joined() {
+            <span class="kw">let </span>_event = <span class="self">self</span>.next().<span class="kw">await</span>.ok_or(Error::ReceiverClosed)<span class="question-mark">??</span>;
         }
         <span class="prelude-val">Ok</span>(())
     }
 
-    <span class="doccomment">/// Returns true if we are connected to at least one node.
+    <span class="doccomment">/// Returns `true` if we are connected to at least one node.
     </span><span class="kw">pub fn </span>is_joined(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
         !<span class="self">self</span>.neighbors.is_empty()
     }
@@ -422,10 +410,6 @@
         <span class="kw">let </span>item = <span class="macro">std::task::ready!</span>(Pin::new(<span class="kw-2">&amp;mut </span><span class="self">self</span>.stream).poll_next(cx));
         <span class="kw">if let </span><span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(item)) = <span class="kw-2">&amp;</span>item {
             <span class="kw">match </span>item {
-                Event::Gossip(GossipEvent::Joined(neighbors)) =&gt; {
-                    <span class="self">self</span>.joined = <span class="bool-val">true</span>;
-                    <span class="self">self</span>.neighbors.extend(neighbors.iter().copied());
-                }
                 Event::Gossip(GossipEvent::NeighborUp(node_id)) =&gt; {
                     <span class="self">self</span>.neighbors.insert(<span class="kw-2">*</span>node_id);
                 }
@@ -456,10 +440,6 @@
 /// These are the events emitted from a [`GossipReceiver`], wrapped in [`Event::Gossip`].
 </span><span class="attr">#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 </span><span class="kw">pub enum </span>GossipEvent {
-    <span class="doccomment">/// We joined the topic with at least one peer.
-    ///
-    /// This is the first event on a [`GossipReceiver`] and will only be emitted once.
-    </span>Joined(Vec&lt;NodeId&gt;),
     <span class="doccomment">/// We have a new, direct neighbor in the swarm membership layer for this topic.
     </span>NeighborUp(NodeId),
     <span class="doccomment">/// We dropped direct neighbor in the swarm membership layer for this topic.
@@ -498,21 +478,21 @@
 <span class="doccomment">/// A stream of commands for a gossip subscription.
 </span><span class="kw">pub type </span>CommandStream = Pin&lt;Box&lt;<span class="kw">dyn </span>Stream&lt;Item = Command&gt; + Send + Sync + <span class="lifetime">'static</span>&gt;&gt;;
 
-<span class="doccomment">/// Send a gossip message
+<span class="doccomment">/// Command for a gossip topic.
 </span><span class="attr">#[derive(Serialize, Deserialize, derive_more::Debug)]
 </span><span class="kw">pub enum </span>Command {
-    <span class="doccomment">/// Broadcast a message to all nodes in the swarm
+    <span class="doccomment">/// Broadcasts a message to all nodes in the swarm.
     </span>Broadcast(<span class="attr">#[debug(<span class="string">"Bytes({})"</span>, _0.len())] </span>Bytes),
-    <span class="doccomment">/// Broadcast a message to all direct neighbors
+    <span class="doccomment">/// Broadcasts a message to all direct neighbors.
     </span>BroadcastNeighbors(<span class="attr">#[debug(<span class="string">"Bytes({})"</span>, _0.len())] </span>Bytes),
-    <span class="doccomment">/// Connect to a set of peers
+    <span class="doccomment">/// Connects to a set of peers.
     </span>JoinPeers(Vec&lt;NodeId&gt;),
 }
 
 <span class="doccomment">/// Options for joining a gossip topic.
 </span><span class="attr">#[derive(Serialize, Deserialize, Debug)]
 </span><span class="kw">pub struct </span>JoinOptions {
-    <span class="doccomment">/// The initial bootstrap nodes
+    <span class="doccomment">/// The initial bootstrap nodes.
     </span><span class="kw">pub </span>bootstrap: BTreeSet&lt;NodeId&gt;,
     <span class="doccomment">/// The maximum number of messages that can be buffered in a subscription.
     ///

@@ -2278,7 +2278,16 @@
 <a href="#2277" id="2277">2277</a>
 <a href="#2278" id="2278">2278</a>
 <a href="#2279" id="2279">2279</a>
-<a href="#2280" id="2280">2280</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
+<a href="#2280" id="2280">2280</a>
+<a href="#2281" id="2281">2281</a>
+<a href="#2282" id="2282">2282</a>
+<a href="#2283" id="2283">2283</a>
+<a href="#2284" id="2284">2284</a>
+<a href="#2285" id="2285">2285</a>
+<a href="#2286" id="2286">2286</a>
+<a href="#2287" id="2287">2287</a>
+<a href="#2288" id="2288">2288</a>
+<a href="#2289" id="2289">2289</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
@@ -2598,7 +2607,7 @@
     /// instead of using a channel created for you.
     ///
     /// It returns a stream of events. If you want to wait for the topic to become active, wait for
-    /// the [`GossipEvent::Joined`] event.
+    /// the first [`GossipEvent::NeighborUp`].
     </span><span class="kw">pub fn </span>subscribe_with_stream(
         <span class="kw-2">&amp;</span><span class="self">self</span>,
         topic_id: TopicId,
@@ -3104,17 +3113,24 @@
                     neighbors,
                     event_senders,
                     command_rx_keys,
-                    joined,
                 } = state;
-                <span class="kw">if </span><span class="kw-2">*</span>joined {
-                    <span class="kw">let </span>neighbors = neighbors.iter().copied().collect();
-                    channels
-                        .event_tx
-                        .try_send(<span class="prelude-val">Ok</span>(Event::Gossip(GossipEvent::Joined(neighbors))))
-                        .ok();
+                <span class="kw">let </span><span class="kw-2">mut </span>sender_dead = <span class="bool-val">false</span>;
+                <span class="kw">if </span>!neighbors.is_empty() {
+                    <span class="kw">for </span>neighbor <span class="kw">in </span>neighbors.iter() {
+                        <span class="kw">if let </span><span class="prelude-val">Err</span>(_err) = channels
+                            .event_tx
+                            .send(<span class="prelude-val">Ok</span>(Event::Gossip(GossipEvent::NeighborUp(<span class="kw-2">*</span>neighbor))))
+                            .<span class="kw">await
+                        </span>{
+                            sender_dead = <span class="bool-val">true</span>;
+                            <span class="kw">break</span>;
+                        }
+                    }
                 }
 
-                event_senders.push(channels.receiver_id, channels.event_tx);
+                <span class="kw">if </span>!sender_dead {
+                    event_senders.push(channels.receiver_id, channels.event_tx);
+                }
                 <span class="kw">let </span>command_rx = TopicCommandStream::new(topic_id, channels.command_rx);
                 <span class="kw">let </span>key = <span class="self">self</span>.command_rx.insert(command_rx);
                 command_rx_keys.insert(key);
@@ -3199,22 +3215,20 @@
                         <span class="kw">continue</span>;
                     };
                     <span class="kw">let </span>TopicState {
-                        joined,
                         neighbors,
                         event_senders,
                         ..
                     } = state;
-                    <span class="kw">let </span>event = <span class="kw">if let </span>ProtoEvent::NeighborUp(neighbor) = event {
-                        neighbors.insert(neighbor);
-                        <span class="kw">if </span>!<span class="kw-2">*</span>joined {
-                            <span class="kw-2">*</span>joined = <span class="bool-val">true</span>;
-                            GossipEvent::Joined(<span class="macro">vec!</span>[neighbor])
-                        } <span class="kw">else </span>{
-                            GossipEvent::NeighborUp(neighbor)
+                    <span class="kw">match </span><span class="kw-2">&amp;</span>event {
+                        ProtoEvent::NeighborUp(neighbor) =&gt; {
+                            neighbors.insert(<span class="kw-2">*</span>neighbor);
                         }
-                    } <span class="kw">else </span>{
-                        event.into()
-                    };
+                        ProtoEvent::NeighborDown(neighbor) =&gt; {
+                            neighbors.remove(neighbor);
+                        }
+                        <span class="kw">_ </span>=&gt; {}
+                    }
+                    <span class="kw">let </span>event: GossipEvent = event.into();
                     event_senders.send(<span class="kw-2">&amp;</span>event);
                     <span class="kw">if </span>!state.still_needed() {
                         <span class="self">self</span>.quit_queue.push_back(topic_id);
@@ -3327,7 +3341,6 @@
 
 <span class="attr">#[derive(Debug, Default)]
 </span><span class="kw">struct </span>TopicState {
-    joined: bool,
     neighbors: BTreeSet&lt;NodeId&gt;,
     <span class="doccomment">/// Sender side to report events to a [`GossipReceiver`].
     ///
@@ -3343,6 +3356,11 @@
     <span class="doccomment">/// Check if the topic still has any publisher or subscriber.
     </span><span class="kw">fn </span>still_needed(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
         !<span class="self">self</span>.event_senders.is_empty() || !<span class="self">self</span>.command_rx_keys.is_empty()
+    }
+
+    <span class="attr">#[cfg(test)]
+    </span><span class="kw">fn </span>joined(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
+        !<span class="self">self</span>.neighbors.is_empty()
     }
 }
 
@@ -4050,13 +4068,13 @@
                                // get peer connection;
                                // receive the other peer's information for a NeighborUp
         </span><span class="kw">let </span>state = actor.topics.get(<span class="kw-2">&amp;</span>topic).expect(<span class="string">"get registered topic"</span>);
-        <span class="macro">assert!</span>(state.joined);
+        <span class="macro">assert!</span>(state.joined());
 
         <span class="comment">// signal the second subscribe, we should remain subscribed
         </span>tx.send(()).<span class="kw">await</span><span class="question-mark">?</span>;
         actor.steps(<span class="number">3</span>).<span class="kw">await</span><span class="question-mark">?</span>; <span class="comment">// subscribe; first receiver gone; first sender gone
         </span><span class="kw">let </span>state = actor.topics.get(<span class="kw-2">&amp;</span>topic).expect(<span class="string">"get registered topic"</span>);
-        <span class="macro">assert!</span>(state.joined);
+        <span class="macro">assert!</span>(state.joined());
 
         <span class="comment">// signal to drop the second handle, the topic should no longer be subscribed
         </span>tx.send(()).<span class="kw">await</span><span class="question-mark">?</span>;
