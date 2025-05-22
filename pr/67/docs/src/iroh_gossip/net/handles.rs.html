@@ -530,7 +530,7 @@
 <span class="kw">use </span>iroh_base::NodeId;
 <span class="kw">use </span>irpc::{channel::spsc, Client};
 <span class="kw">use </span>irpc_derive::rpc_requests;
-<span class="kw">use </span>n0_future::{Stream, StreamExt, TryStreamExt};
+<span class="kw">use </span>n0_future::{boxed::BoxStream, Stream, StreamExt, TryStreamExt};
 <span class="kw">use </span>serde::{Deserialize, Serialize};
 
 <span class="kw">use </span><span class="kw">crate</span>::proto::{DeliveryScope, TopicId};
@@ -792,7 +792,7 @@
 </span><span class="attr">#[derive(derive_more::Debug)]
 </span><span class="kw">pub struct </span>GossipReceiver {
     <span class="attr">#[debug(<span class="string">"BoxStream"</span>)]
-    </span>stream: Pin&lt;Box&lt;<span class="kw">dyn </span>Stream&lt;Item = <span class="prelude-ty">Result</span>&lt;Event, ApiError&gt;&gt; + Send + <span class="lifetime">'static</span>&gt;&gt;,
+    </span>stream: BoxStream&lt;<span class="prelude-ty">Result</span>&lt;Event, ApiError&gt;&gt;,
     neighbors: HashSet&lt;NodeId&gt;,
 }
 
