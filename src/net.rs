@@ -1312,6 +1312,7 @@ mod test {
     use futures_concurrency::future::TryJoin;
     use iroh::{protocol::Router, RelayMap, RelayMode, SecretKey};
     use rand::Rng;
+    use testresult::TestResult;
     use tokio::{spawn, time::timeout};
     use tokio_util::sync::CancellationToken;
     use tracing::{info, instrument};
@@ -1843,6 +1844,24 @@ mod test {
         testresult::TestResult::Ok(())
     }
 
+    /// Spawns a new endpoint and gossip instance.
+    async fn spawn_gossip(
+        secret_key: SecretKey,
+        relay_map: RelayMap,
+    ) -> anyhow::Result<(Router, Gossip)> {
+        let ep = Endpoint::builder()
+            .secret_key(secret_key)
+            .relay_mode(RelayMode::Custom(relay_map))
+            .insecure_skip_relay_cert_verify(true)
+            .bind()
+            .await?;
+        let gossip = Gossip::builder().spawn(ep.clone()).await?;
+        let router = Router::builder(ep.clone())
+            .accept(GOSSIP_ALPN, gossip.clone())
+            .spawn();
+        Ok((router, gossip))
+    }
+
     #[tokio::test]
     #[traced_test]
     async fn can_die_and_reconnect() -> testresult::TestResult {
@@ -1859,24 +1878,6 @@ mod test {
                     .unwrap();
                 rt.block_on(async move { cancel.run_until_cancelled(fut).await })
             })
-        }
-
-        /// Spawns a new endpoint and gossip instance.
-        async fn spawn_gossip(
-            secret_key: SecretKey,
-            relay_map: RelayMap,
-        ) -> anyhow::Result<(Router, Gossip)> {
-            let ep = Endpoint::builder()
-                .secret_key(secret_key)
-                .relay_mode(RelayMode::Custom(relay_map))
-                .insecure_skip_relay_cert_verify(true)
-                .bind()
-                .await?;
-            let gossip = Gossip::builder().spawn(ep.clone()).await?;
-            let router = Router::builder(ep.clone())
-                .accept(GOSSIP_ALPN, gossip.clone())
-                .spawn();
-            Ok((router, gossip))
         }
 
         /// Spawns a gossip node, and broadcasts a single message, then sleep until cancelled externally.
@@ -1970,6 +1971,75 @@ mod test {
         recv_task.abort();
         assert!(join_handle_1.join().unwrap().is_none());
         assert!(join_handle_2.join().unwrap().is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_late_join() -> TestResult {
+        tracing_subscriber::fmt::try_init().ok();
+        let (relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+        let mut rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
+        let topic_id = TopicId::from_bytes(rng.gen());
+
+        let (alfie_router, alfie_gossip) =
+            spawn_gossip(SecretKey::generate(&mut rng), relay_map.clone()).await?;
+        let (betty_router, betty_gossip) =
+            spawn_gossip(SecretKey::generate(&mut rng), relay_map.clone()).await?;
+        let (fiona_router, fiona_gossip) =
+            spawn_gossip(SecretKey::generate(&mut rng), relay_map.clone()).await?;
+
+        // join alfie and betty
+        let alfie_node_addr = alfie_router.endpoint().node_addr().await?;
+        let alfie_node_id = alfie_node_addr.node_id;
+        betty_router.endpoint().add_node_addr(alfie_node_addr)?;
+
+        let mut alfie_topic = alfie_gossip.subscribe(topic_id, vec![])?;
+        let mut betty_topic = betty_gossip.subscribe(topic_id, vec![alfie_node_id])?;
+        info!("waiting for joins between alfie and betty");
+        alfie_topic.joined().await?;
+        info!("alfie joined");
+        betty_topic.joined().await?;
+        info!("betty joined");
+
+        // fiona sends her node addr to alfie over a third-party channel, and waits
+        // for alfie to join her in.
+        let fiona_node_addr = fiona_router.endpoint().node_addr().await?;
+        let fiona_node_id = fiona_node_addr.node_id;
+        alfie_router.endpoint().add_node_addr(fiona_node_addr)?;
+        let _topic = alfie_gossip.subscribe(topic_id, vec![fiona_node_id])?;
+        info!("alfie issued command to join fiona");
+
+        let mut fiona_topic = fiona_gossip.subscribe(topic_id, vec![])?;
+        info!("waiting for fiona to be joined to at least one peer");
+        tokio::time::timeout(Duration::from_secs(1), fiona_topic.joined()).await??;
+        info!("fiona joined");
+
+        info!("betty broadcasts a message");
+        betty_topic
+            .broadcast(b"hello fiona here's betty".to_vec().into())
+            .await?;
+
+        let fiona_received = async move {
+            while let Some(event) = fiona_topic.try_next().await? {
+                match event {
+                    Event::Gossip(GossipEvent::Received(message)) => {
+                        assert_eq!(&message.content[..], b"hello fiona here's betty");
+                        info!("fiona received message from betty");
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            anyhow::Ok(())
+        };
+        tokio::time::timeout(Duration::from_secs(1), fiona_received).await??;
+
+        tokio::try_join!(
+            alfie_router.shutdown(),
+            betty_router.shutdown(),
+            fiona_router.shutdown(),
+        )?;
 
         Ok(())
     }
