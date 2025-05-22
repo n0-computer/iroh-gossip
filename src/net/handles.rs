@@ -12,7 +12,7 @@ use bytes::Bytes;
 use iroh_base::NodeId;
 use irpc::{channel::spsc, Client};
 use irpc_derive::rpc_requests;
-use n0_future::{Stream, StreamExt, TryStreamExt};
+use n0_future::{boxed::BoxStream, Stream, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::proto::{DeliveryScope, TopicId};
@@ -274,7 +274,7 @@ impl Stream for GossipTopic {
 #[derive(derive_more::Debug)]
 pub struct GossipReceiver {
     #[debug("BoxStream")]
-    stream: Pin<Box<dyn Stream<Item = Result<Event, ApiError>> + Send + 'static>>,
+    stream: BoxStream<Result<Event, ApiError>>,
     neighbors: HashSet<NodeId>,
 }
 
