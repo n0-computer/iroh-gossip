@@ -354,6 +354,8 @@ pub enum GossipEvent {
     NeighborUp(NodeId),
     /// We dropped direct neighbor in the swarm membership layer for this topic.
     NeighborDown(NodeId),
+    /// We failed to connect to a peer that we wanted to join.
+    JoinFailed(NodeId),
     /// We received a gossip message for this topic.
     Received(Message),
 }
@@ -363,6 +365,7 @@ impl From<crate::proto::Event<NodeId>> for GossipEvent {
         match event {
             crate::proto::Event::NeighborUp(node_id) => Self::NeighborUp(node_id),
             crate::proto::Event::NeighborDown(node_id) => Self::NeighborDown(node_id),
+            crate::proto::Event::JoinFailed(node_id) => Self::JoinFailed(node_id),
             crate::proto::Event::Received(message) => Self::Received(Message {
                 content: message.content,
                 scope: message.scope,
