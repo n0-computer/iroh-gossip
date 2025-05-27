@@ -190,8 +190,6 @@ pub struct Disconnect {
     /// Whether we are actually shutting down or closing the connection only because our limits are
     /// reached.
     alive: bool,
-    /// Obsolete field (kept in the struct to maintain wire compatibility).
-    _respond: bool,
 }
 
 /// Configuration for the swarm membership layer
@@ -389,10 +387,7 @@ where
         // relevant if the other node just joined the swarm.
         let len = self.config.shuffle_active_view_count + self.config.shuffle_passive_view_count;
         self.send_shuffle_reply(peer, len, io);
-        let message = Message::Disconnect(Disconnect {
-            alive,
-            _respond: false,
-        });
+        let message = Message::Disconnect(Disconnect { alive });
         io.push(OutEvent::SendMessage(peer, message));
         io.push(OutEvent::DisconnectPeer(peer));
     }
