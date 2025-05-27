@@ -67,8 +67,12 @@ pub enum Timer<PI> {
 /// Messages that we can send and receive from peers within the topic.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum Message<PI> {
-    /// Sent to a peer if you want to join the swarm
-    Join(Option<PeerData>),
+    /// Request to add sender to an active view of recipient. If [`Neighbor::priority`] is
+    /// [`Priority::High`], the request cannot be denied.
+    NeighborRequest(NeighborRequest),
+    /// Reply to a [`NeighborRequest`] if the neighbor request is accepted.
+    /// If it's declined, a [`Message::Disconnect`] is sent instead.
+    NeighborReply(NeighborReply),
     /// When receiving Join, ForwardJoin is forwarded to the peer's ActiveView to introduce the
     /// new member.
     ForwardJoin(ForwardJoin<PI>),
@@ -78,9 +82,6 @@ pub enum Message<PI> {
     /// Peers reply to [`Message::Shuffle`] requests with a random peers from their active and
     /// passive views.
     ShuffleReply(ShuffleReply<PI>),
-    /// Request to add sender to an active view of recipient. If [`Neighbor::priority`] is
-    /// [`Priority::High`], the request cannot be denied.
-    Neighbor(Neighbor),
     /// Request to disconnect from a peer.
     /// If [`Disconnect::alive`] is true, the other peer is not shutting down, so it should be
     /// added to the passive set.
@@ -138,7 +139,7 @@ pub struct ShuffleReply<PI> {
 /// The priority of a `Join` message
 ///
 /// This is `High` if the sender does not have any active peers, and `Low` otherwise.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 pub enum Priority {
     /// High priority join that may not be denied.
     ///
@@ -151,12 +152,37 @@ pub enum Priority {
 /// A neighbor message is sent after adding a peer to our active view to inform them that we are
 /// now neighbors.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-pub struct Neighbor {
-    /// The priority of the `Join` or `ForwardJoin` message that triggered this neighbor request.
-    priority: Priority,
-    /// The user data of the peer sending this message.
+pub struct NeighborRequest {
+    reason: NeighborReason,
+    /// The user data of tyou want to join the swarm
     data: Option<PeerData>,
 }
+
+/// Reason why we want to become someone's neighbor.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub enum NeighborReason {
+    /// We are joining the swarm.
+    Join,
+    /// We received a forward join from the peer and react on it.
+    ReplyToForwardJoin { priority: Priority },
+    /// We are activating a passive peer.
+    Activate { priority: Priority },
+}
+
+impl NeighborReason {
+    fn priority(&self) -> Priority {
+        match self {
+            Self::Join => Priority::High,
+            Self::ReplyToForwardJoin { priority } => *priority,
+            Self::Activate { priority } => *priority,
+        }
+    }
+}
+
+/// A neighbor message is sent after adding a peer to our active view to inform them that we are
+/// now neighbors.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct NeighborReply {}
 
 /// Message sent when leaving the swarm or closing down to inform peers about us being gone.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -304,11 +330,11 @@ where
             self.stats.total_connections += 1;
         }
         match message {
-            Message::Join(data) => self.on_join(from, data, io),
             Message::ForwardJoin(details) => self.on_forward_join(from, details, io),
             Message::Shuffle(details) => self.on_shuffle(from, details, io),
             Message::ShuffleReply(details) => self.on_shuffle_reply(details, io),
-            Message::Neighbor(details) => self.on_neighbor(from, details, io),
+            Message::NeighborRequest(details) => self.on_neighbor_request(from, details, io),
+            Message::NeighborReply(_) => self.on_neighbor_reply(from, io),
             Message::Disconnect(details) => self.on_disconnect(from, details, io),
         }
 
@@ -320,10 +346,7 @@ where
     }
 
     fn handle_join(&mut self, peer: PI, io: &mut impl IO<PI>) {
-        io.push(OutEvent::SendMessage(
-            peer,
-            Message::Join(self.me_data.clone()),
-        ));
+        self.send_neighbor_request(peer, NeighborReason::Join, io);
     }
 
     /// We received a disconnect message.
@@ -364,11 +387,8 @@ where
         // Before disconnecting, send a `ShuffleReply` with some of our nodes to
         // prevent the other node from running out of connections. This is especially
         // relevant if the other node just joined the swarm.
-        self.send_shuffle_reply(
-            peer,
-            self.config.shuffle_active_view_count + self.config.shuffle_passive_view_count,
-            io,
-        );
+        let len = self.config.shuffle_active_view_count + self.config.shuffle_passive_view_count;
+        self.send_shuffle_reply(peer, len, io);
         let message = Message::Disconnect(Disconnect {
             alive,
             _respond: false,
@@ -377,45 +397,27 @@ where
         io.push(OutEvent::DisconnectPeer(peer));
     }
 
-    fn on_join(&mut self, peer: PI, data: Option<PeerData>, io: &mut impl IO<PI>) {
-        // "A node that receives a join request will start by adding the new
-        // node to its active view, even if it has to drop a random node from it. (6)"
-        self.add_active(peer, data.clone(), Priority::High, true, io);
-
-        // "The contact node c will then send to all other nodes in its active view a ForwardJoin
-        // request containing the new node identifier. Associated to the join procedure,
-        // there are two configuration parameters, named Active Random Walk Length (ARWL),
-        // that specifies the maximum number of hops a ForwardJoin request is propagated,
-        // and Passive Random Walk Length (PRWL), that specifies at which point in the walk the node
-        // is inserted in a passive view. To use these parameters, the ForwardJoin request carries
-        // a “time to live” field that is initially set to ARWL and decreased at every hop. (7)"
-        let ttl = self.config.active_random_walk_length;
-        let peer_info = PeerInfo { id: peer, data };
-        for node in self.active_view.iter_without(&peer) {
-            let message = Message::ForwardJoin(ForwardJoin {
-                peer: peer_info.clone(),
-                ttl,
-            });
-            io.push(OutEvent::SendMessage(*node, message));
-        }
-    }
-
     fn on_forward_join(&mut self, sender: PI, message: ForwardJoin<PI>, io: &mut impl IO<PI>) {
         let peer_id = message.peer.id;
         // If the peer is already in our active view, we renew our neighbor relationship.
-        if self.active_view.contains(&peer_id) {
-            self.insert_peer_info(message.peer, io);
-            self.send_neighbor(peer_id, Priority::High, io);
-        }
         // "i) If the time to live is equal to zero or if the number of nodes in p’s active view is equal to one,
         // it will add the new node to its active view (7)"
-        else if message.ttl.expired() || self.active_view.len() <= 1 {
-            self.insert_peer_info(message.peer, io);
+        if self.active_view.contains(&peer_id)
+            || message.ttl.expired()
+            || self.active_view.len() <= 1
+        {
             // Modification from paper: Instead of adding the peer directly to our active view,
             // we only send the Neighbor message. We will add the peer to our active view once we receive a
             // reply from our neighbor.
             // This prevents us adding unreachable peers to our active view.
-            self.send_neighbor(peer_id, Priority::High, io);
+            self.insert_peer_info(message.peer, io);
+            self.send_neighbor_request(
+                peer_id,
+                NeighborReason::ReplyToForwardJoin {
+                    priority: Priority::High,
+                },
+                io,
+            );
         } else {
             // "ii) If the time to live is equal to PRWL, p will insert the new node into its passive view"
             if message.ttl == self.config.passive_random_walk_length {
@@ -447,15 +449,46 @@ where
         }
     }
 
-    fn on_neighbor(&mut self, from: PI, details: Neighbor, io: &mut impl IO<PI>) {
-        let is_reply = self.pending_neighbor_requests.remove(&from);
-        let do_reply = !is_reply;
+    fn on_neighbor_request(&mut self, from: PI, details: NeighborRequest, io: &mut impl IO<PI>) {
+        let NeighborRequest { reason, data } = details;
         // "A node q that receives a high priority neighbor request will always accept the request, even
         // if it has to drop a random member from its active view (again, the member that is dropped will
         // receive a Disconnect notification). If a node q receives a low priority Neighbor request, it will
         // only accept the request if it has a free slot in its active view, otherwise it will refuse the request."
-        if !self.add_active(from, details.data, details.priority, do_reply, io) {
+        self.insert_peer_info((from, data.clone()).into(), io);
+        if !self.add_active(from, reason.priority(), io) {
             self.send_disconnect(from, true, io);
+        } else {
+            self.send_neighbor_reply(from, io);
+        }
+
+        if let NeighborReason::Join = reason {
+            // "The contact node c will then send to all other nodes in its active view a ForwardJoin
+            // request containing the new node identifier. Associated to the join procedure,
+            // there are two configuration parameters, named Active Random Walk Length (ARWL),
+            // that specifies the maximum number of hops a ForwardJoin request is propagated,
+            // and Passive Random Walk Length (PRWL), that specifies at which point in the walk the node
+            // is inserted in a passive view. To use these parameters, the ForwardJoin request carries
+            // a “time to live” field that is initially set to ARWL and decreased at every hop. (7)"
+            let ttl = self.config.active_random_walk_length;
+            let peer_info = PeerInfo { id: from, data };
+            for node in self.active_view.iter_without(&from) {
+                let message = Message::ForwardJoin(ForwardJoin {
+                    peer: peer_info.clone(),
+                    ttl,
+                });
+                io.push(OutEvent::SendMessage(*node, message));
+            }
+        }
+    }
+
+    fn on_neighbor_reply(&mut self, from: PI, io: &mut impl IO<PI>) {
+        if self.pending_neighbor_requests.remove(&from) {
+            if !self.add_active(from, Priority::High, io) {
+                self.send_disconnect(from, true, io);
+            }
+        } else {
+            debug!(?from, "Received unsolicited neighbor reply")
         }
     }
 
@@ -619,7 +652,7 @@ where
                 true => Priority::High,
                 false => Priority::Low,
             };
-            self.send_neighbor(node, priority, io);
+            self.send_neighbor_request(node, NeighborReason::Activate { priority }, io);
             // schedule a timer that checks if the node replied with a neighbor message,
             // otherwise try again with another passive node.
             io.push(OutEvent::ScheduleTimer(
@@ -692,22 +725,13 @@ where
     /// If the active view is currently full, a random peer will be removed first.
     /// Sends a Neighbor message to the peer. If high_priority is true, the peer
     /// may not deny the Neighbor request.
-    fn add_active(
-        &mut self,
-        peer: PI,
-        data: Option<PeerData>,
-        priority: Priority,
-        reply: bool,
-        io: &mut impl IO<PI>,
-    ) -> bool {
+    ///
+    /// Returns `true` if the peer is now in the active view.
+    fn add_active(&mut self, peer: PI, priority: Priority, io: &mut impl IO<PI>) -> bool {
         if peer == self.me {
             return false;
         }
-        self.insert_peer_info((peer, data).into(), io);
         if self.active_view.contains(&peer) {
-            if reply {
-                self.send_neighbor(peer, priority, io);
-            }
             return true;
         }
         match (priority, self.active_is_full()) {
@@ -715,42 +739,38 @@ where
                 if is_full {
                     self.free_random_slot_in_active_view(io);
                 }
-                self.add_active_unchecked(peer, Priority::High, reply, io);
+                self.add_active_unchecked(peer, io);
                 true
             }
             (Priority::Low, false) => {
-                self.add_active_unchecked(peer, Priority::Low, reply, io);
+                self.add_active_unchecked(peer, io);
                 true
             }
             (Priority::Low, true) => false,
         }
     }
 
-    fn add_active_unchecked(
-        &mut self,
-        peer: PI,
-        priority: Priority,
-        reply: bool,
-        io: &mut impl IO<PI>,
-    ) {
+    fn add_active_unchecked(&mut self, peer: PI, io: &mut impl IO<PI>) {
         self.passive_view.remove(&peer);
         if self.active_view.insert(peer) {
             debug!(other = ?peer, "add to active view");
             io.push(OutEvent::EmitEvent(Event::NeighborUp(peer)));
-            if reply {
-                self.send_neighbor(peer, priority, io);
-            }
         }
     }
 
-    fn send_neighbor(&mut self, peer: PI, priority: Priority, io: &mut impl IO<PI>) {
+    fn send_neighbor_request(&mut self, peer: PI, reason: NeighborReason, io: &mut impl IO<PI>) {
         if self.pending_neighbor_requests.insert(peer) {
-            let message = Message::Neighbor(Neighbor {
-                priority,
+            let message = Message::NeighborRequest(NeighborRequest {
+                reason,
                 data: self.me_data.clone(),
             });
             io.push(OutEvent::SendMessage(peer, message));
         }
+    }
+
+    fn send_neighbor_reply(&mut self, peer: PI, io: &mut impl IO<PI>) {
+        let message = Message::NeighborReply(NeighborReply {});
+        io.push(OutEvent::SendMessage(peer, message));
     }
 }
 
