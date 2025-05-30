@@ -1,12 +1,17 @@
-import React, { useEffect, useState, useMemo, useRef } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import Papa from "papaparse";
-import { SigmaContainer, useLoadGraph, useRegisterEvents, useSigma } from "@react-sigma/core";
-import '@react-sigma/core/lib/style.css';
-import { MultiDirectedGraph as MultiGraphConstructor } from 'graphology';
-import { circular, random, circlepack } from "graphology-layout";
-import { createEdgeArrowProgram } from 'sigma/rendering';
-import "./style.css"
+import {
+  SigmaContainer,
+  useLoadGraph,
+  useRegisterEvents,
+  useSigma,
+} from "@react-sigma/core";
+import "@react-sigma/core/lib/style.css";
+import { MultiDirectedGraph as MultiGraphConstructor } from "graphology";
+import { circlepack, circular, random } from "graphology-layout";
+import { createEdgeArrowProgram } from "sigma/rendering";
+import "./style.css";
 
 type Event = {
   i: number;
@@ -23,89 +28,92 @@ const COLORS = [
   "orange",
   "gold",
   "yellowgreen",
-  "green"
-]
+  "green",
+];
 
 enum Layout {
   circular = "cirulcar",
   random = "random",
-  circlepack = "circlepack"
+  circlepack = "circlepack",
 }
 
-const GraphView: React.FC<{ events: Event[], time: number, layout: Layout }> = ({ events, time, layout }) => {
+const GraphView: React.FC<{ events: Event[]; time: number; layout: Layout }> = (
+  { events, time, layout },
+) => {
   const loadGraph = useLoadGraph();
   const graph = useMemo(() => new MultiGraphConstructor(), []);
   const [highlightedNode, setHighlightedNode] = useState<string | null>(null);
-  const registerEvents = useRegisterEvents()
-  const lastTime = useRef<number>(0)
+  const registerEvents = useRegisterEvents();
+  const lastTime = useRef<number>(0);
 
   useEffect(() => {
-    let intervalStart
+    let intervalStart;
     if (time < lastTime.current) {
-      graph.clear()
-      intervalStart = 0
+      graph.clear();
+      intervalStart = 0;
     } else {
-      intervalStart = lastTime.current
-      lastTime.current = time
+      intervalStart = lastTime.current;
+      lastTime.current = time;
     }
 
     const addNodes = (event: Event) => {
       for (const n of [event.node, event.peer]) {
         const id = n.toString();
         if (!graph.hasNode(id)) {
-          graph.addNode(id, { label: id })
+          graph.addNode(id, { label: id });
         }
       }
-    }
+    };
 
     const edgeKeys = (event: Event) => {
-      const src = event.node.toString()
-      const dst = event.peer.toString()
+      const src = event.node.toString();
+      const dst = event.peer.toString();
       const key = `${src}->${dst}`;
-      return { src, dst, key }
-    }
+      return { src, dst, key };
+    };
 
-    const filteredEvents = events.filter(e => e.time > intervalStart && e.time <= time)
+    const filteredEvents = events.filter((e) =>
+      e.time > intervalStart && e.time <= time
+    );
     for (const event of filteredEvents) {
-      addNodes(event)
+      addNodes(event);
       if (event.event === "up") {
         const { src, dst, key } = edgeKeys(event);
         if (!graph.hasEdge(key)) {
           graph.addDirectedEdgeWithKey(key, src, dst);
         }
-      }
-      else if (event.event === "down") {
+      } else if (event.event === "down") {
         const { key } = edgeKeys(event);
-        graph.dropEdge(key)
+        graph.dropEdge(key);
       }
     }
 
     if (layout === Layout.circular) {
       circular.assign(graph);
     } else if (layout === Layout.random) {
-      random.assign(graph)
+      random.assign(graph);
     } else if (layout === Layout.circlepack) {
-      circlepack.assign(graph)
+      circlepack.assign(graph);
     } else {
-      throw new Error("invalid layout: " + layout)
+      throw new Error("invalid layout: " + layout);
     }
 
     graph.forEachNode((n) => {
       const deg = graph.degree(n);
-      const color = COLORS[Math.min(deg, 5)]
+      const color = COLORS[Math.min(deg, 5)];
       graph.setNodeAttribute(n, "color", color);
       graph.setNodeAttribute(n, "size", 7);
     });
     graph.forEachEdge((e) => {
-      let color
+      let color;
       if (highlightedNode) {
         if (graph.extremities(e).includes(highlightedNode)) {
-          color = 'red'
+          color = "red";
         } else {
-          color = 'rgba(0,0,0,0.05)'
+          color = "rgba(0,0,0,0.05)";
         }
       } else {
-        color = 'rgba(0,0,0,0.1)'
+        color = "rgba(0,0,0,0.1)";
       }
       graph.setEdgeAttribute(e, "color", color);
       graph.setEdgeAttribute(e, "size", 1);
@@ -120,9 +128,8 @@ const GraphView: React.FC<{ events: Event[], time: number, layout: Layout }> = (
       clickNode: ({ node }) => {
         setHighlightedNode((prev) => (prev === node ? null : node));
       },
-    })
-
-  }, [registerEvents])
+    });
+  }, [registerEvents]);
 
   return null;
 };
@@ -132,7 +139,7 @@ const App = () => {
   const [time, setTime] = useState(0);
   const [maxTime, setMaxTime] = useState(0);
   const [times, setTimes] = useState<number[]>([]);
-  const [layout, setLayout] = useState(Layout.circular)
+  const [layout, setLayout] = useState(Layout.circular);
 
   useEffect(() => {
     Papa.parse<Event>("/data/GossipMulti-n100-r30.events.0.csv", {
@@ -140,7 +147,7 @@ const App = () => {
       header: true,
       dynamicTyping: true,
       complete: (results) => {
-        const rows = (results.data).filter((r) => r.time);
+        const rows = results.data.filter((r) => r.time);
         setEvents(rows);
         const ts = rows.map((e) => e.time).sort((a, b) => a - b);
         setTimes(ts);
@@ -149,7 +156,10 @@ const App = () => {
     });
   }, []);
 
-  const currentEvents = useMemo(() => events.filter((e) => e.time === time), [events, time]);
+  const currentEvents = useMemo(() => events.filter((e) => e.time === time), [
+    events,
+    time,
+  ]);
   const nextTime = () => {
     const next = times.find((t) => t > time);
     if (next !== undefined) setTime(next);
@@ -160,9 +170,12 @@ const App = () => {
     () => ({
       allowInvalidContainer: true,
       renderEdgeLabels: true,
-      defaultEdgeType: 'straight',
+      defaultEdgeType: "straight",
       edgeProgramClasses: {
-        straight: createEdgeArrowProgram({ lengthToThicknessRatio: 5, widenessToThicknessRatio: 5 })
+        straight: createEdgeArrowProgram({
+          lengthToThicknessRatio: 5,
+          widenessToThicknessRatio: 5,
+        }),
       },
     }),
     [],
@@ -172,10 +185,14 @@ const App = () => {
     <>
       <div className="app">
         <SigmaContainer style={{ height: "100vh" }} settings={settings}>
-          {events.length > 0 && <GraphView events={events} time={time} layout={layout} />}
+          {events.length > 0 && (
+            <GraphView events={events} time={time} layout={layout} />
+          )}
         </SigmaContainer>
         <div className="sidebar">
-          <select onChange={e => setLayout(e.target.value as unknown as Layout)}>
+          <select
+            onChange={(e) => setLayout(e.target.value as unknown as Layout)}
+          >
             {Object.keys(Layout).map((key, index) => (
               <option key={index} value={key}>{key}</option>
             ))}

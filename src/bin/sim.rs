@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    io,
     path::{Path, PathBuf},
 };
 
@@ -131,13 +132,13 @@ fn main() -> Result<()> {
                 scenarios
                     .into_par_iter()
                     .filter(filter_fn)
-                    .map(|scenario| run_and_save_simulation(scenario, &seeds, out_dir.as_ref()))
+                    .map(|scenario| run_and_save_simulation(scenario, &seeds, out_dir.as_deref()))
                     .collect()
             } else {
                 scenarios
                     .into_iter()
                     .filter(filter_fn)
-                    .map(|scenario| run_and_save_simulation(scenario, &seeds, out_dir.as_ref()))
+                    .map(|scenario| run_and_save_simulation(scenario, &seeds, out_dir.as_deref()))
                     .collect()
             };
             let mut results = results?;
@@ -164,20 +165,20 @@ fn main() -> Result<()> {
 fn run_and_save_simulation(
     scenario: ScenarioDescription,
     seeds: &[u64],
-    out_dir: Option<impl AsRef<Path>>,
+    out_dir: Option<&Path>,
 ) -> Result<SimulationResults> {
     let label = scenario.label();
 
     if let Some(out_dir) = out_dir.as_ref() {
-        let path = out_dir.as_ref().join(format!("{label}.config.toml"));
+        let path = out_dir.join(format!("{label}.config.toml"));
         let encoded = toml::to_string(&scenario)?;
         std::fs::write(path, encoded)?;
     }
 
-    let result = run_simulation(seeds, scenario);
+    let result = run_simulation_with_seeds(scenario, seeds, out_dir)?;
 
     if let Some(out_dir) = out_dir.as_ref() {
-        let path = out_dir.as_ref().join(format!("{label}.results.json"));
+        let path = out_dir.join(format!("{label}.results.json"));
         let encoded = serde_json::to_string(&result)?;
         std::fs::write(path, encoded)?;
     }
@@ -207,34 +208,14 @@ enum SimulationError {
     FailedToBootstrap,
 }
 
-fn run_simulation(seeds: &[u64], scenario: ScenarioDescription) -> SimulationResults {
+fn run_simulation_with_seeds(
+    scenario: ScenarioDescription,
+    seeds: &[u64],
+    out_dir: Option<&Path>,
+) -> io::Result<SimulationResults> {
     let mut results = HashMap::new();
-    let network_config = scenario.config.clone().unwrap_or_default();
     for &seed in seeds {
-        let span = error_span!("sim", name=%scenario.label(), %seed);
-        let _guard = span.enter();
-
-        let sim_config = SimulatorConfig {
-            rng_seed: seed,
-            peers: scenario.nodes as usize,
-            ..Default::default()
-        };
-        let bootstrap = scenario.bootstrap.clone();
-        let mut simulator = Simulator::new(sim_config, network_config.clone());
-        info!("start");
-        let outcome = simulator.bootstrap(bootstrap);
-
-        if outcome.has_peers_with_no_neighbors() {
-            warn!("not all nodes active after bootstrap: {outcome:?}");
-        } else {
-            info!("bootstrapped, all nodes active");
-        }
-        let result = match scenario.sim {
-            Simulation::GossipSingle => BigSingle.run(simulator, scenario.rounds as usize),
-            Simulation::GossipMulti => BigMulti.run(simulator, scenario.rounds as usize),
-            Simulation::GossipAll => BigAll.run(simulator, scenario.rounds as usize),
-        };
-        info!("done");
+        let result = run_simulation(scenario.clone(), seed, out_dir)?;
         results.insert(seed, result);
     }
 
@@ -245,11 +226,60 @@ fn run_simulation(seeds: &[u64], scenario: ScenarioDescription) -> SimulationRes
     } else {
         None
     };
-    SimulationResults {
+    Ok(SimulationResults {
         average,
         results,
         scenario,
+    })
+}
+
+fn run_simulation(
+    scenario: ScenarioDescription,
+    seed: u64,
+    out_dir: Option<&Path>,
+) -> io::Result<RoundStatsAvg> {
+    let span = error_span!("sim", name=%scenario.label(), %seed);
+    let _guard = span.enter();
+
+    let label = scenario.label();
+    let events_csv_path = out_dir.map(|path| path.join(format!("{label}.events.{seed}.csv")));
+    let sim_config = SimulatorConfig {
+        rng_seed: seed,
+        peers: scenario.nodes as usize,
+        events_csv_path,
+        ..Default::default()
+    };
+    let network_config = scenario.config.clone().unwrap_or_default();
+    let bootstrap = scenario.bootstrap.clone();
+    let mut simulator = Simulator::new(sim_config, network_config.clone());
+    info!("start");
+    let outcome = simulator.bootstrap(bootstrap);
+
+    if let Some(path) = out_dir.as_ref() {
+        let path = path.join(format!("{label}.latencies.{seed}.csv"));
+        let mut writer = csv::Writer::from_path(path)?;
+        for (from, to, latency) in simulator.network.latencies() {
+            writer.write_record([
+                from.to_string(),
+                to.to_string(),
+                latency.as_millis().to_string(),
+            ])?;
+        }
+        writer.flush()?;
     }
+
+    if outcome.has_peers_with_no_neighbors() {
+        warn!("not all nodes active after bootstrap: {outcome:?}");
+    } else {
+        info!("bootstrapped, all nodes active");
+    }
+    let result = match scenario.sim {
+        Simulation::GossipSingle => BigSingle.run(simulator, scenario.rounds as usize),
+        Simulation::GossipMulti => BigMulti.run(simulator, scenario.rounds as usize),
+        Simulation::GossipAll => BigAll.run(simulator, scenario.rounds as usize),
+    };
+    info!("done");
+    Ok(result)
 }
 
 fn print_result(r: &SimulationResults) {

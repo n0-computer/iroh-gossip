@@ -3,6 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque},
     fmt,
+    io::Write,
     str::FromStr,
 };
 
@@ -104,10 +105,73 @@ impl Default for LatencyConfig {
     }
 }
 
+///
+pub trait EventRecorder<PI> {
+    ///
+    fn record(&mut self, time: Duration, node: PI, topic: TopicId, event: Event<PI>);
+    ///
+    fn flush(&mut self);
+}
+
+#[derive(Debug)]
+struct CsvEventRecorder<W: Write> {
+    i: usize,
+    writer: csv::Writer<W>,
+    first: bool,
+}
+
+impl<W: Write> CsvEventRecorder<W> {
+    fn from_writer(writer: csv::Writer<W>) -> Self {
+        Self {
+            i: 0,
+            writer,
+            first: true,
+        }
+    }
+}
+
+impl<PI: ToString, W: Write> EventRecorder<PI> for CsvEventRecorder<W> {
+    fn record(&mut self, time: Duration, node: PI, _topic: TopicId, event: Event<PI>) {
+        if self.first {
+            let line = ["i", "time", "node", "event", "peer", "msg"];
+            if let Err(err) = self.writer.write_record(line) {
+                warn!("CSV event recorder failed to write: {err:?}");
+            }
+            self.first = false;
+        }
+        let (ty, val, val2) = match event {
+            Event::NeighborUp(n) => ("up".to_string(), n.to_string(), "".to_string()),
+            Event::NeighborDown(n) => ("down".to_string(), n.to_string(), "".to_string()),
+            Event::Received(msg) => (
+                "recv".to_string(),
+                msg.delivered_from.to_string(),
+                String::from_utf8_lossy(&msg.content).to_string(),
+            ),
+        };
+        let line = [
+            self.i.to_string(),
+            time.as_millis().to_string(),
+            node.to_string(),
+            ty,
+            val,
+            val2,
+        ];
+        if let Err(err) = self.writer.write_record(line) {
+            warn!("CSV event recorder failed to write: {err:?}");
+        }
+        self.i += 1;
+    }
+    fn flush(&mut self) {
+        if let Err(err) = self.writer.flush() {
+            warn!("CSV event recorder failed to flush: {err:?}");
+        }
+    }
+}
+
 /// Test network implementation.
 ///
 /// A discrete event simulation of a gossip swarm.
-#[derive(Debug)]
+#[derive(derive_more::Debug)]
 pub struct Network<PI, R> {
     start: Instant,
     time: Instant,
@@ -119,6 +183,8 @@ pub struct Network<PI, R> {
     rng: R,
     config: NetworkConfig,
     queue: TimedEventQueue<PI>,
+    #[debug("Box<dyn EventRecorder>")]
+    event_recorder: Option<Box<dyn EventRecorder<PI>>>,
 }
 
 impl<PI, R> Network<PI, R> {
@@ -136,6 +202,7 @@ impl<PI, R> Network<PI, R> {
             events: Default::default(),
             latencies: BTreeMap::new(),
             rng,
+            event_recorder: None,
         }
     }
 }
@@ -168,6 +235,23 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng + Clone> Network<PI, 
     pub fn insert_and_join(&mut self, peer_id: PI, topic: TopicId, bootstrap: Vec<PI>) {
         self.insert(peer_id);
         self.command(peer_id, topic, Command::Join(bootstrap));
+    }
+
+    /// Sets a file path to record all events to.
+    pub fn record_events_to_csv(
+        &mut self,
+        path: impl AsRef<std::path::Path>,
+    ) -> std::io::Result<()> {
+        let event_recorder = CsvEventRecorder::from_writer(csv::Writer::from_path(path)?);
+        self.event_recorder = Some(Box::new(event_recorder));
+        Ok(())
+    }
+
+    /// Returns the latencies between all nodes.
+    pub fn latencies(&self) -> impl Iterator<Item = (PI, PI, Duration)> + '_ {
+        self.latencies
+            .iter()
+            .map(|(conn, latency)| (conn.0[0], conn.0[1], *latency))
     }
 }
 
@@ -304,6 +388,7 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + Clone> Network<PI, R> {
         };
         assert!(time >= self.time);
         self.time = time;
+        let elapsed = self.elapsed();
         let span = debug_span!("tick", %peer, tick = %self.tick, t = %self.elapsed_fmt());
         let _guard = span.enter();
         debug!("~~ TICK ");
@@ -341,6 +426,9 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + Clone> Network<PI, R> {
                 }
                 OutEvent::EmitEvent(topic, event) => {
                     debug!(peer = ?peer, "emit {event:?}");
+                    if let Some(recorder) = self.event_recorder.as_mut() {
+                        recorder.record(elapsed, peer, topic, event.clone());
+                    }
                     self.events.push_back((peer, topic, event));
                 }
                 OutEvent::PeerData(_peer, _data) => {}
@@ -348,6 +436,13 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + Clone> Network<PI, R> {
         }
         for (from, to) in kill {
             self.kill_connection(from, to);
+        }
+    }
+
+    /// Flush the event recorder, if set.
+    pub fn flush(&mut self) {
+        if let Some(recorder) = self.event_recorder.as_mut() {
+            recorder.flush();
         }
     }
 
@@ -539,6 +634,8 @@ pub struct SimulatorConfig {
     pub rng_seed: u64,
     /// Number of nodes to create
     pub peers: usize,
+    /// Optional path to record events as CSV files
+    pub events_csv_path: Option<std::path::PathBuf>,
     /// Timeout after which a gossip round is aborted
     pub gossip_round_timeout: Duration,
 }
@@ -570,6 +667,7 @@ impl SimulatorConfig {
             rng_seed: read_var("SEED", 0),
             peers: peer,
             gossip_round_timeout: Duration::from_secs(read_var("GOSSIP_ROUND_TIMEOUT", 5)),
+            events_csv_path: None,
         }
     }
 }
@@ -580,6 +678,7 @@ impl Default for SimulatorConfig {
             rng_seed: 0,
             peers: 100,
             gossip_round_timeout: Duration::from_secs(5),
+            events_csv_path: None,
         }
     }
 }
@@ -864,8 +963,14 @@ impl Simulator {
         let network_config = network_config.into();
         info!("start {simulator_config:?} {network_config:?}");
         let rng = rand_chacha::ChaCha12Rng::seed_from_u64(simulator_config.rng_seed);
+        let mut network = Network::new(network_config, rng);
+        if let Some(path) = simulator_config.events_csv_path.as_ref() {
+            network
+                .record_events_to_csv(path)
+                .expect("failed to create event CSV file");
+        }
         Self {
-            network: Network::new(network_config, rng),
+            network,
             config: simulator_config,
             round_stats: Default::default(),
         }
