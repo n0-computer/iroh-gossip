@@ -1,0 +1,22 @@
+{
+  "name": "gossip-graph-visualizer",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "vite"
+  },
+  "dependencies": {
+    "@react-sigma/core": "^2.3.0",
+    "graphology": "^0.25.1",
+    "graphology-layout": "^0.4.2",
+    "papaparse": "^5.4.1",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.21",
+    "@types/react-dom": "^18.2.7",
+    "typescript": "^5.3.3",
+    "vite": "^5.0.11"
+  }
+}
