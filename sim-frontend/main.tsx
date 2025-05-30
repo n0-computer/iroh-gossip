@@ -1,12 +1,12 @@
-import React, { useEffect, useState, useMemo } from "react";
+import React, { useEffect, useState, useMemo, useRef } from "react";
 import ReactDOM from "react-dom/client";
 import Papa from "papaparse";
 import { SigmaContainer, useLoadGraph, useRegisterEvents, useSigma } from "@react-sigma/core";
 import '@react-sigma/core/lib/style.css';
-import Graph from "graphology";
 import { MultiDirectedGraph as MultiGraphConstructor } from 'graphology';
-import { circular, random } from "graphology-layout";
-import { EdgeArrowProgram, createEdgeArrowHeadProgram, createEdgeArrowProgram } from 'sigma/rendering';
+import { circular, random, circlepack } from "graphology-layout";
+import { createEdgeArrowProgram } from 'sigma/rendering';
+import "./style.css"
 
 type Event = {
   i: number;
@@ -26,41 +26,70 @@ const COLORS = [
   "green"
 ]
 
-const GraphView: React.FC<{ events: Event[]; time: number }> = ({ events, time }) => {
-  const sigma = useSigma();
+enum Layout {
+  circular = "cirulcar",
+  random = "random",
+  circlepack = "circlepack"
+}
+
+const GraphView: React.FC<{ events: Event[], time: number, layout: Layout }> = ({ events, time, layout }) => {
   const loadGraph = useLoadGraph();
   const graph = useMemo(() => new MultiGraphConstructor(), []);
   const [highlightedNode, setHighlightedNode] = useState<string | null>(null);
   const registerEvents = useRegisterEvents()
-
-  const activeEdges = useMemo(() => {
-    const upMap = new Map<string, boolean>();
-    events
-      .filter((e) => e.time <= time && e.event !== "recv")
-      .forEach((e) => {
-        const key = `${e.node}->${e.peer}`;
-        if (e.event === "up") upMap.set(key, true);
-        else if (e.event === "down") upMap.delete(key);
-      });
-    return new Set(upMap.keys());
-  }, [events, time]);
+  const lastTime = useRef<number>(0)
 
   useEffect(() => {
-    graph.clear();
-    const nodesSet = new Set<number>();
-    events.forEach((e) => {
-      nodesSet.add(e.node);
-      nodesSet.add(e.peer);
-    });
-    nodesSet.forEach((id) => {
-      graph.addNode(id.toString(), { label: id.toString() });
-    });
-    activeEdges.forEach((key) => {
-      const [src, dst] = key.split("->");
-      if (!graph.hasEdge(src, dst)) graph.addDirectedEdgeWithKey(key, src, dst);
-    });
+    let intervalStart
+    if (time < lastTime.current) {
+      graph.clear()
+      intervalStart = 0
+    } else {
+      intervalStart = lastTime.current
+      lastTime.current = time
+    }
 
-    circular.assign(graph);
+    const addNodes = (event: Event) => {
+      for (const n of [event.node, event.peer]) {
+        const id = n.toString();
+        if (!graph.hasNode(id)) {
+          graph.addNode(id, { label: id })
+        }
+      }
+    }
+
+    const edgeKeys = (event: Event) => {
+      const src = event.node.toString()
+      const dst = event.peer.toString()
+      const key = `${src}->${dst}`;
+      return { src, dst, key }
+    }
+
+    const filteredEvents = events.filter(e => e.time > intervalStart && e.time <= time)
+    for (const event of filteredEvents) {
+      addNodes(event)
+      if (event.event === "up") {
+        const { src, dst, key } = edgeKeys(event);
+        if (!graph.hasEdge(key)) {
+          graph.addDirectedEdgeWithKey(key, src, dst);
+        }
+      }
+      else if (event.event === "down") {
+        const { key } = edgeKeys(event);
+        graph.dropEdge(key)
+      }
+    }
+
+    if (layout === Layout.circular) {
+      circular.assign(graph);
+    } else if (layout === Layout.random) {
+      random.assign(graph)
+    } else if (layout === Layout.circlepack) {
+      circlepack.assign(graph)
+    } else {
+      throw new Error("invalid layout: " + layout)
+    }
+
     graph.forEachNode((n) => {
       const deg = graph.degree(n);
       const color = COLORS[Math.min(deg, 5)]
@@ -84,12 +113,11 @@ const GraphView: React.FC<{ events: Event[]; time: number }> = ({ events, time }
     });
 
     loadGraph(graph);
-  }, [graph, events, activeEdges, loadGraph, highlightedNode]);
+  }, [graph, time, events, layout, loadGraph, highlightedNode]);
 
   useEffect(() => {
     registerEvents({
       clickNode: ({ node }) => {
-        console.log("clicked", node)
         setHighlightedNode((prev) => (prev === node ? null : node));
       },
     })
@@ -104,6 +132,7 @@ const App = () => {
   const [time, setTime] = useState(0);
   const [maxTime, setMaxTime] = useState(0);
   const [times, setTimes] = useState<number[]>([]);
+  const [layout, setLayout] = useState(Layout.circular)
 
   useEffect(() => {
     Papa.parse<Event>("/data/GossipMulti-n100-r30.events.0.csv", {
@@ -111,7 +140,7 @@ const App = () => {
       header: true,
       dynamicTyping: true,
       complete: (results) => {
-        const rows = (results.data as any[]).filter((r) => r.time) as Event[];
+        const rows = (results.data).filter((r) => r.time);
         setEvents(rows);
         const ts = rows.map((e) => e.time).sort((a, b) => a - b);
         setTimes(ts);
@@ -134,8 +163,6 @@ const App = () => {
       defaultEdgeType: 'straight',
       edgeProgramClasses: {
         straight: createEdgeArrowProgram({ lengthToThicknessRatio: 5, widenessToThicknessRatio: 5 })
-        // straight: EdgeArrowProgram,
-        // curved: EdgeCurveProgram,
       },
     }),
     [],
@@ -143,38 +170,33 @@ const App = () => {
 
   return (
     <>
-      <SigmaContainer style={{ height: "100vh" }} settings={settings}>
-        {events.length > 0 && <GraphView events={events} time={time} />}
-      </SigmaContainer>
-      <div style={{ position: "fixed", bottom: 10, left: "50%", transform: "translateX(-50%)" }}>
-        <input
-          type="range"
-          min={0}
-          max={maxTime}
-          step={1}
-          value={time}
-          onChange={(e) => setTime(parseInt(e.target.value))}
-        />
-        <button onClick={nextTime}>Next</button>
-        <span style={{ marginLeft: 10 }}>Time: {time}</span>
-      </div>
-      <div
-        style={{
-          position: "fixed",
-          bottom: 10,
-          right: 10,
-          background: "white",
-          padding: 5,
-          maxHeight: 150,
-          overflowY: "auto",
-          fontSize: 12,
-        }}
-      >
-        {currentEvents.map((e, i) => (
-          <div key={i}>
-            [{e.time}] {e.node} {e.event} {e.peer}
-          </div>
-        ))}
+      <div className="app">
+        <SigmaContainer style={{ height: "100vh" }} settings={settings}>
+          {events.length > 0 && <GraphView events={events} time={time} layout={layout} />}
+        </SigmaContainer>
+        <div className="sidebar">
+          <select onChange={e => setLayout(e.target.value as unknown as Layout)}>
+            {Object.keys(Layout).map((key, index) => (
+              <option key={index} value={key}>{key}</option>
+            ))}
+          </select>
+          <input
+            type="range"
+            min={0}
+            max={maxTime}
+            step={1}
+            value={time}
+            onChange={(e) => setTime(parseInt(e.target.value))}
+          />
+          <button onClick={nextTime}>Next</button>
+          <div>Time: {time}</div>
+          <h3>Events at time</h3>
+          {currentEvents.map((e, i) => (
+            <div key={i}>
+              [{e.time}] {e.node} {e.event} {e.peer}
+            </div>
+          ))}
+        </div>
       </div>
     </>
   );
