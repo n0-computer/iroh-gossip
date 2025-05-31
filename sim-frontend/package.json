@@ -6,9 +6,11 @@
     "start": "vite"
   },
   "dependencies": {
-    "@react-sigma/core": "^2.3.0",
-    "graphology": "^0.25.1",
-    "graphology-layout": "^0.4.2",
+    "@react-sigma/core": "^5",
+    "@sigma/node-border": "^3.0.0",
+    "graphology": "^0.26",
+    "graphology-layout": "^0.6",
+    "graphology-layout-forceatlas2": "^0.10.1",
     "papaparse": "^5.4.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"

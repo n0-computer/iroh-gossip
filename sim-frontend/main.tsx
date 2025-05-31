@@ -10,7 +10,9 @@ import {
 import "@react-sigma/core/lib/style.css";
 import { MultiDirectedGraph as MultiGraphConstructor } from "graphology";
 import { circlepack, circular, random } from "graphology-layout";
+import forceAtlas2 from 'graphology-layout-forceatlas2';
 import { createEdgeArrowProgram } from "sigma/rendering";
+import { createNodeBorderProgram } from '@sigma/node-border';
 import "./style.css";
 
 type Event = {
@@ -32,17 +34,24 @@ const COLORS = [
 ];
 
 enum Layout {
-  circular = "cirulcar",
+  circular = "circular",
+  force = "force",
   random = "random",
   circlepack = "circlepack",
 }
 
-const GraphView: React.FC<{ events: Event[]; time: number; layout: Layout }> = (
-  { events, time, layout },
+interface GraphViewProps {
+  events: Event[];
+  time: number;
+  layout: Layout;
+  graph: MultiGraphConstructor;
+  highlightedNode: string | null;
+  setHighlightedNode: React.Dispatch<React.SetStateAction<string | null>>;
+}
+const GraphView: React.FC<GraphViewProps> = (
+  { events, time, layout, graph, highlightedNode, setHighlightedNode },
 ) => {
   const loadGraph = useLoadGraph();
-  const graph = useMemo(() => new MultiGraphConstructor(), []);
-  const [highlightedNode, setHighlightedNode] = useState<string | null>(null);
   const registerEvents = useRegisterEvents();
   const lastTime = useRef<number>(0);
 
@@ -88,27 +97,51 @@ const GraphView: React.FC<{ events: Event[]; time: number; layout: Layout }> = (
       }
     }
 
+    // const newNodes = graph.filterNodes(node => graph.getNodeAttribute(node, 'isNew'));
     if (layout === Layout.circular) {
       circular.assign(graph);
     } else if (layout === Layout.random) {
       random.assign(graph);
     } else if (layout === Layout.circlepack) {
       circlepack.assign(graph);
+      // } else if (layout === Layout.force) {
+      //   forceAtlas2.assign(graph, {
+      //     // nodes: newNodes,
+      //     iterations: 100,
+      //     settings: {
+      //       linLogMode: false,
+      //       outboundAttractionDistribution: false,
+      //       adjustSizes: false,
+      //       edgeWeightInfluence: 1,
+      //     }
+      //   });
     } else {
       throw new Error("invalid layout: " + layout);
     }
 
     graph.forEachNode((n) => {
       const deg = graph.degree(n);
-      const color = COLORS[Math.min(deg, 5)];
+      let color = COLORS[Math.min(deg, 5)];
       graph.setNodeAttribute(n, "color", color);
-      graph.setNodeAttribute(n, "size", 7);
+      if (highlightedNode == n) {
+        graph.setNodeAttribute(n, "borderColor", "fuchsia")
+        graph.setNodeAttribute(n, "borderSize", 0.3)
+        graph.setNodeAttribute(n, "size", 12);
+      } else if (highlightedNode && graph.areNeighbors(n, highlightedNode)) {
+        graph.setNodeAttribute(n, "borderColor", "fuchia")
+        graph.setNodeAttribute(n, "borderSize", 0.15)
+        graph.setNodeAttribute(n, "size", 9);
+
+      } else {
+        graph.setNodeAttribute(n, "borderSize", 0)
+        graph.setNodeAttribute(n, "size", 7);
+      }
     });
     graph.forEachEdge((e) => {
       let color;
       if (highlightedNode) {
         if (graph.extremities(e).includes(highlightedNode)) {
-          color = "red";
+          color = "fuchsia";
         } else {
           color = "rgba(0,0,0,0.05)";
         }
@@ -140,6 +173,8 @@ const App = () => {
   const [maxTime, setMaxTime] = useState(0);
   const [times, setTimes] = useState<number[]>([]);
   const [layout, setLayout] = useState(Layout.circular);
+  const graph = useMemo(() => new MultiGraphConstructor(), []);
+  const [highlightedNode, setHighlightedNode] = useState<string | null>(null);
 
   useEffect(() => {
     Papa.parse<Event>("/data/GossipMulti-n100-r30.events.0.csv", {
@@ -177,6 +212,15 @@ const App = () => {
           widenessToThicknessRatio: 5,
         }),
       },
+      defaultNodeType: 'bordered',
+      nodeProgramClasses: {
+        bordered: createNodeBorderProgram({
+          borders: [
+            { size: { attribute: 'borderSize', defaultValue: 0 }, color: { attribute: 'borderColor' } },
+            { size: { fill: true }, color: { attribute: 'color' } },
+          ],
+        }),
+      },
     }),
     [],
   );
@@ -186,7 +230,14 @@ const App = () => {
       <div className="app">
         <SigmaContainer style={{ height: "100vh" }} settings={settings}>
           {events.length > 0 && (
-            <GraphView events={events} time={time} layout={layout} />
+            <GraphView
+              events={events}
+              time={time}
+              layout={layout}
+              graph={graph}
+              highlightedNode={highlightedNode}
+              setHighlightedNode={setHighlightedNode}
+            />
           )}
         </SigmaContainer>
         <div className="sidebar">
@@ -213,11 +264,26 @@ const App = () => {
               [{e.time}] {e.node} {e.event} {e.peer}
             </div>
           ))}
+          {highlightedNode && (
+            <NodeDetails graph={graph} node={highlightedNode} />
+          )}
         </div>
       </div>
     </>
   );
 };
+
+function NodeDetails({ graph, node }: { graph: MultiGraphConstructor; node: string }) {
+  const edges = graph.edges(node);
+  return (
+    <div>
+      <h3>node {node}</h3>
+      <ul>
+        {edges.map((edge) => <li>{edge}</li>)}
+      </ul>
+    </div>
+  );
+}
 
 const root = ReactDOM.createRoot(document.getElementById("root")!);
 root.render(<App />);
