@@ -1,0 +1,55 @@
+sim = "GossipMulti"
+nodes = 100
+bootstrap = "single"
+rounds = 30
+
+[config.latency.dynamic]
+min = "10ms"
+max = "50ms"
+
+[config.proto]
+max_message_size = 4096
+
+[config.proto.membership]
+active_view_capacity = 5
+passive_view_capacity = 30
+active_random_walk_length = 6
+passive_random_walk_length = 3
+shuffle_random_walk_length = 6
+shuffle_active_view_count = 3
+shuffle_passive_view_count = 4
+
+[config.proto.membership.shuffle_interval]
+secs = 60
+nanos = 0
+
+[config.proto.membership.neighbor_request_timeout]
+secs = 0
+nanos = 500000000
+
+[config.proto.broadcast]
+optimization_threshold = 7
+
+[config.proto.broadcast.graft_timeout_1]
+secs = 0
+nanos = 80000000
+
+[config.proto.broadcast.graft_timeout_2]
+secs = 0
+nanos = 40000000
+
+[config.proto.broadcast.dispatch_timeout]
+secs = 0
+nanos = 5000000
+
+[config.proto.broadcast.message_cache_retention]
+secs = 30
+nanos = 0
+
+[config.proto.broadcast.message_id_retention]
+secs = 90
+nanos = 0
+
+[config.proto.broadcast.cache_evict_interval]
+secs = 1
+nanos = 0
