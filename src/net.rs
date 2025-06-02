@@ -40,7 +40,7 @@ use crate::{
 
 pub mod util;
 
-use crate::api::{self, Command, Event, GossipApi, GossipEvent};
+use crate::api::{self, Command, Event, GossipApi};
 
 /// ALPN protocol name
 pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/0";
@@ -698,10 +698,7 @@ impl Actor {
                 let mut sender_dead = false;
                 if !neighbors.is_empty() {
                     for neighbor in neighbors.iter() {
-                        if let Err(_err) = tx
-                            .try_send(Event::Gossip(GossipEvent::NeighborUp(*neighbor)))
-                            .await
-                        {
+                        if let Err(_err) = tx.try_send(Event::NeighborUp(*neighbor)).await {
                             sender_dead = true;
                             break;
                         }
@@ -806,7 +803,6 @@ impl Actor {
                         }
                         _ => {}
                     }
-                    let event: GossipEvent = event.into();
                     event_sender.send(event).ok();
                     if !state.still_needed() {
                         self.quit_queue.push_back(topic_id);
@@ -901,7 +897,7 @@ impl Default for PeerState {
 #[derive(Debug)]
 struct TopicState {
     neighbors: BTreeSet<NodeId>,
-    event_sender: broadcast::Sender<GossipEvent>,
+    event_sender: broadcast::Sender<ProtoEvent>,
     /// Keys identifying command receivers in [`Actor::command_rx`].
     ///
     /// This represents the receiver side of gossip's publish public API.
@@ -1026,7 +1022,7 @@ fn decode_peer_data(peer_data: &PeerData) -> Result<AddrInfo, Error> {
 
 async fn topic_subscriber_loop(
     mut sender: spsc::Sender<Event>,
-    mut topic_events: broadcast::Receiver<GossipEvent>,
+    mut topic_events: broadcast::Receiver<ProtoEvent>,
 ) {
     loop {
         tokio::select! {
@@ -1035,7 +1031,7 @@ async fn topic_subscriber_loop(
                let event = match msg {
                    Err(broadcast::error::RecvError::Closed) => break,
                    Err(broadcast::error::RecvError::Lagged(_)) => Event::Lagged,
-                   Ok(event) => Event::Gossip(event)
+                   Ok(event) => event.into(),
                };
                if sender.send(event).await.is_err() {
                    break;
@@ -1426,7 +1422,7 @@ pub(crate) mod test {
             loop {
                 let ev = sub2.next().await.unwrap().unwrap();
                 info!("go2 event: {ev:?}");
-                if let Event::Gossip(GossipEvent::Received(msg)) = ev {
+                if let Event::Received(msg) = ev {
                     recv.push(msg.content);
                 }
                 if recv.len() == len {
@@ -1441,7 +1437,7 @@ pub(crate) mod test {
             loop {
                 let ev = sub3.next().await.unwrap().unwrap();
                 info!("go3 event: {ev:?}");
-                if let Event::Gossip(GossipEvent::Received(msg)) = ev {
+                if let Event::Received(msg) = ev {
                     recv.push(msg.content);
                 }
                 if recv.len() == len {
@@ -1529,10 +1525,8 @@ pub(crate) mod test {
                 while let Some(ev) = sub_rx.try_next().await? {
                     match ev {
                         Event::Lagged => tracing::debug!("missed some messages :("),
-                        Event::Gossip(gm) => match gm {
-                            GossipEvent::Received(_) => unreachable!("test does not send messages"),
-                            other => tracing::debug!(?other, "gs event"),
-                        },
+                        Event::Received(_) => unreachable!("test does not send messages"),
+                        other @ _ => tracing::debug!(?other, "gs event"),
                     }
                 }
 
@@ -1679,7 +1673,7 @@ pub(crate) mod test {
         // we should receive a Neighbor down event
         let conn_timeout = Duration::from_millis(500);
         let ev = timeout(conn_timeout, sub.try_next()).await??;
-        assert_eq!(ev, Some(Event::Gossip(GossipEvent::NeighborDown(node_id2))));
+        assert_eq!(ev, Some(Event::NeighborDown(node_id2)));
         tracing::info!("node 2 left");
 
         // signal node_2 to subscribe again
@@ -1687,7 +1681,7 @@ pub(crate) mod test {
 
         let conn_timeout = Duration::from_millis(500);
         let ev = timeout(conn_timeout, sub.try_next()).await??;
-        assert_eq!(ev, Some(Event::Gossip(GossipEvent::NeighborUp(node_id2))));
+        assert_eq!(ev, Some(Event::NeighborUp(node_id2)));
         tracing::info!("node 2 rejoined!");
 
         // cleanup and ensure everything went as expected
@@ -1772,7 +1766,7 @@ pub(crate) mod test {
                 addr_tx.send(addr).unwrap();
                 let mut topic = gossip.subscribe_and_join(topic_id, vec![]).await?;
                 while let Some(event) = topic.try_next().await.unwrap() {
-                    if let Event::Gossip(GossipEvent::Received(message)) = event {
+                    if let Event::Received(message) = event {
                         let message = std::str::from_utf8(&message.content)?.to_string();
                         msgs_recv_tx.send(message).await?;
                     }

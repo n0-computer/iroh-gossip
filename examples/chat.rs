@@ -12,7 +12,7 @@ use ed25519_dalek::Signature;
 use futures_lite::StreamExt;
 use iroh::{Endpoint, NodeAddr, PublicKey, RelayMode, RelayUrl, SecretKey};
 use iroh_gossip::{
-    api::{Event, GossipEvent, GossipReceiver},
+    api::{Event, GossipReceiver},
     net::{Gossip, GOSSIP_ALPN},
     proto::TopicId,
 };
@@ -175,7 +175,7 @@ async fn subscribe_loop(mut receiver: GossipReceiver) -> Result<()> {
     // init a peerid -> name hashmap
     let mut names = HashMap::new();
     while let Some(event) = receiver.try_next().await? {
-        if let Event::Gossip(GossipEvent::Received(msg)) = event {
+        if let Event::Received(msg) = event {
             let (from, message) = SignedMessage::verify_and_decode(&msg.content)?;
             match message {
                 Message::AboutMe { name } => {
