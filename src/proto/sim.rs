@@ -247,6 +247,11 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng + Clone> Network<PI, 
         Ok(())
     }
 
+    /// Sets the event recorder.
+    pub fn set_event_recorder(&mut self, event_recorder: Box<dyn EventRecorder<PI>>) {
+        self.event_recorder = Some(event_recorder);
+    }
+
     /// Returns the latencies between all nodes.
     pub fn latencies(&self) -> impl Iterator<Item = (PI, PI, Duration)> + '_ {
         self.latencies

@@ -251,6 +251,7 @@ pub struct Config {
     /// > The timeout value is a protocol parameter that should be configured considering the
     /// > diameter of the overlay and a target maximum recovery latency, defined by the application
     /// > requirements. (p.8)
+    #[serde(with = "humantime_serde")]
     pub graft_timeout_1: Duration,
     /// This timeout is registered when sending a [`Graft`] message. If a reply has not been
     /// received once the timeout expires, we send another [`Graft`] message to the next peer that
@@ -259,8 +260,10 @@ pub struct Config {
     /// The plumtree paper notes:
     /// > This second timeout value should be smaller that the first, in the order of an average
     /// > round trip time to a neighbor.
+    #[serde(with = "humantime_serde")]
     pub graft_timeout_2: Duration,
     /// Timeout after which [`IHave`] messages are pushed to peers.
+    #[serde(with = "humantime_serde")]
     pub dispatch_timeout: Duration,
     /// The protocol performs a tree optimization, which promotes lazy peers to eager peers if the
     /// [`Message::IHave`] messages received from them have a lower number of hops from the
@@ -276,15 +279,18 @@ pub struct Config {
     /// able to retrieve messages once they need them. If this is high, the cache will grow.
     ///
     /// Should be at least around several round trip times to peers.
+    #[serde(with = "humantime_serde")]
     pub message_cache_retention: Duration,
 
     /// Duration for which to keep the [`MessageId`]s for received messages.
     ///
     /// Should be at least as long as [`Self::message_cache_retention`], usually will be longer to
     /// not accidentally receive messages multiple times.
+    #[serde(with = "humantime_serde")]
     pub message_id_retention: Duration,
 
     /// How often the internal caches will be checked for expired items.
+    #[serde(with = "humantime_serde")]
     pub cache_evict_interval: Duration,
 }
 
