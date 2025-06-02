@@ -1831,8 +1831,7 @@
 <a href="#1830" id="1830">1830</a>
 <a href="#1831" id="1831">1831</a>
 <a href="#1832" id="1832">1832</a>
-<a href="#1833" id="1833">1833</a>
-<a href="#1834" id="1834">1834</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
+<a href="#1833" id="1833">1833</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
@@ -2757,7 +2756,6 @@
     <span class="doccomment">/// Check if the topic still has any publisher or subscriber.
     </span><span class="kw">fn </span>still_needed(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
         !<span class="self">self</span>.command_rx_keys.is_empty() &amp;&amp; <span class="self">self</span>.event_sender.receiver_count() &gt; <span class="number">0
-        </span><span class="comment">// !self.event_senders.is_empty() || !self.command_rx_keys.is_empty()
     </span>}
 
     <span class="attr">#[cfg(test)]
