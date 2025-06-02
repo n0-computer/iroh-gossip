@@ -77,11 +77,7 @@ irpc = { version = "0.2.3", optional = true, default-features = false, features 
 irpc-derive = { version = "0.2.3", optional = true }
 
 # rpc dependencies (optional)
-nested_enum_utils = { version = "0.1.0", optional = true }
-quic-rpc = { version = "0.20", optional = true }
-quic-rpc-derive = { version = "0.20", optional = true }
 quinn = { package = "iroh-quinn", version = "0.13.0", optional = true }
-strum = { version = "0.26", optional = true }
 
 # test-utils dependencies (optional)
 rand_chacha = { version = "0.3.1", optional = true }

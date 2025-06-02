@@ -923,7 +923,6 @@ impl TopicState {
     /// Check if the topic still has any publisher or subscriber.
     fn still_needed(&self) -> bool {
         !self.command_rx_keys.is_empty() && self.event_sender.receiver_count() > 0
-        // !self.event_senders.is_empty() || !self.command_rx_keys.is_empty()
     }
 
     #[cfg(test)]
