@@ -1,0 +1,2 @@
+- move simulation runner to web worker
+- add controls to remove nodes, resume simulation, send messages etc

@@ -1,24 +1,53 @@
 {
-  "name": "gossip-graph-visualizer",
-  "version": "1.0.0",
+  "name": "sim-frontend3",
   "private": true,
+  "version": "0.0.0",
+  "type": "module",
   "scripts": {
-    "start": "vite"
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "eslint .",
+    "preview": "vite preview",
+    "build:wasm": "wasm-pack build ./wasm --dev --weak-refs --reference-types -t bundler -d pkg",
+    "build:wasm:release": "wasm-pack build ./wasm --release --weak-refs --reference-types -t bundler -d pkg"
   },
   "dependencies": {
-    "@react-sigma/core": "^5",
+    "@radix-ui/react-collapsible": "^1.1.11",
+    "@radix-ui/react-dialog": "^1.1.14",
+    "@radix-ui/react-select": "^2.2.5",
+    "@radix-ui/react-separator": "^1.1.7",
+    "@radix-ui/react-slot": "^1.2.3",
+    "@radix-ui/react-tooltip": "^1.2.7",
+    "@react-sigma/core": "^5.0.4",
     "@sigma/node-border": "^3.0.0",
-    "graphology": "^0.26",
-    "graphology-layout": "^0.6",
-    "graphology-layout-forceatlas2": "^0.10.1",
-    "papaparse": "^5.4.1",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "@tailwindcss/vite": "^4.1.8",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "graphology": "^0.26.0",
+    "graphology-layout": "^0.6.1",
+    "lucide-react": "^0.511.0",
+    "papaparse": "^5.5.3",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "sigma": "^3.0.2",
+    "tailwind-merge": "^3.3.0",
+    "tailwindcss": "^4.1.8",
+    "gossip-sim-wasm": "file:./wasm/pkg"
   },
   "devDependencies": {
-    "@types/react": "^18.2.21",
-    "@types/react-dom": "^18.2.7",
-    "typescript": "^5.3.3",
-    "vite": "^5.0.11"
+    "@eslint/js": "^9.25.0",
+    "@types/react": "^19.1.2",
+    "@types/react-dom": "^19.1.2",
+    "@vitejs/plugin-react": "^4.4.1",
+    "eslint": "^9.25.0",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.19",
+    "globals": "^16.0.0",
+    "tw-animate-css": "^1.3.2",
+    "typescript": "~5.8.3",
+    "typescript-eslint": "^8.30.1",
+    "vite": "^6.3.5",
+    "vite-plugin-top-level-await": "^1.5.0",
+    "vite-plugin-wasm": "^3.4.1"
   }
 }
