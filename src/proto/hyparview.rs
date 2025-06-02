@@ -190,8 +190,10 @@ pub struct Config {
     /// Number of passive peers to be included in a `Shuffle` request.
     pub shuffle_passive_view_count: usize,
     /// Interval duration for shuffle requests
+    #[serde(with = "humantime_serde")]
     pub shuffle_interval: Duration,
     /// Timeout after which a `Neighbor` request is considered failed
+    #[serde(with = "humantime_serde")]
     pub neighbor_request_timeout: Duration,
 }
 impl Default for Config {
