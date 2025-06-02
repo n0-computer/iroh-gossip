@@ -10,7 +10,7 @@ function App() {
     <GraphContext>
       <div className="flex h-screen">
         <div className="w-80 h-full bg-background border-r border-border p-4 overflow-y-auto">
-          <SimLoader defaultUrl="../data/GossipMulti-n100-r30.events.0.csv" />
+          <SimLoader defaultUrl="data/GossipMulti-n100-r30.events.0.csv" />
           <SimRunner config={config} />
           <ConfigSidebar config={config} setConfig={setConfig} />
         </div>

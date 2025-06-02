@@ -217,7 +217,7 @@ export function Graph() {
   const context = useGraphContext()
   if (!context) return null
   const { graph, highlightedNode, setHighlightedNode, events, time, layout } = context
-
+  if (!events) return null
 
   // Sigma settings
   const settings = useMemo(
