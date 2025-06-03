@@ -31,14 +31,17 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, error_span, trace, warn, Instrument};
 
-use self::util::{read_message, write_message, Timers};
+use self::util_old::{read_message, write_message, Timers};
 use crate::{
     api::RpcMessage,
     metrics::Metrics,
     proto::{self, HyparviewConfig, PeerData, PlumtreeConfig, Scope, TopicId},
 };
 
-pub mod util;
+mod connections;
+mod topic;
+mod util;
+mod util_old;
 
 use crate::api::{self, Command, Event, GossipApi};
 
@@ -86,10 +89,10 @@ pub enum Error {
     EmptyPeerData,
     /// Writing a message to the network
     #[error("write {0}")]
-    Write(#[from] util::WriteError),
+    Write(#[from] util_old::WriteError),
     /// Reading a message from the network
     #[error("read {0}")]
-    Read(#[from] util::ReadError),
+    Read(#[from] util_old::ReadError),
     /// A watchable disconnected.
     #[error(transparent)]
     WatchableDisconnected(#[from] iroh::watchable::Disconnected),

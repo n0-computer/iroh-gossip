@@ -24,6 +24,12 @@ macro_rules! idbytes_impls {
             pub fn as_bytes(&self) -> &[u8; 32] {
                 &self.0
             }
+
+            /// Convert to a hex string limited to the first 5 bytes for a friendly string
+            /// representation of the key.
+            pub fn fmt_short(&self) -> String {
+                data_encoding::HEXLOWER.encode(&self.as_bytes()[..5])
+            }
         }
 
         impl<T: ::std::convert::Into<[u8; 32]>> ::std::convert::From<T> for $ty {

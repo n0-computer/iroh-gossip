@@ -15,7 +15,7 @@ use irpc_derive::rpc_requests;
 use n0_future::{boxed::BoxStream, Stream, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
-use crate::proto::{DeliveryScope, TopicId};
+use crate::proto::{DeliveryScope, Scope, TopicId};
 
 /// Default channel capacity for topic subscription channels (one per topic)
 const TOPIC_EVENTS_DEFAULT_CAP: usize = 2048;
@@ -384,6 +384,17 @@ pub enum Command {
     BroadcastNeighbors(#[debug("Bytes({})", _0.len())] Bytes),
     /// Connects to a set of peers.
     JoinPeers(Vec<NodeId>),
+}
+
+impl From<Command> for crate::proto::topic::Command<NodeId> {
+    fn from(value: Command) -> Self {
+        use crate::proto::topic::Command::*;
+        match value {
+            Command::Broadcast(msg) => Broadcast(msg, Scope::Swarm),
+            Command::BroadcastNeighbors(msg) => Broadcast(msg, Scope::Neighbors),
+            Command::JoinPeers(peers) => Join(peers),
+        }
+    }
 }
 
 /// Options for joining a gossip topic.
