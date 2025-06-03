@@ -68,7 +68,7 @@ iroh = { version = "0.35", default-features = false, optional = true }
 tokio = { version = "1", optional = true, features = ["io-util", "sync"] }
 tokio-util = { version = "0.7.12", optional = true, features = ["codec"] }
 tracing = "0.1"
-data-encoding = { version = "2.6.0", optional = true }
+data-encoding = "2.6.0"
 thiserror = { version = "2.0", optional = true }
 irpc = { version = "0.2.3", optional = true, default-features = false, features = [
     "stream",
@@ -150,7 +150,7 @@ simulator = [
     "dep:comfy-table",
 ]
 metrics = ["iroh-metrics/metrics"]
-examples = ["net", "dep:data-encoding"]
+examples = ["net"]
 
 [[test]]
 name = "sim"

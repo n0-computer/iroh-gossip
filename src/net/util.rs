@@ -2,11 +2,11 @@
 
 use std::{io, pin::Pin};
 
-use bytes::{Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use n0_future::time::{sleep_until, Instant, Sleep};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use serde::{de::DeserializeOwned, Serialize};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
-use super::ProtoMessage;
 use crate::proto::util::TimerMap;
 
 /// Errors related to message writing
@@ -17,29 +17,30 @@ pub enum WriteError {
     Ser(#[from] postcard::Error),
     /// IO error
     #[error(transparent)]
-    Io(#[from] std::io::Error),
-    /// Message was larger than the configured maximum message size
-    #[error("message too large")]
-    TooLarge,
+    Write(#[from] iroh::endpoint::WriteError),
+    // /// Message was larger than the configured maximum message size
+    // #[error("message too large")]
+    // TooLarge,
 }
 
 /// Write a `ProtoMessage` as a length-prefixed, postcard-encoded message.
-pub async fn write_message<W: AsyncWrite + Unpin>(
-    writer: &mut W,
+pub async fn write_message<T: Serialize>(
+    writer: &mut iroh::endpoint::SendStream,
     buffer: &mut BytesMut,
-    frame: &ProtoMessage,
-    max_message_size: usize,
+    frame: &T, // max_message_size: usize,
 ) -> Result<(), WriteError> {
     let len = postcard::experimental::serialized_size(&frame)?;
-    if len >= max_message_size {
-        return Err(WriteError::TooLarge);
-    }
+    // if len >= max_message_size {
+    //     return Err(WriteError::TooLarge);
+    // }
 
     buffer.clear();
-    buffer.resize(len, 0u8);
-    let slice = postcard::to_slice(&frame, buffer)?;
-    writer.write_u32(len as u32).await?;
-    writer.write_all(slice).await?;
+    buffer.put_u32(len as u32);
+    buffer.resize(len + 4, 0u8);
+    let _slice = postcard::to_slice(&frame, &mut buffer[4..])?;
+    writer.write_all(&buffer).await?;
+    // writer.write_u32(len as u32).await?;
+    // writer.write_all(slice).await?;
     Ok(())
 }
 
@@ -58,11 +59,11 @@ pub enum ReadError {
 }
 
 /// Read a length-prefixed message and decode as `ProtoMessage`;
-pub async fn read_message(
+pub async fn read_message<T: DeserializeOwned>(
     reader: impl AsyncRead + Unpin,
     buffer: &mut BytesMut,
     max_message_size: usize,
-) -> Result<Option<ProtoMessage>, ReadError> {
+) -> Result<Option<T>, ReadError> {
     match read_lp(reader, buffer, max_message_size).await? {
         None => Ok(None),
         Some(data) => {
@@ -105,7 +106,7 @@ pub async fn read_lp(
 
 /// A [`TimerMap`] with an async method to wait for the next timer expiration.
 #[derive(Debug)]
-pub struct Timers<T> {
+pub(crate) struct Timers<T> {
     next: Option<(Instant, Pin<Box<Sleep>>)>,
     map: TimerMap<T>,
 }
@@ -120,13 +121,13 @@ impl<T> Default for Timers<T> {
 }
 
 impl<T> Timers<T> {
-    /// Creates a new timer map.
-    pub fn new() -> Self {
-        Self::default()
-    }
+    // /// Creates a new timer map.
+    // pub fn new() -> Self {
+    //     Self::default()
+    // }
 
     /// Inserts a new entry at the specified instant
-    pub fn insert(&mut self, instant: Instant, item: T) {
+    pub(crate) fn insert(&mut self, instant: Instant, item: T) {
         self.map.insert(instant, item);
     }
 
@@ -138,7 +139,7 @@ impl<T> Timers<T> {
     }
 
     /// Waits for the next timer to elapse.
-    pub async fn wait_next(&mut self) -> Instant {
+    pub(crate) async fn wait_next(&mut self) -> Instant {
         self.reset();
         match self.next.as_mut() {
             Some((instant, sleep)) => {
@@ -150,7 +151,7 @@ impl<T> Timers<T> {
     }
 
     /// Pops the earliest timer that expires at or before `now`.
-    pub fn pop_before(&mut self, now: Instant) -> Option<(Instant, T)> {
+    pub(crate) fn pop_before(&mut self, now: Instant) -> Option<(Instant, T)> {
         self.map.pop_before(now)
     }
 }

@@ -206,6 +206,7 @@ pub struct State<PI, R> {
     pub(crate) gossip: plumtree::State<PI>,
     outbox: VecDeque<OutEvent<PI>>,
     stats: Stats,
+    max_message_size: usize,
 }
 
 impl<PI: PeerIdentity> State<PI, rand::rngs::StdRng> {
@@ -216,6 +217,11 @@ impl<PI: PeerIdentity> State<PI, rand::rngs::StdRng> {
     /// Panics if [`Config::max_message_size`] is below [`MIN_MAX_MESSAGE_SIZE`].
     pub fn new(me: PI, me_data: Option<PeerData>, config: Config) -> Self {
         Self::with_rng(me, me_data, config, rand::rngs::StdRng::from_entropy())
+    }
+
+    /// Returns the configured max message size.
+    pub fn max_message_size(&self) -> usize {
+        self.max_message_size
     }
 }
 
@@ -246,6 +252,7 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
             me,
             outbox: VecDeque::new(),
             stats: Stats::default(),
+            max_message_size: config.max_message_size,
         }
     }
 
