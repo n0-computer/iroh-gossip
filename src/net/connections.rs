@@ -13,11 +13,9 @@ use iroh::{
     Endpoint, NodeId,
 };
 use n0_future::task::AbortOnDropHandle;
-use postcard::experimental::max_size::MaxSize;
-use quinn::ReadExactError;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    io::AsyncReadExt,
+    io::{AsyncReadExt, AsyncWriteExt},
     sync::{mpsc, oneshot, Notify},
     task::JoinSet,
 };
@@ -26,29 +24,169 @@ use tracing::{debug, error_span, info, Instrument};
 
 use crate::{proto::TopicId, ALPN};
 
-#[derive(Debug)]
-pub struct TopicRecvStream {
+// #[derive(Debug, derive_more::Deref)]
+// pub(crate) struct GuardedSendStream {
+//     conn: StrongConnection,
+//     #[deref]
+//     stream: SendStream,
+// }
+
+// #[derive(Debug, derive_more::Deref)]
+// pub(crate) struct GuardedRecvStream {
+//     conn: StrongConnection,
+//     #[deref]
+//     stream: RecvStream,
+// }
+
+// impl std::ops::DerefMut for GuardedRecvStream {
+//     fn deref_mut(&mut self) -> &mut Self::Target {
+//         &mut self.stream
+//     }
+// }
+// impl std::ops::DerefMut for GuardedSendStream {
+//     fn deref_mut(&mut self) -> &mut Self::Target {
+//         &mut self.stream
+//     }
+// }
+
+// #[derive(Debug)]
+// pub(crate) enum OpenError {
+//     Dropped,
+//     Connection(ConnectionError),
+//     OpenStream,
+// }
+
+// #[derive(Debug)]
+// pub(crate) enum AcceptError {
+//     Dropped,
+//     Connection(ConnectionError),
+//     OpenStream,
+// }
+
+// #[derive(Debug)]
+// pub(crate) struct Dropped;
+
+// #[derive(Debug)]
+// enum ToStreamPool {
+//     Open {
+//         node_id: NodeId,
+//         topic_id: TopicId,
+//         reply: oneshot::Sender<Result<GuardedSendStream, OpenError>>,
+//     },
+//     Accept {
+//         topic_id: TopicId,
+//         reply: mpsc::Sender<Result<GuardedRecvStream, AcceptError>>,
+//     },
+//     HandleConnection {
+//         conn: Connection,
+//     },
+// }
+
+// #[derive(Debug, Clone)]
+// pub(crate) struct StreamPool {
+//     tx: mpsc::Sender<ToStreamPool>,
+//     _task_handle: Arc<AbortOnDropHandle<()>>,
+// }
+
+// impl StreamPool {
+//     pub(crate) async fn open(
+//         &self,
+//         node_id: NodeId,
+//         topic_id: TopicId,
+//     ) -> Result<GuardedSendStream, OpenError> {
+//         let (reply, reply_rx) = oneshot::channel();
+//         self.tx
+//             .send(ToStreamPool::Open {
+//                 node_id,
+//                 topic_id,
+//                 reply,
+//             })
+//             .await
+//             .map_err(|_| OpenError::Dropped)?;
+//         reply_rx.await.map_err(|_| OpenError::Dropped)?
+//     }
+
+//     pub(crate) async fn accept(
+//         &self,
+//         topic_id: TopicId,
+//     ) -> Result<mpsc::Receiver<Result<GuardedRecvStream, AcceptError>>, Dropped> {
+//         let (reply, reply_rx) = mpsc::channel(16);
+//         self.tx
+//             .send(ToStreamPool::Accept { topic_id, reply })
+//             .await
+//             .map_err(|_| Dropped)?;
+//         Ok(reply_rx)
+//     }
+
+//     pub(crate) async fn handle_connection(&self, conn: Connection) -> Result<(), Dropped> {
+//         self.tx
+//             .send(ToStreamPool::HandleConnection { conn })
+//             .await
+//             .map_err(|_| Dropped)
+//     }
+
+//     pub(crate) fn spawn(endpoint: Endpoint) -> Self {
+//         let (tx, rx) = mpsc::channel(16);
+//         let (topic_stream_tx, topic_stream_rx) = mpsc::channel(16);
+//         let fut = async move {
+//             let cancel = CancellationToken::new();
+//             let mut actor = ConnectionsActor::new(endpoint, topic_streams_tx, cancel);
+//             let waiting = HashMap::new();
+//             loop {
+//                 tokio::select! {
+//                     _ = actor.poll() => {},
+//                     msg = rx.recv() => {
+//                         let Some(msg) = msg else {
+//                             break;
+//                         };
+//                         match msg {
+//                             ToStreamPool::Open { node_id, topic_id, reply } => {
+//                                 let conn = actor.get_or_connect(node_id, reply);
+//                                 // TODO: move into task
+//                             }
+//                             ToStreamPool::Accept { topic_id, reply } => todo!(),
+//                             ToStreamPool::HandleConnection { conn } => todo!(),
+//                         }
+//                     }
+//                 }
+//             }
+//         };
+//         let task = tokio::task::spawn(fut);
+//         let handle = AbortOnDropHandle::new(task);
+//         Self {
+//             _task_handle: handle,
+//             tx,
+//         }
+//     }
+// }
+
+#[derive(derive_more::Debug)]
+pub struct RemoteStream {
+    #[debug("{}", topic_id.fmt_short())]
     pub topic_id: TopicId,
+    #[debug("{}", node_id.fmt_short())]
     pub node_id: NodeId,
+    #[debug(skip)]
     pub recv_stream: RecvStream,
+    #[debug(skip)]
     pub conn: StrongConnection,
 }
 
 #[derive(Debug)]
-struct ConnectionsActor {
+pub struct ConnectionsActor {
     endpoint: Endpoint,
     waiting: HashMap<NodeId, Vec<oneshot::Sender<Result<StrongConnection>>>>,
     active: HashMap<NodeId, WeakConnection>,
     dial_tasks: JoinSet<(NodeId, Result<Connection>)>,
     conn_tasks: JoinSet<(NodeId, Connection)>,
     stop_accepting: CancellationToken,
-    topic_streams_tx: mpsc::Sender<TopicRecvStream>,
+    topic_streams_tx: mpsc::Sender<RemoteStream>,
 }
 
 impl ConnectionsActor {
     pub fn new(
         endpoint: Endpoint,
-        topic_streams_tx: mpsc::Sender<TopicRecvStream>,
+        topic_streams_tx: mpsc::Sender<RemoteStream>,
         stop_accepting: CancellationToken,
     ) -> Self {
         Self {
@@ -61,12 +199,14 @@ impl ConnectionsActor {
             topic_streams_tx,
         }
     }
+
     pub async fn poll(&mut self) {
         tokio::select! {
             Some(res) = self.dial_tasks.join_next(), if !self.dial_tasks.is_empty() => {
                 let (node_id, conn) = res.expect("dial task panicked");
                 match conn {
                     Ok(conn) => {
+                        debug!(remote = %node_id.fmt_short(), "handle connection (connect)");
                         self.handle_connection(conn);
                     },
                     Err(err) => {
@@ -83,6 +223,7 @@ impl ConnectionsActor {
                 let (node_id, conn) = res.expect("dial task panicked");
                 self.closed(node_id, conn);
             }
+            _ = std::future::pending() => {}
         }
     }
 
@@ -113,6 +254,7 @@ impl ConnectionsActor {
         let Ok(node_id) = conn.remote_node_id() else {
             return;
         };
+        debug!(remote = %node_id.fmt_short(), "handle connection (accept)");
         let mut senders = self.waiting.remove(&node_id).unwrap_or_default();
         let conn = WeakConnection::new(conn);
         let old = self.active.insert(node_id, conn.clone());
@@ -122,6 +264,7 @@ impl ConnectionsActor {
         senders.drain(..).for_each(|reply| {
             reply.send(Ok(conn.clone_strong())).ok();
         });
+        let id = conn.stable_id();
         let fut = Self::connection_loop(
             // self.topics.clone(),
             node_id,
@@ -129,7 +272,7 @@ impl ConnectionsActor {
             self.stop_accepting.child_token(),
             self.topic_streams_tx.clone(),
         );
-        let fut = fut.instrument(error_span!("conn", me=%self.endpoint.node_id().fmt_short(), remote=%node_id.fmt_short()));
+        let fut = fut.instrument(error_span!("conn", remote=%node_id.fmt_short(), %id));
         self.conn_tasks.spawn(fut);
     }
 
@@ -146,42 +289,44 @@ impl ConnectionsActor {
         node_id: NodeId,
         conn: WeakConnection,
         cancel: CancellationToken,
-        topic_stream_tx: mpsc::Sender<TopicRecvStream>,
+        topic_stream_tx: mpsc::Sender<RemoteStream>,
     ) -> (NodeId, Connection) {
-        {
-            loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => {
-                        debug!("break: cancelled");
+        debug!("starting connection loop");
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    debug!("break: cancelled");
+                    break;
+                }
+                _ = conn.should_close() => {
+                    if let Some(reason) = conn.close_reason() {
+                        info!("break: connection closed: {reason:?}");
+                        break;
+                    } else if !conn.is_active() {
+                        info!("break: closing connection: unused");
+                        conn.close(42u32.into(), b"close");
                         break;
                     }
-                    _ = conn.should_close() => {
-                        if let Some(reason) = conn.close_reason() {
-                            debug!("break: connection closed: {reason:?}");
-                            break;
-                        } else if !conn.is_active() {
-                            info!("Closing connection: unused!");
-                            conn.close(42u32.into(), b"close");
+                }
+                res = conn.accept_uni() => {
+                    let mut recv_stream = match res {
+                        Ok(stream) => stream,
+                        Err(_err) => {
                             break;
                         }
-                    }
-                    res = conn.accept_uni() => {
-                        let mut recv_stream = match res {
-                            Ok(stream) => stream,
-                            Err(_err) => {
-                                break;
-                            }
-                        };
-                        let conn = conn.clone_strong();
-                        let Ok(header) = StreamHeader::read(&mut recv_stream).await else {
-                            // TODO: Error?
-                            break;
-                        };
-                        let topic_id = header.topic_id;
-                        let topic_stream = TopicRecvStream { topic_id, recv_stream, conn, node_id };
-                        if let Err(_err) = topic_stream_tx.send(topic_stream).await {
-                            break;
-                        }
+                    };
+                    let conn = conn.clone_strong();
+                    debug!("stream incoming");
+                    let Ok(header) = StreamHeader::read(&mut recv_stream).await else {
+                        // TODO: Error?
+                        debug!("failed to read stream header, abort");
+                        continue;
+                    };
+                    let topic_id = header.topic_id;
+                    let topic_stream = RemoteStream { topic_id, recv_stream, conn, node_id };
+                    debug!(topic=%topic_id.fmt_short(), "stream ok, forward");
+                    if let Err(_err) = topic_stream_tx.send(topic_stream).await {
+                        break;
                     }
                 }
             }
@@ -213,6 +358,7 @@ impl StreamHeader {
     pub async fn write(self, stream: &mut SendStream) -> Result<()> {
         let frame = WireStreamHeader::V0(self);
         let buf = postcard::to_stdvec(&frame)?;
+        stream.write_u32(buf.len() as u32).await?;
         stream.write_all(&buf).await?;
         Ok(())
     }
@@ -236,9 +382,19 @@ impl WeakConnection {
     }
 
     async fn should_close(&self) -> Result<(), ConnectionError> {
-        tokio::select! {
-            _ = self.usage.notify.notified() => {},
-            _ = self.conn.closed() => {}
+        if let Some(error) = self.conn.close_reason() {
+            return Err(error);
+        }
+        loop {
+            let notify = self.usage.notify_unused.notified();
+            tokio::select! {
+                _ = notify => {
+                    if !self.is_active() {
+                        break;
+                    }
+                },
+                _ = self.conn.closed() => {}
+            }
         }
         if let Some(error) = self.conn.close_reason() {
             Err(error)
@@ -293,14 +449,13 @@ struct UsageGuard(Arc<ConnectionUsage>);
 
 impl Drop for UsageGuard {
     fn drop(&mut self) {
-        debug!(
-            "drop guard - uses {} init {} bt {}",
-            self.0.uses.load(Ordering::SeqCst),
-            self.0.init.load(Ordering::SeqCst),
-            std::backtrace::Backtrace::capture()
-        );
+        // debug!(
+        //     "drop guard - uses {} init {}",
+        //     self.0.uses.load(Ordering::SeqCst),
+        //     self.0.init.load(Ordering::SeqCst),
+        // );
         if self.0.uses.fetch_sub(1, Ordering::SeqCst) == 1 {
-            self.0.notify.notify_waiters();
+            self.0.notify_unused.notify_waiters();
         }
     }
 }
@@ -317,7 +472,7 @@ impl Clone for UsageGuard {
 struct ConnectionUsage {
     init: AtomicBool,
     uses: AtomicU32,
-    notify: Notify,
+    notify_unused: Notify,
 }
 impl ConnectionUsage {
     fn new(self: &Arc<Self>) -> UsageGuard {
@@ -341,9 +496,9 @@ impl ConnectionUsage {
 
     fn is_active(&self) -> bool {
         debug!(
-            "conn checck - uses {} init {}",
-            self.uses.load(Ordering::SeqCst),
-            self.init.load(Ordering::SeqCst)
+            "conn.is_active - used {} init {}",
+            self.is_used(),
+            self.is_init()
         );
         self.is_used() || !self.is_init()
     }

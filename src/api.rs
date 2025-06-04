@@ -38,7 +38,6 @@ pub(crate) enum Request {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct JoinRequest {
     pub topic_id: TopicId,
-    pub bootstrap: BTreeSet<NodeId>,
 }
 
 /// Errors returned from methods in [`GossipApi`]
@@ -134,13 +133,12 @@ impl GossipApi {
         topic_id: TopicId,
         opts: JoinOptions,
     ) -> Result<GossipTopic, ApiError> {
-        let req = JoinRequest {
-            topic_id,
-            bootstrap: opts.bootstrap,
-        };
-        let (tx, rx) = self
+        let req = JoinRequest { topic_id };
+        let (mut tx, rx) = self
             .client
             .bidi_streaming(req, TOPIC_COMMANDS_CAP, opts.subscription_capacity)
+            .await?;
+        tx.send(Command::JoinPeers(opts.bootstrap.into_iter().collect()))
             .await?;
         Ok(GossipTopic::new(tx, rx))
     }
