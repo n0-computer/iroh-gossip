@@ -108,6 +108,11 @@ impl<PI> Message<PI> {
             },
         }
     }
+
+    /// Returns `true` if this is a disconnect message (which is the last message sent to a peer per topic).
+    pub fn is_disconnect(&self) -> bool {
+        matches!(self, Message::Swarm(hyparview::Message::Disconnect(_)))
+    }
 }
 
 /// An event to be emitted to the application for a particular topic.

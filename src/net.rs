@@ -13,7 +13,7 @@ use bytes::BytesMut;
 use futures_concurrency::stream::{stream_group, StreamGroup};
 use futures_util::FutureExt as _;
 use iroh::{
-    endpoint::{Connection, DirectAddr},
+    endpoint::{Connection, DirectAddr, RecvStream},
     protocol::ProtocolHandler,
     Endpoint, NodeAddr, NodeId, PublicKey, RelayUrl,
 };
@@ -22,7 +22,7 @@ use n0_future::{
     boxed::BoxFuture,
     task::{self, AbortOnDropHandle, JoinSet},
     time::Instant,
-    Stream, StreamExt as _,
+    FuturesUnordered, Stream, StreamExt as _,
 };
 use rand::rngs::StdRng;
 use rand_core::SeedableRng;
@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, error_span, trace, warn, Instrument};
+use util::StreamHeader;
 
 use self::util::{read_message, write_message, Timers};
 use crate::{
@@ -937,35 +938,91 @@ async fn connection_loop(
     max_message_size: usize,
     queue: Vec<ProtoMessage>,
 ) -> anyhow::Result<()> {
-    let (mut send, mut recv) = match origin {
-        ConnOrigin::Accept => conn.accept_bi().await?,
-        ConnOrigin::Dial => conn.open_bi().await?,
-    };
     debug!(?origin, "connection established");
-    let mut send_buf = BytesMut::new();
-    let mut recv_buf = BytesMut::new();
 
     let send_loop = async {
+        let mut streams = HashMap::new();
+        let mut send_buf = BytesMut::new();
+        let mut finishing = JoinSet::new();
         for msg in queue {
-            write_message(&mut send, &mut send_buf, &msg, max_message_size).await?;
+            write_message(
+                conn,
+                &mut streams,
+                &mut finishing,
+                &mut send_buf,
+                &msg,
+                max_message_size,
+            )
+            .await?;
         }
         while let Some(msg) = send_rx.recv().await {
-            write_message(&mut send, &mut send_buf, &msg, max_message_size).await?;
+            write_message(
+                conn,
+                &mut streams,
+                &mut finishing,
+                &mut send_buf,
+                &msg,
+                max_message_size,
+            )
+            .await?;
         }
-        // notify the other node no more data will be sent
-        let _ = send.finish();
-        // wait for the other node to ack all the sent data
-        let _ = send.stopped().await;
+        for (_, mut stream) in streams.drain() {
+            stream.finish().ok();
+            finishing.spawn(async move {
+                stream.stopped().await.ok();
+            });
+        }
+        while let Some(_) = finishing.join_next().await {}
         anyhow::Ok(())
     };
 
-    let recv_loop = async {
-        loop {
-            let msg = read_message(&mut recv, &mut recv_buf, max_message_size).await?;
+    async fn read_from_stream(
+        mut stream: RecvStream,
+        mut recv_buf: BytesMut,
+        max_message_size: usize,
+        header: StreamHeader,
+    ) -> anyhow::Result<(Option<ProtoMessage>, RecvStream, StreamHeader, BytesMut)> {
+        debug!("recv read in");
+        let msg = read_message(&mut stream, &mut recv_buf, max_message_size).await?;
+        debug!("recv read read");
+        let msg = msg.map(|msg| ProtoMessage {
+            topic: header.topic_id,
+            message: msg,
+        });
+        Ok((msg, stream, header, recv_buf))
+    }
 
-            match msg {
-                None => break,
-                Some(msg) => in_event_tx.send(InEvent::RecvMessage(from, msg)).await?,
+    let recv_loop = async {
+        // let mut streams = HashMap::new();
+        let mut read_futures = FuturesUnordered::new();
+        debug!("recv loop start");
+        loop {
+            debug!(read_futures = read_futures.len(), "recv loop wait");
+            tokio::select! {
+                _ = conn.closed() => break,
+                stream = conn.accept_uni() => {
+                    let mut stream = stream?;
+                    let header = StreamHeader::read(&mut stream).await?;
+                    debug!(topic=?header.topic_id, "recv stream opened");
+                    let recv_buf = BytesMut::new();
+                    read_futures.push(read_from_stream(stream, recv_buf, max_message_size, header));
+                }
+                res = read_futures.next(), if !read_futures.is_empty() => {
+                    debug!("recv stream read {res:?}");
+                    let Some(res) = res else {
+                        continue;
+                    };
+                    let (msg, stream, header, recv_buf) = res?;
+                    match msg {
+                        None => {
+                            debug!(topic=?header.topic_id, "recv stream closed");
+                        },
+                        Some(msg) => {
+                            in_event_tx.send(InEvent::RecvMessage(from, msg)).await?;
+                            read_futures.push(read_from_stream(stream, recv_buf, max_message_size, header));
+                        }
+                    }
+                }
             }
         }
         anyhow::Ok(())
@@ -1352,8 +1409,9 @@ pub(crate) mod test {
     }
 
     #[tokio::test]
-    #[traced_test]
+    // #[traced_test]
     async fn gossip_net_smoke() {
+        tracing_subscriber::fmt::try_init().ok();
         let mut rng = rand_chacha::ChaCha12Rng::seed_from_u64(1);
         let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
 
