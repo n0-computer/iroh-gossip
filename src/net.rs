@@ -29,11 +29,11 @@ use tracing::{debug, error_span, trace, warn, Instrument};
 use crate::{
     api::{self, GossipApi, RpcMessage},
     metrics::Metrics,
-    proto::{HyparviewConfig, PeerData, PlumtreeConfig, TopicId},
+    proto::{self, HyparviewConfig, PeerData, PlumtreeConfig, TopicId},
 };
 
 use self::connections::ConnectionPool;
-use self::topic::{Config, SubscribeChannels, ToTopic, TopicHandle};
+use self::topic::{SubscribeChannels, ToTopic, TopicHandle};
 
 mod connections;
 mod topic;
@@ -63,12 +63,6 @@ pub enum Error {
     /// Tried to construct empty peer data
     #[error("empty peer data")]
     EmptyPeerData,
-    // /// Writing a message to the network
-    // #[error("write {0}")]
-    // Write(#[from] util_old::WriteError),
-    // /// Reading a message from the network
-    // #[error("read {0}")]
-    // Read(#[from] util_old::ReadError),
     /// A watchable disconnected.
     #[error(transparent)]
     WatchableDisconnected(#[from] iroh::watchable::Disconnected),
@@ -168,26 +162,26 @@ impl ProtocolHandler for Gossip {
 /// Builder to configure and construct [`Gossip`].
 #[derive(Debug, Clone)]
 pub struct Builder {
-    config: topic::Config,
+    config: proto::Config,
 }
 
 impl Builder {
     /// Sets the maximum message size in bytes.
     /// By default this is `4096` bytes.
     pub fn max_message_size(mut self, size: usize) -> Self {
-        self.config.proto.max_message_size = size;
+        self.config.max_message_size = size;
         self
     }
 
     /// Set the membership configuration.
     pub fn membership_config(mut self, config: HyparviewConfig) -> Self {
-        self.config.proto.membership = config;
+        self.config.membership = config;
         self
     }
 
     /// Set the broadcast configuration.
     pub fn broadcast_config(mut self, config: PlumtreeConfig) -> Self {
-        self.config.proto.broadcast = config;
+        self.config.broadcast = config;
         self
     }
 
@@ -220,13 +214,9 @@ impl Builder {
         };
 
         let me = endpoint.node_id().fmt_short();
-        let max_message_size = self.config.proto.max_message_size;
-        let (actor, rpc_tx, local_tx) = Actor::new(
-            endpoint,
-            Arc::new(self.config),
-            metrics.clone(),
-            &addr.into(),
-        );
+        let max_message_size = self.config.max_message_size;
+        let (actor, rpc_tx, local_tx) =
+            Actor::new(endpoint, self.config, metrics.clone(), &addr.into());
 
         let actor_handle = task::spawn(
             async move {
@@ -311,14 +301,14 @@ struct Actor {
     topic_handles: HashMap<TopicId, TopicHandle>,
     topic_tasks: tokio::task::JoinSet<self::topic::Topic>,
     metrics: Arc<Metrics>,
-    config: Arc<Config>,
+    config: proto::Config,
     our_peer_data: Watchable<PeerData>,
 }
 
 impl Actor {
     fn new(
         endpoint: Endpoint,
-        config: Arc<Config>,
+        config: proto::Config,
         metrics: Arc<Metrics>,
         my_addr: &AddrInfo,
     ) -> (
@@ -328,7 +318,6 @@ impl Actor {
     ) {
         let (rpc_tx, rpc_rx) = mpsc::channel(TO_ACTOR_CAP);
         let (local_tx, local_rx) = mpsc::channel(16);
-        // let (from_topic_tx, from_topic_rx) = mpsc::channel(16);
 
         let connection_pool = ConnectionPool::new(endpoint.clone());
         let our_peer_data = Watchable::new(my_addr.encode());
@@ -342,8 +331,6 @@ impl Actor {
             connection_pool,
             metrics,
             topic_tasks: JoinSet::default(),
-            // from_topic_tx,
-            // from_topic_rx,
             our_peer_data,
         };
 
@@ -466,7 +453,7 @@ impl Actor {
     async fn handle_rpc_msg(&mut self, msg: RpcMessage) {
         trace!("handle to_actor  {msg:?}");
         match msg {
-            RpcMessage::Join(msg) => {
+            RpcMessage::Subscribe(msg) => {
                 let WithChannels {
                     inner,
                     rx,
@@ -474,7 +461,7 @@ impl Actor {
                     // TODO(frando): make use of span?
                     span: _,
                 } = msg;
-                let api::JoinRequest { topic_id } = inner;
+                let api::SubscribeRequest { topic_id } = inner;
                 let channels = (tx, rx);
                 self.subscribe(topic_id, channels).await;
             }
@@ -682,10 +669,8 @@ pub(crate) mod test {
             let metrics = Arc::new(Metrics::default());
 
             let max_message_size = config.max_message_size;
-            let mut tconfig = Config::default();
-            tconfig.proto = config;
             let (actor, to_actor_tx, conn_tx) =
-                Actor::new(endpoint, Arc::new(tconfig), metrics.clone(), &my_addr);
+                Actor::new(endpoint, config, metrics.clone(), &my_addr);
 
             let _actor_handle =
                 AbortOnDropHandle::new(task::spawn(futures_lite::future::pending()));
@@ -779,9 +764,9 @@ pub(crate) mod test {
     }
 
     #[tokio::test]
-    // #[traced_test]
+    #[traced_test]
     async fn gossip_net_smoke() {
-        tracing_subscriber::fmt::try_init().ok();
+        // tracing_subscriber::fmt::try_init().ok();
         let mut rng = rand_chacha::ChaCha12Rng::seed_from_u64(1);
         let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
 
@@ -907,9 +892,9 @@ pub(crate) mod test {
     ///   droppetopicd
     // NOTE: this is a regression test.
     #[tokio::test]
-    // #[traced_test]
+    #[traced_test]
     async fn subscription_cleanup() -> testresult::TestResult {
-        tracing_subscriber::fmt::try_init().ok();
+        // tracing_subscriber::fmt::try_init().ok();
         let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
         let ct = CancellationToken::new();
         let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
@@ -1018,7 +1003,7 @@ pub(crate) mod test {
         tracing::info!("subscribe2 done, now sleep and wait join");
 
         // TODO(Frando): Remove timeout. Added because the topics don't have manual actor loops yet.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(1000)).await;
         tracing::info!("sleep done, should be joined");
         let state = actor
             .topic_handles
@@ -1051,9 +1036,9 @@ pub(crate) mod test {
     /// times.
     // NOTE: This is a regression test
     #[tokio::test(flavor = "multi_thread")]
-    // #[traced_test]
+    #[traced_test]
     async fn can_reconnect() -> testresult::TestResult {
-        tracing_subscriber::fmt::try_init().ok();
+        // tracing_subscriber::fmt::try_init().ok();
         let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
         let ct = CancellationToken::new();
         let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
@@ -1140,9 +1125,9 @@ pub(crate) mod test {
     }
 
     #[tokio::test]
-    // #[traced_test]
+    #[traced_test]
     async fn can_die_and_reconnect() -> testresult::TestResult {
-        tracing_subscriber::fmt::try_init().ok();
+        // tracing_subscriber::fmt::try_init().ok();
         /// Runs a future in a separate runtime on a separate thread, cancelling everything
         /// abruptly once `cancel` is invoked.
         fn run_in_thread<T: Send + 'static>(
