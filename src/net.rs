@@ -6,13 +6,12 @@ use std::{
     sync::Arc,
 };
 
-use connections::{ConnectionsActor, RemoteStream};
 use futures_util::FutureExt;
 use iroh::{
     endpoint::{Connection, DirectAddr},
     protocol::ProtocolHandler,
     watchable::Watchable,
-    Endpoint, NodeAddr, NodeId, PublicKey, RelayUrl,
+    Endpoint, NodeAddr, NodeId, RelayUrl,
 };
 use irpc::WithChannels;
 use n0_future::{
@@ -21,41 +20,30 @@ use n0_future::{
     Stream, StreamExt as _,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
-use topic::{Config, FromTopic, SubscribeChannels, ToTopic, TopicHandle};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinSet,
+};
 use tracing::{debug, error_span, trace, warn, Instrument};
 
 use crate::{
-    api::RpcMessage,
+    api::{self, GossipApi, RpcMessage},
     metrics::Metrics,
-    proto::{self, HyparviewConfig, PeerData, PlumtreeConfig, TopicId},
+    proto::{HyparviewConfig, PeerData, PlumtreeConfig, TopicId},
 };
+
+use self::connections::ConnectionPool;
+use self::topic::{Config, SubscribeChannels, ToTopic, TopicHandle};
 
 mod connections;
 mod topic;
 mod util;
-
-use crate::api::{self, GossipApi};
 
 /// ALPN protocol name
 pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/0";
 
 /// Channel capacity for the ToActor message queue (single)
 const TO_ACTOR_CAP: usize = 64;
-// /// Channel capacity for the send queue (one per connection)
-// const SEND_QUEUE_CAP: usize = 64;
-// /// Channel capacity for the InEvent message queue (single)
-// const IN_EVENT_CAP: usize = 1024;
-// /// Channel capacity for broadcast subscriber event queue (one per topic)
-// const TOPIC_EVENT_CAP: usize = 256;
-// /// Name used for logging when new node addresses are added from gossip.
-// const SOURCE_NAME: &str = "gossip";
-
-/// Events emitted from the gossip protocol
-pub type ProtoEvent = proto::Event<PublicKey>;
-/// Commands for the gossip protocol
-pub type ProtoCommand = proto::Command<PublicKey>;
 
 /// Net related errors
 #[derive(Debug, thiserror::Error)]
@@ -317,16 +305,13 @@ impl Gossip {
 /// Actor that sends and handles messages between the connection and main state loops
 struct Actor {
     endpoint: Endpoint,
-    /// Input messages to the actor
     rpc_rx: mpsc::Receiver<RpcMessage>,
     local_rx: mpsc::Receiver<LocalActorMessage>,
-    connections: ConnectionsActor,
-    topics: HashMap<TopicId, TopicHandle>,
+    connection_pool: ConnectionPool,
+    topic_handles: HashMap<TopicId, TopicHandle>,
+    topic_tasks: tokio::task::JoinSet<self::topic::Topic>,
     metrics: Arc<Metrics>,
     config: Arc<Config>,
-    from_topic_tx: mpsc::Sender<FromTopic>,
-    from_topic_rx: mpsc::Receiver<FromTopic>,
-    incoming_stream_rx: mpsc::Receiver<RemoteStream>,
     our_peer_data: Watchable<PeerData>,
 }
 
@@ -343,16 +328,9 @@ impl Actor {
     ) {
         let (rpc_tx, rpc_rx) = mpsc::channel(TO_ACTOR_CAP);
         let (local_tx, local_rx) = mpsc::channel(16);
-        let (from_topic_tx, from_topic_rx) = mpsc::channel(16);
-        let (incoming_stream_tx, incoming_stream_rx) = mpsc::channel(16);
+        // let (from_topic_tx, from_topic_rx) = mpsc::channel(16);
 
-        let stop_accepting = CancellationToken::new();
-        let connections = ConnectionsActor::new(
-            endpoint.clone(),
-            incoming_stream_tx,
-            stop_accepting.child_token(),
-        );
-
+        let connection_pool = ConnectionPool::new(endpoint.clone());
         let our_peer_data = Watchable::new(my_addr.encode());
 
         let actor = Actor {
@@ -360,12 +338,12 @@ impl Actor {
             rpc_rx,
             local_rx,
             config,
-            topics: Default::default(),
-            connections,
+            topic_handles: Default::default(),
+            connection_pool,
             metrics,
-            from_topic_tx,
-            from_topic_rx,
-            incoming_stream_rx,
+            topic_tasks: JoinSet::default(),
+            // from_topic_tx,
+            // from_topic_rx,
             our_peer_data,
         };
 
@@ -437,15 +415,12 @@ impl Actor {
             conn = self.local_rx.recv() => {
                 match conn {
                     Some(LocalActorMessage::Shutdown { reply }) => {
-                        debug!("received shutdown message, quit all topics");
-                        // self.quit_queue.extend(self.topics.keys().copied());
-                        // self.process_quit_queue().await.ok();
-                        debug!("all topics quit, stop gossip actor");
+                        debug!("received shutdown message, quit actor");
                         reply.send(()).ok();
                         return Ok(None)
                     },
                     Some(LocalActorMessage::HandleConnection(conn)) => {
-                        self.connections.handle_connection(conn);
+                        self.connection_pool.handle_connection(conn);
                     }
                     None => {
                         debug!("all gossip handles dropped, stop gossip actor");
@@ -457,38 +432,17 @@ impl Actor {
                 trace!(?i, "tick: to_actor_rx");
                 self.metrics.actor_tick_rx.inc();
                 match msg {
-                    Some(msg) => {
-                        self.handle_rpc_msg(msg).await?;
-                    }
+                    Some(msg) => self.handle_rpc_msg(msg).await,
                     None => {
                         debug!("all gossip handles dropped, stop gossip actor");
                         return Ok(None)
                     }
                 }
             },
-            Some(msg) = self.from_topic_rx.recv() => {
-                trace!(?i, "tick: from_topic_rx {msg:?}");
-                match msg {
-                    FromTopic::Connect { node_id, reply } => {
-                        self.connections.get_or_connect(node_id, reply);
-                    }
-                    FromTopic::Closed { topic_id, state } => {
-                        self.topic_closed(topic_id, state).await;
-                    }
-                }
+            Some(res) = self.topic_tasks.join_next(), if !self.topic_tasks.is_empty() => {
+                let state = res.expect("topic task panicked");
+                self.topic_closed(state).await;
             }
-            Some(stream) = self.incoming_stream_rx.recv() => {
-                trace!(?i, "tick: topic_streams_rx");
-                if let Some(handle) = self.topics.get_mut(&stream.topic_id) {
-                    debug!(remote=%stream.node_id.fmt_short(), topic=%stream.topic_id.fmt_short(), "stream for existing topic: fwd");
-                    handle.send(ToTopic::RemoteStream(stream)).await;
-                } else {
-                    debug!(remote=%stream.node_id.fmt_short(), topic=%stream.topic_id.fmt_short(), "stream for unknown topic: drop");
-                }
-            }
-            _ = self.connections.poll() => {
-                trace!(?i, "tick: connections.poll");
-            },
             Some(new_addresses) = direct_addresses_stream.next() => {
                 trace!(?i, "tick: new_endpoints");
                 self.metrics.actor_tick_endpoint.inc();
@@ -509,7 +463,7 @@ impl Actor {
         let _ = self.our_peer_data.set(peer_data);
     }
 
-    async fn handle_rpc_msg(&mut self, msg: RpcMessage) -> Result<(), Error> {
+    async fn handle_rpc_msg(&mut self, msg: RpcMessage) {
         trace!("handle to_actor  {msg:?}");
         match msg {
             RpcMessage::Join(msg) => {
@@ -525,36 +479,40 @@ impl Actor {
                 self.subscribe(topic_id, channels).await;
             }
         }
-        Ok(())
     }
 
     async fn subscribe(&mut self, topic_id: TopicId, channels: SubscribeChannels) {
         let me = self.endpoint.node_id();
-        let topic_handle = self.topics.entry(topic_id).or_insert_with(|| {
+        let topic_handle = self.topic_handles.entry(topic_id).or_insert_with(|| {
             let endpoint = self.endpoint.clone();
             let peer_data_fn = Arc::new(move |node_id, peer_data: PeerData| {
                 if let Some(node_addr) = AddrInfo::decode_to_node_addr(&peer_data, node_id) {
                     endpoint.add_node_addr(node_addr).ok();
                 }
             });
-            TopicHandle::spawn(
+            TopicHandle::spawn_into(
+                &mut self.topic_tasks,
                 me,
                 topic_id,
                 self.config.clone(),
-                self.from_topic_tx.clone(),
                 peer_data_fn,
                 self.our_peer_data.watch(),
+                self.connection_pool.clone(),
             )
         });
         topic_handle.send(ToTopic::Subscribe(channels)).await;
     }
 
-    async fn topic_closed(&mut self, topic_id: TopicId, state: self::topic::Topic) {
+    async fn topic_closed(&mut self, state: self::topic::Topic) {
+        let topic_id = state.id();
         tracing::info!(topic=%topic_id.fmt_short(), "topic closed");
-        if let Some(handle) = self.topics.remove(&topic_id) {
-            if let Some(new_handle) = handle.maybe_respawn(state).await {
+        if let Some(handle) = self.topic_handles.remove(&topic_id) {
+            if let Some(new_handle) = handle
+                .maybe_respawn_into(&mut self.topic_tasks, state)
+                .await
+            {
                 tracing::info!(topic=%topic_id.fmt_short(), "topic respawned");
-                self.topics.insert(topic_id, new_handle);
+                self.topic_handles.insert(topic_id, new_handle);
             } else {
                 tracing::info!(topic=%topic_id.fmt_short(), "topic closed and dropped");
             }
@@ -629,7 +587,7 @@ pub(crate) mod test {
     use tracing::{info, instrument};
     use tracing_test::traced_test;
 
-    use crate::api::Event;
+    use crate::{api::Event, proto};
 
     use super::*;
 
@@ -816,6 +774,7 @@ pub(crate) mod test {
                 }
             }
         }
+        endpoint.close().await;
         Ok(())
     }
 
@@ -1044,7 +1003,10 @@ pub(crate) mod test {
 
         // TODO(Frando): Remove timeout. Added because the topics don't have manual actor loops yet.
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let state = actor.topics.get(&topic).expect("get registered topic");
+        let state = actor
+            .topic_handles
+            .get(&topic)
+            .expect("get registered topic");
         assert!(state.joined());
 
         // signal the second subscribe, we should remain subscribed
@@ -1053,14 +1015,17 @@ pub(crate) mod test {
 
         // TODO(Frando): Remove timeout. Added because the topics don't have manual actor loops yet.
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let state = actor.topics.get(&topic).expect("get registered topic");
+        let state = actor
+            .topic_handles
+            .get(&topic)
+            .expect("get registered topic");
         assert!(state.joined());
 
         // signal to drop the second handle, the topic should no longer be subscribed
         tx.send(()).await?;
         actor.steps(1).await?; // topic closed
 
-        assert!(!actor.topics.contains_key(&topic));
+        assert!(!actor.topic_handles.contains_key(&topic));
 
         // cleanup and ensure everything went as expected
         ct.cancel();
@@ -1080,7 +1045,7 @@ pub(crate) mod test {
     /// unsubscribe and then resubscribe and connection between the nodes should succeed both
     /// times.
     // NOTE: This is a regression test
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     // #[traced_test]
     async fn can_reconnect() -> testresult::TestResult {
         tracing_subscriber::fmt::try_init().ok();
@@ -1105,7 +1070,6 @@ pub(crate) mod test {
         let topic: TopicId = blake3::hash(b"can_reconnect").into();
         tracing::info!(%topic, "joining");
 
-        let ct2 = ct.child_token();
         // channel used to signal the second gossip instance to advance the test
         let (tx, mut rx) = mpsc::channel::<()>(1);
         let addr1 = NodeAddr::new(node_id1).with_relay_url(relay_url.clone());
@@ -1126,8 +1090,6 @@ pub(crate) mod test {
 
             sub.joined().await?;
             tracing::info!("go2 sub2 joined!");
-
-            ct2.cancelled().await;
 
             anyhow::Ok(())
         }
@@ -1161,19 +1123,21 @@ pub(crate) mod test {
         assert_eq!(ev, Some(Event::NeighborUp(node_id2)));
         tracing::info!("node 2 rejoined!");
 
-        // cleanup and ensure everything went as expected
-        ct.cancel();
+        // wait for go2 to also be rejoined, then the task terminates
         let wait = Duration::from_secs(2);
+        timeout(wait, go2_handle).await???;
+        ct.cancel();
+        // cleanup and ensure everything went as expected
         timeout(wait, ep1_handle).await???;
         timeout(wait, ep2_handle).await???;
-        timeout(wait, go2_handle).await???;
 
         testresult::TestResult::Ok(())
     }
 
     #[tokio::test]
-    #[traced_test]
+    // #[traced_test]
     async fn can_die_and_reconnect() -> testresult::TestResult {
+        tracing_subscriber::fmt::try_init().ok();
         /// Runs a future in a separate runtime on a separate thread, cancelling everything
         /// abruptly once `cancel` is invoked.
         fn run_in_thread<T: Send + 'static>(

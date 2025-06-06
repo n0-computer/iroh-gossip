@@ -6,20 +6,20 @@ use std::{
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use anyhow::Context;
 use bytes::BytesMut;
-use iroh::{endpoint::SendStream, watchable::Watcher, NodeId};
+use iroh::{watchable::Watcher, NodeId};
 use irpc::channel::spsc;
-use n0_future::{task::AbortOnDropHandle, time::Instant, StreamExt};
+use n0_future::{time::Instant, StreamExt};
 use rand::rngs::StdRng;
 use tokio::{
     sync::{
         broadcast,
-        mpsc::{self},
-        oneshot,
+        mpsc::{self, error::TrySendError},
     },
     task::{AbortHandle, JoinSet},
 };
-use tracing::{debug, error_span, trace, warn, Instrument};
+use tracing::{debug, error_span, instrument, trace, warn, Instrument};
 
 use crate::{
     api,
@@ -27,8 +27,8 @@ use crate::{
 };
 
 use super::{
-    connections::{RemoteStream, StreamHeader, StrongConnection},
-    util::{read_message, write_message, Timers},
+    connections::{ConnectionPool, RemoteRecvStream},
+    util::{read_message, write_message, Timers, WriteError},
 };
 
 pub(super) type SubscribeChannels = (spsc::Sender<api::Event>, spsc::Receiver<api::Command>);
@@ -61,20 +61,6 @@ impl Default for Config {
 #[derive(derive_more::Debug)]
 pub(crate) enum ToTopic {
     Subscribe(#[debug("Channels")] SubscribeChannels),
-    RemoteStream(RemoteStream),
-}
-
-#[derive(derive_more::Debug)]
-pub(crate) enum FromTopic {
-    Connect {
-        node_id: NodeId,
-        reply: oneshot::Sender<anyhow::Result<StrongConnection>>,
-    },
-    Closed {
-        topic_id: TopicId,
-        #[debug("Topic")]
-        state: Topic,
-    },
 }
 
 type Message = proto::topic::Message<NodeId>;
@@ -92,33 +78,37 @@ pub(crate) struct TopicHandle {
     tx: mpsc::Sender<ToTopic>,
     #[cfg(test)]
     joined: Arc<AtomicBool>,
-    handle: AbortOnDropHandle<()>,
+    // handle: AbortOnDropHandle<()>,
+    handle: AbortHandle,
     queue: Vec<ToTopic>,
 }
 
 impl TopicHandle {
-    pub(crate) fn spawn(
+    pub(crate) fn spawn_into(
+        join_set: &mut JoinSet<Topic>,
         me: NodeId,
         topic_id: TopicId,
         config: Arc<Config>,
-        from_topic_tx: mpsc::Sender<FromTopic>,
         on_peer_data: OnPeerData,
         peer_data_updates: Watcher<PeerData>,
-    ) -> TopicHandle {
+        connection_pool: ConnectionPool,
+    ) -> Self {
         let (to_topic_tx, to_topic_rx) = mpsc::channel(TO_TOPIC_CAP);
         let topic = Topic::new(
             me,
             topic_id,
             config,
             to_topic_rx,
-            from_topic_tx,
             on_peer_data,
             peer_data_updates,
+            connection_pool,
         );
         #[cfg(test)]
         let joined = topic.joined.clone();
-        let handle = topic.spawn();
-        TopicHandle {
+
+        let handle = join_set.spawn(topic.run());
+
+        Self {
             tx: to_topic_tx,
             #[cfg(test)]
             joined,
@@ -126,8 +116,43 @@ impl TopicHandle {
             queue: Vec::new(),
         }
     }
+    // pub(crate) fn spawn(
+    //     me: NodeId,
+    //     topic_id: TopicId,
+    //     config: Arc<Config>,
+    //     from_topic_tx: mpsc::Sender<FromTopic>,
+    //     on_peer_data: OnPeerData,
+    //     peer_data_updates: Watcher<PeerData>,
+    //     connection_pool: ConnectionPool,
+    // ) -> TopicHandle {
+    //     let (to_topic_tx, to_topic_rx) = mpsc::channel(TO_TOPIC_CAP);
+    //     let topic = Topic::new(
+    //         me,
+    //         topic_id,
+    //         config,
+    //         to_topic_rx,
+    //         from_topic_tx,
+    //         on_peer_data,
+    //         peer_data_updates,
+    //         connection_pool,
+    //     );
+    //     #[cfg(test)]
+    //     let joined = topic.joined.clone();
+    //     let handle = topic.spawn();
+    //     TopicHandle {
+    //         tx: to_topic_tx,
+    //         #[cfg(test)]
+    //         joined,
+    //         handle,
+    //         queue: Vec::new(),
+    //     }
+    // }
 
-    pub(crate) async fn maybe_respawn(mut self, mut state: Topic) -> Option<Self> {
+    pub(crate) async fn maybe_respawn_into(
+        mut self,
+        join_set: &mut JoinSet<Topic>,
+        mut state: Topic,
+    ) -> Option<Self> {
         debug!("maybe_respawn");
         let mut queue = vec![];
         while let Ok(msg) = state.to_topic_rx.try_recv() {
@@ -140,7 +165,8 @@ impl TopicHandle {
             debug!("respawn!");
             let (to_topic_tx, to_topic_rx) = mpsc::channel(TO_TOPIC_CAP);
             self.tx = to_topic_tx;
-            self.handle = state.respawn(to_topic_rx);
+            state.reset(to_topic_rx);
+            self.handle = join_set.spawn(state.run());
             for msg in queue.drain(..) {
                 self.send(msg).await;
             }
@@ -173,10 +199,12 @@ pub(crate) struct Topic {
 
     neighbors: BTreeSet<NodeId>,
     peers: HashMap<NodeId, PeerState>,
-    peer_send_tasks: JoinSet<NodeId>,
+    peer_send_tasks: JoinSet<(NodeId, anyhow::Result<()>)>,
     peer_recv_tasks: JoinSet<NodeId>,
-    neighbor_recv_rx: mpsc::Receiver<(NodeId, Message)>,
-    neighbor_recv_tx: mpsc::Sender<(NodeId, Message)>,
+    peer_recv_rx: mpsc::Receiver<(NodeId, Message)>,
+    peer_recv_tx: mpsc::Sender<(NodeId, Message)>,
+
+    accept_rx: mpsc::Receiver<RemoteRecvStream>,
 
     config: Arc<Config>,
     closed: bool,
@@ -187,13 +215,13 @@ pub(crate) struct Topic {
     event_send_tasks: JoinSet<()>,
 
     to_topic_rx: mpsc::Receiver<ToTopic>,
-    to_gossip_actor: mpsc::Sender<FromTopic>,
     #[cfg(test)]
     joined: Arc<AtomicBool>,
     #[debug(skip)]
     on_peer_data: OnPeerData,
     peer_data_updates: Watcher<PeerData>,
     init: bool,
+    connection_pool: ConnectionPool,
 }
 
 #[derive(Debug, Default)]
@@ -204,23 +232,28 @@ struct PeerState {
 }
 
 impl Topic {
+    pub fn id(&self) -> TopicId {
+        self.id
+    }
+
     fn new(
         me: NodeId,
         topic_id: TopicId,
         config: Arc<Config>,
         to_topic_rx: mpsc::Receiver<ToTopic>,
-        from_topic_tx: mpsc::Sender<FromTopic>,
         on_peer_data: OnPeerData,
         peer_data_updates: Watcher<PeerData>,
+        connection_pool: ConnectionPool,
     ) -> Self {
         // This channel can be small: Network should wait so that we have flow control.
         let (neighbor_recv_tx, neighbor_recv_rx) = mpsc::channel(NEIGHBOR_RECV_CAPACITY);
         let peer_data = peer_data_updates.get().ok();
         let state = proto::topic::State::new(me, peer_data, config.proto.clone());
         let (event_sender, _event_recveiver) = broadcast::channel(config.event_channel_cap);
+        let accept_rx = connection_pool.accept_topic(topic_id, 16);
         Self {
-            neighbor_recv_tx,
-            neighbor_recv_rx,
+            peer_recv_tx: neighbor_recv_tx,
+            peer_recv_rx: neighbor_recv_rx,
             id: topic_id,
             out_events: Default::default(),
             state,
@@ -235,46 +268,48 @@ impl Topic {
             event_send_tasks: Default::default(),
             neighbors: Default::default(),
             to_topic_rx,
-            to_gossip_actor: from_topic_tx,
             #[cfg(test)]
             joined: Default::default(),
             on_peer_data,
             peer_data_updates,
             init: false,
+            connection_pool,
+            accept_rx,
         }
     }
 
-    fn respawn(mut self, to_topic_rx: mpsc::Receiver<ToTopic>) -> AbortOnDropHandle<()> {
+    fn reset(&mut self, to_topic_rx: mpsc::Receiver<ToTopic>) {
         let (neighbor_recv_tx, neighbor_recv_rx) = mpsc::channel(NEIGHBOR_RECV_CAPACITY);
         self.to_topic_rx = to_topic_rx;
-        self.neighbor_recv_tx = neighbor_recv_tx;
-        self.neighbor_recv_rx = neighbor_recv_rx;
+        self.peer_recv_tx = neighbor_recv_tx;
+        self.peer_recv_rx = neighbor_recv_rx;
         self.command_receivers = Default::default();
         self.event_send_tasks = Default::default();
         self.init = false;
-        self.spawn()
+        // self.spawn()
     }
 
-    fn spawn(mut self) -> AbortOnDropHandle<()> {
-        let id = self.id;
-        let task = n0_future::task::spawn(
-            async move {
-                self.run().await;
-                self.to_gossip_actor
-                    .clone()
-                    .send(FromTopic::Closed {
-                        topic_id: id,
-                        state: self,
-                    })
-                    .await
-                    .ok();
-            }
-            .instrument(error_span!("topic", topic = %id.fmt_short())),
-        );
-        AbortOnDropHandle::new(task)
-    }
+    // fn spawn(mut self) -> AbortOnDropHandle<()> {
+    //     let id = self.id;
+    //     let task = n0_future::task::spawn(
+    //         async move {
+    //             self.run().await;
+    //             self.to_gossip_actor
+    //                 .clone()
+    //                 .send(FromTopic::Closed {
+    //                     topic_id: id,
+    //                     state: self,
+    //                 })
+    //                 .await
+    //                 .ok();
+    //         }
+    //         .instrument(error_span!("topic", topic = %id.fmt_short())),
+    //     );
+    //     AbortOnDropHandle::new(task)
+    // }
 
-    async fn run(&mut self) {
+    #[instrument(skip_all, fields(topic=%self.id))]
+    async fn run(mut self) -> Self {
         debug!("actor start");
         for i in 0.. {
             if !self.tick(i).await || self.should_close() {
@@ -297,11 +332,13 @@ impl Topic {
         // Drain queue for potential further quit messages.
         // TODO: remove this
         trace!("actor closed");
+        self
     }
 
     async fn tick(&mut self, i: usize) -> bool {
         trace!("tick {i}: wait. send tasks: {}", self.peer_send_tasks.len());
         tokio::select! {
+            biased;
             msg = self.to_topic_rx.recv() => {
                 trace!(tick=i, "tick: to_topic {msg:?}");
                 let Some(msg) = msg else {
@@ -310,7 +347,16 @@ impl Topic {
                 };
                 match msg {
                     ToTopic::Subscribe(channels) => self.handle_subscribe(channels),
-                    ToTopic::RemoteStream(recv_stream) => self.handle_remote_stream(recv_stream),
+                    // ToTopic::RemoteStream(recv_stream) => self.handle_remote_stream(recv_stream),
+                }
+            }
+            remote_stream = self.accept_rx.recv() => {
+                if let Some(stream) = remote_stream {
+                    self.handle_remote_stream(stream);
+                } else {
+                    // TODO: connection actor died, or topic was reregsitered
+                    warn!("connection actor died");
+                    return false;
                 }
             }
             Ok(our_peer_data) = self.peer_data_updates.updated() => {
@@ -326,16 +372,15 @@ impl Topic {
             _ = self.event_send_tasks.join_next(), if !self.event_send_tasks.is_empty() => {
                 trace!(tick=i, "tick: event sender closed");
             }
-            Some((node_id, message)) = self.neighbor_recv_rx.recv() => {
+            Some((node_id, message)) = self.peer_recv_rx.recv() => {
                 trace!(tick=i, node=%node_id.fmt_short(), "tick: recv from remote {message:?}");
                 self.handle_in_event(InEvent::RecvMessage(node_id, message));
             }
-            Some(node_id) = self.peer_send_tasks.join_next(), if !self.peer_send_tasks.is_empty() => {
-                tracing::info!(tick=i, ?node_id, "tick: sender to remote closed");
-                let node_id = node_id.expect("sender task panicked");
+            Some(res) = self.peer_send_tasks.join_next(), if !self.peer_send_tasks.is_empty() => {
+                let (node_id, _res) = res.expect("sender task panicked");
                 trace!(tick=i, node=%node_id.fmt_short(), "tick: sender to remote closed");
                 let peer = self.peers.get_mut(&node_id).expect("sender state to be present");
-                peer.send_tasks -= 1;
+                peer.send_tasks = peer.send_tasks.saturating_sub(1);
                 if peer.send_tasks == 0 {
                     self.handle_in_event(InEvent::PeerDisconnected(node_id));
                     self.peers.remove(&node_id);
@@ -354,20 +399,15 @@ impl Topic {
         self.init && self.command_receivers.is_empty() && self.event_sender.receiver_count() == 0
     }
 
-    fn handle_remote_stream(&mut self, mut stream: RemoteStream) {
-        let tx = self.neighbor_recv_tx.clone();
+    fn handle_remote_stream(&mut self, mut stream: RemoteRecvStream) {
+        let tx = self.peer_recv_tx.clone();
         let node_id = stream.node_id;
         let fut = async move {
             let mut buffer = BytesMut::new();
             loop {
                 // read message
                 // TODO: max message size
-                match read_message(
-                    &mut stream.recv_stream,
-                    &mut buffer,
-                    DEFAULT_MAX_MESSAGE_SIZE,
-                )
-                .await
+                match read_message(&mut stream.stream, &mut buffer, DEFAULT_MAX_MESSAGE_SIZE).await
                 {
                     Err(err) => {
                         debug!("remote recv stream closed: {err:?}");
@@ -380,7 +420,7 @@ impl Topic {
                         break;
                     }
                     Ok(Some(message)) => {
-                        if let Err(_) = tx.send((stream.node_id, message)).await {
+                        if let Err(_) = tx.send((node_id, message)).await {
                             debug!("remote recv: closing because topic closed");
                             break;
                         }
@@ -478,11 +518,16 @@ impl Topic {
         self.event_sender.send(event).ok();
     }
 
-    fn get_sender(&mut self, node_id: NodeId) -> &mut mpsc::Sender<Message> {
-        let mut spawn_sender = || {
+    fn send(&mut self, node_id: NodeId, message: Message) {
+        let peer = self.peers.entry(node_id).or_default();
+        let sender = if let Some(ref mut channel) = peer.sender {
+            debug!(peer=%node_id.fmt_short(), "get sender");
+            channel
+        } else {
+            debug!(peer=%node_id.fmt_short(), cap=self.config.peer_channel_cap, "spawn new sender");
             let (tx, rx) = mpsc::channel(self.config.peer_channel_cap);
             let actor = SendLoop {
-                to_gossip_actor: self.to_gossip_actor.clone(),
+                connection_pool: self.connection_pool.clone(),
                 node_id,
                 from_topic: rx,
                 topic_id: self.id,
@@ -491,129 +536,109 @@ impl Topic {
                 .run()
                 .instrument(error_span!("send", remote=%node_id.fmt_short()));
             self.peer_send_tasks.spawn(fut);
-            tx
-        };
-
-        let peer = self.peers.entry(node_id).or_default();
-        if let Some(ref mut channel) = peer.sender {
-            channel
-        } else {
-            let tx = spawn_sender();
             peer.send_tasks += 1;
             peer.sender.insert(tx)
-        }
-    }
-
-    fn send(&mut self, node_id: NodeId, message: Message) {
-        let sender = self.get_sender(node_id);
-        if sender.try_send(message).is_err() {
-            warn!(remote=%node_id.fmt_short(), "failed to send to peer: queue full");
-            // disconnect?
-            // queue final message in permit?
+        };
+        // TODO: Make async
+        if let Err(err) = sender.try_send(message) {
+            match err {
+                TrySendError::Full(_) => {
+                    warn!(remote=%node_id.fmt_short(), "failed to send to peer channel: queue full");
+                }
+                TrySendError::Closed(_msg) => {
+                    warn!(remote=%node_id.fmt_short(), "failed to send to peer channel: closed");
+                    let _ = self
+                        .peers
+                        .get_mut(&node_id)
+                        .expect("just checked")
+                        .sender
+                        .take();
+                    self.handle_in_event(InEvent::PeerDisconnected(node_id));
+                }
+            }
         }
     }
 }
 
 struct SendLoop {
+    connection_pool: ConnectionPool,
     from_topic: mpsc::Receiver<Message>,
     node_id: NodeId,
     topic_id: TopicId,
-    to_gossip_actor: mpsc::Sender<FromTopic>,
 }
 
-#[derive(thiserror::Error, Debug)]
+#[derive(Debug)]
 enum SendLoopError {
-    #[error("gossip actor closed")]
-    GossipClosed,
-    #[error("topic actor closed")]
-    TopicClosed,
-    #[error("failed to connect: {0}")]
-    FailedToConnect(anyhow::Error),
-    #[error("reconnect requested")]
-    ReconnectRequested,
-    #[error(transparent)]
+    Reconnect,
     OpenStream(anyhow::Error),
+    Write(WriteError),
 }
 
 impl SendLoop {
-    async fn run(mut self) -> NodeId {
-        loop {
-            if let Err(err) = self.run_inner().await {
-                if let SendLoopError::ReconnectRequested = err {
+    async fn run(mut self) -> (NodeId, anyhow::Result<()>) {
+        let res = loop {
+            debug!("start send loop");
+            match self.run_inner().await {
+                Ok(()) => break Ok(()),
+                Err(SendLoopError::Reconnect) => {
+                    debug!("reconnect requested");
                     continue;
-                } else {
-                    warn!("send loop failed: {err:?}");
-                    break;
                 }
-            } else {
-                tracing::info!("send loop close!");
-                break;
+                Err(SendLoopError::OpenStream(err)) => {
+                    break Err(err).context("open stream");
+                }
+                Err(SendLoopError::Write(err)) => {
+                    break Err(err.into());
+                }
             }
-        }
-        self.node_id
+        };
+        tracing::info!(?res, "send loop close!");
+        (self.node_id, res)
     }
 
     async fn run_inner(&mut self) -> Result<(), SendLoopError> {
         let mut buffer = BytesMut::new();
 
-        let open_stream = async {
-            let (reply, reply_rx) = oneshot::channel();
-            debug!("connecting");
-            let conn = {
-                self.to_gossip_actor
-                    .send(FromTopic::Connect {
-                        node_id: self.node_id,
-                        reply,
-                    })
-                    .await
-                    .map_err(|_| SendLoopError::GossipClosed)?;
-                reply_rx
-                    .await
-                    .map_err(|_| SendLoopError::GossipClosed)?
-                    .map_err(SendLoopError::FailedToConnect)?
-            };
-            debug!("connected");
-            // TODO: emit reconnect in case of error?
-            let send_stream = open_stream(&conn, self.topic_id)
-                .await
-                .map_err(SendLoopError::OpenStream)?;
-            debug!("stream opened");
-            Ok((conn, send_stream))
-        };
-
-        let (conn, mut send_stream) = open_stream.await?;
+        let mut stream = self
+            .connection_pool
+            .open_topic(self.node_id, self.topic_id)
+            .await
+            .map_err(SendLoopError::OpenStream)?;
 
         loop {
             tokio::select! {
-                _ = conn.should_replace() => {
+                biased;
+                _ = stream.conn.should_replace() => {
                     debug!("replace connection");
-                    send_stream.finish().ok();
-                    return Err(SendLoopError::ReconnectRequested);
+                    stream.stream.finish().ok();
+                    // we still want to give the old send stream a chance to finish.
+                    tokio::task::spawn(async move {
+                        stream.stream.stopped().await.ok();
+                    });
+                    return Err(SendLoopError::Reconnect);
                 }
                 message = self.from_topic.recv() => {
                     let Some(message) = message else {
                         debug!("sender closing: channel dropped (state says quit)");
                         debug!("finishing send stream..");
-                        if let Ok(_) = send_stream.finish() {
-                            send_stream.stopped().await.ok();
+                        if let Ok(_) = stream.stream.finish() {
+                            stream.stream.stopped().await.ok();
                         }
                         debug!("send stream finished");
                         return Ok(())
                     };
-                    if let Err(err) = write_message(&mut send_stream, &mut buffer, &message).await {
-                        warn!("sender closing with error: {err:#}");
+                    if let Err(err) = write_message(&mut stream.stream, &mut buffer, &message).await {
+                        return if stream.conn.has_replacement() {
+                            debug!("replace connection");
+                            Err(SendLoopError::Reconnect)
+                        } else {
+                            warn!("sender closing with error: {err:#}");
+                            Err(SendLoopError::Write(err))
+                        };
                         // TODO: Is this what we want
-                        return Err(SendLoopError::ReconnectRequested);
                     }
                 }
             }
         }
     }
-}
-
-async fn open_stream(conn: &StrongConnection, topic_id: TopicId) -> anyhow::Result<SendStream> {
-    let mut stream = conn.open_uni().await?;
-    let header = StreamHeader { topic_id };
-    header.write(&mut stream).await?;
-    Ok(stream)
 }
