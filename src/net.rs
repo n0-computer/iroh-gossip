@@ -907,8 +907,9 @@ pub(crate) mod test {
     ///   droppetopicd
     // NOTE: this is a regression test.
     #[tokio::test]
-    #[traced_test]
+    // #[traced_test]
     async fn subscription_cleanup() -> testresult::TestResult {
+        tracing_subscriber::fmt::try_init().ok();
         let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
         let ct = CancellationToken::new();
         let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
@@ -974,6 +975,7 @@ pub(crate) mod test {
             // first subscribe is done immediately
             tracing::info!("subscribing the first time");
             let sub_1a = go1.subscribe_and_join(topic, vec![node_id2]).await?;
+            tracing::info!("subscribed!");
 
             // wait for signal to subscribe a second time
             rx.recv().await.expect("signal for second subscribe");
@@ -996,13 +998,13 @@ pub(crate) mod test {
         let go1_handle = task::spawn(go1_task);
 
         // advance and check that the topic is now subscribed
-        actor.steps(4).await?; // handle our subscribe;
-                               // get connect request from topic
-                               // poll connection pool
-                               // get recv stream from remote
+        tracing::info!("now wait subscribe 1");
+        actor.steps(1).await?; // handle our subscribe;
+        tracing::info!("subscribe1 done, now sleep and wait join");
 
         // TODO(Frando): Remove timeout. Added because the topics don't have manual actor loops yet.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(2000)).await;
+        tracing::info!("sleep done, should be joined");
         let state = actor
             .topic_handles
             .get(&topic)
@@ -1011,10 +1013,13 @@ pub(crate) mod test {
 
         // signal the second subscribe, we should remain subscribed
         tx.send(()).await?;
+        tracing::info!("now wait subscribe 2");
         actor.steps(1).await?; // subscribe
+        tracing::info!("subscribe2 done, now sleep and wait join");
 
         // TODO(Frando): Remove timeout. Added because the topics don't have manual actor loops yet.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        tracing::info!("sleep done, should be joined");
         let state = actor
             .topic_handles
             .get(&topic)

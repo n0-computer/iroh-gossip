@@ -106,7 +106,11 @@ impl TopicHandle {
         #[cfg(test)]
         let joined = topic.joined.clone();
 
-        let handle = join_set.spawn(topic.run());
+        let handle = join_set.spawn(
+            topic
+                .run()
+                .instrument(error_span!("topic", topic=%topic_id.fmt_short())),
+        );
 
         Self {
             tx: to_topic_tx,
@@ -151,22 +155,27 @@ impl TopicHandle {
     pub(crate) async fn maybe_respawn_into(
         mut self,
         join_set: &mut JoinSet<Topic>,
-        mut state: Topic,
+        mut topic: Topic,
     ) -> Option<Self> {
         debug!("maybe_respawn");
         let mut queue = vec![];
-        while let Ok(msg) = state.to_topic_rx.try_recv() {
+        while let Ok(msg) = topic.to_topic_rx.try_recv() {
             queue.push(msg);
         }
         debug!("queue from state {}", queue.len());
         queue.extend(self.queue.drain(..));
         debug!("queue from handle {}", queue.len());
-        if !queue.is_empty() && queue.iter().any(|msg| matches!(msg, ToTopic::Subscribe(_))) {
+        if !queue.is_empty() {
             debug!("respawn!");
             let (to_topic_tx, to_topic_rx) = mpsc::channel(TO_TOPIC_CAP);
+            topic.reset(to_topic_rx);
+            let id = topic.id();
+            self.handle = join_set.spawn(
+                topic
+                    .run()
+                    .instrument(error_span!("topic", topic=%id.fmt_short())),
+            );
             self.tx = to_topic_tx;
-            state.reset(to_topic_rx);
-            self.handle = join_set.spawn(state.run());
             for msg in queue.drain(..) {
                 self.send(msg).await;
             }
@@ -308,7 +317,6 @@ impl Topic {
     //     AbortOnDropHandle::new(task)
     // }
 
-    #[instrument(skip_all, fields(topic=%self.id))]
     async fn run(mut self) -> Self {
         debug!("actor start");
         for i in 0.. {
