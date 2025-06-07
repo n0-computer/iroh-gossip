@@ -1324,9 +1324,8 @@ pub(crate) mod test {
     }
 
     #[tokio::test]
-    // #[traced_test]
+    #[traced_test]
     async fn gossip_net_smoke() {
-        tracing_subscriber::fmt::try_init().ok();
         let mut rng = rand_chacha::ChaCha12Rng::seed_from_u64(1);
         let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
 
