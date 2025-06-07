@@ -7,8 +7,10 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
-use iroh::endpoint::{RecvStream, SendStream};
-use iroh::{endpoint::Connection, NodeId};
+use iroh::{
+    endpoint::{Connection, RecvStream, SendStream},
+    NodeId,
+};
 use n0_future::{
     time::{sleep_until, Instant, Sleep},
     FuturesUnordered, StreamExt,
