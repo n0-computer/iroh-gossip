@@ -295,7 +295,7 @@ impl GossipReceiver {
 
     /// Waits until we are connected to at least one node.
     ///
-    /// Progresses the event stream to the first [`GossipEvent::NeighborUp`] event.
+    /// Progresses the event stream to the first [`Event::NeighborUp`] event.
     ///
     /// Note that this consumes this initial `NeighborUp` event. If you want to track
     /// neighbors, use [`Self::neighbors`] after awaiting [`Self::joined`], and then
@@ -335,7 +335,7 @@ impl Stream for GossipReceiver {
 
 /// Events emitted from a gossip topic.
 ///
-/// These are the events emitted from a [`GossipReceiver`], wrapped in [`Event::Gossip`].
+/// These are the events emitted from a [`GossipReceiver`].
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum Event {
     /// We have a new, direct neighbor in the swarm membership layer for this topic.

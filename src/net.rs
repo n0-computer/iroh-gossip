@@ -1526,7 +1526,7 @@ pub(crate) mod test {
                     match ev {
                         Event::Lagged => tracing::debug!("missed some messages :("),
                         Event::Received(_) => unreachable!("test does not send messages"),
-                        other @ _ => tracing::debug!(?other, "gs event"),
+                        other => tracing::debug!(?other, "gs event"),
                     }
                 }
 
