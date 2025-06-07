@@ -13,7 +13,7 @@ use n0_future::{
     time::{sleep_until, Instant, Sleep},
     FuturesUnordered, StreamExt,
 };
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::mpsc,
@@ -52,26 +52,29 @@ pub(crate) struct StreamHeader {
 }
 
 impl StreamHeader {
-    pub(crate) async fn read(stream: &mut RecvStream) -> Result<Self, ReadError> {
-        let len = stream.read_u32().await?;
-        let mut buf = vec![0u8; len as usize];
-        stream
-            .read_exact(&mut buf)
-            .await
-            .map_err(|err| io::Error::other(err))?;
-        let header: WireStreamHeader = postcard::from_bytes(&buf)?;
+    pub(crate) async fn read(
+        stream: &mut RecvStream,
+        buffer: &mut BytesMut,
+        max_message_size: usize,
+    ) -> Result<Self, ReadError> {
+        let header: WireStreamHeader = read_message(stream, buffer, max_message_size)
+            .await?
+            .ok_or(ReadError::Io(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "stream ended before header",
+            )))?;
         let WireStreamHeader::V0(header) = header;
         Ok(header)
     }
 
-    pub(crate) async fn write(self, stream: &mut SendStream) -> Result<(), WriteError> {
+    pub(crate) async fn write(
+        self,
+        stream: &mut SendStream,
+        buffer: &mut Vec<u8>,
+        max_message_size: usize,
+    ) -> Result<(), WriteError> {
         let frame = WireStreamHeader::V0(self);
-        let buf = postcard::to_stdvec(&frame)?;
-        stream.write_u32(buf.len() as u32).await?;
-        stream
-            .write_all(&buf)
-            .await
-            .map_err(|err| io::Error::other(err))?;
+        write_lp(stream, &frame, buffer, max_message_size).await?;
         Ok(())
     }
 }
@@ -138,7 +141,8 @@ struct RecvStreamState {
 
 impl RecvStreamState {
     pub async fn init(mut stream: RecvStream, max_message_size: usize) -> Result<Self, ReadError> {
-        let header = StreamHeader::read(&mut stream).await?;
+        let mut buffer = BytesMut::new();
+        let header = StreamHeader::read(&mut stream, &mut buffer, max_message_size).await?;
         Ok(Self {
             buffer: BytesMut::new(),
             max_message_size,
@@ -209,15 +213,13 @@ impl SendLoop {
         Ok(())
     }
 
-    /// Write a `ProtoMessage` as a length-prefixed, postcard-encoded message.
+    /// Write a `ProtoMessage` as a length-prefixed, postcard-encoded message on its stream.
+    ///
+    /// If no stream is opened yet, this opens a new stream for the topic and writes the topic header.
     ///
     /// This function is not cancellation-safe.
     pub async fn write_message(&mut self, frame: &ProtoMessage) -> Result<(), WriteError> {
         let ProtoMessage { topic, message } = frame;
-        let len = postcard::experimental::serialized_size(&message)?;
-        if len >= self.max_message_size {
-            return Err(WriteError::TooLarge);
-        }
         let topic_id = *topic;
         let is_last = message.is_disconnect();
 
@@ -226,30 +228,26 @@ impl SendLoop {
             hash_map::Entry::Vacant(entry) => {
                 let mut stream = self.conn.open_uni().await?;
                 let header = StreamHeader { topic_id };
-                header.write(&mut stream).await?;
+                header
+                    .write(&mut stream, &mut self.buffer, self.max_message_size)
+                    .await?;
                 debug!(topic=%topic_id.fmt_short(), "stream accepted");
                 entry.insert_entry(stream)
             }
         };
         let stream = entry.get_mut();
 
-        self.buffer.clear();
-        self.buffer.resize(len, 0u8);
-        let slice = postcard::to_slice(&message, &mut self.buffer)?;
-        stream.write_u32(len as u32).await?;
-        stream
-            .write_all(slice)
-            .await
-            .map_err(|err| io::Error::other(err))?;
+        write_lp(stream, message, &mut self.buffer, self.max_message_size).await?;
 
         if is_last {
             debug!(topic=%topic_id.fmt_short(), "stream closing");
             let mut stream = entry.remove();
-            stream.finish().ok();
-            self.finishing.spawn(async move {
-                stream.stopped().await.ok();
-                debug!(topic=%topic_id.fmt_short(), "stream closed");
-            });
+            if stream.finish().is_ok() {
+                self.finishing.spawn(async move {
+                    stream.stopped().await.ok();
+                    debug!(topic=%topic_id.fmt_short(), "stream closed");
+                });
+            }
         }
 
         Ok(())
@@ -270,12 +268,12 @@ pub enum ReadError {
     TooLarge,
 }
 
-/// Read a length-prefixed message and decode as `ProtoMessage`;
-pub async fn read_message(
+/// Read a length-prefixed message and decode with postcard.
+pub async fn read_message<T: DeserializeOwned>(
     reader: &mut RecvStream,
     buffer: &mut BytesMut,
     max_message_size: usize,
-) -> Result<Option<crate::proto::topic::Message<NodeId>>, ReadError> {
+) -> Result<Option<T>, ReadError> {
     match read_lp(reader, buffer, max_message_size).await? {
         None => Ok(None),
         Some(data) => {
@@ -312,6 +310,28 @@ pub async fn read_lp(
         .await
         .map_err(|err| io::Error::other(err))?;
     Ok(Some(buffer.split_to(size).freeze()))
+}
+
+/// Writes a length-prefixed message.
+pub async fn write_lp<T: Serialize>(
+    stream: &mut SendStream,
+    message: &T,
+    buffer: &mut Vec<u8>,
+    max_message_size: usize,
+) -> Result<(), WriteError> {
+    let len = postcard::experimental::serialized_size(&message)?;
+    if len >= max_message_size {
+        return Err(WriteError::TooLarge);
+    }
+    buffer.clear();
+    buffer.resize(len, 0u8);
+    let slice = postcard::to_slice(&message, buffer)?;
+    stream.write_u32(len as u32).await?;
+    stream
+        .write_all(slice)
+        .await
+        .map_err(|err| io::Error::other(err))?;
+    Ok(())
 }
 
 /// A [`TimerMap`] with an async method to wait for the next timer expiration.
