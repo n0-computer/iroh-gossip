@@ -384,10 +384,7 @@
 <a href="#383" id="383">383</a>
 <a href="#384" id="384">384</a>
 <a href="#385" id="385">385</a>
-<a href="#386" id="386">386</a>
-<a href="#387" id="387">387</a>
-<a href="#388" id="388">388</a>
-<a href="#389" id="389">389</a></pre></div><pre class="rust"><code><span class="doccomment">//! Utilities for iroh-gossip networking
+<a href="#386" id="386">386</a></pre></div><pre class="rust"><code><span class="doccomment">//! Utilities for iroh-gossip networking
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map, HashMap},
@@ -498,7 +495,7 @@
             <span class="macro">tokio::select!</span> {
                 <span class="kw">_ </span>= <span class="self">self</span>.conn.closed() =&gt; <span class="kw">break</span>,
                 stream = <span class="self">self</span>.conn.accept_uni() =&gt; {
-                    <span class="kw">let </span>stream = stream.map_err(|err| io::Error::other(err))<span class="question-mark">?</span>;
+                    <span class="kw">let </span>stream = stream.map_err(io::Error::other)<span class="question-mark">?</span>;
                     <span class="kw">let </span>state = RecvStreamState::init(stream, <span class="self">self</span>.max_message_size).<span class="kw">await</span><span class="question-mark">?</span>;
                     <span class="macro">debug!</span>(topic=%state.header.topic_id.fmt_short(), <span class="string">"stream opened"</span>);
                     read_futures.push(state.read_next());
@@ -508,7 +505,7 @@
                     <span class="kw">match </span>msg {
                         <span class="prelude-val">None </span>=&gt; <span class="macro">debug!</span>(topic=%state.header.topic_id.fmt_short(), <span class="string">"stream closed"</span>),
                         <span class="prelude-val">Some</span>(msg) =&gt; {
-                            <span class="kw">if let </span><span class="prelude-val">Err</span>(<span class="kw">_</span>) = <span class="self">self</span>.in_event_tx.send(InEvent::RecvMessage(<span class="self">self</span>.remote_node_id, msg)).<span class="kw">await </span>{
+                            <span class="kw">if </span><span class="self">self</span>.in_event_tx.send(InEvent::RecvMessage(<span class="self">self</span>.remote_node_id, msg)).<span class="kw">await</span>.is_err() {
                                 <span class="kw">break</span>;
                             }
                             read_futures.push(state.read_next());
@@ -600,7 +597,7 @@
         }
         <span class="comment">// Wait for the remote to acknowledge all streams are stopped.
         // TODO(Frando): We likely want to apply a timeout here.
-        </span><span class="kw">while let </span><span class="prelude-val">Some</span>(<span class="kw">_</span>) = <span class="self">self</span>.finishing.join_next().<span class="kw">await </span>{}
+        </span><span class="kw">while </span><span class="self">self</span>.finishing.join_next().<span class="kw">await</span>.is_some() {}
         <span class="prelude-val">Ok</span>(())
     }
 
@@ -699,7 +696,7 @@
     reader
         .read_exact(<span class="kw-2">&amp;mut </span>buffer[..])
         .<span class="kw">await
-        </span>.map_err(|err| io::Error::other(err))<span class="question-mark">?</span>;
+        </span>.map_err(io::Error::other)<span class="question-mark">?</span>;
     <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(buffer.split_to(size).freeze()))
 }
 
@@ -718,10 +715,7 @@
     buffer.resize(len, <span class="number">0u8</span>);
     <span class="kw">let </span>slice = postcard::to_slice(<span class="kw-2">&amp;</span>message, buffer)<span class="question-mark">?</span>;
     stream.write_u32(len <span class="kw">as </span>u32).<span class="kw">await</span><span class="question-mark">?</span>;
-    stream
-        .write_all(slice)
-        .<span class="kw">await
-        </span>.map_err(|err| io::Error::other(err))<span class="question-mark">?</span>;
+    stream.write_all(slice).<span class="kw">await</span>.map_err(io::Error::other)<span class="question-mark">?</span>;
     <span class="prelude-val">Ok</span>(())
 }
 
