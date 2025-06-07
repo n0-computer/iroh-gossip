@@ -385,7 +385,9 @@
 <a href="#384" id="384">384</a>
 <a href="#385" id="385">385</a>
 <a href="#386" id="386">386</a>
-<a href="#387" id="387">387</a></pre></div><pre class="rust"><code><span class="doccomment">//! Utilities for iroh-gossip networking
+<a href="#387" id="387">387</a>
+<a href="#388" id="388">388</a>
+<a href="#389" id="389">389</a></pre></div><pre class="rust"><code><span class="doccomment">//! Utilities for iroh-gossip networking
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map, HashMap},
@@ -394,8 +396,10 @@
 };
 
 <span class="kw">use </span>bytes::{Bytes, BytesMut};
-<span class="kw">use </span>iroh::endpoint::{RecvStream, SendStream};
-<span class="kw">use </span>iroh::{endpoint::Connection, NodeId};
+<span class="kw">use </span>iroh::{
+    endpoint::{Connection, RecvStream, SendStream},
+    NodeId,
+};
 <span class="kw">use </span>n0_future::{
     time::{sleep_until, Instant, Sleep},
     FuturesUnordered, StreamExt,
