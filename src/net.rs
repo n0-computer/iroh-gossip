@@ -41,7 +41,7 @@ use self::util::{RecvLoop, SendLoop, Timers};
 pub mod util;
 
 /// ALPN protocol name
-pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/0";
+pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/1";
 
 /// Channel capacity for the send queue (one per connection)
 const SEND_QUEUE_CAP: usize = 64;
@@ -620,10 +620,10 @@ impl Actor {
             async move {
                 let res = connection_loop(
                     peer_id,
-                    &conn,
+                    conn.clone(),
                     origin,
                     send_rx,
-                    &in_event_tx,
+                    in_event_tx,
                     max_message_size,
                     queue,
                 )
@@ -928,20 +928,20 @@ enum ConnOrigin {
 
 async fn connection_loop(
     from: PublicKey,
-    conn: &Connection,
+    conn: Connection,
     origin: ConnOrigin,
     send_rx: mpsc::Receiver<ProtoMessage>,
-    in_event_tx: &mpsc::Sender<InEvent>,
+    in_event_tx: mpsc::Sender<InEvent>,
     max_message_size: usize,
     queue: Vec<ProtoMessage>,
 ) -> anyhow::Result<()> {
     debug!(?origin, "connection established");
 
     let mut send_loop = SendLoop::new(conn.clone(), send_rx, max_message_size);
-    let mut recv_loop = RecvLoop::new(from, conn.clone(), in_event_tx.clone(), max_message_size);
+    let mut recv_loop = RecvLoop::new(from, conn, in_event_tx, max_message_size);
 
-    let send_fut = send_loop.run(queue);
-    let recv_fut = recv_loop.run();
+    let send_fut = send_loop.run(queue).instrument(error_span!("send"));
+    let recv_fut = recv_loop.run().instrument(error_span!("recv"));
 
     let res = tokio::join!(send_fut, recv_fut);
     res.0.context("send_loop").and(res.1.context("recv_loop"))
