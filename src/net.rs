@@ -9,11 +9,10 @@ use std::{
 };
 
 use anyhow::Context as _;
-use bytes::BytesMut;
 use futures_concurrency::stream::{stream_group, StreamGroup};
 use futures_util::FutureExt as _;
 use iroh::{
-    endpoint::{Connection, DirectAddr, RecvStream},
+    endpoint::{Connection, DirectAddr},
     protocol::ProtocolHandler,
     Endpoint, NodeAddr, NodeId, PublicKey, RelayUrl,
 };
@@ -22,7 +21,7 @@ use n0_future::{
     boxed::BoxFuture,
     task::{self, AbortOnDropHandle, JoinSet},
     time::Instant,
-    FuturesUnordered, Stream, StreamExt as _,
+    Stream, StreamExt as _,
 };
 use rand::rngs::StdRng;
 use rand_core::SeedableRng;
@@ -30,18 +29,16 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, error_span, trace, warn, Instrument};
-use util::StreamHeader;
 
-use self::util::{read_message, write_message, Timers};
 use crate::{
-    api::RpcMessage,
+    api::{self, Command, Event, GossipApi, RpcMessage},
     metrics::Metrics,
     proto::{self, HyparviewConfig, PeerData, PlumtreeConfig, Scope, TopicId},
 };
 
-pub mod util;
+use self::util::{RecvLoop, SendLoop, Timers};
 
-use crate::api::{self, Command, Event, GossipApi};
+pub mod util;
 
 /// ALPN protocol name
 pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/0";
@@ -933,102 +930,20 @@ async fn connection_loop(
     from: PublicKey,
     conn: &Connection,
     origin: ConnOrigin,
-    mut send_rx: mpsc::Receiver<ProtoMessage>,
+    send_rx: mpsc::Receiver<ProtoMessage>,
     in_event_tx: &mpsc::Sender<InEvent>,
     max_message_size: usize,
     queue: Vec<ProtoMessage>,
 ) -> anyhow::Result<()> {
     debug!(?origin, "connection established");
 
-    let send_loop = async {
-        let mut streams = HashMap::new();
-        let mut send_buf = BytesMut::new();
-        let mut finishing = JoinSet::new();
-        for msg in queue {
-            write_message(
-                conn,
-                &mut streams,
-                &mut finishing,
-                &mut send_buf,
-                &msg,
-                max_message_size,
-            )
-            .await?;
-        }
-        while let Some(msg) = send_rx.recv().await {
-            write_message(
-                conn,
-                &mut streams,
-                &mut finishing,
-                &mut send_buf,
-                &msg,
-                max_message_size,
-            )
-            .await?;
-        }
-        for (_, mut stream) in streams.drain() {
-            stream.finish().ok();
-            finishing.spawn(async move {
-                stream.stopped().await.ok();
-            });
-        }
-        while let Some(_) = finishing.join_next().await {}
-        anyhow::Ok(())
-    };
+    let mut send_loop = SendLoop::new(conn.clone(), send_rx, max_message_size);
+    let mut recv_loop = RecvLoop::new(from, conn.clone(), in_event_tx.clone(), max_message_size);
 
-    async fn read_from_stream(
-        mut stream: RecvStream,
-        mut recv_buf: BytesMut,
-        max_message_size: usize,
-        header: StreamHeader,
-    ) -> anyhow::Result<(Option<ProtoMessage>, RecvStream, StreamHeader, BytesMut)> {
-        debug!("recv read in");
-        let msg = read_message(&mut stream, &mut recv_buf, max_message_size).await?;
-        debug!("recv read read");
-        let msg = msg.map(|msg| ProtoMessage {
-            topic: header.topic_id,
-            message: msg,
-        });
-        Ok((msg, stream, header, recv_buf))
-    }
+    let send_fut = send_loop.run(queue);
+    let recv_fut = recv_loop.run();
 
-    let recv_loop = async {
-        // let mut streams = HashMap::new();
-        let mut read_futures = FuturesUnordered::new();
-        debug!("recv loop start");
-        loop {
-            debug!(read_futures = read_futures.len(), "recv loop wait");
-            tokio::select! {
-                _ = conn.closed() => break,
-                stream = conn.accept_uni() => {
-                    let mut stream = stream?;
-                    let header = StreamHeader::read(&mut stream).await?;
-                    debug!(topic=?header.topic_id, "recv stream opened");
-                    let recv_buf = BytesMut::new();
-                    read_futures.push(read_from_stream(stream, recv_buf, max_message_size, header));
-                }
-                res = read_futures.next(), if !read_futures.is_empty() => {
-                    debug!("recv stream read {res:?}");
-                    let Some(res) = res else {
-                        continue;
-                    };
-                    let (msg, stream, header, recv_buf) = res?;
-                    match msg {
-                        None => {
-                            debug!(topic=?header.topic_id, "recv stream closed");
-                        },
-                        Some(msg) => {
-                            in_event_tx.send(InEvent::RecvMessage(from, msg)).await?;
-                            read_futures.push(read_from_stream(stream, recv_buf, max_message_size, header));
-                        }
-                    }
-                }
-            }
-        }
-        anyhow::Ok(())
-    };
-
-    let res = tokio::join!(send_loop, recv_loop);
+    let res = tokio::join!(send_fut, recv_fut);
     res.0.context("send_loop").and(res.1.context("recv_loop"))
 }
 
