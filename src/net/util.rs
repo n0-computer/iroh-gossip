@@ -109,7 +109,7 @@ impl RecvLoop {
             tokio::select! {
                 _ = self.conn.closed() => break,
                 stream = self.conn.accept_uni() => {
-                    let stream = stream.map_err(|err| io::Error::other(err))?;
+                    let stream = stream.map_err(io::Error::other)?;
                     let state = RecvStreamState::init(stream, self.max_message_size).await?;
                     debug!(topic=%state.header.topic_id.fmt_short(), "stream opened");
                     read_futures.push(state.read_next());
@@ -119,7 +119,7 @@ impl RecvLoop {
                     match msg {
                         None => debug!(topic=%state.header.topic_id.fmt_short(), "stream closed"),
                         Some(msg) => {
-                            if let Err(_) = self.in_event_tx.send(InEvent::RecvMessage(self.remote_node_id, msg)).await {
+                            if self.in_event_tx.send(InEvent::RecvMessage(self.remote_node_id, msg)).await.is_err() {
                                 break;
                             }
                             read_futures.push(state.read_next());
@@ -211,7 +211,7 @@ impl SendLoop {
         }
         // Wait for the remote to acknowledge all streams are stopped.
         // TODO(Frando): We likely want to apply a timeout here.
-        while let Some(_) = self.finishing.join_next().await {}
+        while self.finishing.join_next().await.is_some() {}
         Ok(())
     }
 
@@ -310,7 +310,7 @@ pub async fn read_lp(
     reader
         .read_exact(&mut buffer[..])
         .await
-        .map_err(|err| io::Error::other(err))?;
+        .map_err(io::Error::other)?;
     Ok(Some(buffer.split_to(size).freeze()))
 }
 
@@ -329,10 +329,7 @@ pub async fn write_lp<T: Serialize>(
     buffer.resize(len, 0u8);
     let slice = postcard::to_slice(&message, buffer)?;
     stream.write_u32(len as u32).await?;
-    stream
-        .write_all(slice)
-        .await
-        .map_err(|err| io::Error::other(err))?;
+    stream.write_all(slice).await.map_err(io::Error::other)?;
     Ok(())
 }
 

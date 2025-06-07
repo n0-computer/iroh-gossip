@@ -38,7 +38,7 @@ use crate::{
 
 use self::util::{RecvLoop, SendLoop, Timers};
 
-pub mod util;
+mod util;
 
 /// ALPN protocol name
 pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/1";
