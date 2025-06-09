@@ -86,7 +86,7 @@ pub enum Message<PI> {
     /// Request to disconnect from a peer.
     /// If [`Disconnect::alive`] is true, the other peer is not shutting down, so it should be
     /// added to the passive set.
-    Disconnect(Disconnect),
+    Disconnect(Disconnect<PI>),
 }
 
 /// The time-to-live for this message.
@@ -187,10 +187,12 @@ pub struct NeighborReply {}
 
 /// Message sent when leaving the swarm or closing down to inform peers about us being gone.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-pub struct Disconnect {
+pub struct Disconnect<PI> {
     /// Whether we are actually shutting down or closing the connection only because our limits are
     /// reached.
     alive: bool,
+    /// A list of nodes from the sender's active and passive views
+    nodes: Vec<PeerInfo<PI>>,
 }
 
 /// Configuration for the swarm membership layer
@@ -358,8 +360,9 @@ where
     }
 
     /// We received a disconnect message.
-    fn on_disconnect(&mut self, peer: PI, details: Disconnect, io: &mut impl IO<PI>) {
+    fn on_disconnect(&mut self, peer: PI, details: Disconnect<PI>, io: &mut impl IO<PI>) {
         self.neighbor_request_failed(peer, io);
+
         if self.active_view.contains(&peer) {
             self.remove_active(
                 &peer,
@@ -371,6 +374,7 @@ where
         } else if details.alive && self.passive_view.contains(&peer) {
             self.alive_disconnect_peers.insert(peer);
         }
+        self.on_shuffle_nodes(details.nodes, Some(&peer), io);
     }
 
     /// A connection was closed by the peer.
@@ -395,9 +399,8 @@ where
         // Before disconnecting, send a `ShuffleReply` with some of our nodes to
         // prevent the other node from running out of connections. This is especially
         // relevant if the other node just joined the swarm.
-        let len = self.config.shuffle_active_view_count + self.config.shuffle_passive_view_count;
-        self.send_shuffle_reply(peer, len, io);
-        let message = Message::Disconnect(Disconnect { alive });
+        let nodes = self.get_nodes_for_shuffle(None);
+        let message = Message::Disconnect(Disconnect { alive, nodes });
         io.push(OutEvent::SendMessage(peer, message));
         io.push(OutEvent::DisconnectPeer(peer));
     }
@@ -524,9 +527,7 @@ where
     fn on_shuffle(&mut self, from: PI, shuffle: Shuffle<PI>, io: &mut impl IO<PI>) {
         if shuffle.ttl.expired() || self.active_view.len() <= 1 {
             let len = shuffle.nodes.len();
-            for node in shuffle.nodes {
-                self.add_passive(node.id, node.data, io);
-            }
+            self.on_shuffle_nodes(shuffle.nodes, None, io);
             self.send_shuffle_reply(shuffle.origin, len, io);
         } else if let Some(node) = self
             .active_view
@@ -541,7 +542,28 @@ where
         }
     }
 
+    fn on_shuffle_nodes(
+        &mut self,
+        nodes: Vec<PeerInfo<PI>>,
+        skip_peer: Option<&PI>,
+        io: &mut impl IO<PI>,
+    ) {
+        for node in nodes {
+            self.add_passive(node.id, node.data, io);
+        }
+        self.refill_active_from_passive(skip_peer, io);
+    }
+
     fn send_shuffle_reply(&mut self, to: PI, len: usize, io: &mut impl IO<PI>) {
+        let nodes = self.get_nodes_for_shuffle(Some(len));
+        let message = Message::ShuffleReply(ShuffleReply { nodes });
+        io.push(OutEvent::SendMessage(to, message));
+    }
+
+    fn get_nodes_for_shuffle(&mut self, len: Option<usize>) -> Vec<PeerInfo<PI>> {
+        let len = len.unwrap_or_else(|| {
+            self.config.shuffle_active_view_count + self.config.shuffle_passive_view_count
+        });
         let mut nodes = self.passive_view.shuffled_and_capped(len, &mut self.rng);
         // If we don't have enough passive nodes for the expected length, we fill with
         // active nodes.
@@ -551,18 +573,11 @@ where
                     .shuffled_and_capped(len - nodes.len(), &mut self.rng),
             );
         }
-        let nodes = nodes.into_iter().map(|id| self.peer_info(&id));
-        let message = Message::ShuffleReply(ShuffleReply {
-            nodes: nodes.collect(),
-        });
-        io.push(OutEvent::SendMessage(to, message));
+        nodes.into_iter().map(|id| self.peer_info(&id)).collect()
     }
 
     fn on_shuffle_reply(&mut self, message: ShuffleReply<PI>, io: &mut impl IO<PI>) {
-        for node in message.nodes {
-            self.add_passive(node.id, node.data, io);
-        }
-        self.refill_active_from_passive(None, io);
+        self.on_shuffle_nodes(message.nodes, None, io);
     }
 
     fn handle_shuffle_timer(&mut self, io: &mut impl IO<PI>) {
