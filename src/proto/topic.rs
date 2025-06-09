@@ -117,6 +117,8 @@ pub enum Event<PI> {
     NeighborUp(PI),
     /// We dropped direct neighbor in the swarm membership layer for this topic
     NeighborDown(PI),
+    /// We failed to dial a peer that we wanted to neighbor with.
+    JoinFailed(PI),
     /// A gossip message was received for this topic
     Received(GossipEvent<PI>),
 }
@@ -126,6 +128,7 @@ impl<PI> From<hyparview::Event<PI>> for Event<PI> {
         match value {
             hyparview::Event::NeighborUp(peer) => Self::NeighborUp(peer),
             hyparview::Event::NeighborDown(peer) => Self::NeighborDown(peer),
+            hyparview::Event::JoinFailed(peer) => Self::JoinFailed(peer),
         }
     }
 }
