@@ -384,7 +384,12 @@
 <a href="#383" id="383">383</a>
 <a href="#384" id="384">384</a>
 <a href="#385" id="385">385</a>
-<a href="#386" id="386">386</a></pre></div><pre class="rust"><code><span class="doccomment">//! Utilities for iroh-gossip networking
+<a href="#386" id="386">386</a>
+<a href="#387" id="387">387</a>
+<a href="#388" id="388">388</a>
+<a href="#389" id="389">389</a>
+<a href="#390" id="390">390</a>
+<a href="#391" id="391">391</a></pre></div><pre class="rust"><code><span class="doccomment">//! Utilities for iroh-gossip networking
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map, HashMap},
@@ -491,9 +496,11 @@
 
     <span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">async fn </span>run(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;(), ReadError&gt; {
         <span class="kw">let </span><span class="kw-2">mut </span>read_futures = FuturesUnordered::new();
+        <span class="kw">let </span>closed = <span class="self">self</span>.conn.closed();
+        <span class="macro">tokio::pin!</span>(closed);
         <span class="kw">loop </span>{
             <span class="macro">tokio::select!</span> {
-                <span class="kw">_ </span>= <span class="self">self</span>.conn.closed() =&gt; <span class="kw">break</span>,
+                <span class="kw">_ </span>= <span class="kw-2">&amp;mut </span>closed =&gt; <span class="kw">break</span>,
                 stream = <span class="self">self</span>.conn.accept_uni() =&gt; {
                     <span class="kw">let </span>stream = stream.map_err(io::Error::other)<span class="question-mark">?</span>;
                     <span class="kw">let </span>state = RecvStreamState::init(stream, <span class="self">self</span>.max_message_size).<span class="kw">await</span><span class="question-mark">?</span>;
@@ -578,10 +585,13 @@
         <span class="kw">for </span>msg <span class="kw">in </span>queue {
             <span class="self">self</span>.write_message(<span class="kw-2">&amp;</span>msg).<span class="kw">await</span><span class="question-mark">?</span>;
         }
+        <span class="kw">let </span>conn_clone = <span class="self">self</span>.conn.clone();
+        <span class="kw">let </span>closed = conn_clone.closed();
+        <span class="macro">tokio::pin!</span>(closed);
         <span class="kw">loop </span>{
             <span class="macro">tokio::select!</span> {
                 biased;
-                <span class="kw">_ </span>= <span class="self">self</span>.conn.closed() =&gt; <span class="kw">break</span>,
+                <span class="kw">_ </span>= <span class="kw-2">&amp;mut </span>closed =&gt; <span class="kw">break</span>,
                 <span class="prelude-val">Some</span>(msg) = <span class="self">self</span>.send_rx.recv() =&gt; <span class="self">self</span>.write_message(<span class="kw-2">&amp;</span>msg).<span class="kw">await</span><span class="question-mark">?</span>,
                 <span class="kw">_ </span>= <span class="self">self</span>.finishing.join_next(), <span class="kw">if </span>!<span class="self">self</span>.finishing.is_empty() =&gt; {}
                 <span class="kw">else </span>=&gt; <span class="kw">break</span>,
