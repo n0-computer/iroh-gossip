@@ -105,9 +105,11 @@ impl RecvLoop {
 
     pub(crate) async fn run(&mut self) -> Result<(), ReadError> {
         let mut read_futures = FuturesUnordered::new();
+        let closed = self.conn.closed();
+        tokio::pin!(closed);
         loop {
             tokio::select! {
-                _ = self.conn.closed() => break,
+                _ = &mut closed => break,
                 stream = self.conn.accept_uni() => {
                     let stream = stream.map_err(io::Error::other)?;
                     let state = RecvStreamState::init(stream, self.max_message_size).await?;
@@ -192,10 +194,13 @@ impl SendLoop {
         for msg in queue {
             self.write_message(&msg).await?;
         }
+        let conn_clone = self.conn.clone();
+        let closed = conn_clone.closed();
+        tokio::pin!(closed);
         loop {
             tokio::select! {
                 biased;
-                _ = self.conn.closed() => break,
+                _ = &mut closed => break,
                 Some(msg) = self.send_rx.recv() => self.write_message(&msg).await?,
                 _ = self.finishing.join_next(), if !self.finishing.is_empty() => {}
                 else => break,
