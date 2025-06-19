@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["ApiError","Command","Event","GossipEvent","RpcMessage"],"struct":["GossipApi","GossipReceiver","GossipSender","GossipTopic","JoinOptions","Message"]};
+window.SIDEBAR_ITEMS = {"enum":["ApiError","Command","Event","RpcMessage"],"struct":["GossipApi","GossipReceiver","GossipSender","GossipTopic","JoinOptions","Message"]};
