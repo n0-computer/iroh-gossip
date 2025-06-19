@@ -295,7 +295,7 @@ impl GossipReceiver {
 
     /// Waits until we are connected to at least one node.
     ///
-    /// Progresses the event stream to the first [`GossipEvent::NeighborUp`] event.
+    /// Progresses the event stream to the first [`Event::NeighborUp`] event.
     ///
     /// Note that this consumes this initial `NeighborUp` event. If you want to track
     /// neighbors, use [`Self::neighbors`] after awaiting [`Self::joined`], and then
@@ -320,10 +320,10 @@ impl Stream for GossipReceiver {
         let item = std::task::ready!(Pin::new(&mut self.stream).poll_next(cx));
         if let Some(Ok(item)) = &item {
             match item {
-                Event::Gossip(GossipEvent::NeighborUp(node_id)) => {
+                Event::NeighborUp(node_id) => {
                     self.neighbors.insert(*node_id);
                 }
-                Event::Gossip(GossipEvent::NeighborDown(node_id)) => {
+                Event::NeighborDown(node_id) => {
                     self.neighbors.remove(node_id);
                 }
                 _ => {}
@@ -333,32 +333,22 @@ impl Stream for GossipReceiver {
     }
 }
 
-/// Events emitted from a gossip topic with a lagging notification.
-///
-/// This is the item of the [`GossipReceiver`] stream. It wraps the actual gossip events to also
-/// provide a notification if we missed gossip events for the topic.
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
-pub enum Event {
-    /// We received an event.
-    Gossip(GossipEvent),
-    /// We missed some messages because our [`GossipReceiver`] was not progressing fast enough.
-    Lagged,
-}
-
 /// Events emitted from a gossip topic.
 ///
-/// These are the events emitted from a [`GossipReceiver`], wrapped in [`Event::Gossip`].
+/// These are the events emitted from a [`GossipReceiver`].
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
-pub enum GossipEvent {
+pub enum Event {
     /// We have a new, direct neighbor in the swarm membership layer for this topic.
     NeighborUp(NodeId),
     /// We dropped direct neighbor in the swarm membership layer for this topic.
     NeighborDown(NodeId),
     /// We received a gossip message for this topic.
     Received(Message),
+    /// We missed some messages because our [`GossipReceiver`] was not progressing fast enough.
+    Lagged,
 }
 
-impl From<crate::proto::Event<NodeId>> for GossipEvent {
+impl From<crate::proto::Event<NodeId>> for Event {
     fn from(event: crate::proto::Event<NodeId>) -> Self {
         match event {
             crate::proto::Event::NeighborUp(node_id) => Self::NeighborUp(node_id),
@@ -433,7 +423,7 @@ mod tests {
         use rand::SeedableRng;
 
         use crate::{
-            api::{Event, GossipApi, GossipEvent},
+            api::{Event, GossipApi},
             net::{test::create_endpoint, Gossip},
             proto::TopicId,
             ALPN,
@@ -495,7 +485,7 @@ mod tests {
             // wait for a message
             while let Some(event) = topic.try_next().await? {
                 match event {
-                    Event::Gossip(GossipEvent::Received(message)) => {
+                    Event::Received(message) => {
                         assert_eq!(&message.content[..], b"hello");
                         break;
                     }
