@@ -1089,9 +1089,8 @@ pub(crate) mod test {
     use tracing::{info, instrument};
     use tracing_test::traced_test;
 
-    use crate::api::ApiError;
-
     use super::*;
+    use crate::api::ApiError;
 
     struct ManualActorLoop {
         actor: Actor,
