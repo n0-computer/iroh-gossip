@@ -32,7 +32,6 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(iroh_docsrs)"] }
 unused-async = "warn"
 
 [dependencies]
-async-channel = { version = "2.3.1", optional = true }
 blake3 = { package = "iroh-blake3", version = "1.4.5" }
 bytes = { version = "1.7", features = ["serde"] }
 derive_more = { version = "1.0.0", features = [
@@ -123,7 +122,6 @@ net = [
     "dep:iroh",
     "dep:tokio",
     "dep:tokio-util",
-    "dep:async-channel",
     "dep:futures-util",
     "dep:futures-concurrency",
     "dep:anyhow",
