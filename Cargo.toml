@@ -182,5 +182,5 @@ debug = true
 debug = true
 
 [patch.crates-io]
-iroh = { git = "https://github.com/n0-computer/iroh", branch = "main" }
-iroh-base = { git = "https://github.com/n0-computer/iroh", branch = "main" }
+iroh = { git = "https://github.com/n0-computer/iroh", branch = "Frando/fix-wasm-watcher-lifetime" }
+iroh-base = { git = "https://github.com/n0-computer/iroh", branch = "Frando/fix-wasm-watcher-lifetime" }
