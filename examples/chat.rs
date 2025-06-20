@@ -17,6 +17,7 @@ use iroh_gossip::{
     proto::TopicId,
 };
 use n0_future::task;
+use n0_watcher::Watcher;
 use serde::{Deserialize, Serialize};
 
 /// Chat over iroh-gossip
@@ -116,7 +117,7 @@ async fn main() -> Result<()> {
 
     // print a ticket that includes our own node id and endpoint addresses
     let ticket = {
-        let me = endpoint.node_addr().await?;
+        let me = endpoint.node_addr().initialized().await?;
         let peers = peers.iter().cloned().chain([me]).collect();
         Ticket { topic, peers }
     };

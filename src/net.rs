@@ -14,16 +14,16 @@ use futures_concurrency::stream::{stream_group, StreamGroup};
 use futures_util::FutureExt as _;
 use iroh::{
     endpoint::{Connection, DirectAddr},
-    protocol::ProtocolHandler,
+    protocol::{AcceptError, ProtocolHandler},
     Endpoint, NodeAddr, NodeId, PublicKey, RelayUrl,
 };
 use irpc::WithChannels;
 use n0_future::{
-    boxed::BoxFuture,
     task::{self, AbortOnDropHandle, JoinSet},
     time::Instant,
     Stream, StreamExt as _,
 };
+use n0_watcher::Watcher;
 use rand::rngs::StdRng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
@@ -92,7 +92,7 @@ pub enum Error {
     Read(#[from] util::ReadError),
     /// A watchable disconnected.
     #[error(transparent)]
-    WatchableDisconnected(#[from] iroh::watchable::Disconnected),
+    WatchableDisconnected(#[from] n0_watcher::Disconnected),
     /// Iroh connection error
     #[error(transparent)]
     IrohConnection(#[from] iroh::endpoint::ConnectionError),
@@ -162,21 +162,17 @@ pub(crate) struct Inner {
 }
 
 impl ProtocolHandler for Gossip {
-    fn accept(&self, conn: Connection) -> BoxFuture<anyhow::Result<()>> {
-        let this = self.clone();
-        Box::pin(async move {
-            this.handle_connection(conn).await?;
-            Ok(())
-        })
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        self.handle_connection(connection)
+            .await
+            .map_err(AcceptError::from_err)?;
+        Ok(())
     }
 
-    fn shutdown(&self) -> BoxFuture<()> {
-        let this = self.clone();
-        Box::pin(async move {
-            if let Err(err) = this.shutdown().await {
-                warn!("error while shutting down gossip: {err:#}");
-            }
-        })
+    async fn shutdown(&self) {
+        if let Err(err) = self.shutdown().await {
+            warn!("error while shutting down gossip: {err:#}");
+        }
     }
 }
 
@@ -212,26 +208,7 @@ impl Builder {
         // We want to wait for our endpoint to be addressable by other nodes before launching gossip,
         // because otherwise our Join messages, which will be forwarded into the swarm through a random
         // walk, might not include an address to talk back to us.
-        // `Endpoint::node_addr` always waits for direct addresses to be available, which never completes
-        // when running as WASM in browser. Therefore, we instead race the futures that wait for the direct
-        // addresses or the home relay to be initialized, and construct our node address from that.
-        // TODO: Make `Endpoint` provide a more straightforward API for that.
-        let addr = {
-            n0_future::future::race(
-                endpoint.direct_addresses().initialized().map(|_| ()),
-                endpoint.home_relay().initialized().map(|_| ()),
-            )
-            .await;
-            let addrs = endpoint
-                .direct_addresses()
-                .get()
-                .expect("endpoint alive")
-                .unwrap_or_default()
-                .into_iter()
-                .map(|x| x.addr);
-            let home_relay = endpoint.home_relay().get().expect("endpoint alive");
-            NodeAddr::from_parts(endpoint.node_id(), home_relay, addrs)
-        };
+        let addr = endpoint.node_addr().initialized().await?;
 
         let (actor, rpc_tx, local_tx) =
             Actor::new(endpoint, self.config, metrics.clone(), &addr.into());
@@ -415,7 +392,7 @@ impl Actor {
     ) -> Result<
         (
             BTreeSet<DirectAddr>,
-            impl Stream<Item = iroh::RelayUrl> + Unpin,
+            impl Stream<Item = Vec<iroh::RelayUrl>> + Unpin,
             impl Stream<Item = BTreeSet<DirectAddr>> + Unpin,
         ),
         Error,
@@ -423,7 +400,7 @@ impl Actor {
         // Watch for changes in direct addresses to update our peer data.
         let direct_addresses_stream = self.endpoint.direct_addresses().stream().filter_map(|i| i);
         // Watch for changes of our home relay to update our peer data.
-        let home_relay_stream = self.endpoint.home_relay().stream().filter_map(|i| i);
+        let home_relay_stream = self.endpoint.home_relay().stream();
         // With each gossip message we provide addressing information to reach our node.
         let current_addresses = self.endpoint.direct_addresses().get()?.unwrap_or_default();
 
@@ -441,7 +418,7 @@ impl Actor {
     async fn event_loop(
         &mut self,
         current_addresses: &mut BTreeSet<DirectAddr>,
-        home_relay_stream: &mut (impl Stream<Item = iroh::RelayUrl> + Unpin),
+        home_relay_stream: &mut (impl Stream<Item = Vec<iroh::RelayUrl>> + Unpin),
         direct_addresses_stream: &mut (impl Stream<Item = BTreeSet<DirectAddr>> + Unpin),
         i: usize,
     ) -> Result<Option<()>, Error> {
@@ -1079,7 +1056,13 @@ fn our_peer_data(
     direct_addresses: &BTreeSet<DirectAddr>,
 ) -> Result<PeerData, Error> {
     encode_peer_data(&AddrInfo {
-        relay_url: endpoint.home_relay().get().ok().flatten(),
+        relay_url: endpoint
+            .home_relay()
+            .get()
+            .ok()
+            .into_iter()
+            .flatten()
+            .next(),
         direct_addresses: direct_addresses.iter().map(|x| x.addr).collect(),
     })
 }
@@ -1087,7 +1070,10 @@ fn our_peer_data(
 #[derive(Debug)]
 struct Dialer {
     endpoint: Endpoint,
-    pending: JoinSet<(NodeId, Option<Result<Connection, Error>>)>,
+    pending: JoinSet<(
+        NodeId,
+        Option<Result<Connection, iroh::endpoint::ConnectError>>,
+    )>,
     pending_dials: HashMap<NodeId, CancellationToken>,
 }
 
@@ -1113,7 +1099,7 @@ impl Dialer {
             let res = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => None,
-                res = endpoint.connect(node_id, alpn) => Some(res.map_err(Error::from)),
+                res = endpoint.connect(node_id, alpn) => Some(res),
             };
             (node_id, res)
         });
@@ -1126,7 +1112,12 @@ impl Dialer {
 
     /// Waits for the next dial operation to complete.
     /// `None` means disconnected
-    async fn next_conn(&mut self) -> (NodeId, Option<Result<Connection, Error>>) {
+    async fn next_conn(
+        &mut self,
+    ) -> (
+        NodeId,
+        Option<Result<Connection, iroh::endpoint::ConnectError>>,
+    ) {
         match self.pending_dials.is_empty() {
             false => {
                 let (node_id, res) = loop {
@@ -1249,7 +1240,7 @@ pub(crate) mod test {
             config: proto::Config,
             relay_map: RelayMap,
             cancel: &CancellationToken,
-        ) -> Result<(Self, Actor, EndpointHandle), Error> {
+        ) -> n0_snafu::Result<(Self, Actor, EndpointHandle)> {
             let my_addr = AddrInfo {
                 relay_url: relay_map.nodes().next().map(|relay| relay.url.clone()),
                 direct_addresses: Default::default(),
@@ -1289,7 +1280,7 @@ pub(crate) mod test {
             config: proto::Config,
             relay_map: RelayMap,
             cancel: &CancellationToken,
-        ) -> Result<(Self, Endpoint, EndpointHandle, impl Drop), Error> {
+        ) -> n0_snafu::Result<(Self, Endpoint, EndpointHandle, impl Drop)> {
             let (g, actor, ep_handle) =
                 Gossip::t_new_with_actor(rng, config, relay_map, cancel).await?;
             let ep = actor.endpoint.clone();
@@ -1309,7 +1300,7 @@ pub(crate) mod test {
     pub(crate) async fn create_endpoint(
         rng: &mut rand_chacha::ChaCha12Rng,
         relay_map: RelayMap,
-    ) -> Result<Endpoint, Error> {
+    ) -> n0_snafu::Result<Endpoint> {
         let ep = Endpoint::builder()
             .secret_key(SecretKey::generate(rng))
             .alpns(vec![GOSSIP_ALPN.to_vec()])
@@ -1755,7 +1746,7 @@ pub(crate) mod test {
             let secret_key = SecretKey::generate(&mut rng);
             async move {
                 let (router, gossip) = spawn_gossip(secret_key, relay_map).await?;
-                let addr = router.endpoint().node_addr().await?;
+                let addr = router.endpoint().node_addr().initialized().await?;
                 info!(node_id = %addr.node_id.fmt_short(), "recv node spawned");
                 addr_tx.send(addr).unwrap();
                 let mut topic = gossip.subscribe_and_join(topic_id, vec![]).await?;

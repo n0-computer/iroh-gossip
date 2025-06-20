@@ -419,6 +419,8 @@ mod tests {
     async fn test_rpc() -> testresult::TestResult {
         use iroh::{protocol::Router, RelayMap};
         use n0_future::{time::Duration, StreamExt};
+        use n0_snafu::ResultExt;
+        use n0_watcher::Watcher;
         use rand::SeedableRng;
 
         use crate::{
@@ -434,9 +436,12 @@ mod tests {
         async fn create_gossip_endpoint(
             rng: &mut rand_chacha::ChaCha12Rng,
             relay_map: RelayMap,
-        ) -> anyhow::Result<(Router, Gossip)> {
+        ) -> n0_snafu::Result<(Router, Gossip)> {
             let endpoint = create_endpoint(rng, relay_map).await?;
-            let gossip = Gossip::builder().spawn(endpoint.clone()).await?;
+            let gossip = Gossip::builder()
+                .spawn(endpoint.clone())
+                .await
+                .context("failed to spawn gossip")?;
             let router = Router::builder(endpoint)
                 .accept(ALPN, gossip.clone())
                 .spawn();
@@ -451,7 +456,7 @@ mod tests {
         // create a second node so that we can test actually joining
         let (node2_id, node2_addr, node2_task) = {
             let (router, gossip) = create_gossip_endpoint(&mut rng, relay_map.clone()).await?;
-            let node_addr = router.endpoint().node_addr().await?;
+            let node_addr = router.endpoint().node_addr().initialized().await?;
             let node_id = router.endpoint().node_id();
             let task = tokio::task::spawn(async move {
                 let mut topic = gossip.subscribe_and_join(topic_id, vec![]).await?;
