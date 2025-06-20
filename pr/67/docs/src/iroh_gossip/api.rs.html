@@ -506,8 +506,7 @@
 <a href="#505" id="505">505</a>
 <a href="#506" id="506">506</a>
 <a href="#507" id="507">507</a>
-<a href="#508" id="508">508</a>
-<a href="#509" id="509">509</a></pre></div><pre class="rust"><code><span class="doccomment">//! Public API for using iroh-gossip
+<a href="#508" id="508">508</a></pre></div><pre class="rust"><code><span class="doccomment">//! Public API for using iroh-gossip
 //!
 //! The API is usable both locally and over RPC.
 
@@ -519,8 +518,7 @@
 
 <span class="kw">use </span>bytes::Bytes;
 <span class="kw">use </span>iroh_base::NodeId;
-<span class="kw">use </span>irpc::{channel::spsc, Client};
-<span class="kw">use </span>irpc_derive::rpc_requests;
+<span class="kw">use </span>irpc::{channel::mpsc, rpc_requests, Client};
 <span class="kw">use </span>n0_future::{boxed::BoxStream, Stream, StreamExt, TryStreamExt};
 <span class="kw">use </span>serde::{Deserialize, Serialize};
 
@@ -540,7 +538,7 @@
 </span><span class="attr">#[rpc_requests(Service, message = RpcMessage)]
 #[derive(Debug, Serialize, Deserialize)]
 </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">enum </span>Request {
-    <span class="attr">#[rpc(tx=spsc::Sender&lt;Event&gt;, rx=spsc::Receiver&lt;Command&gt;)]
+    <span class="attr">#[rpc(tx=mpsc::Sender&lt;Event&gt;, rx=mpsc::Receiver&lt;Command&gt;)]
     </span>Join(JoinRequest),
 }
 
@@ -687,10 +685,10 @@
 
 <span class="doccomment">/// Sender for a gossip topic.
 </span><span class="attr">#[derive(Debug)]
-</span><span class="kw">pub struct </span>GossipSender(spsc::Sender&lt;Command&gt;);
+</span><span class="kw">pub struct </span>GossipSender(mpsc::Sender&lt;Command&gt;);
 
 <span class="kw">impl </span>GossipSender {
-    <span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>new(sender: spsc::Sender&lt;Command&gt;) -&gt; <span class="self">Self </span>{
+    <span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>new(sender: mpsc::Sender&lt;Command&gt;) -&gt; <span class="self">Self </span>{
         <span class="self">Self</span>(sender)
     }
 
@@ -733,7 +731,7 @@
 }
 
 <span class="kw">impl </span>GossipTopic {
-    <span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>new(sender: spsc::Sender&lt;Command&gt;, receiver: spsc::Receiver&lt;Event&gt;) -&gt; <span class="self">Self </span>{
+    <span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>new(sender: mpsc::Sender&lt;Command&gt;, receiver: mpsc::Receiver&lt;Event&gt;) -&gt; <span class="self">Self </span>{
         <span class="kw">let </span>sender = GossipSender::new(sender);
         <span class="self">Self </span>{
             sender,
@@ -788,7 +786,7 @@
 }
 
 <span class="kw">impl </span>GossipReceiver {
-    <span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>new(events_rx: spsc::Receiver&lt;Event&gt;) -&gt; <span class="self">Self </span>{
+    <span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>new(events_rx: mpsc::Receiver&lt;Event&gt;) -&gt; <span class="self">Self </span>{
         <span class="kw">let </span>stream = events_rx.into_stream().map_err(ApiError::from);
         <span class="kw">let </span>stream = Box::pin(stream);
         <span class="self">Self </span>{
