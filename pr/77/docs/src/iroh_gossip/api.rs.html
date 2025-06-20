@@ -511,7 +511,10 @@
 <a href="#510" id="510">510</a>
 <a href="#511" id="511">511</a>
 <a href="#512" id="512">512</a>
-<a href="#513" id="513">513</a></pre></div><pre class="rust"><code><span class="doccomment">//! Public API for using iroh-gossip
+<a href="#513" id="513">513</a>
+<a href="#514" id="514">514</a>
+<a href="#515" id="515">515</a>
+<a href="#516" id="516">516</a></pre></div><pre class="rust"><code><span class="doccomment">//! Public API for using iroh-gossip
 //!
 //! The API is usable both locally and over RPC.
 
@@ -525,7 +528,9 @@
 <span class="kw">use </span>iroh_base::NodeId;
 <span class="kw">use </span>irpc::{channel::mpsc, rpc_requests, Client};
 <span class="kw">use </span>n0_future::{boxed::BoxStream, Stream, StreamExt, TryStreamExt};
+<span class="kw">use </span>nested_enum_utils::common_fields;
 <span class="kw">use </span>serde::{Deserialize, Serialize};
+<span class="kw">use </span>snafu::Snafu;
 
 <span class="kw">use </span><span class="kw">crate</span>::proto::{DeliveryScope, TopicId};
 
@@ -553,26 +558,31 @@
     <span class="kw">pub </span>bootstrap: BTreeSet&lt;NodeId&gt;,
 }
 
-<span class="doccomment">/// Errors returned from methods in [`GossipApi`]
-</span><span class="attr">#[derive(Debug, thiserror::Error)]
+<span class="attr">#[allow(missing_docs)]
+#[common_fields({
+    backtrace: <span class="prelude-ty">Option</span>&lt;snafu::Backtrace&gt;,
+    <span class="attr">#[snafu(implicit)]
+    </span>span_trace: n0_snafu::SpanTrace,
+})]
+<span class="attr">#[derive(Debug, Snafu)]
+#[non_exhaustive]
 </span><span class="kw">pub enum </span>ApiError {
-    <span class="doccomment">/// RPC error
-    </span><span class="attr">#[error(transparent)]
-    </span>Rpc(<span class="attr">#[from] </span>irpc::Error),
+    <span class="attr">#[snafu(transparent)]
+    </span>Rpc { source: irpc::Error },
     <span class="doccomment">/// The gossip topic was closed.
-    </span><span class="attr">#[error(<span class="string">"topic closed"</span>)]
-    </span>Closed,
+    </span><span class="attr">#[snafu(display(<span class="string">"topic closed"</span>))]
+    </span>Closed {},
 }
 
 <span class="kw">impl </span>From&lt;irpc::channel::SendError&gt; <span class="kw">for </span>ApiError {
     <span class="kw">fn </span>from(value: irpc::channel::SendError) -&gt; <span class="self">Self </span>{
-        <span class="self">Self</span>::Rpc(value.into())
+        irpc::Error::from(value).into()
     }
 }
 
 <span class="kw">impl </span>From&lt;irpc::channel::RecvError&gt; <span class="kw">for </span>ApiError {
     <span class="kw">fn </span>from(value: irpc::channel::RecvError) -&gt; <span class="self">Self </span>{
-        <span class="self">Self</span>::Rpc(value.into())
+        irpc::Error::from(value).into()
     }
 }
 
@@ -814,7 +824,7 @@
     /// continue to track `NeighborUp` events on the event stream.
     </span><span class="kw">pub async fn </span>joined(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;(), ApiError&gt; {
         <span class="kw">while </span>!<span class="self">self</span>.is_joined() {
-            <span class="kw">let </span>_event = <span class="self">self</span>.next().<span class="kw">await</span>.ok_or(ApiError::Closed)<span class="question-mark">??</span>;
+            <span class="kw">let </span>_event = <span class="self">self</span>.next().<span class="kw">await</span>.ok_or(ClosedSnafu.build())<span class="question-mark">??</span>;
         }
         <span class="prelude-val">Ok</span>(())
     }
@@ -932,7 +942,6 @@
     </span><span class="kw">async fn </span>test_rpc() -&gt; testresult::TestResult {
         <span class="kw">use </span>iroh::{protocol::Router, RelayMap};
         <span class="kw">use </span>n0_future::{time::Duration, StreamExt};
-        <span class="kw">use </span>n0_snafu::ResultExt;
         <span class="kw">use </span>n0_watcher::Watcher;
         <span class="kw">use </span>rand::SeedableRng;
 
@@ -951,10 +960,7 @@
             relay_map: RelayMap,
         ) -&gt; n0_snafu::Result&lt;(Router, Gossip)&gt; {
             <span class="kw">let </span>endpoint = create_endpoint(rng, relay_map).<span class="kw">await</span><span class="question-mark">?</span>;
-            <span class="kw">let </span>gossip = Gossip::builder()
-                .spawn(endpoint.clone())
-                .<span class="kw">await
-                </span>.context(<span class="string">"failed to spawn gossip"</span>)<span class="question-mark">?</span>;
+            <span class="kw">let </span>gossip = Gossip::builder().spawn(endpoint.clone());
             <span class="kw">let </span>router = Router::builder(endpoint)
                 .accept(ALPN, gossip.clone())
                 .spawn();

@@ -1726,91 +1726,7 @@
 <a href="#1725" id="1725">1725</a>
 <a href="#1726" id="1726">1726</a>
 <a href="#1727" id="1727">1727</a>
-<a href="#1728" id="1728">1728</a>
-<a href="#1729" id="1729">1729</a>
-<a href="#1730" id="1730">1730</a>
-<a href="#1731" id="1731">1731</a>
-<a href="#1732" id="1732">1732</a>
-<a href="#1733" id="1733">1733</a>
-<a href="#1734" id="1734">1734</a>
-<a href="#1735" id="1735">1735</a>
-<a href="#1736" id="1736">1736</a>
-<a href="#1737" id="1737">1737</a>
-<a href="#1738" id="1738">1738</a>
-<a href="#1739" id="1739">1739</a>
-<a href="#1740" id="1740">1740</a>
-<a href="#1741" id="1741">1741</a>
-<a href="#1742" id="1742">1742</a>
-<a href="#1743" id="1743">1743</a>
-<a href="#1744" id="1744">1744</a>
-<a href="#1745" id="1745">1745</a>
-<a href="#1746" id="1746">1746</a>
-<a href="#1747" id="1747">1747</a>
-<a href="#1748" id="1748">1748</a>
-<a href="#1749" id="1749">1749</a>
-<a href="#1750" id="1750">1750</a>
-<a href="#1751" id="1751">1751</a>
-<a href="#1752" id="1752">1752</a>
-<a href="#1753" id="1753">1753</a>
-<a href="#1754" id="1754">1754</a>
-<a href="#1755" id="1755">1755</a>
-<a href="#1756" id="1756">1756</a>
-<a href="#1757" id="1757">1757</a>
-<a href="#1758" id="1758">1758</a>
-<a href="#1759" id="1759">1759</a>
-<a href="#1760" id="1760">1760</a>
-<a href="#1761" id="1761">1761</a>
-<a href="#1762" id="1762">1762</a>
-<a href="#1763" id="1763">1763</a>
-<a href="#1764" id="1764">1764</a>
-<a href="#1765" id="1765">1765</a>
-<a href="#1766" id="1766">1766</a>
-<a href="#1767" id="1767">1767</a>
-<a href="#1768" id="1768">1768</a>
-<a href="#1769" id="1769">1769</a>
-<a href="#1770" id="1770">1770</a>
-<a href="#1771" id="1771">1771</a>
-<a href="#1772" id="1772">1772</a>
-<a href="#1773" id="1773">1773</a>
-<a href="#1774" id="1774">1774</a>
-<a href="#1775" id="1775">1775</a>
-<a href="#1776" id="1776">1776</a>
-<a href="#1777" id="1777">1777</a>
-<a href="#1778" id="1778">1778</a>
-<a href="#1779" id="1779">1779</a>
-<a href="#1780" id="1780">1780</a>
-<a href="#1781" id="1781">1781</a>
-<a href="#1782" id="1782">1782</a>
-<a href="#1783" id="1783">1783</a>
-<a href="#1784" id="1784">1784</a>
-<a href="#1785" id="1785">1785</a>
-<a href="#1786" id="1786">1786</a>
-<a href="#1787" id="1787">1787</a>
-<a href="#1788" id="1788">1788</a>
-<a href="#1789" id="1789">1789</a>
-<a href="#1790" id="1790">1790</a>
-<a href="#1791" id="1791">1791</a>
-<a href="#1792" id="1792">1792</a>
-<a href="#1793" id="1793">1793</a>
-<a href="#1794" id="1794">1794</a>
-<a href="#1795" id="1795">1795</a>
-<a href="#1796" id="1796">1796</a>
-<a href="#1797" id="1797">1797</a>
-<a href="#1798" id="1798">1798</a>
-<a href="#1799" id="1799">1799</a>
-<a href="#1800" id="1800">1800</a>
-<a href="#1801" id="1801">1801</a>
-<a href="#1802" id="1802">1802</a>
-<a href="#1803" id="1803">1803</a>
-<a href="#1804" id="1804">1804</a>
-<a href="#1805" id="1805">1805</a>
-<a href="#1806" id="1806">1806</a>
-<a href="#1807" id="1807">1807</a>
-<a href="#1808" id="1808">1808</a>
-<a href="#1809" id="1809">1809</a>
-<a href="#1810" id="1810">1810</a>
-<a href="#1811" id="1811">1811</a>
-<a href="#1812" id="1812">1812</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
+<a href="#1728" id="1728">1728</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
@@ -1820,12 +1736,11 @@
     task::{Context, Poll},
 };
 
-<span class="kw">use </span>anyhow::Context <span class="kw">as _</span>;
 <span class="kw">use </span>bytes::BytesMut;
 <span class="kw">use </span>futures_concurrency::stream::{stream_group, StreamGroup};
 <span class="kw">use </span>futures_util::FutureExt <span class="kw">as _</span>;
 <span class="kw">use </span>iroh::{
-    endpoint::{Connection, DirectAddr},
+    endpoint::Connection,
     protocol::{AcceptError, ProtocolHandler},
     Endpoint, NodeAddr, NodeId, PublicKey, RelayUrl,
 };
@@ -1836,9 +1751,11 @@
     Stream, StreamExt <span class="kw">as _</span>,
 };
 <span class="kw">use </span>n0_watcher::Watcher;
+<span class="kw">use </span>nested_enum_utils::common_fields;
 <span class="kw">use </span>rand::rngs::StdRng;
 <span class="kw">use </span>rand_core::SeedableRng;
 <span class="kw">use </span>serde::{Deserialize, Serialize};
+<span class="kw">use </span>snafu::Snafu;
 <span class="kw">use </span>tokio::sync::{broadcast, mpsc, oneshot};
 <span class="kw">use </span>tokio_util::sync::CancellationToken;
 <span class="kw">use </span>tracing::{debug, error, error_span, trace, warn, Instrument};
@@ -1878,56 +1795,6 @@
 <span class="kw">type </span>Timer = proto::Timer&lt;PublicKey&gt;;
 <span class="kw">type </span>ProtoMessage = proto::Message&lt;PublicKey&gt;;
 
-<span class="doccomment">/// Net related errors
-</span><span class="attr">#[derive(Debug, thiserror::Error)]
-</span><span class="kw">pub enum </span>Error {
-    <span class="doccomment">/// The gossip actor is closed, and cannot receive new messages
-    </span><span class="attr">#[error(<span class="string">"Actor closed"</span>)]
-    </span>ActorClosed,
-    <span class="doccomment">/// First event received that was not `Joined`
-    </span><span class="attr">#[error(<span class="string">"Joined event to be the first event received"</span>)]
-    </span>UnexpectedEvent,
-    <span class="doccomment">/// The gossip message receiver closed
-    </span><span class="attr">#[error(<span class="string">"Receiver closed"</span>)]
-    </span>ReceiverClosed,
-    <span class="doccomment">/// Ser/De error
-    </span><span class="attr">#[error(<span class="string">"Ser/De {0}"</span>)]
-    </span>SerDe(<span class="attr">#[from] </span>postcard::Error),
-    <span class="doccomment">/// Tried to construct empty peer data
-    </span><span class="attr">#[error(<span class="string">"empty peer data"</span>)]
-    </span>EmptyPeerData,
-    <span class="doccomment">/// Writing a message to the network
-    </span><span class="attr">#[error(<span class="string">"write {0}"</span>)]
-    </span>Write(<span class="attr">#[from] </span>util::WriteError),
-    <span class="doccomment">/// Reading a message from the network
-    </span><span class="attr">#[error(<span class="string">"read {0}"</span>)]
-    </span>Read(<span class="attr">#[from] </span>util::ReadError),
-    <span class="doccomment">/// A watchable disconnected.
-    </span><span class="attr">#[error(transparent)]
-    </span>WatchableDisconnected(<span class="attr">#[from] </span>n0_watcher::Disconnected),
-    <span class="doccomment">/// Iroh connection error
-    </span><span class="attr">#[error(transparent)]
-    </span>IrohConnection(<span class="attr">#[from] </span>iroh::endpoint::ConnectionError),
-    <span class="doccomment">/// Errors coming from `iroh`
-    </span><span class="attr">#[error(transparent)]
-    </span>Iroh(<span class="attr">#[from] </span>anyhow::Error),
-    <span class="doccomment">/// Task join failure
-    </span><span class="attr">#[error(<span class="string">"join"</span>)]
-    </span>Join(<span class="attr">#[from] </span>task::JoinError),
-    <span class="doccomment">/// Failed to send a request.
-    </span><span class="attr">#[error(transparent)]
-    </span>RpcSend(<span class="attr">#[from] </span>irpc::channel::SendError),
-    <span class="doccomment">/// Failed to receive a response.
-    </span><span class="attr">#[error(transparent)]
-    </span>RpcRecv(<span class="attr">#[from] </span>irpc::channel::RecvError),
-}
-
-<span class="kw">impl</span>&lt;T&gt; From&lt;mpsc::error::SendError&lt;T&gt;&gt; <span class="kw">for </span>Error {
-    <span class="kw">fn </span>from(_value: mpsc::error::SendError&lt;T&gt;) -&gt; <span class="self">Self </span>{
-        Error::ActorClosed
-    }
-}
-
 <span class="doccomment">/// Publish and subscribe on gossiping topics.
 ///
 /// Each topic is a separate broadcast tree with separate memberships.
@@ -1962,6 +1829,29 @@
 </span><span class="kw">enum </span>LocalActorMessage {
     HandleConnection(Connection),
     Shutdown { reply: oneshot::Sender&lt;()&gt; },
+}
+
+<span class="attr">#[allow(missing_docs)]
+#[common_fields({
+    backtrace: <span class="prelude-ty">Option</span>&lt;snafu::Backtrace&gt;,
+    <span class="attr">#[snafu(implicit)]
+    </span>span_trace: n0_snafu::SpanTrace,
+})]
+<span class="attr">#[derive(Debug, Snafu)]
+#[non_exhaustive]
+</span><span class="kw">pub enum </span>Error {
+    ActorDropped {},
+}
+
+<span class="kw">impl</span>&lt;T&gt; From&lt;mpsc::error::SendError&lt;T&gt;&gt; <span class="kw">for </span>Error {
+    <span class="kw">fn </span>from(_value: mpsc::error::SendError&lt;T&gt;) -&gt; <span class="self">Self </span>{
+        ActorDroppedSnafu.build()
+    }
+}
+<span class="kw">impl </span>From&lt;oneshot::error::RecvError&gt; <span class="kw">for </span>Error {
+    <span class="kw">fn </span>from(_value: oneshot::error::RecvError) -&gt; <span class="self">Self </span>{
+        ActorDroppedSnafu.build()
+    }
 }
 
 <span class="attr">#[derive(Debug)]
@@ -2015,30 +1905,17 @@
     </span>}
 
     <span class="doccomment">/// Spawn a gossip actor and get a handle for it
-    </span><span class="kw">pub async fn </span>spawn(<span class="self">self</span>, endpoint: Endpoint) -&gt; <span class="prelude-ty">Result</span>&lt;Gossip, Error&gt; {
+    </span><span class="kw">pub fn </span>spawn(<span class="self">self</span>, endpoint: Endpoint) -&gt; Gossip {
         <span class="kw">let </span>metrics = Arc::new(Metrics::default());
-        <span class="comment">// We want to wait for our endpoint to be addressable by other nodes before launching gossip,
-        // because otherwise our Join messages, which will be forwarded into the swarm through a random
-        // walk, might not include an address to talk back to us.
-        </span><span class="kw">let </span>addr = endpoint.node_addr().initialized().<span class="kw">await</span><span class="question-mark">?</span>;
-
-        <span class="kw">let </span>(actor, rpc_tx, local_tx) =
-            Actor::new(endpoint, <span class="self">self</span>.config, metrics.clone(), <span class="kw-2">&amp;</span>addr.into());
+        <span class="kw">let </span>(actor, rpc_tx, local_tx) = Actor::new(endpoint, <span class="self">self</span>.config, metrics.clone());
         <span class="kw">let </span>me = actor.endpoint.node_id().fmt_short();
         <span class="kw">let </span>max_message_size = actor.state.max_message_size();
 
-        <span class="kw">let </span>actor_handle = task::spawn(
-            <span class="kw">async move </span>{
-                <span class="kw">if let </span><span class="prelude-val">Err</span>(err) = actor.run().<span class="kw">await </span>{
-                    <span class="macro">warn!</span>(<span class="string">"gossip actor closed with error: {err:?}"</span>);
-                }
-            }
-            .instrument(<span class="macro">error_span!</span>(<span class="string">"gossip"</span>, %me)),
-        );
+        <span class="kw">let </span>actor_handle = task::spawn(actor.run().instrument(<span class="macro">error_span!</span>(<span class="string">"gossip"</span>, %me)));
 
         <span class="kw">let </span>api = GossipApi::local(rpc_tx);
 
-        <span class="prelude-val">Ok</span>(Gossip {
+        Gossip {
             inner: Inner {
                 api,
                 local_tx,
@@ -2047,7 +1924,7 @@
                 metrics,
             }
             .into(),
-        })
+        }
     }
 }
 
@@ -2085,7 +1962,7 @@
     ///
     /// This leaves all topics, sending `Disconnect` messages to peers, and then
     /// stops the gossip actor loop and drops all state and connections.
-    </span><span class="kw">pub async fn </span>shutdown(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; anyhow::Result&lt;()&gt; {
+    </span><span class="kw">pub async fn </span>shutdown(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
         <span class="kw">let </span>(reply, reply_rx) = oneshot::channel();
         <span class="self">self</span>.inner
             .local_tx
@@ -2127,7 +2004,7 @@
     <span class="doccomment">/// Internal queue of topic to close because all handles were dropped.
     </span>quit_queue: VecDeque&lt;TopicId&gt;,
     <span class="doccomment">/// Tasks for the connection loops, to keep track of panics.
-    </span>connection_tasks: JoinSet&lt;(NodeId, Connection, anyhow::Result&lt;()&gt;)&gt;,
+    </span>connection_tasks: JoinSet&lt;(NodeId, Connection, <span class="prelude-ty">Result</span>&lt;(), ConnectionLoopError&gt;)&gt;,
     metrics: Arc&lt;Metrics&gt;,
     topic_event_forwarders: JoinSet&lt;TopicId&gt;,
 }
@@ -2137,7 +2014,6 @@
         endpoint: Endpoint,
         config: proto::Config,
         metrics: Arc&lt;Metrics&gt;,
-        my_addr: <span class="kw-2">&amp;</span>AddrInfo,
     ) -&gt; (
         <span class="self">Self</span>,
         mpsc::Sender&lt;RpcMessage&gt;,
@@ -2147,7 +2023,7 @@
         <span class="kw">let </span>dialer = Dialer::new(endpoint.clone());
         <span class="kw">let </span>state = proto::State::new(
             peer_id,
-            encode_peer_data(my_addr).unwrap(),
+            Default::default(),
             config,
             rand::rngs::StdRng::from_entropy(),
         );
@@ -2176,52 +2052,26 @@
         (actor, rpc_tx, local_tx)
     }
 
-    <span class="kw">pub async fn </span>run(<span class="kw-2">mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
-        <span class="kw">let </span>(<span class="kw-2">mut </span>current_addresses, <span class="kw-2">mut </span>home_relay_stream, <span class="kw-2">mut </span>direct_addresses_stream) =
-            <span class="self">self</span>.setup().<span class="kw">await</span><span class="question-mark">?</span>;
+    <span class="kw">pub async fn </span>run(<span class="kw-2">mut </span><span class="self">self</span>) {
+        <span class="kw">let </span><span class="kw-2">mut </span>addr_update_stream = <span class="self">self</span>.setup().<span class="kw">await</span>;
 
         <span class="kw">let </span><span class="kw-2">mut </span>i = <span class="number">0</span>;
-        <span class="kw">while let </span><span class="prelude-val">Some</span>(()) = <span class="self">self
-            </span>.event_loop(
-                <span class="kw-2">&amp;mut </span>current_addresses,
-                <span class="kw-2">&amp;mut </span>home_relay_stream,
-                <span class="kw-2">&amp;mut </span>direct_addresses_stream,
-                i,
-            )
-            .<span class="kw">await</span><span class="question-mark">?
-        </span>{
+        <span class="kw">while </span><span class="self">self</span>.event_loop(<span class="kw-2">&amp;mut </span>addr_update_stream, i).<span class="kw">await </span>{
             i += <span class="number">1</span>;
         }
-        <span class="prelude-val">Ok</span>(())
     }
 
     <span class="doccomment">/// Performs the initial actor setup to run the [`Actor::event_loop`].
     ///
     /// This updates our current address and return it. It also returns the home relay stream and
     /// direct addr stream.
-    </span><span class="kw">async fn </span>setup(
-        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;
-        (
-            BTreeSet&lt;DirectAddr&gt;,
-            <span class="kw">impl </span>Stream&lt;Item = Vec&lt;iroh::RelayUrl&gt;&gt; + Unpin,
-            <span class="kw">impl </span>Stream&lt;Item = BTreeSet&lt;DirectAddr&gt;&gt; + Unpin,
-        ),
-        Error,
-    &gt; {
-        <span class="comment">// Watch for changes in direct addresses to update our peer data.
-        </span><span class="kw">let </span>direct_addresses_stream = <span class="self">self</span>.endpoint.direct_addresses().stream().filter_map(|i| i);
-        <span class="comment">// Watch for changes of our home relay to update our peer data.
-        </span><span class="kw">let </span>home_relay_stream = <span class="self">self</span>.endpoint.home_relay().stream();
-        <span class="comment">// With each gossip message we provide addressing information to reach our node.
-        </span><span class="kw">let </span>current_addresses = <span class="self">self</span>.endpoint.direct_addresses().get()<span class="question-mark">?</span>.unwrap_or_default();
-
-        <span class="self">self</span>.handle_addr_update(<span class="kw-2">&amp;</span>current_addresses).<span class="kw">await</span><span class="question-mark">?</span>;
-        <span class="prelude-val">Ok</span>((
-            current_addresses,
-            home_relay_stream,
-            direct_addresses_stream,
-        ))
+    </span><span class="kw">async fn </span>setup(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="kw">impl </span>Stream&lt;Item = NodeAddr&gt; + Send + Unpin {
+        <span class="kw">let </span>addr_update_stream = <span class="self">self</span>.endpoint.node_addr().stream().filter_map(|x| x);
+        <span class="comment">// TODO(Frando): Fail if endpoint disconnected?
+        </span><span class="kw">if let </span><span class="prelude-val">Ok</span>(initial_addr) = <span class="self">self</span>.endpoint.node_addr().initialized().<span class="kw">await </span>{
+            <span class="self">self</span>.handle_addr_update(initial_addr).<span class="kw">await</span>;
+        }
+        addr_update_stream
     }
 
     <span class="doccomment">/// One event loop processing step.
@@ -2229,11 +2079,9 @@
     /// None is returned when no further processing should be performed.
     </span><span class="kw">async fn </span>event_loop(
         <span class="kw-2">&amp;mut </span><span class="self">self</span>,
-        current_addresses: <span class="kw-2">&amp;mut </span>BTreeSet&lt;DirectAddr&gt;,
-        home_relay_stream: <span class="kw-2">&amp;mut </span>(<span class="kw">impl </span>Stream&lt;Item = Vec&lt;iroh::RelayUrl&gt;&gt; + Unpin),
-        direct_addresses_stream: <span class="kw-2">&amp;mut </span>(<span class="kw">impl </span>Stream&lt;Item = BTreeSet&lt;DirectAddr&gt;&gt; + Unpin),
+        addr_updates: <span class="kw-2">&amp;mut </span>(<span class="kw">impl </span>Stream&lt;Item = NodeAddr&gt; + Send + Unpin),
         i: usize,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="prelude-ty">Option</span>&lt;()&gt;, Error&gt; {
+    ) -&gt; bool {
         <span class="self">self</span>.metrics.actor_tick_main.inc();
         <span class="macro">tokio::select!</span> {
             biased;
@@ -2242,10 +2090,10 @@
                     <span class="prelude-val">Some</span>(LocalActorMessage::Shutdown { reply }) =&gt; {
                         <span class="macro">debug!</span>(<span class="string">"received shutdown message, quit all topics"</span>);
                         <span class="self">self</span>.quit_queue.extend(<span class="self">self</span>.topics.keys().copied());
-                        <span class="self">self</span>.process_quit_queue().<span class="kw">await</span>.ok();
+                        <span class="self">self</span>.process_quit_queue().<span class="kw">await</span>;
                         <span class="macro">debug!</span>(<span class="string">"all topics quit, stop gossip actor"</span>);
                         reply.send(()).ok();
-                        <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>)
+                        <span class="kw">return </span><span class="bool-val">false</span>;
                     },
                     <span class="prelude-val">Some</span>(LocalActorMessage::HandleConnection(conn)) =&gt; {
                         <span class="kw">if let </span><span class="prelude-val">Ok</span>(remote_node_id) = conn.remote_node_id() {
@@ -2254,7 +2102,7 @@
                     }
                     <span class="prelude-val">None </span>=&gt; {
                         <span class="macro">debug!</span>(<span class="string">"all gossip handles dropped, stop gossip actor"</span>);
-                        <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>)
+                        <span class="kw">return </span><span class="bool-val">false</span>;
                     }
                 }
             }
@@ -2263,27 +2111,22 @@
                 <span class="self">self</span>.metrics.actor_tick_rx.inc();
                 <span class="kw">match </span>msg {
                     <span class="prelude-val">Some</span>(msg) =&gt; {
-                        <span class="self">self</span>.handle_rpc_msg(msg, Instant::now()).<span class="kw">await</span><span class="question-mark">?</span>;
+                        <span class="self">self</span>.handle_rpc_msg(msg, Instant::now()).<span class="kw">await</span>;
                     }
                     <span class="prelude-val">None </span>=&gt; {
                         <span class="macro">debug!</span>(<span class="string">"all gossip handles dropped, stop gossip actor"</span>);
-                        <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>)
+                        <span class="kw">return </span><span class="bool-val">false</span>;
                     }
                 }
             },
             <span class="prelude-val">Some</span>((key, (topic, command))) = <span class="self">self</span>.command_rx.next(), <span class="kw">if </span>!<span class="self">self</span>.command_rx.is_empty() =&gt; {
                 <span class="macro">trace!</span>(<span class="question-mark">?</span>i, <span class="string">"tick: command_rx"</span>);
-                <span class="self">self</span>.handle_command(topic, key, command).<span class="kw">await</span><span class="question-mark">?</span>;
+                <span class="self">self</span>.handle_command(topic, key, command).<span class="kw">await</span>;
             },
-            <span class="prelude-val">Some</span>(new_addresses) = direct_addresses_stream.next() =&gt; {
-                <span class="macro">trace!</span>(<span class="question-mark">?</span>i, <span class="string">"tick: new_endpoints"</span>);
+            <span class="prelude-val">Some</span>(new_address) = addr_updates.next() =&gt; {
+                <span class="macro">trace!</span>(<span class="question-mark">?</span>i, <span class="string">"tick: new_address"</span>);
                 <span class="self">self</span>.metrics.actor_tick_endpoint.inc();
-                <span class="kw-2">*</span>current_addresses = new_addresses;
-                <span class="self">self</span>.handle_addr_update(current_addresses).<span class="kw">await</span><span class="question-mark">?</span>;
-            }
-            <span class="prelude-val">Some</span>(_relay_url) = home_relay_stream.next() =&gt; {
-                <span class="macro">trace!</span>(<span class="question-mark">?</span>i, <span class="string">"tick: new_home_relay"</span>);
-                <span class="self">self</span>.handle_addr_update(current_addresses).<span class="kw">await</span><span class="question-mark">?</span>;
+                <span class="self">self</span>.handle_addr_update(new_address).<span class="kw">await</span>;
             }
             (peer_id, res) = <span class="self">self</span>.dialer.next_conn() =&gt; {
                 <span class="macro">trace!</span>(<span class="question-mark">?</span>i, <span class="string">"tick: dialer"</span>);
@@ -2301,7 +2144,7 @@
                         <span class="kw">let </span>is_active = <span class="macro">matches!</span>(peer_state, <span class="prelude-val">Some</span>(PeerState::Active { .. }));
                         <span class="kw">if </span>!is_active {
                             <span class="self">self</span>.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
-                                .<span class="kw">await</span><span class="question-mark">?</span>;
+                                .<span class="kw">await</span>;
                         }
                     }
                     <span class="prelude-val">None </span>=&gt; {
@@ -2314,40 +2157,38 @@
                 <span class="macro">trace!</span>(<span class="question-mark">?</span>i, <span class="string">"tick: in_event_rx"</span>);
                 <span class="self">self</span>.metrics.actor_tick_in_event_rx.inc();
                 <span class="kw">let </span>event = event.expect(<span class="string">"unreachable: in_event_tx is never dropped before receiver"</span>);
-                <span class="self">self</span>.handle_in_event(event, Instant::now()).<span class="kw">await</span><span class="question-mark">?</span>;
+                <span class="self">self</span>.handle_in_event(event, Instant::now()).<span class="kw">await</span>;
             }
             <span class="kw">_ </span>= <span class="self">self</span>.timers.wait_next() =&gt; {
                 <span class="macro">trace!</span>(<span class="question-mark">?</span>i, <span class="string">"tick: timers"</span>);
                 <span class="self">self</span>.metrics.actor_tick_timers.inc();
                 <span class="kw">let </span>now = Instant::now();
                 <span class="kw">while let </span><span class="prelude-val">Some</span>((_instant, timer)) = <span class="self">self</span>.timers.pop_before(now) {
-                    <span class="self">self</span>.handle_in_event(InEvent::TimerExpired(timer), now).<span class="kw">await</span><span class="question-mark">?</span>;
+                    <span class="self">self</span>.handle_in_event(InEvent::TimerExpired(timer), now).<span class="kw">await</span>;
                 }
             }
             <span class="prelude-val">Some</span>(res) = <span class="self">self</span>.connection_tasks.join_next(), <span class="kw">if </span>!<span class="self">self</span>.connection_tasks.is_empty() =&gt; {
                 <span class="macro">trace!</span>(<span class="question-mark">?</span>i, <span class="string">"tick: connection_tasks"</span>);
                 <span class="kw">let </span>(peer_id, conn, result) = res.expect(<span class="string">"connection task panicked"</span>);
-                <span class="self">self</span>.handle_connection_task_finished(peer_id, conn, result).<span class="kw">await</span><span class="question-mark">?</span>;
+                <span class="self">self</span>.handle_connection_task_finished(peer_id, conn, result).<span class="kw">await</span>;
             }
             <span class="prelude-val">Some</span>(res) = <span class="self">self</span>.topic_event_forwarders.join_next(), <span class="kw">if </span>!<span class="self">self</span>.topic_event_forwarders.is_empty() =&gt; {
                 <span class="kw">let </span>topic_id = res.expect(<span class="string">"topic event forwarder panicked"</span>);
                 <span class="kw">if let </span><span class="prelude-val">Some</span>(state) = <span class="self">self</span>.topics.get_mut(<span class="kw-2">&amp;</span>topic_id) {
                     <span class="kw">if </span>!state.still_needed() {
                         <span class="self">self</span>.quit_queue.push_back(topic_id);
-                        <span class="self">self</span>.process_quit_queue().<span class="kw">await</span><span class="question-mark">?</span>;
+                        <span class="self">self</span>.process_quit_queue().<span class="kw">await</span>;
                     }
                 }
             }
         }
 
-        <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(()))
-    }
+        <span class="bool-val">true
+    </span>}
 
-    <span class="kw">async fn </span>handle_addr_update(
-        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
-        current_addresses: <span class="kw-2">&amp;</span>BTreeSet&lt;DirectAddr&gt;,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
-        <span class="kw">let </span>peer_data = our_peer_data(<span class="kw-2">&amp;</span><span class="self">self</span>.endpoint, current_addresses)<span class="question-mark">?</span>;
+    <span class="kw">async fn </span>handle_addr_update(<span class="kw-2">&amp;mut </span><span class="self">self</span>, node_addr: NodeAddr) {
+        <span class="comment">// let peer_data = our_peer_data(&amp;self.endpoint, current_addresses);
+        </span><span class="kw">let </span>peer_data = encode_peer_data(<span class="kw-2">&amp;</span>node_addr.into());
         <span class="self">self</span>.handle_in_event(InEvent::UpdatePeerData(peer_data), Instant::now())
             .<span class="kw">await
     </span>}
@@ -2357,12 +2198,12 @@
         topic: TopicId,
         key: stream_group::Key,
         command: <span class="prelude-ty">Option</span>&lt;Command&gt;,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
+    ) {
         <span class="macro">debug!</span>(<span class="question-mark">?</span>topic, <span class="question-mark">?</span>key, <span class="question-mark">?</span>command, <span class="string">"handle command"</span>);
         <span class="kw">let </span><span class="prelude-val">Some</span>(state) = <span class="self">self</span>.topics.get_mut(<span class="kw-2">&amp;</span>topic) <span class="kw">else </span>{
             <span class="comment">// TODO: unreachable?
             </span><span class="macro">warn!</span>(<span class="string">"received command for unknown topic"</span>);
-            <span class="kw">return </span><span class="prelude-val">Ok</span>(());
+            <span class="kw">return</span>;
         };
         <span class="kw">match </span>command {
             <span class="prelude-val">Some</span>(command) =&gt; {
@@ -2374,17 +2215,16 @@
                     Command::JoinPeers(peers) =&gt; ProtoCommand::Join(peers),
                 };
                 <span class="self">self</span>.handle_in_event(proto::InEvent::Command(topic, command), Instant::now())
-                    .<span class="kw">await</span><span class="question-mark">?</span>;
+                    .<span class="kw">await</span>;
             }
             <span class="prelude-val">None </span>=&gt; {
                 state.command_rx_keys.remove(<span class="kw-2">&amp;</span>key);
                 <span class="kw">if </span>!state.still_needed() {
                     <span class="self">self</span>.quit_queue.push_back(topic);
-                    <span class="self">self</span>.process_quit_queue().<span class="kw">await</span><span class="question-mark">?</span>;
+                    <span class="self">self</span>.process_quit_queue().<span class="kw">await</span>;
                 }
             }
         }
-        <span class="prelude-val">Ok</span>(())
     }
 
     <span class="kw">fn </span>handle_connection(<span class="kw-2">&amp;mut </span><span class="self">self</span>, peer_id: NodeId, origin: ConnOrigin, conn: Connection) {
@@ -2430,8 +2270,8 @@
         <span class="kw-2">&amp;mut </span><span class="self">self</span>,
         peer_id: NodeId,
         conn: Connection,
-        task_result: anyhow::Result&lt;()&gt;,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
+        task_result: <span class="prelude-ty">Result</span>&lt;(), ConnectionLoopError&gt;,
+    ) {
         <span class="kw">if </span>conn.close_reason().is_none() {
             conn.close(<span class="number">0u32</span>.into(), <span class="string">b"close from disconnect"</span>);
         }
@@ -2447,7 +2287,7 @@
             <span class="kw">if </span>conn.stable_id() == <span class="kw-2">*</span>active_conn_id {
                 <span class="macro">debug!</span>(<span class="string">"active send connection closed, mark peer as disconnected"</span>);
                 <span class="self">self</span>.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
-                    .<span class="kw">await</span><span class="question-mark">?</span>;
+                    .<span class="kw">await</span>;
             } <span class="kw">else </span>{
                 other_conns.retain(|x| <span class="kw-2">*</span>x != conn.stable_id());
                 <span class="macro">debug!</span>(<span class="string">"remaining {} other connections"</span>, other_conns.len() + <span class="number">1</span>);
@@ -2455,10 +2295,9 @@
         } <span class="kw">else </span>{
             <span class="macro">debug!</span>(<span class="string">"peer already marked as disconnected"</span>);
         }
-        <span class="prelude-val">Ok</span>(())
     }
 
-    <span class="kw">async fn </span>handle_rpc_msg(<span class="kw-2">&amp;mut </span><span class="self">self</span>, msg: RpcMessage, now: Instant) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
+    <span class="kw">async fn </span>handle_rpc_msg(<span class="kw-2">&amp;mut </span><span class="self">self</span>, msg: RpcMessage, now: Instant) {
         <span class="macro">trace!</span>(<span class="string">"handle to_actor  {msg:?}"</span>);
         <span class="kw">match </span>msg {
             RpcMessage::Join(msg) =&gt; {
@@ -2504,33 +2343,30 @@
                     ),
                     now,
                 )
-                .<span class="kw">await</span><span class="question-mark">?</span>;
+                .<span class="kw">await</span>;
             }
         }
-        <span class="prelude-val">Ok</span>(())
     }
 
-    <span class="kw">async fn </span>handle_in_event(<span class="kw-2">&amp;mut </span><span class="self">self</span>, event: InEvent, now: Instant) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
-        <span class="self">self</span>.handle_in_event_inner(event, now).<span class="kw">await</span><span class="question-mark">?</span>;
-        <span class="self">self</span>.process_quit_queue().<span class="kw">await</span><span class="question-mark">?</span>;
-        <span class="prelude-val">Ok</span>(())
+    <span class="kw">async fn </span>handle_in_event(<span class="kw-2">&amp;mut </span><span class="self">self</span>, event: InEvent, now: Instant) {
+        <span class="self">self</span>.handle_in_event_inner(event, now).<span class="kw">await</span>;
+        <span class="self">self</span>.process_quit_queue().<span class="kw">await</span>;
     }
 
-    <span class="kw">async fn </span>process_quit_queue(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
+    <span class="kw">async fn </span>process_quit_queue(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
         <span class="kw">while let </span><span class="prelude-val">Some</span>(topic_id) = <span class="self">self</span>.quit_queue.pop_front() {
             <span class="self">self</span>.handle_in_event_inner(
                 InEvent::Command(topic_id, ProtoCommand::Quit),
                 Instant::now(),
             )
-            .<span class="kw">await</span><span class="question-mark">?</span>;
+            .<span class="kw">await</span>;
             <span class="kw">if </span><span class="self">self</span>.topics.remove(<span class="kw-2">&amp;</span>topic_id).is_some() {
                 <span class="macro">tracing::debug!</span>(%topic_id, <span class="string">"publishers and subscribers gone; unsubscribing"</span>);
             }
         }
-        <span class="prelude-val">Ok</span>(())
     }
 
-    <span class="kw">async fn </span>handle_in_event_inner(<span class="kw-2">&amp;mut </span><span class="self">self</span>, event: InEvent, now: Instant) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
+    <span class="kw">async fn </span>handle_in_event_inner(<span class="kw-2">&amp;mut </span><span class="self">self</span>, event: InEvent, now: Instant) {
         <span class="kw">if </span><span class="macro">matches!</span>(event, InEvent::TimerExpired(<span class="kw">_</span>)) {
             <span class="macro">trace!</span>(<span class="question-mark">?</span>event, <span class="string">"handle in_event"</span>);
         } <span class="kw">else </span>{
@@ -2618,7 +2454,6 @@
                 },
             }
         }
-        <span class="prelude-val">Ok</span>(())
     }
 }
 
@@ -2717,6 +2552,35 @@
     Dial,
 }
 
+<span class="attr">#[allow(missing_docs)]
+#[common_fields({
+    backtrace: <span class="prelude-ty">Option</span>&lt;snafu::Backtrace&gt;,
+})]
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+#[non_exhaustive]
+</span><span class="kw">enum </span>ConnectionLoopError {
+    <span class="attr">#[snafu(transparent)]
+    </span>Write {
+        source: <span class="self">self</span>::util::WriteError,
+    },
+    <span class="attr">#[snafu(transparent)]
+    </span>Read {
+        source: <span class="self">self</span>::util::ReadError,
+    },
+    <span class="attr">#[snafu(transparent)]
+    </span>Connection {
+        source: iroh::endpoint::ConnectionError,
+    },
+    ActorDropped {},
+}
+
+<span class="kw">impl</span>&lt;T&gt; From&lt;mpsc::error::SendError&lt;T&gt;&gt; <span class="kw">for </span>ConnectionLoopError {
+    <span class="kw">fn </span>from(_value: mpsc::error::SendError&lt;T&gt;) -&gt; <span class="self">Self </span>{
+        <span class="self">self</span>::connection_loop_error::ActorDroppedSnafu.build()
+    }
+}
+
 <span class="kw">async fn </span>connection_loop(
     from: PublicKey,
     conn: <span class="kw-2">&amp;</span>Connection,
@@ -2725,7 +2589,7 @@
     in_event_tx: <span class="kw-2">&amp;</span>mpsc::Sender&lt;InEvent&gt;,
     max_message_size: usize,
     queue: Vec&lt;ProtoMessage&gt;,
-) -&gt; anyhow::Result&lt;()&gt; {
+) -&gt; <span class="prelude-ty">Result</span>&lt;(), ConnectionLoopError&gt; {
     <span class="kw">let </span>(<span class="kw-2">mut </span>send, <span class="kw-2">mut </span>recv) = <span class="kw">match </span>origin {
         ConnOrigin::Accept =&gt; conn.accept_bi().<span class="kw">await</span><span class="question-mark">?</span>,
         ConnOrigin::Dial =&gt; conn.open_bi().<span class="kw">await</span><span class="question-mark">?</span>,
@@ -2745,7 +2609,7 @@
         </span><span class="kw">let _ </span>= send.finish();
         <span class="comment">// wait for the other node to ack all the sent data
         </span><span class="kw">let _ </span>= send.stopped().<span class="kw">await</span>;
-        anyhow::Ok(())
+        <span class="prelude-ty">Result</span>::&lt;<span class="kw">_</span>, ConnectionLoopError&gt;::Ok(())
     };
 
     <span class="kw">let </span>recv_loop = <span class="kw">async </span>{
@@ -2757,11 +2621,13 @@
                 <span class="prelude-val">Some</span>(msg) =&gt; in_event_tx.send(InEvent::RecvMessage(from, msg)).<span class="kw">await</span><span class="question-mark">?</span>,
             }
         }
-        anyhow::Ok(())
+        <span class="prelude-ty">Result</span>::&lt;<span class="kw">_</span>, ConnectionLoopError&gt;::Ok(())
     };
 
-    <span class="kw">let </span>res = <span class="macro">tokio::join!</span>(send_loop, recv_loop);
-    res.<span class="number">0</span>.context(<span class="string">"send_loop"</span>).and(res.<span class="number">1</span>.context(<span class="string">"recv_loop"</span>))
+    <span class="kw">let </span>(send_res, recv_res) = <span class="macro">tokio::join!</span>(send_loop, recv_loop);
+    send_res<span class="question-mark">?</span>;
+    recv_res<span class="question-mark">?</span>;
+    <span class="prelude-val">Ok</span>(())
 }
 
 <span class="attr">#[derive(Default, Debug, Clone, Serialize, Deserialize)]
@@ -2785,16 +2651,12 @@
     }
 }
 
-<span class="kw">fn </span>encode_peer_data(info: <span class="kw-2">&amp;</span>AddrInfo) -&gt; <span class="prelude-ty">Result</span>&lt;PeerData, Error&gt; {
-    <span class="kw">let </span>bytes = postcard::to_stdvec(info)<span class="question-mark">?</span>;
-    <span class="kw">if </span>bytes.is_empty() {
-        <span class="kw">return </span><span class="prelude-val">Err</span>(Error::EmptyPeerData);
-    }
-
-    <span class="prelude-val">Ok</span>(PeerData::new(bytes))
+<span class="kw">fn </span>encode_peer_data(info: <span class="kw-2">&amp;</span>AddrInfo) -&gt; PeerData {
+    <span class="kw">let </span>bytes = postcard::to_stdvec(info).expect(<span class="string">"serializing AddrInfo may not fail"</span>);
+    PeerData::new(bytes)
 }
 
-<span class="kw">fn </span>decode_peer_data(peer_data: <span class="kw-2">&amp;</span>PeerData) -&gt; <span class="prelude-ty">Result</span>&lt;AddrInfo, Error&gt; {
+<span class="kw">fn </span>decode_peer_data(peer_data: <span class="kw-2">&amp;</span>PeerData) -&gt; <span class="prelude-ty">Result</span>&lt;AddrInfo, postcard::Error&gt; {
     <span class="kw">let </span>bytes = peer_data.as_bytes();
     <span class="kw">if </span>bytes.is_empty() {
         <span class="kw">return </span><span class="prelude-val">Ok</span>(AddrInfo::default());
@@ -2861,22 +2723,6 @@
             Poll::Pending =&gt; Poll::Pending,
         }
     }
-}
-
-<span class="kw">fn </span>our_peer_data(
-    endpoint: <span class="kw-2">&amp;</span>Endpoint,
-    direct_addresses: <span class="kw-2">&amp;</span>BTreeSet&lt;DirectAddr&gt;,
-) -&gt; <span class="prelude-ty">Result</span>&lt;PeerData, Error&gt; {
-    encode_peer_data(<span class="kw-2">&amp;</span>AddrInfo {
-        relay_url: endpoint
-            .home_relay()
-            .get()
-            .ok()
-            .into_iter()
-            .flatten()
-            .next(),
-        direct_addresses: direct_addresses.iter().map(|x| x.addr).collect(),
-    })
 }
 
 <span class="attr">#[derive(Debug)]
@@ -2961,18 +2807,22 @@
 
     <span class="kw">use </span>bytes::Bytes;
     <span class="kw">use </span>futures_concurrency::future::TryJoin;
-    <span class="kw">use </span>iroh::{protocol::Router, RelayMap, RelayMode, SecretKey};
+    <span class="kw">use </span>iroh::{endpoint::BindError, protocol::Router, RelayMap, RelayMode, SecretKey};
+    <span class="kw">use </span>n0_snafu::{<span class="prelude-ty">Result</span>, ResultExt};
+    <span class="kw">use </span>nested_enum_utils::common_fields;
     <span class="kw">use </span>rand::Rng;
+    <span class="kw">use </span>snafu::Snafu;
     <span class="kw">use </span>tokio::{spawn, time::timeout};
     <span class="kw">use </span>tokio_util::sync::CancellationToken;
     <span class="kw">use </span>tracing::{info, instrument};
     <span class="kw">use </span>tracing_test::traced_test;
 
+    <span class="kw">use </span><span class="kw">crate</span>::api::ApiError;
+
     <span class="kw">use super</span>::<span class="kw-2">*</span>;
 
     <span class="kw">struct </span>ManualActorLoop {
         actor: Actor,
-        current_addresses: BTreeSet&lt;DirectAddr&gt;,
         step: usize,
     }
 
@@ -2990,54 +2840,47 @@
         }
     }
 
-    <span class="kw">type </span>EndpointHandle = tokio::task::JoinHandle&lt;<span class="prelude-ty">Result</span>&lt;(), Error&gt;&gt;;
+    <span class="kw">type </span>EndpointHandle = tokio::task::JoinHandle&lt;<span class="prelude-ty">Result</span>&lt;()&gt;&gt;;
 
     <span class="kw">impl </span>ManualActorLoop {
         <span class="attr">#[instrument(skip_all, fields(me = %actor.endpoint.node_id().fmt_short()))]
-        </span><span class="kw">async fn </span>new(<span class="kw-2">mut </span>actor: Actor) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>, Error&gt; {
-            <span class="kw">let </span>(current_addresses, <span class="kw">_</span>, <span class="kw">_</span>) = actor.setup().<span class="kw">await</span><span class="question-mark">?</span>;
-            <span class="kw">let </span>test_rig = <span class="self">Self </span>{
-                actor,
-                current_addresses,
-                step: <span class="number">0</span>,
-            };
-
-            <span class="prelude-val">Ok</span>(test_rig)
+        </span><span class="kw">async fn </span>new(<span class="kw-2">mut </span>actor: Actor) -&gt; <span class="self">Self </span>{
+            <span class="kw">let _ </span>= actor.setup().<span class="kw">await</span>;
+            <span class="self">Self </span>{ actor, step: <span class="number">0 </span>}
         }
 
         <span class="attr">#[instrument(skip_all, fields(me = %<span class="self">self</span>.endpoint.node_id().fmt_short()))]
-        </span><span class="kw">async fn </span>step(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="prelude-ty">Option</span>&lt;()&gt;, Error&gt; {
-            <span class="kw">let </span>ManualActorLoop {
-                actor,
-                current_addresses,
-                step,
-            } = <span class="self">self</span>;
+        </span><span class="kw">async fn </span>step(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; bool {
+            <span class="kw">let </span>ManualActorLoop { actor, step } = <span class="self">self</span>;
             <span class="kw-2">*</span>step += <span class="number">1</span>;
             <span class="comment">// ignore updates that change our published address. This gives us better control over
             // events since the endpoint it no longer emitting changes
-            </span><span class="kw">let </span>home_relay_stream = <span class="kw-2">&amp;mut </span>futures_lite::stream::pending();
-            <span class="kw">let </span>direct_addresses_stream = <span class="kw-2">&amp;mut </span>futures_lite::stream::pending();
-            actor
-                .event_loop(
-                    current_addresses,
-                    home_relay_stream,
-                    direct_addresses_stream,
-                    <span class="kw-2">*</span>step,
-                )
-                .<span class="kw">await
+            </span><span class="kw">let </span>addr_update_stream = <span class="kw-2">&amp;mut </span>futures_lite::stream::pending();
+            actor.event_loop(addr_update_stream, <span class="kw-2">*</span>step).<span class="kw">await
         </span>}
 
-        <span class="kw">async fn </span>steps(<span class="kw-2">&amp;mut </span><span class="self">self</span>, n: usize) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
+        <span class="kw">async fn </span>steps(<span class="kw-2">&amp;mut </span><span class="self">self</span>, n: usize) {
             <span class="kw">for _ in </span><span class="number">0</span>..n {
-                <span class="self">self</span>.step().<span class="kw">await</span><span class="question-mark">?</span>;
+                <span class="self">self</span>.step().<span class="kw">await</span>;
             }
-            <span class="prelude-val">Ok</span>(())
         }
 
-        <span class="kw">async fn </span>finish(<span class="kw-2">mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
-            <span class="kw">while </span><span class="self">self</span>.step().<span class="kw">await</span><span class="question-mark">?</span>.is_some() {}
-            <span class="prelude-val">Ok</span>(())
+        <span class="kw">async fn </span>finish(<span class="kw-2">mut </span><span class="self">self</span>) {
+            <span class="kw">while </span><span class="self">self</span>.step().<span class="kw">await </span>{}
         }
+    }
+
+    <span class="attr">#[allow(missing_docs)]
+    #[common_fields({
+        backtrace: <span class="prelude-ty">Option</span>&lt;snafu::Backtrace&gt;,
+    })]
+    #[derive(Debug, Snafu)]
+    #[non_exhaustive]
+    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">enum </span>CreateEndpointError {
+        <span class="attr">#[snafu(transparent)]
+        </span>Bind { source: BindError },
+        <span class="attr">#[snafu(transparent)]
+        </span>Dropped { source: n0_watcher::Disconnected },
     }
 
     <span class="kw">impl </span>Gossip {
@@ -3052,16 +2895,11 @@
             config: proto::Config,
             relay_map: RelayMap,
             cancel: <span class="kw-2">&amp;</span>CancellationToken,
-        ) -&gt; n0_snafu::Result&lt;(<span class="self">Self</span>, Actor, EndpointHandle)&gt; {
-            <span class="kw">let </span>my_addr = AddrInfo {
-                relay_url: relay_map.nodes().next().map(|relay| relay.url.clone()),
-                direct_addresses: Default::default(),
-            };
+        ) -&gt; <span class="prelude-ty">Result</span>&lt;(<span class="self">Self</span>, Actor, EndpointHandle), CreateEndpointError&gt; {
             <span class="kw">let </span>endpoint = create_endpoint(rng, relay_map).<span class="kw">await</span><span class="question-mark">?</span>;
             <span class="kw">let </span>metrics = Arc::new(Metrics::default());
 
-            <span class="kw">let </span>(actor, to_actor_tx, conn_tx) =
-                Actor::new(endpoint, config, metrics.clone(), <span class="kw-2">&amp;</span>my_addr);
+            <span class="kw">let </span>(actor, to_actor_tx, conn_tx) = Actor::new(endpoint, config, metrics.clone());
             <span class="kw">let </span>max_message_size = actor.state.max_message_size();
 
             <span class="kw">let </span>_actor_handle =
@@ -3077,13 +2915,13 @@
                 .into(),
             };
 
-            <span class="kw">let </span>endpoing_task = task::spawn(endpoint_loop(
+            <span class="kw">let </span>endpoint_task = task::spawn(endpoint_loop(
                 actor.endpoint.clone(),
                 gossip.clone(),
                 cancel.child_token(),
             ));
 
-            <span class="prelude-val">Ok</span>((gossip, actor, endpoing_task))
+            <span class="prelude-val">Ok</span>((gossip, actor, endpoint_task))
         }
 
         <span class="doccomment">/// Crates a new testing gossip instance with the normal actor loop.
@@ -3092,19 +2930,13 @@
             config: proto::Config,
             relay_map: RelayMap,
             cancel: <span class="kw-2">&amp;</span>CancellationToken,
-        ) -&gt; n0_snafu::Result&lt;(<span class="self">Self</span>, Endpoint, EndpointHandle, <span class="kw">impl </span>Drop)&gt; {
+        ) -&gt; <span class="prelude-ty">Result</span>&lt;(<span class="self">Self</span>, Endpoint, EndpointHandle, <span class="kw">impl </span>Drop), CreateEndpointError&gt; {
             <span class="kw">let </span>(g, actor, ep_handle) =
                 Gossip::t_new_with_actor(rng, config, relay_map, cancel).<span class="kw">await</span><span class="question-mark">?</span>;
             <span class="kw">let </span>ep = actor.endpoint.clone();
             <span class="kw">let </span>me = ep.node_id().fmt_short();
-            <span class="kw">let </span>actor_handle = task::spawn(
-                <span class="kw">async move </span>{
-                    <span class="kw">if let </span><span class="prelude-val">Err</span>(err) = actor.run().<span class="kw">await </span>{
-                        <span class="macro">warn!</span>(<span class="string">"gossip actor closed with error: {err:?}"</span>);
-                    }
-                }
-                .instrument(<span class="macro">tracing::error_span!</span>(<span class="string">"gossip"</span>, %me)),
-            );
+            <span class="kw">let </span>actor_handle =
+                task::spawn(actor.run().instrument(<span class="macro">tracing::error_span!</span>(<span class="string">"gossip"</span>, %me)));
             <span class="prelude-val">Ok</span>((g, ep, ep_handle, AbortOnDropHandle::new(actor_handle)))
         }
     }
@@ -3112,7 +2944,7 @@
     <span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">async fn </span>create_endpoint(
         rng: <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng,
         relay_map: RelayMap,
-    ) -&gt; n0_snafu::Result&lt;Endpoint&gt; {
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;Endpoint, CreateEndpointError&gt; {
         <span class="kw">let </span>ep = Endpoint::builder()
             .secret_key(SecretKey::generate(rng))
             .alpns(<span class="macro">vec!</span>[GOSSIP_ALPN.to_vec()])
@@ -3129,7 +2961,7 @@
         endpoint: Endpoint,
         gossip: Gossip,
         cancel: CancellationToken,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;()&gt; {
         <span class="kw">loop </span>{
             <span class="macro">tokio::select!</span> {
                 biased;
@@ -3146,7 +2978,7 @@
                                 </span><span class="kw">continue</span>;
                             }
                         };
-                        gossip.handle_connection(connecting.<span class="kw">await</span><span class="question-mark">?</span>).<span class="kw">await</span><span class="question-mark">?
+                        gossip.handle_connection(connecting.<span class="kw">await</span>.e()<span class="question-mark">?</span>).<span class="kw">await</span><span class="question-mark">?
                     </span>}
                 }
             }
@@ -3164,9 +2996,9 @@
         <span class="kw">let </span>ep2 = create_endpoint(<span class="kw-2">&amp;mut </span>rng, relay_map.clone()).<span class="kw">await</span>.unwrap();
         <span class="kw">let </span>ep3 = create_endpoint(<span class="kw-2">&amp;mut </span>rng, relay_map.clone()).<span class="kw">await</span>.unwrap();
 
-        <span class="kw">let </span>go1 = Gossip::builder().spawn(ep1.clone()).<span class="kw">await</span>.unwrap();
-        <span class="kw">let </span>go2 = Gossip::builder().spawn(ep2.clone()).<span class="kw">await</span>.unwrap();
-        <span class="kw">let </span>go3 = Gossip::builder().spawn(ep3.clone()).<span class="kw">await</span>.unwrap();
+        <span class="kw">let </span>go1 = Gossip::builder().spawn(ep1.clone());
+        <span class="kw">let </span>go2 = Gossip::builder().spawn(ep2.clone());
+        <span class="kw">let </span>go3 = Gossip::builder().spawn(ep3.clone());
         <span class="macro">debug!</span>(<span class="string">"peer1 {:?}"</span>, ep1.node_id());
         <span class="macro">debug!</span>(<span class="string">"peer2 {:?}"</span>, ep2.node_id());
         <span class="macro">debug!</span>(<span class="string">"peer3 {:?}"</span>, ep3.node_id());
@@ -3283,7 +3115,7 @@
     </span><span class="comment">// NOTE: this is a regression test.
     </span><span class="attr">#[tokio::test]
     #[traced_test]
-    </span><span class="kw">async fn </span>subscription_cleanup() -&gt; testresult::TestResult {
+    </span><span class="kw">async fn </span>subscription_cleanup() -&gt; <span class="prelude-ty">Result</span> {
         <span class="kw">let </span>rng = <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
         <span class="kw">let </span>ct = CancellationToken::new();
         <span class="kw">let </span>(relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().<span class="kw">await</span>.unwrap();
@@ -3291,7 +3123,7 @@
         <span class="comment">// create the first node with a manual actor loop
         </span><span class="kw">let </span>(go1, actor, ep1_handle) =
             Gossip::t_new_with_actor(rng, Default::default(), relay_map.clone(), <span class="kw-2">&amp;</span>ct).<span class="kw">await</span><span class="question-mark">?</span>;
-        <span class="kw">let </span><span class="kw-2">mut </span>actor = ManualActorLoop::new(actor).<span class="kw">await</span><span class="question-mark">?</span>;
+        <span class="kw">let </span><span class="kw-2">mut </span>actor = ManualActorLoop::new(actor).<span class="kw">await</span>;
 
         <span class="comment">// create the second node with the usual actor loop
         </span><span class="kw">let </span>(go2, ep2, ep2_handle, _test_actor_handle) =
@@ -3328,7 +3160,7 @@
                 }
 
                 <span class="macro">tracing::debug!</span>(<span class="string">"subscribe stream ended"</span>);
-                anyhow::Ok(())
+                <span class="prelude-ty">Result</span>::&lt;<span class="kw">_</span>, n0_snafu::Error&gt;::Ok(())
             };
 
             <span class="macro">tokio::select!</span> {
@@ -3365,39 +3197,39 @@
             </span>ct1.cancelled().<span class="kw">await</span>;
             drop(go1);
 
-            anyhow::Ok(())
+            <span class="prelude-ty">Result</span>::&lt;<span class="kw">_</span>, n0_snafu::Error&gt;::Ok(())
         }
         .instrument(<span class="macro">tracing::debug_span!</span>(<span class="string">"node_1"</span>, %node_id1));
         <span class="kw">let </span>go1_handle = task::spawn(go1_task);
 
         <span class="comment">// advance and check that the topic is now subscribed
-        </span>actor.steps(<span class="number">3</span>).<span class="kw">await</span><span class="question-mark">?</span>; <span class="comment">// handle our subscribe;
-                               // get peer connection;
-                               // receive the other peer's information for a NeighborUp
+        </span>actor.steps(<span class="number">3</span>).<span class="kw">await</span>; <span class="comment">// handle our subscribe;
+                              // get peer connection;
+                              // receive the other peer's information for a NeighborUp
         </span><span class="kw">let </span>state = actor.topics.get(<span class="kw-2">&amp;</span>topic).expect(<span class="string">"get registered topic"</span>);
         <span class="macro">assert!</span>(state.joined());
 
         <span class="comment">// signal the second subscribe, we should remain subscribed
-        </span>tx.send(()).<span class="kw">await</span><span class="question-mark">?</span>;
-        actor.steps(<span class="number">3</span>).<span class="kw">await</span><span class="question-mark">?</span>; <span class="comment">// subscribe; first receiver gone; first sender gone
+        </span>tx.send(()).<span class="kw">await</span>.e()<span class="question-mark">?</span>;
+        actor.steps(<span class="number">3</span>).<span class="kw">await</span>; <span class="comment">// subscribe; first receiver gone; first sender gone
         </span><span class="kw">let </span>state = actor.topics.get(<span class="kw-2">&amp;</span>topic).expect(<span class="string">"get registered topic"</span>);
         <span class="macro">assert!</span>(state.joined());
 
         <span class="comment">// signal to drop the second handle, the topic should no longer be subscribed
-        </span>tx.send(()).<span class="kw">await</span><span class="question-mark">?</span>;
-        actor.steps(<span class="number">2</span>).<span class="kw">await</span><span class="question-mark">?</span>; <span class="comment">// second receiver gone; second sender gone
+        </span>tx.send(()).<span class="kw">await</span>.e()<span class="question-mark">?</span>;
+        actor.steps(<span class="number">2</span>).<span class="kw">await</span>; <span class="comment">// second receiver gone; second sender gone
         </span><span class="macro">assert!</span>(!actor.topics.contains_key(<span class="kw-2">&amp;</span>topic));
 
         <span class="comment">// cleanup and ensure everything went as expected
         </span>ct.cancel();
         <span class="kw">let </span>wait = Duration::from_secs(<span class="number">2</span>);
-        timeout(wait, ep1_handle).<span class="kw">await</span><span class="question-mark">???</span>;
-        timeout(wait, ep2_handle).<span class="kw">await</span><span class="question-mark">???</span>;
-        timeout(wait, go1_handle).<span class="kw">await</span><span class="question-mark">???</span>;
-        timeout(wait, go2_handle).<span class="kw">await</span><span class="question-mark">???</span>;
-        timeout(wait, actor.finish()).<span class="kw">await</span><span class="question-mark">??</span>;
+        timeout(wait, ep1_handle).<span class="kw">await</span>.e()<span class="question-mark">?</span>.e()<span class="question-mark">??</span>;
+        timeout(wait, ep2_handle).<span class="kw">await</span>.e()<span class="question-mark">?</span>.e()<span class="question-mark">??</span>;
+        timeout(wait, go1_handle).<span class="kw">await</span>.e()<span class="question-mark">?</span>.e()<span class="question-mark">??</span>;
+        timeout(wait, go2_handle).<span class="kw">await</span>.e()<span class="question-mark">?</span>.e()<span class="question-mark">??</span>;
+        timeout(wait, actor.finish()).<span class="kw">await</span>.e()<span class="question-mark">?</span>;
 
-        testresult::TestResult::Ok(())
+        <span class="prelude-val">Ok</span>(())
     }
 
     <span class="doccomment">/// Test that nodes can reconnect to each other.
@@ -3408,7 +3240,7 @@
     </span><span class="comment">// NOTE: This is a regression test
     </span><span class="attr">#[tokio::test]
     #[traced_test]
-    </span><span class="kw">async fn </span>can_reconnect() -&gt; testresult::TestResult {
+    </span><span class="kw">async fn </span>can_reconnect() -&gt; <span class="prelude-ty">Result</span> {
         <span class="kw">let </span>rng = <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
         <span class="kw">let </span>ct = CancellationToken::new();
         <span class="kw">let </span>(relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().<span class="kw">await</span>.unwrap();
@@ -3452,7 +3284,7 @@
 
             ct2.cancelled().<span class="kw">await</span>;
 
-            anyhow::Ok(())
+            <span class="prelude-ty">Result</span>::&lt;<span class="kw">_</span>, ApiError&gt;::Ok(())
         }
         .instrument(<span class="macro">tracing::debug_span!</span>(<span class="string">"node_2"</span>, %node_id2));
         <span class="kw">let </span>go2_handle = task::spawn(go2_task);
@@ -3465,35 +3297,35 @@
         </span>sub.joined().<span class="kw">await</span><span class="question-mark">?</span>;
 
         <span class="comment">// signal node_2 to unsubscribe
-        </span>tx.send(()).<span class="kw">await</span><span class="question-mark">?</span>;
+        </span>tx.send(()).<span class="kw">await</span>.e()<span class="question-mark">?</span>;
 
         <span class="comment">// we should receive a Neighbor down event
         </span><span class="kw">let </span>conn_timeout = Duration::from_millis(<span class="number">500</span>);
-        <span class="kw">let </span>ev = timeout(conn_timeout, sub.try_next()).<span class="kw">await</span><span class="question-mark">??</span>;
+        <span class="kw">let </span>ev = timeout(conn_timeout, sub.try_next()).<span class="kw">await</span>.e()<span class="question-mark">??</span>;
         <span class="macro">assert_eq!</span>(ev, <span class="prelude-val">Some</span>(Event::NeighborDown(node_id2)));
         <span class="macro">tracing::info!</span>(<span class="string">"node 2 left"</span>);
 
         <span class="comment">// signal node_2 to subscribe again
-        </span>tx.send(()).<span class="kw">await</span><span class="question-mark">?</span>;
+        </span>tx.send(()).<span class="kw">await</span>.e()<span class="question-mark">?</span>;
 
         <span class="kw">let </span>conn_timeout = Duration::from_millis(<span class="number">500</span>);
-        <span class="kw">let </span>ev = timeout(conn_timeout, sub.try_next()).<span class="kw">await</span><span class="question-mark">??</span>;
+        <span class="kw">let </span>ev = timeout(conn_timeout, sub.try_next()).<span class="kw">await</span>.e()<span class="question-mark">??</span>;
         <span class="macro">assert_eq!</span>(ev, <span class="prelude-val">Some</span>(Event::NeighborUp(node_id2)));
         <span class="macro">tracing::info!</span>(<span class="string">"node 2 rejoined!"</span>);
 
         <span class="comment">// cleanup and ensure everything went as expected
         </span>ct.cancel();
         <span class="kw">let </span>wait = Duration::from_secs(<span class="number">2</span>);
-        timeout(wait, ep1_handle).<span class="kw">await</span><span class="question-mark">???</span>;
-        timeout(wait, ep2_handle).<span class="kw">await</span><span class="question-mark">???</span>;
-        timeout(wait, go2_handle).<span class="kw">await</span><span class="question-mark">???</span>;
+        timeout(wait, ep1_handle).<span class="kw">await</span>.e()<span class="question-mark">?</span>.e()<span class="question-mark">??</span>;
+        timeout(wait, ep2_handle).<span class="kw">await</span>.e()<span class="question-mark">?</span>.e()<span class="question-mark">??</span>;
+        timeout(wait, go2_handle).<span class="kw">await</span>.e()<span class="question-mark">?</span>.e()<span class="question-mark">??</span>;
 
-        testresult::TestResult::Ok(())
+        Result::Ok(())
     }
 
     <span class="attr">#[tokio::test]
     #[traced_test]
-    </span><span class="kw">async fn </span>can_die_and_reconnect() -&gt; testresult::TestResult {
+    </span><span class="kw">async fn </span>can_die_and_reconnect() -&gt; <span class="prelude-ty">Result</span> {
         <span class="doccomment">/// Runs a future in a separate runtime on a separate thread, cancelling everything
         /// abruptly once `cancel` is invoked.
         </span><span class="kw">fn </span>run_in_thread&lt;T: Send + <span class="lifetime">'static</span>&gt;(
@@ -3513,14 +3345,14 @@
         </span><span class="kw">async fn </span>spawn_gossip(
             secret_key: SecretKey,
             relay_map: RelayMap,
-        ) -&gt; anyhow::Result&lt;(Router, Gossip)&gt; {
+        ) -&gt; <span class="prelude-ty">Result</span>&lt;(Router, Gossip), BindError&gt; {
             <span class="kw">let </span>ep = Endpoint::builder()
                 .secret_key(secret_key)
                 .relay_mode(RelayMode::Custom(relay_map))
                 .insecure_skip_relay_cert_verify(<span class="bool-val">true</span>)
                 .bind()
                 .<span class="kw">await</span><span class="question-mark">?</span>;
-            <span class="kw">let </span>gossip = Gossip::builder().spawn(ep.clone()).<span class="kw">await</span><span class="question-mark">?</span>;
+            <span class="kw">let </span>gossip = Gossip::builder().spawn(ep.clone());
             <span class="kw">let </span>router = Router::builder(ep.clone())
                 .accept(GOSSIP_ALPN, gossip.clone())
                 .spawn();
@@ -3534,7 +3366,7 @@
             bootstrap_addr: NodeAddr,
             topic_id: TopicId,
             message: String,
-        ) -&gt; anyhow::Result&lt;()&gt; {
+        ) -&gt; <span class="prelude-ty">Result</span> {
             <span class="kw">let </span>(router, gossip) = spawn_gossip(secret_key, relay_map).<span class="kw">await</span><span class="question-mark">?</span>;
             <span class="macro">info!</span>(node_id = %router.endpoint().node_id().fmt_short(), <span class="string">"broadcast node spawned"</span>);
             <span class="kw">let </span>bootstrap = <span class="macro">vec!</span>[bootstrap_addr.node_id];
@@ -3572,7 +3404,7 @@
             }
         });
 
-        <span class="kw">let </span>node0_addr = addr_rx.<span class="kw">await</span><span class="question-mark">?</span>;
+        <span class="kw">let </span>node0_addr = addr_rx.<span class="kw">await</span>.e()<span class="question-mark">?</span>;
         <span class="kw">let </span>max_wait = Duration::from_secs(<span class="number">5</span>);
 
         <span class="comment">// spawn a node, send a message, and then abruptly terminate the node ungracefully
@@ -3590,7 +3422,7 @@
             ),
         );
         <span class="comment">// assert that we received the message on the receiver node.
-        </span><span class="kw">let </span>msg = timeout(max_wait, msgs_recv_rx.recv()).<span class="kw">await</span><span class="question-mark">?</span>.unwrap();
+        </span><span class="kw">let </span>msg = timeout(max_wait, msgs_recv_rx.recv()).<span class="kw">await</span>.e()<span class="question-mark">?</span>.unwrap();
         <span class="macro">assert_eq!</span>(<span class="kw-2">&amp;</span>msg, <span class="string">"msg1"</span>);
         <span class="macro">info!</span>(<span class="string">"kill broadcast node"</span>);
         cancel.cancel();
@@ -3609,7 +3441,7 @@
         );
         <span class="comment">// assert that we received the message on the receiver node.
         // this means that the reconnect with the same node id worked.
-        </span><span class="kw">let </span>msg = timeout(max_wait, msgs_recv_rx.recv()).<span class="kw">await</span><span class="question-mark">?</span>.unwrap();
+        </span><span class="kw">let </span>msg = timeout(max_wait, msgs_recv_rx.recv()).<span class="kw">await</span>.e()<span class="question-mark">?</span>.unwrap();
         <span class="macro">assert_eq!</span>(<span class="kw-2">&amp;</span>msg, <span class="string">"msg2"</span>);
         <span class="macro">info!</span>(<span class="string">"kill broadcast node"</span>);
         cancel.cancel();
