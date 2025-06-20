@@ -8,12 +8,11 @@ use std::{
     task::{Context, Poll},
 };
 
-use anyhow::Context as _;
 use bytes::BytesMut;
 use futures_concurrency::stream::{stream_group, StreamGroup};
 use futures_util::FutureExt as _;
 use iroh::{
-    endpoint::{Connection, DirectAddr},
+    endpoint::Connection,
     protocol::{AcceptError, ProtocolHandler},
     Endpoint, NodeAddr, NodeId, PublicKey, RelayUrl,
 };
@@ -24,9 +23,11 @@ use n0_future::{
     Stream, StreamExt as _,
 };
 use n0_watcher::Watcher;
+use nested_enum_utils::common_fields;
 use rand::rngs::StdRng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
+use snafu::Snafu;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, error_span, trace, warn, Instrument};
@@ -66,56 +67,6 @@ type OutEvent = proto::OutEvent<PublicKey>;
 type Timer = proto::Timer<PublicKey>;
 type ProtoMessage = proto::Message<PublicKey>;
 
-/// Net related errors
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    /// The gossip actor is closed, and cannot receive new messages
-    #[error("Actor closed")]
-    ActorClosed,
-    /// First event received that was not `Joined`
-    #[error("Joined event to be the first event received")]
-    UnexpectedEvent,
-    /// The gossip message receiver closed
-    #[error("Receiver closed")]
-    ReceiverClosed,
-    /// Ser/De error
-    #[error("Ser/De {0}")]
-    SerDe(#[from] postcard::Error),
-    /// Tried to construct empty peer data
-    #[error("empty peer data")]
-    EmptyPeerData,
-    /// Writing a message to the network
-    #[error("write {0}")]
-    Write(#[from] util::WriteError),
-    /// Reading a message from the network
-    #[error("read {0}")]
-    Read(#[from] util::ReadError),
-    /// A watchable disconnected.
-    #[error(transparent)]
-    WatchableDisconnected(#[from] n0_watcher::Disconnected),
-    /// Iroh connection error
-    #[error(transparent)]
-    IrohConnection(#[from] iroh::endpoint::ConnectionError),
-    /// Errors coming from `iroh`
-    #[error(transparent)]
-    Iroh(#[from] anyhow::Error),
-    /// Task join failure
-    #[error("join")]
-    Join(#[from] task::JoinError),
-    /// Failed to send a request.
-    #[error(transparent)]
-    RpcSend(#[from] irpc::channel::SendError),
-    /// Failed to receive a response.
-    #[error(transparent)]
-    RpcRecv(#[from] irpc::channel::RecvError),
-}
-
-impl<T> From<mpsc::error::SendError<T>> for Error {
-    fn from(_value: mpsc::error::SendError<T>) -> Self {
-        Error::ActorClosed
-    }
-}
-
 /// Publish and subscribe on gossiping topics.
 ///
 /// Each topic is a separate broadcast tree with separate memberships.
@@ -150,6 +101,29 @@ impl std::ops::Deref for Gossip {
 enum LocalActorMessage {
     HandleConnection(Connection),
     Shutdown { reply: oneshot::Sender<()> },
+}
+
+#[allow(missing_docs)]
+#[common_fields({
+    backtrace: Option<snafu::Backtrace>,
+    #[snafu(implicit)]
+    span_trace: n0_snafu::SpanTrace,
+})]
+#[derive(Debug, Snafu)]
+#[non_exhaustive]
+pub enum Error {
+    ActorDropped {},
+}
+
+impl<T> From<mpsc::error::SendError<T>> for Error {
+    fn from(_value: mpsc::error::SendError<T>) -> Self {
+        ActorDroppedSnafu.build()
+    }
+}
+impl From<oneshot::error::RecvError> for Error {
+    fn from(_value: oneshot::error::RecvError) -> Self {
+        ActorDroppedSnafu.build()
+    }
 }
 
 #[derive(Debug)]
@@ -203,30 +177,17 @@ impl Builder {
     }
 
     /// Spawn a gossip actor and get a handle for it
-    pub async fn spawn(self, endpoint: Endpoint) -> Result<Gossip, Error> {
+    pub fn spawn(self, endpoint: Endpoint) -> Gossip {
         let metrics = Arc::new(Metrics::default());
-        // We want to wait for our endpoint to be addressable by other nodes before launching gossip,
-        // because otherwise our Join messages, which will be forwarded into the swarm through a random
-        // walk, might not include an address to talk back to us.
-        let addr = endpoint.node_addr().initialized().await?;
-
-        let (actor, rpc_tx, local_tx) =
-            Actor::new(endpoint, self.config, metrics.clone(), &addr.into());
+        let (actor, rpc_tx, local_tx) = Actor::new(endpoint, self.config, metrics.clone());
         let me = actor.endpoint.node_id().fmt_short();
         let max_message_size = actor.state.max_message_size();
 
-        let actor_handle = task::spawn(
-            async move {
-                if let Err(err) = actor.run().await {
-                    warn!("gossip actor closed with error: {err:?}");
-                }
-            }
-            .instrument(error_span!("gossip", %me)),
-        );
+        let actor_handle = task::spawn(actor.run().instrument(error_span!("gossip", %me)));
 
         let api = GossipApi::local(rpc_tx);
 
-        Ok(Gossip {
+        Gossip {
             inner: Inner {
                 api,
                 local_tx,
@@ -235,7 +196,7 @@ impl Builder {
                 metrics,
             }
             .into(),
-        })
+        }
     }
 }
 
@@ -273,7 +234,7 @@ impl Gossip {
     ///
     /// This leaves all topics, sending `Disconnect` messages to peers, and then
     /// stops the gossip actor loop and drops all state and connections.
-    pub async fn shutdown(&self) -> anyhow::Result<()> {
+    pub async fn shutdown(&self) -> Result<(), Error> {
         let (reply, reply_rx) = oneshot::channel();
         self.inner
             .local_tx
@@ -315,7 +276,7 @@ struct Actor {
     /// Internal queue of topic to close because all handles were dropped.
     quit_queue: VecDeque<TopicId>,
     /// Tasks for the connection loops, to keep track of panics.
-    connection_tasks: JoinSet<(NodeId, Connection, anyhow::Result<()>)>,
+    connection_tasks: JoinSet<(NodeId, Connection, Result<(), ConnectionLoopError>)>,
     metrics: Arc<Metrics>,
     topic_event_forwarders: JoinSet<TopicId>,
 }
@@ -325,7 +286,6 @@ impl Actor {
         endpoint: Endpoint,
         config: proto::Config,
         metrics: Arc<Metrics>,
-        my_addr: &AddrInfo,
     ) -> (
         Self,
         mpsc::Sender<RpcMessage>,
@@ -335,7 +295,7 @@ impl Actor {
         let dialer = Dialer::new(endpoint.clone());
         let state = proto::State::new(
             peer_id,
-            encode_peer_data(my_addr).unwrap(),
+            Default::default(),
             config,
             rand::rngs::StdRng::from_entropy(),
         );
@@ -364,52 +324,26 @@ impl Actor {
         (actor, rpc_tx, local_tx)
     }
 
-    pub async fn run(mut self) -> Result<(), Error> {
-        let (mut current_addresses, mut home_relay_stream, mut direct_addresses_stream) =
-            self.setup().await?;
+    pub async fn run(mut self) {
+        let mut addr_update_stream = self.setup().await;
 
         let mut i = 0;
-        while let Some(()) = self
-            .event_loop(
-                &mut current_addresses,
-                &mut home_relay_stream,
-                &mut direct_addresses_stream,
-                i,
-            )
-            .await?
-        {
+        while self.event_loop(&mut addr_update_stream, i).await {
             i += 1;
         }
-        Ok(())
     }
 
     /// Performs the initial actor setup to run the [`Actor::event_loop`].
     ///
     /// This updates our current address and return it. It also returns the home relay stream and
     /// direct addr stream.
-    async fn setup(
-        &mut self,
-    ) -> Result<
-        (
-            BTreeSet<DirectAddr>,
-            impl Stream<Item = Vec<iroh::RelayUrl>> + Unpin,
-            impl Stream<Item = BTreeSet<DirectAddr>> + Unpin,
-        ),
-        Error,
-    > {
-        // Watch for changes in direct addresses to update our peer data.
-        let direct_addresses_stream = self.endpoint.direct_addresses().stream().filter_map(|i| i);
-        // Watch for changes of our home relay to update our peer data.
-        let home_relay_stream = self.endpoint.home_relay().stream();
-        // With each gossip message we provide addressing information to reach our node.
-        let current_addresses = self.endpoint.direct_addresses().get()?.unwrap_or_default();
-
-        self.handle_addr_update(&current_addresses).await?;
-        Ok((
-            current_addresses,
-            home_relay_stream,
-            direct_addresses_stream,
-        ))
+    async fn setup(&mut self) -> impl Stream<Item = NodeAddr> + Send + Unpin {
+        let addr_update_stream = self.endpoint.node_addr().stream().filter_map(|x| x);
+        // TODO(Frando): Fail if endpoint disconnected?
+        if let Ok(initial_addr) = self.endpoint.node_addr().initialized().await {
+            self.handle_addr_update(initial_addr).await;
+        }
+        addr_update_stream
     }
 
     /// One event loop processing step.
@@ -417,11 +351,9 @@ impl Actor {
     /// None is returned when no further processing should be performed.
     async fn event_loop(
         &mut self,
-        current_addresses: &mut BTreeSet<DirectAddr>,
-        home_relay_stream: &mut (impl Stream<Item = Vec<iroh::RelayUrl>> + Unpin),
-        direct_addresses_stream: &mut (impl Stream<Item = BTreeSet<DirectAddr>> + Unpin),
+        addr_updates: &mut (impl Stream<Item = NodeAddr> + Send + Unpin),
         i: usize,
-    ) -> Result<Option<()>, Error> {
+    ) -> bool {
         self.metrics.actor_tick_main.inc();
         tokio::select! {
             biased;
@@ -430,10 +362,10 @@ impl Actor {
                     Some(LocalActorMessage::Shutdown { reply }) => {
                         debug!("received shutdown message, quit all topics");
                         self.quit_queue.extend(self.topics.keys().copied());
-                        self.process_quit_queue().await.ok();
+                        self.process_quit_queue().await;
                         debug!("all topics quit, stop gossip actor");
                         reply.send(()).ok();
-                        return Ok(None)
+                        return false;
                     },
                     Some(LocalActorMessage::HandleConnection(conn)) => {
                         if let Ok(remote_node_id) = conn.remote_node_id() {
@@ -442,7 +374,7 @@ impl Actor {
                     }
                     None => {
                         debug!("all gossip handles dropped, stop gossip actor");
-                        return Ok(None)
+                        return false;
                     }
                 }
             }
@@ -451,27 +383,22 @@ impl Actor {
                 self.metrics.actor_tick_rx.inc();
                 match msg {
                     Some(msg) => {
-                        self.handle_rpc_msg(msg, Instant::now()).await?;
+                        self.handle_rpc_msg(msg, Instant::now()).await;
                     }
                     None => {
                         debug!("all gossip handles dropped, stop gossip actor");
-                        return Ok(None)
+                        return false;
                     }
                 }
             },
             Some((key, (topic, command))) = self.command_rx.next(), if !self.command_rx.is_empty() => {
                 trace!(?i, "tick: command_rx");
-                self.handle_command(topic, key, command).await?;
+                self.handle_command(topic, key, command).await;
             },
-            Some(new_addresses) = direct_addresses_stream.next() => {
-                trace!(?i, "tick: new_endpoints");
+            Some(new_address) = addr_updates.next() => {
+                trace!(?i, "tick: new_address");
                 self.metrics.actor_tick_endpoint.inc();
-                *current_addresses = new_addresses;
-                self.handle_addr_update(current_addresses).await?;
-            }
-            Some(_relay_url) = home_relay_stream.next() => {
-                trace!(?i, "tick: new_home_relay");
-                self.handle_addr_update(current_addresses).await?;
+                self.handle_addr_update(new_address).await;
             }
             (peer_id, res) = self.dialer.next_conn() => {
                 trace!(?i, "tick: dialer");
@@ -489,7 +416,7 @@ impl Actor {
                         let is_active = matches!(peer_state, Some(PeerState::Active { .. }));
                         if !is_active {
                             self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
-                                .await?;
+                                .await;
                         }
                     }
                     None => {
@@ -502,40 +429,38 @@ impl Actor {
                 trace!(?i, "tick: in_event_rx");
                 self.metrics.actor_tick_in_event_rx.inc();
                 let event = event.expect("unreachable: in_event_tx is never dropped before receiver");
-                self.handle_in_event(event, Instant::now()).await?;
+                self.handle_in_event(event, Instant::now()).await;
             }
             _ = self.timers.wait_next() => {
                 trace!(?i, "tick: timers");
                 self.metrics.actor_tick_timers.inc();
                 let now = Instant::now();
                 while let Some((_instant, timer)) = self.timers.pop_before(now) {
-                    self.handle_in_event(InEvent::TimerExpired(timer), now).await?;
+                    self.handle_in_event(InEvent::TimerExpired(timer), now).await;
                 }
             }
             Some(res) = self.connection_tasks.join_next(), if !self.connection_tasks.is_empty() => {
                 trace!(?i, "tick: connection_tasks");
                 let (peer_id, conn, result) = res.expect("connection task panicked");
-                self.handle_connection_task_finished(peer_id, conn, result).await?;
+                self.handle_connection_task_finished(peer_id, conn, result).await;
             }
             Some(res) = self.topic_event_forwarders.join_next(), if !self.topic_event_forwarders.is_empty() => {
                 let topic_id = res.expect("topic event forwarder panicked");
                 if let Some(state) = self.topics.get_mut(&topic_id) {
                     if !state.still_needed() {
                         self.quit_queue.push_back(topic_id);
-                        self.process_quit_queue().await?;
+                        self.process_quit_queue().await;
                     }
                 }
             }
         }
 
-        Ok(Some(()))
+        true
     }
 
-    async fn handle_addr_update(
-        &mut self,
-        current_addresses: &BTreeSet<DirectAddr>,
-    ) -> Result<(), Error> {
-        let peer_data = our_peer_data(&self.endpoint, current_addresses)?;
+    async fn handle_addr_update(&mut self, node_addr: NodeAddr) {
+        // let peer_data = our_peer_data(&self.endpoint, current_addresses);
+        let peer_data = encode_peer_data(&node_addr.into());
         self.handle_in_event(InEvent::UpdatePeerData(peer_data), Instant::now())
             .await
     }
@@ -545,12 +470,12 @@ impl Actor {
         topic: TopicId,
         key: stream_group::Key,
         command: Option<Command>,
-    ) -> Result<(), Error> {
+    ) {
         debug!(?topic, ?key, ?command, "handle command");
         let Some(state) = self.topics.get_mut(&topic) else {
             // TODO: unreachable?
             warn!("received command for unknown topic");
-            return Ok(());
+            return;
         };
         match command {
             Some(command) => {
@@ -562,17 +487,16 @@ impl Actor {
                     Command::JoinPeers(peers) => ProtoCommand::Join(peers),
                 };
                 self.handle_in_event(proto::InEvent::Command(topic, command), Instant::now())
-                    .await?;
+                    .await;
             }
             None => {
                 state.command_rx_keys.remove(&key);
                 if !state.still_needed() {
                     self.quit_queue.push_back(topic);
-                    self.process_quit_queue().await?;
+                    self.process_quit_queue().await;
                 }
             }
         }
-        Ok(())
     }
 
     fn handle_connection(&mut self, peer_id: NodeId, origin: ConnOrigin, conn: Connection) {
@@ -618,8 +542,8 @@ impl Actor {
         &mut self,
         peer_id: NodeId,
         conn: Connection,
-        task_result: anyhow::Result<()>,
-    ) -> Result<(), Error> {
+        task_result: Result<(), ConnectionLoopError>,
+    ) {
         if conn.close_reason().is_none() {
             conn.close(0u32.into(), b"close from disconnect");
         }
@@ -635,7 +559,7 @@ impl Actor {
             if conn.stable_id() == *active_conn_id {
                 debug!("active send connection closed, mark peer as disconnected");
                 self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
-                    .await?;
+                    .await;
             } else {
                 other_conns.retain(|x| *x != conn.stable_id());
                 debug!("remaining {} other connections", other_conns.len() + 1);
@@ -643,10 +567,9 @@ impl Actor {
         } else {
             debug!("peer already marked as disconnected");
         }
-        Ok(())
     }
 
-    async fn handle_rpc_msg(&mut self, msg: RpcMessage, now: Instant) -> Result<(), Error> {
+    async fn handle_rpc_msg(&mut self, msg: RpcMessage, now: Instant) {
         trace!("handle to_actor  {msg:?}");
         match msg {
             RpcMessage::Join(msg) => {
@@ -692,33 +615,30 @@ impl Actor {
                     ),
                     now,
                 )
-                .await?;
+                .await;
             }
         }
-        Ok(())
     }
 
-    async fn handle_in_event(&mut self, event: InEvent, now: Instant) -> Result<(), Error> {
-        self.handle_in_event_inner(event, now).await?;
-        self.process_quit_queue().await?;
-        Ok(())
+    async fn handle_in_event(&mut self, event: InEvent, now: Instant) {
+        self.handle_in_event_inner(event, now).await;
+        self.process_quit_queue().await;
     }
 
-    async fn process_quit_queue(&mut self) -> Result<(), Error> {
+    async fn process_quit_queue(&mut self) {
         while let Some(topic_id) = self.quit_queue.pop_front() {
             self.handle_in_event_inner(
                 InEvent::Command(topic_id, ProtoCommand::Quit),
                 Instant::now(),
             )
-            .await?;
+            .await;
             if self.topics.remove(&topic_id).is_some() {
                 tracing::debug!(%topic_id, "publishers and subscribers gone; unsubscribing");
             }
         }
-        Ok(())
     }
 
-    async fn handle_in_event_inner(&mut self, event: InEvent, now: Instant) -> Result<(), Error> {
+    async fn handle_in_event_inner(&mut self, event: InEvent, now: Instant) {
         if matches!(event, InEvent::TimerExpired(_)) {
             trace!(?event, "handle in_event");
         } else {
@@ -806,7 +726,6 @@ impl Actor {
                 },
             }
         }
-        Ok(())
     }
 }
 
@@ -905,6 +824,35 @@ enum ConnOrigin {
     Dial,
 }
 
+#[allow(missing_docs)]
+#[common_fields({
+    backtrace: Option<snafu::Backtrace>,
+})]
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+#[non_exhaustive]
+enum ConnectionLoopError {
+    #[snafu(transparent)]
+    Write {
+        source: self::util::WriteError,
+    },
+    #[snafu(transparent)]
+    Read {
+        source: self::util::ReadError,
+    },
+    #[snafu(transparent)]
+    Connection {
+        source: iroh::endpoint::ConnectionError,
+    },
+    ActorDropped {},
+}
+
+impl<T> From<mpsc::error::SendError<T>> for ConnectionLoopError {
+    fn from(_value: mpsc::error::SendError<T>) -> Self {
+        self::connection_loop_error::ActorDroppedSnafu.build()
+    }
+}
+
 async fn connection_loop(
     from: PublicKey,
     conn: &Connection,
@@ -913,7 +861,7 @@ async fn connection_loop(
     in_event_tx: &mpsc::Sender<InEvent>,
     max_message_size: usize,
     queue: Vec<ProtoMessage>,
-) -> anyhow::Result<()> {
+) -> Result<(), ConnectionLoopError> {
     let (mut send, mut recv) = match origin {
         ConnOrigin::Accept => conn.accept_bi().await?,
         ConnOrigin::Dial => conn.open_bi().await?,
@@ -933,7 +881,7 @@ async fn connection_loop(
         let _ = send.finish();
         // wait for the other node to ack all the sent data
         let _ = send.stopped().await;
-        anyhow::Ok(())
+        Result::<_, ConnectionLoopError>::Ok(())
     };
 
     let recv_loop = async {
@@ -945,11 +893,13 @@ async fn connection_loop(
                 Some(msg) => in_event_tx.send(InEvent::RecvMessage(from, msg)).await?,
             }
         }
-        anyhow::Ok(())
+        Result::<_, ConnectionLoopError>::Ok(())
     };
 
-    let res = tokio::join!(send_loop, recv_loop);
-    res.0.context("send_loop").and(res.1.context("recv_loop"))
+    let (send_res, recv_res) = tokio::join!(send_loop, recv_loop);
+    send_res?;
+    recv_res?;
+    Ok(())
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
@@ -973,16 +923,12 @@ impl From<NodeAddr> for AddrInfo {
     }
 }
 
-fn encode_peer_data(info: &AddrInfo) -> Result<PeerData, Error> {
-    let bytes = postcard::to_stdvec(info)?;
-    if bytes.is_empty() {
-        return Err(Error::EmptyPeerData);
-    }
-
-    Ok(PeerData::new(bytes))
+fn encode_peer_data(info: &AddrInfo) -> PeerData {
+    let bytes = postcard::to_stdvec(info).expect("serializing AddrInfo may not fail");
+    PeerData::new(bytes)
 }
 
-fn decode_peer_data(peer_data: &PeerData) -> Result<AddrInfo, Error> {
+fn decode_peer_data(peer_data: &PeerData) -> Result<AddrInfo, postcard::Error> {
     let bytes = peer_data.as_bytes();
     if bytes.is_empty() {
         return Ok(AddrInfo::default());
@@ -1049,22 +995,6 @@ impl Stream for TopicCommandStream {
             Poll::Pending => Poll::Pending,
         }
     }
-}
-
-fn our_peer_data(
-    endpoint: &Endpoint,
-    direct_addresses: &BTreeSet<DirectAddr>,
-) -> Result<PeerData, Error> {
-    encode_peer_data(&AddrInfo {
-        relay_url: endpoint
-            .home_relay()
-            .get()
-            .ok()
-            .into_iter()
-            .flatten()
-            .next(),
-        direct_addresses: direct_addresses.iter().map(|x| x.addr).collect(),
-    })
 }
 
 #[derive(Debug)]
@@ -1149,18 +1079,22 @@ pub(crate) mod test {
 
     use bytes::Bytes;
     use futures_concurrency::future::TryJoin;
-    use iroh::{protocol::Router, RelayMap, RelayMode, SecretKey};
+    use iroh::{endpoint::BindError, protocol::Router, RelayMap, RelayMode, SecretKey};
+    use n0_snafu::{Result, ResultExt};
+    use nested_enum_utils::common_fields;
     use rand::Rng;
+    use snafu::Snafu;
     use tokio::{spawn, time::timeout};
     use tokio_util::sync::CancellationToken;
     use tracing::{info, instrument};
     use tracing_test::traced_test;
 
+    use crate::api::ApiError;
+
     use super::*;
 
     struct ManualActorLoop {
         actor: Actor,
-        current_addresses: BTreeSet<DirectAddr>,
         step: usize,
     }
 
@@ -1178,54 +1112,47 @@ pub(crate) mod test {
         }
     }
 
-    type EndpointHandle = tokio::task::JoinHandle<Result<(), Error>>;
+    type EndpointHandle = tokio::task::JoinHandle<Result<()>>;
 
     impl ManualActorLoop {
         #[instrument(skip_all, fields(me = %actor.endpoint.node_id().fmt_short()))]
-        async fn new(mut actor: Actor) -> Result<Self, Error> {
-            let (current_addresses, _, _) = actor.setup().await?;
-            let test_rig = Self {
-                actor,
-                current_addresses,
-                step: 0,
-            };
-
-            Ok(test_rig)
+        async fn new(mut actor: Actor) -> Self {
+            let _ = actor.setup().await;
+            Self { actor, step: 0 }
         }
 
         #[instrument(skip_all, fields(me = %self.endpoint.node_id().fmt_short()))]
-        async fn step(&mut self) -> Result<Option<()>, Error> {
-            let ManualActorLoop {
-                actor,
-                current_addresses,
-                step,
-            } = self;
+        async fn step(&mut self) -> bool {
+            let ManualActorLoop { actor, step } = self;
             *step += 1;
             // ignore updates that change our published address. This gives us better control over
             // events since the endpoint it no longer emitting changes
-            let home_relay_stream = &mut futures_lite::stream::pending();
-            let direct_addresses_stream = &mut futures_lite::stream::pending();
-            actor
-                .event_loop(
-                    current_addresses,
-                    home_relay_stream,
-                    direct_addresses_stream,
-                    *step,
-                )
-                .await
+            let addr_update_stream = &mut futures_lite::stream::pending();
+            actor.event_loop(addr_update_stream, *step).await
         }
 
-        async fn steps(&mut self, n: usize) -> Result<(), Error> {
+        async fn steps(&mut self, n: usize) {
             for _ in 0..n {
-                self.step().await?;
+                self.step().await;
             }
-            Ok(())
         }
 
-        async fn finish(mut self) -> Result<(), Error> {
-            while self.step().await?.is_some() {}
-            Ok(())
+        async fn finish(mut self) {
+            while self.step().await {}
         }
+    }
+
+    #[allow(missing_docs)]
+    #[common_fields({
+        backtrace: Option<snafu::Backtrace>,
+    })]
+    #[derive(Debug, Snafu)]
+    #[non_exhaustive]
+    pub(crate) enum CreateEndpointError {
+        #[snafu(transparent)]
+        Bind { source: BindError },
+        #[snafu(transparent)]
+        Dropped { source: n0_watcher::Disconnected },
     }
 
     impl Gossip {
@@ -1240,16 +1167,11 @@ pub(crate) mod test {
             config: proto::Config,
             relay_map: RelayMap,
             cancel: &CancellationToken,
-        ) -> n0_snafu::Result<(Self, Actor, EndpointHandle)> {
-            let my_addr = AddrInfo {
-                relay_url: relay_map.nodes().next().map(|relay| relay.url.clone()),
-                direct_addresses: Default::default(),
-            };
+        ) -> Result<(Self, Actor, EndpointHandle), CreateEndpointError> {
             let endpoint = create_endpoint(rng, relay_map).await?;
             let metrics = Arc::new(Metrics::default());
 
-            let (actor, to_actor_tx, conn_tx) =
-                Actor::new(endpoint, config, metrics.clone(), &my_addr);
+            let (actor, to_actor_tx, conn_tx) = Actor::new(endpoint, config, metrics.clone());
             let max_message_size = actor.state.max_message_size();
 
             let _actor_handle =
@@ -1265,13 +1187,13 @@ pub(crate) mod test {
                 .into(),
             };
 
-            let endpoing_task = task::spawn(endpoint_loop(
+            let endpoint_task = task::spawn(endpoint_loop(
                 actor.endpoint.clone(),
                 gossip.clone(),
                 cancel.child_token(),
             ));
 
-            Ok((gossip, actor, endpoing_task))
+            Ok((gossip, actor, endpoint_task))
         }
 
         /// Crates a new testing gossip instance with the normal actor loop.
@@ -1280,19 +1202,13 @@ pub(crate) mod test {
             config: proto::Config,
             relay_map: RelayMap,
             cancel: &CancellationToken,
-        ) -> n0_snafu::Result<(Self, Endpoint, EndpointHandle, impl Drop)> {
+        ) -> Result<(Self, Endpoint, EndpointHandle, impl Drop), CreateEndpointError> {
             let (g, actor, ep_handle) =
                 Gossip::t_new_with_actor(rng, config, relay_map, cancel).await?;
             let ep = actor.endpoint.clone();
             let me = ep.node_id().fmt_short();
-            let actor_handle = task::spawn(
-                async move {
-                    if let Err(err) = actor.run().await {
-                        warn!("gossip actor closed with error: {err:?}");
-                    }
-                }
-                .instrument(tracing::error_span!("gossip", %me)),
-            );
+            let actor_handle =
+                task::spawn(actor.run().instrument(tracing::error_span!("gossip", %me)));
             Ok((g, ep, ep_handle, AbortOnDropHandle::new(actor_handle)))
         }
     }
@@ -1300,7 +1216,7 @@ pub(crate) mod test {
     pub(crate) async fn create_endpoint(
         rng: &mut rand_chacha::ChaCha12Rng,
         relay_map: RelayMap,
-    ) -> n0_snafu::Result<Endpoint> {
+    ) -> Result<Endpoint, CreateEndpointError> {
         let ep = Endpoint::builder()
             .secret_key(SecretKey::generate(rng))
             .alpns(vec![GOSSIP_ALPN.to_vec()])
@@ -1317,7 +1233,7 @@ pub(crate) mod test {
         endpoint: Endpoint,
         gossip: Gossip,
         cancel: CancellationToken,
-    ) -> Result<(), Error> {
+    ) -> Result<()> {
         loop {
             tokio::select! {
                 biased;
@@ -1334,7 +1250,7 @@ pub(crate) mod test {
                                 continue;
                             }
                         };
-                        gossip.handle_connection(connecting.await?).await?
+                        gossip.handle_connection(connecting.await.e()?).await?
                     }
                 }
             }
@@ -1352,9 +1268,9 @@ pub(crate) mod test {
         let ep2 = create_endpoint(&mut rng, relay_map.clone()).await.unwrap();
         let ep3 = create_endpoint(&mut rng, relay_map.clone()).await.unwrap();
 
-        let go1 = Gossip::builder().spawn(ep1.clone()).await.unwrap();
-        let go2 = Gossip::builder().spawn(ep2.clone()).await.unwrap();
-        let go3 = Gossip::builder().spawn(ep3.clone()).await.unwrap();
+        let go1 = Gossip::builder().spawn(ep1.clone());
+        let go2 = Gossip::builder().spawn(ep2.clone());
+        let go3 = Gossip::builder().spawn(ep3.clone());
         debug!("peer1 {:?}", ep1.node_id());
         debug!("peer2 {:?}", ep2.node_id());
         debug!("peer3 {:?}", ep3.node_id());
@@ -1471,7 +1387,7 @@ pub(crate) mod test {
     // NOTE: this is a regression test.
     #[tokio::test]
     #[traced_test]
-    async fn subscription_cleanup() -> testresult::TestResult {
+    async fn subscription_cleanup() -> Result {
         let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
         let ct = CancellationToken::new();
         let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
@@ -1479,7 +1395,7 @@ pub(crate) mod test {
         // create the first node with a manual actor loop
         let (go1, actor, ep1_handle) =
             Gossip::t_new_with_actor(rng, Default::default(), relay_map.clone(), &ct).await?;
-        let mut actor = ManualActorLoop::new(actor).await?;
+        let mut actor = ManualActorLoop::new(actor).await;
 
         // create the second node with the usual actor loop
         let (go2, ep2, ep2_handle, _test_actor_handle) =
@@ -1516,7 +1432,7 @@ pub(crate) mod test {
                 }
 
                 tracing::debug!("subscribe stream ended");
-                anyhow::Ok(())
+                Result::<_, n0_snafu::Error>::Ok(())
             };
 
             tokio::select! {
@@ -1553,39 +1469,39 @@ pub(crate) mod test {
             ct1.cancelled().await;
             drop(go1);
 
-            anyhow::Ok(())
+            Result::<_, n0_snafu::Error>::Ok(())
         }
         .instrument(tracing::debug_span!("node_1", %node_id1));
         let go1_handle = task::spawn(go1_task);
 
         // advance and check that the topic is now subscribed
-        actor.steps(3).await?; // handle our subscribe;
-                               // get peer connection;
-                               // receive the other peer's information for a NeighborUp
+        actor.steps(3).await; // handle our subscribe;
+                              // get peer connection;
+                              // receive the other peer's information for a NeighborUp
         let state = actor.topics.get(&topic).expect("get registered topic");
         assert!(state.joined());
 
         // signal the second subscribe, we should remain subscribed
-        tx.send(()).await?;
-        actor.steps(3).await?; // subscribe; first receiver gone; first sender gone
+        tx.send(()).await.e()?;
+        actor.steps(3).await; // subscribe; first receiver gone; first sender gone
         let state = actor.topics.get(&topic).expect("get registered topic");
         assert!(state.joined());
 
         // signal to drop the second handle, the topic should no longer be subscribed
-        tx.send(()).await?;
-        actor.steps(2).await?; // second receiver gone; second sender gone
+        tx.send(()).await.e()?;
+        actor.steps(2).await; // second receiver gone; second sender gone
         assert!(!actor.topics.contains_key(&topic));
 
         // cleanup and ensure everything went as expected
         ct.cancel();
         let wait = Duration::from_secs(2);
-        timeout(wait, ep1_handle).await???;
-        timeout(wait, ep2_handle).await???;
-        timeout(wait, go1_handle).await???;
-        timeout(wait, go2_handle).await???;
-        timeout(wait, actor.finish()).await??;
+        timeout(wait, ep1_handle).await.e()?.e()??;
+        timeout(wait, ep2_handle).await.e()?.e()??;
+        timeout(wait, go1_handle).await.e()?.e()??;
+        timeout(wait, go2_handle).await.e()?.e()??;
+        timeout(wait, actor.finish()).await.e()?;
 
-        testresult::TestResult::Ok(())
+        Ok(())
     }
 
     /// Test that nodes can reconnect to each other.
@@ -1596,7 +1512,7 @@ pub(crate) mod test {
     // NOTE: This is a regression test
     #[tokio::test]
     #[traced_test]
-    async fn can_reconnect() -> testresult::TestResult {
+    async fn can_reconnect() -> Result {
         let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
         let ct = CancellationToken::new();
         let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
@@ -1640,7 +1556,7 @@ pub(crate) mod test {
 
             ct2.cancelled().await;
 
-            anyhow::Ok(())
+            Result::<_, ApiError>::Ok(())
         }
         .instrument(tracing::debug_span!("node_2", %node_id2));
         let go2_handle = task::spawn(go2_task);
@@ -1653,35 +1569,35 @@ pub(crate) mod test {
         sub.joined().await?;
 
         // signal node_2 to unsubscribe
-        tx.send(()).await?;
+        tx.send(()).await.e()?;
 
         // we should receive a Neighbor down event
         let conn_timeout = Duration::from_millis(500);
-        let ev = timeout(conn_timeout, sub.try_next()).await??;
+        let ev = timeout(conn_timeout, sub.try_next()).await.e()??;
         assert_eq!(ev, Some(Event::NeighborDown(node_id2)));
         tracing::info!("node 2 left");
 
         // signal node_2 to subscribe again
-        tx.send(()).await?;
+        tx.send(()).await.e()?;
 
         let conn_timeout = Duration::from_millis(500);
-        let ev = timeout(conn_timeout, sub.try_next()).await??;
+        let ev = timeout(conn_timeout, sub.try_next()).await.e()??;
         assert_eq!(ev, Some(Event::NeighborUp(node_id2)));
         tracing::info!("node 2 rejoined!");
 
         // cleanup and ensure everything went as expected
         ct.cancel();
         let wait = Duration::from_secs(2);
-        timeout(wait, ep1_handle).await???;
-        timeout(wait, ep2_handle).await???;
-        timeout(wait, go2_handle).await???;
+        timeout(wait, ep1_handle).await.e()?.e()??;
+        timeout(wait, ep2_handle).await.e()?.e()??;
+        timeout(wait, go2_handle).await.e()?.e()??;
 
-        testresult::TestResult::Ok(())
+        Result::Ok(())
     }
 
     #[tokio::test]
     #[traced_test]
-    async fn can_die_and_reconnect() -> testresult::TestResult {
+    async fn can_die_and_reconnect() -> Result {
         /// Runs a future in a separate runtime on a separate thread, cancelling everything
         /// abruptly once `cancel` is invoked.
         fn run_in_thread<T: Send + 'static>(
@@ -1701,14 +1617,14 @@ pub(crate) mod test {
         async fn spawn_gossip(
             secret_key: SecretKey,
             relay_map: RelayMap,
-        ) -> anyhow::Result<(Router, Gossip)> {
+        ) -> Result<(Router, Gossip), BindError> {
             let ep = Endpoint::builder()
                 .secret_key(secret_key)
                 .relay_mode(RelayMode::Custom(relay_map))
                 .insecure_skip_relay_cert_verify(true)
                 .bind()
                 .await?;
-            let gossip = Gossip::builder().spawn(ep.clone()).await?;
+            let gossip = Gossip::builder().spawn(ep.clone());
             let router = Router::builder(ep.clone())
                 .accept(GOSSIP_ALPN, gossip.clone())
                 .spawn();
@@ -1722,7 +1638,7 @@ pub(crate) mod test {
             bootstrap_addr: NodeAddr,
             topic_id: TopicId,
             message: String,
-        ) -> anyhow::Result<()> {
+        ) -> Result {
             let (router, gossip) = spawn_gossip(secret_key, relay_map).await?;
             info!(node_id = %router.endpoint().node_id().fmt_short(), "broadcast node spawned");
             let bootstrap = vec![bootstrap_addr.node_id];
@@ -1760,7 +1676,7 @@ pub(crate) mod test {
             }
         });
 
-        let node0_addr = addr_rx.await?;
+        let node0_addr = addr_rx.await.e()?;
         let max_wait = Duration::from_secs(5);
 
         // spawn a node, send a message, and then abruptly terminate the node ungracefully
@@ -1778,7 +1694,7 @@ pub(crate) mod test {
             ),
         );
         // assert that we received the message on the receiver node.
-        let msg = timeout(max_wait, msgs_recv_rx.recv()).await?.unwrap();
+        let msg = timeout(max_wait, msgs_recv_rx.recv()).await.e()?.unwrap();
         assert_eq!(&msg, "msg1");
         info!("kill broadcast node");
         cancel.cancel();
@@ -1797,7 +1713,7 @@ pub(crate) mod test {
         );
         // assert that we received the message on the receiver node.
         // this means that the reconnect with the same node id worked.
-        let msg = timeout(max_wait, msgs_recv_rx.recv()).await?.unwrap();
+        let msg = timeout(max_wait, msgs_recv_rx.recv()).await.e()?.unwrap();
         assert_eq!(&msg, "msg2");
         info!("kill broadcast node");
         cancel.cancel();

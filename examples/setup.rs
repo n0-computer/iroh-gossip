@@ -8,7 +8,7 @@ async fn main() -> anyhow::Result<()> {
     let endpoint = Endpoint::builder().discovery_n0().bind().await?;
 
     // build gossip protocol
-    let gossip = Gossip::builder().spawn(endpoint.clone()).await?;
+    let gossip = Gossip::builder().spawn(endpoint.clone());
 
     // setup router
     let router = Router::builder(endpoint.clone())

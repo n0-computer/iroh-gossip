@@ -12,7 +12,9 @@ use bytes::Bytes;
 use iroh_base::NodeId;
 use irpc::{channel::mpsc, rpc_requests, Client};
 use n0_future::{boxed::BoxStream, Stream, StreamExt, TryStreamExt};
+use nested_enum_utils::common_fields;
 use serde::{Deserialize, Serialize};
+use snafu::Snafu;
 
 use crate::proto::{DeliveryScope, TopicId};
 
@@ -40,26 +42,31 @@ pub(crate) struct JoinRequest {
     pub bootstrap: BTreeSet<NodeId>,
 }
 
-/// Errors returned from methods in [`GossipApi`]
-#[derive(Debug, thiserror::Error)]
+#[allow(missing_docs)]
+#[common_fields({
+    backtrace: Option<snafu::Backtrace>,
+    #[snafu(implicit)]
+    span_trace: n0_snafu::SpanTrace,
+})]
+#[derive(Debug, Snafu)]
+#[non_exhaustive]
 pub enum ApiError {
-    /// RPC error
-    #[error(transparent)]
-    Rpc(#[from] irpc::Error),
+    #[snafu(transparent)]
+    Rpc { source: irpc::Error },
     /// The gossip topic was closed.
-    #[error("topic closed")]
-    Closed,
+    #[snafu(display("topic closed"))]
+    Closed {},
 }
 
 impl From<irpc::channel::SendError> for ApiError {
     fn from(value: irpc::channel::SendError) -> Self {
-        Self::Rpc(value.into())
+        irpc::Error::from(value).into()
     }
 }
 
 impl From<irpc::channel::RecvError> for ApiError {
     fn from(value: irpc::channel::RecvError) -> Self {
-        Self::Rpc(value.into())
+        irpc::Error::from(value).into()
     }
 }
 
@@ -301,7 +308,7 @@ impl GossipReceiver {
     /// continue to track `NeighborUp` events on the event stream.
     pub async fn joined(&mut self) -> Result<(), ApiError> {
         while !self.is_joined() {
-            let _event = self.next().await.ok_or(ApiError::Closed)??;
+            let _event = self.next().await.ok_or(ClosedSnafu.build())??;
         }
         Ok(())
     }
@@ -419,7 +426,6 @@ mod tests {
     async fn test_rpc() -> testresult::TestResult {
         use iroh::{protocol::Router, RelayMap};
         use n0_future::{time::Duration, StreamExt};
-        use n0_snafu::ResultExt;
         use n0_watcher::Watcher;
         use rand::SeedableRng;
 
@@ -438,10 +444,7 @@ mod tests {
             relay_map: RelayMap,
         ) -> n0_snafu::Result<(Router, Gossip)> {
             let endpoint = create_endpoint(rng, relay_map).await?;
-            let gossip = Gossip::builder()
-                .spawn(endpoint.clone())
-                .await
-                .context("failed to spawn gossip")?;
+            let gossip = Gossip::builder().spawn(endpoint.clone());
             let router = Router::builder(endpoint)
                 .accept(ALPN, gossip.clone())
                 .spawn();
