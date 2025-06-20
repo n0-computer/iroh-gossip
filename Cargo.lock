@@ -1835,7 +1835,6 @@ dependencies = [
 name = "iroh-gossip"
 version = "0.35.0"
 dependencies = [
- "anyhow",
  "blake3",
  "bytes",
  "clap",
@@ -1867,7 +1866,6 @@ dependencies = [
  "serde_json",
  "snafu",
  "testresult",
- "thiserror 2.0.12",
  "tokio",
  "tokio-util",
  "toml",

@@ -3,15 +3,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result};
 use clap::Parser;
 use comfy_table::{presets::NOTHING, Cell, CellAlignment, Table};
 use iroh_gossip::proto::sim::{
     BootstrapMode, NetworkConfig, RoundStats, RoundStatsAvg, RoundStatsDiff, Simulator,
     SimulatorConfig,
 };
+use n0_snafu::{Result, ResultExt};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
+use snafu::Snafu;
 use tracing::{error_span, info, warn};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -103,8 +104,8 @@ fn main() -> Result<()> {
             single_threaded,
             filter,
         } => {
-            let config_text = std::fs::read_to_string(&config_path)?;
-            let config: SimConfig = toml::from_str(&config_text)?;
+            let config_text = std::fs::read_to_string(&config_path).e()?;
+            let config: SimConfig = toml::from_str(&config_text).e()?;
 
             let base_config = config.config.unwrap_or_default();
             info!("base config: {base_config:?}");
@@ -115,7 +116,7 @@ fn main() -> Result<()> {
             }
 
             if let Some(out_dir) = out_dir.as_ref() {
-                std::fs::create_dir_all(out_dir)?;
+                std::fs::create_dir_all(out_dir).e()?;
             }
 
             let filter_fn = |s: &ScenarioDescription| {
@@ -170,19 +171,19 @@ fn run_and_save_simulation(
 
     if let Some(out_dir) = out_dir.as_ref() {
         let path = out_dir.as_ref().join(format!("{label}.config.toml"));
-        let encoded = toml::to_string(&scenario)?;
-        std::fs::write(path, encoded)?;
+        let encoded = toml::to_string(&scenario).e()?;
+        std::fs::write(path, encoded).e()?;
     }
 
     let result = run_simulation(seeds, scenario);
 
     if let Some(out_dir) = out_dir.as_ref() {
         let path = out_dir.as_ref().join(format!("{label}.results.json"));
-        let encoded = serde_json::to_string(&result)?;
-        std::fs::write(path, encoded)?;
+        let encoded = serde_json::to_string(&result).e()?;
+        std::fs::write(path, encoded).e()?;
     }
 
-    anyhow::Ok(result)
+    Ok(result)
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -195,16 +196,16 @@ struct SimulationResults {
 
 impl SimulationResults {
     fn load_from_file(path: impl AsRef<Path>) -> Result<Self> {
-        let s = std::fs::read_to_string(path.as_ref())?;
-        let out = serde_json::from_str(&s)?;
+        let s = std::fs::read_to_string(path.as_ref()).e()?;
+        let out = serde_json::from_str(&s).e()?;
         Ok(out)
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, thiserror::Error)]
+#[derive(Debug, Serialize, Deserialize, Clone, Snafu)]
 enum SimulationError {
-    #[error("failed to bootstrap")]
-    FailedToBootstrap,
+    #[snafu(display("failed to bootstrap"))]
+    FailedToBootstrap {},
 }
 
 fn run_simulation(seeds: &[u64], scenario: ScenarioDescription) -> SimulationResults {
@@ -326,7 +327,8 @@ impl Scenario for BigAll {
 
 fn compare_dirs(baseline_dir: PathBuf, current_path: PathBuf, filter: Vec<String>) -> Result<()> {
     let mut paths = vec![];
-    for entry in std::fs::read_dir(&current_path)?
+    for entry in std::fs::read_dir(&current_path)
+        .e()?
         .filter_map(Result::ok)
         .filter(|x| x.path().is_file())
     {

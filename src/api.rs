@@ -423,9 +423,10 @@ mod tests {
     #[cfg(all(feature = "rpc", feature = "net"))]
     #[tokio::test]
     #[tracing_test::traced_test]
-    async fn test_rpc() -> testresult::TestResult {
+    async fn test_rpc() -> n0_snafu::Result {
         use iroh::{protocol::Router, RelayMap};
         use n0_future::{time::Duration, StreamExt};
+        use n0_snafu::{Error, Result, ResultExt};
         use n0_watcher::Watcher;
         use rand::SeedableRng;
 
@@ -442,7 +443,7 @@ mod tests {
         async fn create_gossip_endpoint(
             rng: &mut rand_chacha::ChaCha12Rng,
             relay_map: RelayMap,
-        ) -> n0_snafu::Result<(Router, Gossip)> {
+        ) -> Result<(Router, Gossip)> {
             let endpoint = create_endpoint(rng, relay_map).await?;
             let gossip = Gossip::builder().spawn(endpoint.clone());
             let router = Router::builder(endpoint)
@@ -464,7 +465,7 @@ mod tests {
             let task = tokio::task::spawn(async move {
                 let mut topic = gossip.subscribe_and_join(topic_id, vec![]).await?;
                 topic.broadcast(b"hello".to_vec().into()).await?;
-                anyhow::Ok(router)
+                Result::<_, Error>::Ok(router)
             });
             (node_id, node_addr, task)
         };
@@ -473,15 +474,17 @@ mod tests {
 
         // expose the gossip node over RPC
         let (rpc_server_endpoint, rpc_server_cert) =
-            irpc::util::make_server_endpoint("127.0.0.1:0".parse().unwrap())?;
-        let rpc_server_addr = rpc_server_endpoint.local_addr()?;
+            irpc::util::make_server_endpoint("127.0.0.1:0".parse().unwrap())
+                .map_err(Error::anyhow)?;
+        let rpc_server_addr = rpc_server_endpoint.local_addr().e()?;
         let rpc_server_task = tokio::task::spawn(async move {
             gossip.listen(rpc_server_endpoint).await;
         });
 
         // connect to the RPC node with a new client
         let rpc_client_endpoint =
-            irpc::util::make_client_endpoint("127.0.0.1:0".parse().unwrap(), &[&rpc_server_cert])?;
+            irpc::util::make_client_endpoint("127.0.0.1:0".parse().unwrap(), &[&rpc_server_cert])
+                .map_err(Error::anyhow)?;
         let rpc_client = GossipApi::connect(rpc_client_endpoint, rpc_server_addr);
 
         // join via RPC
@@ -500,17 +503,19 @@ mod tests {
                     _ => {}
                 }
             }
-            anyhow::Ok(())
+            Result::<_, Error>::Ok(())
         };
 
         // timeout to not hang in case of failure
-        tokio::time::timeout(Duration::from_secs(10), recv).await??;
+        tokio::time::timeout(Duration::from_secs(10), recv)
+            .await
+            .e()??;
 
         // shutdown
         rpc_server_task.abort();
-        router.shutdown().await?;
-        let router2 = node2_task.await??;
-        router2.shutdown().await?;
+        router.shutdown().await.e()?;
+        let router2 = node2_task.await.e()??;
+        router2.shutdown().await.e()?;
         Ok(())
     }
 }

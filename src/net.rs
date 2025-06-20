@@ -1667,11 +1667,11 @@ pub(crate) mod test {
                 let mut topic = gossip.subscribe_and_join(topic_id, vec![]).await?;
                 while let Some(event) = topic.try_next().await.unwrap() {
                     if let Event::Received(message) = event {
-                        let message = std::str::from_utf8(&message.content)?.to_string();
-                        msgs_recv_tx.send(message).await?;
+                        let message = std::str::from_utf8(&message.content).e()?.to_string();
+                        msgs_recv_tx.send(message).await.e()?;
                     }
                 }
-                anyhow::Ok(())
+                Result::<_, n0_snafu::Error>::Ok(())
             }
         });
 
