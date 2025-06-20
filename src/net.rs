@@ -17,7 +17,7 @@ use iroh::{
     protocol::ProtocolHandler,
     Endpoint, NodeAddr, NodeId, PublicKey, RelayUrl,
 };
-use irpc::{channel::spsc, WithChannels};
+use irpc::WithChannels;
 use n0_future::{
     boxed::BoxFuture,
     task::{self, AbortOnDropHandle, JoinSet},
@@ -108,12 +108,6 @@ pub enum Error {
     /// Failed to receive a response.
     #[error(transparent)]
     RpcRecv(#[from] irpc::channel::RecvError),
-}
-
-impl<T> From<async_channel::SendError<T>> for Error {
-    fn from(_value: async_channel::SendError<T>) -> Self {
-        Error::ActorClosed
-    }
 }
 
 impl<T> From<mpsc::error::SendError<T>> for Error {
@@ -1021,7 +1015,7 @@ fn decode_peer_data(peer_data: &PeerData) -> Result<AddrInfo, Error> {
 }
 
 async fn topic_subscriber_loop(
-    mut sender: spsc::Sender<Event>,
+    sender: irpc::channel::mpsc::Sender<Event>,
     mut topic_events: broadcast::Receiver<ProtoEvent>,
 ) {
     loop {

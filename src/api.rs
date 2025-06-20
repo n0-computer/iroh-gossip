@@ -10,8 +10,7 @@ use std::{
 
 use bytes::Bytes;
 use iroh_base::NodeId;
-use irpc::{channel::spsc, Client};
-use irpc_derive::rpc_requests;
+use irpc::{channel::mpsc, rpc_requests, Client};
 use n0_future::{boxed::BoxStream, Stream, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
@@ -31,7 +30,7 @@ impl irpc::Service for Service {}
 #[rpc_requests(Service, message = RpcMessage)]
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) enum Request {
-    #[rpc(tx=spsc::Sender<Event>, rx=spsc::Receiver<Command>)]
+    #[rpc(tx=mpsc::Sender<Event>, rx=mpsc::Receiver<Command>)]
     Join(JoinRequest),
 }
 
@@ -178,10 +177,10 @@ impl GossipApi {
 
 /// Sender for a gossip topic.
 #[derive(Debug)]
-pub struct GossipSender(spsc::Sender<Command>);
+pub struct GossipSender(mpsc::Sender<Command>);
 
 impl GossipSender {
-    pub(crate) fn new(sender: spsc::Sender<Command>) -> Self {
+    pub(crate) fn new(sender: mpsc::Sender<Command>) -> Self {
         Self(sender)
     }
 
@@ -224,7 +223,7 @@ pub struct GossipTopic {
 }
 
 impl GossipTopic {
-    pub(crate) fn new(sender: spsc::Sender<Command>, receiver: spsc::Receiver<Event>) -> Self {
+    pub(crate) fn new(sender: mpsc::Sender<Command>, receiver: mpsc::Receiver<Event>) -> Self {
         let sender = GossipSender::new(sender);
         Self {
             sender,
@@ -279,7 +278,7 @@ pub struct GossipReceiver {
 }
 
 impl GossipReceiver {
-    pub(crate) fn new(events_rx: spsc::Receiver<Event>) -> Self {
+    pub(crate) fn new(events_rx: mpsc::Receiver<Event>) -> Self {
         let stream = events_rx.into_stream().map_err(ApiError::from);
         let stream = Box::pin(stream);
         Self {
