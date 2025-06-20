@@ -1725,8 +1725,7 @@
 <a href="#1724" id="1724">1724</a>
 <a href="#1725" id="1725">1725</a>
 <a href="#1726" id="1726">1726</a>
-<a href="#1727" id="1727">1727</a>
-<a href="#1728" id="1728">1728</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
+<a href="#1727" id="1727">1727</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
@@ -2817,9 +2816,8 @@
     <span class="kw">use </span>tracing::{info, instrument};
     <span class="kw">use </span>tracing_test::traced_test;
 
-    <span class="kw">use </span><span class="kw">crate</span>::api::ApiError;
-
     <span class="kw">use super</span>::<span class="kw-2">*</span>;
+    <span class="kw">use </span><span class="kw">crate</span>::api::ApiError;
 
     <span class="kw">struct </span>ManualActorLoop {
         actor: Actor,
