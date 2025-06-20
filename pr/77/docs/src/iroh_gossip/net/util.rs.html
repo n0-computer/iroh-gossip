@@ -154,29 +154,57 @@
 <a href="#153" id="153">153</a>
 <a href="#154" id="154">154</a>
 <a href="#155" id="155">155</a>
-<a href="#156" id="156">156</a></pre></div><pre class="rust"><code><span class="doccomment">//! Utilities for iroh-gossip networking
+<a href="#156" id="156">156</a>
+<a href="#157" id="157">157</a>
+<a href="#158" id="158">158</a>
+<a href="#159" id="159">159</a>
+<a href="#160" id="160">160</a>
+<a href="#161" id="161">161</a>
+<a href="#162" id="162">162</a>
+<a href="#163" id="163">163</a>
+<a href="#164" id="164">164</a>
+<a href="#165" id="165">165</a>
+<a href="#166" id="166">166</a>
+<a href="#167" id="167">167</a>
+<a href="#168" id="168">168</a>
+<a href="#169" id="169">169</a>
+<a href="#170" id="170">170</a>
+<a href="#171" id="171">171</a>
+<a href="#172" id="172">172</a>
+<a href="#173" id="173">173</a>
+<a href="#174" id="174">174</a></pre></div><pre class="rust"><code><span class="doccomment">//! Utilities for iroh-gossip networking
 
 </span><span class="kw">use </span>std::{io, pin::Pin};
 
 <span class="kw">use </span>bytes::{Bytes, BytesMut};
 <span class="kw">use </span>n0_future::time::{sleep_until, Instant, Sleep};
+<span class="kw">use </span>nested_enum_utils::common_fields;
+<span class="kw">use </span>snafu::Snafu;
 <span class="kw">use </span>tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 <span class="kw">use </span><span class="kw">super</span>::ProtoMessage;
 <span class="kw">use </span><span class="kw">crate</span>::proto::util::TimerMap;
 
 <span class="doccomment">/// Errors related to message writing
-</span><span class="attr">#[derive(Debug, thiserror::Error)]
+</span><span class="attr">#[allow(missing_docs)]
+#[common_fields({
+    backtrace: <span class="prelude-ty">Option</span>&lt;snafu::Backtrace&gt;,
+    <span class="attr">#[snafu(implicit)]
+    </span>span_trace: n0_snafu::SpanTrace,
+})]
+<span class="attr">#[derive(Debug, Snafu)]
+#[snafu(module)]
+#[non_exhaustive]
 </span><span class="kw">pub enum </span>WriteError {
     <span class="doccomment">/// Serialization failed
-    </span><span class="attr">#[error(transparent)]
-    </span>Ser(<span class="attr">#[from] </span>postcard::Error),
+    </span><span class="attr">#[snafu(transparent)]
+    </span>Ser { source: postcard::Error },
     <span class="doccomment">/// IO error
-    </span><span class="attr">#[error(transparent)]
-    </span>Io(<span class="attr">#[from] </span>std::io::Error),
+    </span><span class="attr">#[snafu(transparent)]
+    </span>Io { source: std::io::Error },
     <span class="doccomment">/// Message was larger than the configured maximum message size
-    </span><span class="attr">#[error(<span class="string">"message too large"</span>)]
-    </span>TooLarge,
+    </span><span class="attr">#[snafu(display(<span class="string">"message too large"</span>))]
+    </span>TooLarge {},
 }
 
 <span class="doccomment">/// Write a `ProtoMessage` as a length-prefixed, postcard-encoded message.
@@ -188,7 +216,7 @@
 ) -&gt; <span class="prelude-ty">Result</span>&lt;(), WriteError&gt; {
     <span class="kw">let </span>len = postcard::experimental::serialized_size(<span class="kw-2">&amp;</span>frame)<span class="question-mark">?</span>;
     <span class="kw">if </span>len &gt;= max_message_size {
-        <span class="kw">return </span><span class="prelude-val">Err</span>(WriteError::TooLarge);
+        <span class="kw">return </span><span class="prelude-val">Err</span>(<span class="self">self</span>::write_error::TooLargeSnafu.build());
     }
 
     buffer.clear();
@@ -200,17 +228,25 @@
 }
 
 <span class="doccomment">/// Errors related to message reading
-</span><span class="attr">#[derive(Debug, thiserror::Error)]
+</span><span class="attr">#[allow(missing_docs)]
+#[common_fields({
+    backtrace: <span class="prelude-ty">Option</span>&lt;snafu::Backtrace&gt;,
+    <span class="attr">#[snafu(implicit)]
+    </span>span_trace: n0_snafu::SpanTrace,
+})]
+<span class="attr">#[derive(Debug, Snafu)]
+#[snafu(module)]
+#[non_exhaustive]
 </span><span class="kw">pub enum </span>ReadError {
     <span class="doccomment">/// Deserialization failed
-    </span><span class="attr">#[error(transparent)]
-    </span>De(<span class="attr">#[from] </span>postcard::Error),
+    </span><span class="attr">#[snafu(transparent)]
+    </span>De { source: postcard::Error },
     <span class="doccomment">/// IO error
-    </span><span class="attr">#[error(transparent)]
-    </span>Io(<span class="attr">#[from] </span>std::io::Error),
+    </span><span class="attr">#[snafu(transparent)]
+    </span>Io { source: std::io::Error },
     <span class="doccomment">/// Message was larger than the configured maximum message size
-    </span><span class="attr">#[error(<span class="string">"message too large"</span>)]
-    </span>TooLarge,
+    </span><span class="attr">#[snafu(display(<span class="string">"message too large"</span>))]
+    </span>TooLarge {},
 }
 
 <span class="doccomment">/// Read a length-prefixed message and decode as `ProtoMessage`;
@@ -245,9 +281,9 @@
         <span class="prelude-val">Err</span>(err) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(err.into()),
     };
     <span class="kw">let </span><span class="kw-2">mut </span>reader = reader.take(size <span class="kw">as </span>u64);
-    <span class="kw">let </span>size = usize::try_from(size).map_err(|<span class="kw">_</span>| ReadError::TooLarge)<span class="question-mark">?</span>;
+    <span class="kw">let </span>size = usize::try_from(size).map_err(|<span class="kw">_</span>| read_error::TooLargeSnafu.build())<span class="question-mark">?</span>;
     <span class="kw">if </span>size &gt; max_message_size {
-        <span class="kw">return </span><span class="prelude-val">Err</span>(ReadError::TooLarge);
+        <span class="kw">return </span><span class="prelude-val">Err</span>(read_error::TooLargeSnafu.build());
     }
     buffer.reserve(size);
     <span class="kw">loop </span>{

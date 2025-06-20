@@ -514,7 +514,12 @@
 <a href="#513" id="513">513</a>
 <a href="#514" id="514">514</a>
 <a href="#515" id="515">515</a>
-<a href="#516" id="516">516</a></pre></div><pre class="rust"><code><span class="doccomment">//! Public API for using iroh-gossip
+<a href="#516" id="516">516</a>
+<a href="#517" id="517">517</a>
+<a href="#518" id="518">518</a>
+<a href="#519" id="519">519</a>
+<a href="#520" id="520">520</a>
+<a href="#521" id="521">521</a></pre></div><pre class="rust"><code><span class="doccomment">//! Public API for using iroh-gossip
 //!
 //! The API is usable both locally and over RPC.
 
@@ -939,9 +944,10 @@
     <span class="attr">#[cfg(all(feature = <span class="string">"rpc"</span>, feature = <span class="string">"net"</span>))]
     #[tokio::test]
     #[tracing_test::traced_test]
-    </span><span class="kw">async fn </span>test_rpc() -&gt; testresult::TestResult {
+    </span><span class="kw">async fn </span>test_rpc() -&gt; n0_snafu::Result {
         <span class="kw">use </span>iroh::{protocol::Router, RelayMap};
         <span class="kw">use </span>n0_future::{time::Duration, StreamExt};
+        <span class="kw">use </span>n0_snafu::{Error, <span class="prelude-ty">Result</span>, ResultExt};
         <span class="kw">use </span>n0_watcher::Watcher;
         <span class="kw">use </span>rand::SeedableRng;
 
@@ -958,7 +964,7 @@
         <span class="kw">async fn </span>create_gossip_endpoint(
             rng: <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng,
             relay_map: RelayMap,
-        ) -&gt; n0_snafu::Result&lt;(Router, Gossip)&gt; {
+        ) -&gt; <span class="prelude-ty">Result</span>&lt;(Router, Gossip)&gt; {
             <span class="kw">let </span>endpoint = create_endpoint(rng, relay_map).<span class="kw">await</span><span class="question-mark">?</span>;
             <span class="kw">let </span>gossip = Gossip::builder().spawn(endpoint.clone());
             <span class="kw">let </span>router = Router::builder(endpoint)
@@ -980,7 +986,7 @@
             <span class="kw">let </span>task = tokio::task::spawn(<span class="kw">async move </span>{
                 <span class="kw">let </span><span class="kw-2">mut </span>topic = gossip.subscribe_and_join(topic_id, <span class="macro">vec!</span>[]).<span class="kw">await</span><span class="question-mark">?</span>;
                 topic.broadcast(<span class="string">b"hello"</span>.to_vec().into()).<span class="kw">await</span><span class="question-mark">?</span>;
-                anyhow::Ok(router)
+                <span class="prelude-ty">Result</span>::&lt;<span class="kw">_</span>, Error&gt;::Ok(router)
             });
             (node_id, node_addr, task)
         };
@@ -989,15 +995,17 @@
 
         <span class="comment">// expose the gossip node over RPC
         </span><span class="kw">let </span>(rpc_server_endpoint, rpc_server_cert) =
-            irpc::util::make_server_endpoint(<span class="string">"127.0.0.1:0"</span>.parse().unwrap())<span class="question-mark">?</span>;
-        <span class="kw">let </span>rpc_server_addr = rpc_server_endpoint.local_addr()<span class="question-mark">?</span>;
+            irpc::util::make_server_endpoint(<span class="string">"127.0.0.1:0"</span>.parse().unwrap())
+                .map_err(Error::anyhow)<span class="question-mark">?</span>;
+        <span class="kw">let </span>rpc_server_addr = rpc_server_endpoint.local_addr().e()<span class="question-mark">?</span>;
         <span class="kw">let </span>rpc_server_task = tokio::task::spawn(<span class="kw">async move </span>{
             gossip.listen(rpc_server_endpoint).<span class="kw">await</span>;
         });
 
         <span class="comment">// connect to the RPC node with a new client
         </span><span class="kw">let </span>rpc_client_endpoint =
-            irpc::util::make_client_endpoint(<span class="string">"127.0.0.1:0"</span>.parse().unwrap(), <span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>rpc_server_cert])<span class="question-mark">?</span>;
+            irpc::util::make_client_endpoint(<span class="string">"127.0.0.1:0"</span>.parse().unwrap(), <span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>rpc_server_cert])
+                .map_err(Error::anyhow)<span class="question-mark">?</span>;
         <span class="kw">let </span>rpc_client = GossipApi::connect(rpc_client_endpoint, rpc_server_addr);
 
         <span class="comment">// join via RPC
@@ -1016,17 +1024,19 @@
                     <span class="kw">_ </span>=&gt; {}
                 }
             }
-            anyhow::Ok(())
+            <span class="prelude-ty">Result</span>::&lt;<span class="kw">_</span>, Error&gt;::Ok(())
         };
 
         <span class="comment">// timeout to not hang in case of failure
-        </span>tokio::time::timeout(Duration::from_secs(<span class="number">10</span>), recv).<span class="kw">await</span><span class="question-mark">??</span>;
+        </span>tokio::time::timeout(Duration::from_secs(<span class="number">10</span>), recv)
+            .<span class="kw">await
+            </span>.e()<span class="question-mark">??</span>;
 
         <span class="comment">// shutdown
         </span>rpc_server_task.abort();
-        router.shutdown().<span class="kw">await</span><span class="question-mark">?</span>;
-        <span class="kw">let </span>router2 = node2_task.<span class="kw">await</span><span class="question-mark">??</span>;
-        router2.shutdown().<span class="kw">await</span><span class="question-mark">?</span>;
+        router.shutdown().<span class="kw">await</span>.e()<span class="question-mark">?</span>;
+        <span class="kw">let </span>router2 = node2_task.<span class="kw">await</span>.e()<span class="question-mark">??</span>;
+        router2.shutdown().<span class="kw">await</span>.e()<span class="question-mark">?</span>;
         <span class="prelude-val">Ok</span>(())
     }
 }

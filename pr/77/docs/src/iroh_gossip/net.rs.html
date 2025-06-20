@@ -3394,11 +3394,11 @@
                 <span class="kw">let </span><span class="kw-2">mut </span>topic = gossip.subscribe_and_join(topic_id, <span class="macro">vec!</span>[]).<span class="kw">await</span><span class="question-mark">?</span>;
                 <span class="kw">while let </span><span class="prelude-val">Some</span>(event) = topic.try_next().<span class="kw">await</span>.unwrap() {
                     <span class="kw">if let </span>Event::Received(message) = event {
-                        <span class="kw">let </span>message = std::str::from_utf8(<span class="kw-2">&amp;</span>message.content)<span class="question-mark">?</span>.to_string();
-                        msgs_recv_tx.send(message).<span class="kw">await</span><span class="question-mark">?</span>;
+                        <span class="kw">let </span>message = std::str::from_utf8(<span class="kw-2">&amp;</span>message.content).e()<span class="question-mark">?</span>.to_string();
+                        msgs_recv_tx.send(message).<span class="kw">await</span>.e()<span class="question-mark">?</span>;
                     }
                 }
-                anyhow::Ok(())
+                <span class="prelude-ty">Result</span>::&lt;<span class="kw">_</span>, n0_snafu::Error&gt;::Ok(())
             }
         });
 
