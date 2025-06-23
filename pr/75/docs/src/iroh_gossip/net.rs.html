@@ -1791,20 +1791,7 @@
 <a href="#1790" id="1790">1790</a>
 <a href="#1791" id="1791">1791</a>
 <a href="#1792" id="1792">1792</a>
-<a href="#1793" id="1793">1793</a>
-<a href="#1794" id="1794">1794</a>
-<a href="#1795" id="1795">1795</a>
-<a href="#1796" id="1796">1796</a>
-<a href="#1797" id="1797">1797</a>
-<a href="#1798" id="1798">1798</a>
-<a href="#1799" id="1799">1799</a>
-<a href="#1800" id="1800">1800</a>
-<a href="#1801" id="1801">1801</a>
-<a href="#1802" id="1802">1802</a>
-<a href="#1803" id="1803">1803</a>
-<a href="#1804" id="1804">1804</a>
-<a href="#1805" id="1805">1805</a>
-<a href="#1806" id="1806">1806</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
+<a href="#1793" id="1793">1793</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
@@ -1817,13 +1804,12 @@
 <span class="kw">use </span>anyhow::Context <span class="kw">as _</span>;
 <span class="kw">use </span>futures_concurrency::stream::{stream_group, StreamGroup};
 <span class="kw">use </span>futures_util::FutureExt <span class="kw">as _</span>;
-<span class="kw">use </span>handles::RpcMessage;
 <span class="kw">use </span>iroh::{
     endpoint::{Connection, DirectAddr},
     protocol::ProtocolHandler,
     Endpoint, NodeAddr, NodeId, PublicKey, RelayUrl,
 };
-<span class="kw">use </span>irpc::{channel::spsc, WithChannels};
+<span class="kw">use </span>irpc::WithChannels;
 <span class="kw">use </span>n0_future::{
     boxed::BoxFuture,
     task::{<span class="self">self</span>, AbortOnDropHandle, JoinSet},
@@ -1837,14 +1823,14 @@
 <span class="kw">use </span>tokio_util::sync::CancellationToken;
 <span class="kw">use </span>tracing::{debug, error, error_span, trace, warn, Instrument};
 
-<span class="kw">pub use </span><span class="self">self</span>::handles::{Command, Event, GossipApi, GossipEvent, GossipReceiver, GossipSender};
-<span class="kw">use </span><span class="self">self</span>::util::{RecvLoop, SendLoop, Timers};
 <span class="kw">use crate</span>::{
+    api::{<span class="self">self</span>, Command, Event, GossipApi, RpcMessage},
     metrics::Metrics,
     proto::{<span class="self">self</span>, HyparviewConfig, PeerData, PlumtreeConfig, Scope, TopicId},
 };
 
-<span class="kw">pub mod </span>handles;
+<span class="kw">use </span><span class="self">self</span>::util::{RecvLoop, SendLoop, Timers};
+
 <span class="kw">mod </span>util;
 
 <span class="doccomment">/// ALPN protocol name
@@ -1913,12 +1899,6 @@
     <span class="doccomment">/// Failed to receive a response.
     </span><span class="attr">#[error(transparent)]
     </span>RpcRecv(<span class="attr">#[from] </span>irpc::channel::RecvError),
-}
-
-<span class="kw">impl</span>&lt;T&gt; From&lt;async_channel::SendError&lt;T&gt;&gt; <span class="kw">for </span>Error {
-    <span class="kw">fn </span>from(_value: async_channel::SendError&lt;T&gt;) -&gt; <span class="self">Self </span>{
-        Error::ActorClosed
-    }
 }
 
 <span class="kw">impl</span>&lt;T&gt; From&lt;mpsc::error::SendError&lt;T&gt;&gt; <span class="kw">for </span>Error {
@@ -2491,7 +2471,7 @@
                     <span class="comment">// TODO(frando): make use of span?
                     </span>span: <span class="kw">_</span>,
                 } = msg;
-                <span class="kw">let </span>handles::JoinRequest {
+                <span class="kw">let </span>api::JoinRequest {
                     topic_id,
                     bootstrap,
                 } = inner;
@@ -2503,10 +2483,7 @@
                 <span class="kw">let </span><span class="kw-2">mut </span>sender_dead = <span class="bool-val">false</span>;
                 <span class="kw">if </span>!neighbors.is_empty() {
                     <span class="kw">for </span>neighbor <span class="kw">in </span>neighbors.iter() {
-                        <span class="kw">if let </span><span class="prelude-val">Err</span>(_err) = tx
-                            .try_send(Event::Gossip(GossipEvent::NeighborUp(<span class="kw-2">*</span>neighbor)))
-                            .<span class="kw">await
-                        </span>{
+                        <span class="kw">if let </span><span class="prelude-val">Err</span>(_err) = tx.try_send(Event::NeighborUp(<span class="kw-2">*</span>neighbor)).<span class="kw">await </span>{
                             sender_dead = <span class="bool-val">true</span>;
                             <span class="kw">break</span>;
                         }
@@ -2611,7 +2588,6 @@
                         }
                         <span class="kw">_ </span>=&gt; {}
                     }
-                    <span class="kw">let </span>event: GossipEvent = event.into();
                     event_sender.send(event).ok();
                     <span class="kw">if </span>!state.still_needed() {
                         <span class="self">self</span>.quit_queue.push_back(topic_id);
@@ -2706,7 +2682,7 @@
 <span class="attr">#[derive(Debug)]
 </span><span class="kw">struct </span>TopicState {
     neighbors: BTreeSet&lt;NodeId&gt;,
-    event_sender: broadcast::Sender&lt;GossipEvent&gt;,
+    event_sender: broadcast::Sender&lt;ProtoEvent&gt;,
     <span class="doccomment">/// Keys identifying command receivers in [`Actor::command_rx`].
     ///
     /// This represents the receiver side of gossip's publish public API.
@@ -2804,8 +2780,8 @@
 }
 
 <span class="kw">async fn </span>topic_subscriber_loop(
-    <span class="kw-2">mut </span>sender: spsc::Sender&lt;Event&gt;,
-    <span class="kw-2">mut </span>topic_events: broadcast::Receiver&lt;GossipEvent&gt;,
+    sender: irpc::channel::mpsc::Sender&lt;Event&gt;,
+    <span class="kw-2">mut </span>topic_events: broadcast::Receiver&lt;ProtoEvent&gt;,
 ) {
     <span class="kw">loop </span>{
         <span class="macro">tokio::select!</span> {
@@ -2814,7 +2790,7 @@
                <span class="kw">let </span>event = <span class="kw">match </span>msg {
                    <span class="prelude-val">Err</span>(broadcast::error::RecvError::Closed) =&gt; <span class="kw">break</span>,
                    <span class="prelude-val">Err</span>(broadcast::error::RecvError::Lagged(<span class="kw">_</span>)) =&gt; Event::Lagged,
-                   <span class="prelude-val">Ok</span>(event) =&gt; Event::Gossip(event)
+                   <span class="prelude-val">Ok</span>(event) =&gt; event.into(),
                };
                <span class="kw">if </span>sender.send(event).<span class="kw">await</span>.is_err() {
                    <span class="kw">break</span>;
@@ -3205,7 +3181,7 @@
             <span class="kw">loop </span>{
                 <span class="kw">let </span>ev = sub2.next().<span class="kw">await</span>.unwrap().unwrap();
                 <span class="macro">info!</span>(<span class="string">"go2 event: {ev:?}"</span>);
-                <span class="kw">if let </span>Event::Gossip(GossipEvent::Received(msg)) = ev {
+                <span class="kw">if let </span>Event::Received(msg) = ev {
                     recv.push(msg.content);
                 }
                 <span class="kw">if </span>recv.len() == len {
@@ -3220,7 +3196,7 @@
             <span class="kw">loop </span>{
                 <span class="kw">let </span>ev = sub3.next().<span class="kw">await</span>.unwrap().unwrap();
                 <span class="macro">info!</span>(<span class="string">"go3 event: {ev:?}"</span>);
-                <span class="kw">if let </span>Event::Gossip(GossipEvent::Received(msg)) = ev {
+                <span class="kw">if let </span>Event::Received(msg) = ev {
                     recv.push(msg.content);
                 }
                 <span class="kw">if </span>recv.len() == len {
@@ -3308,10 +3284,8 @@
                 <span class="kw">while let </span><span class="prelude-val">Some</span>(ev) = sub_rx.try_next().<span class="kw">await</span><span class="question-mark">? </span>{
                     <span class="kw">match </span>ev {
                         Event::Lagged =&gt; <span class="macro">tracing::debug!</span>(<span class="string">"missed some messages :("</span>),
-                        Event::Gossip(gm) =&gt; <span class="kw">match </span>gm {
-                            GossipEvent::Received(<span class="kw">_</span>) =&gt; <span class="macro">unreachable!</span>(<span class="string">"test does not send messages"</span>),
-                            other =&gt; <span class="macro">tracing::debug!</span>(<span class="question-mark">?</span>other, <span class="string">"gs event"</span>),
-                        },
+                        Event::Received(<span class="kw">_</span>) =&gt; <span class="macro">unreachable!</span>(<span class="string">"test does not send messages"</span>),
+                        other =&gt; <span class="macro">tracing::debug!</span>(<span class="question-mark">?</span>other, <span class="string">"gs event"</span>),
                     }
                 }
 
@@ -3458,7 +3432,7 @@
         <span class="comment">// we should receive a Neighbor down event
         </span><span class="kw">let </span>conn_timeout = Duration::from_millis(<span class="number">500</span>);
         <span class="kw">let </span>ev = timeout(conn_timeout, sub.try_next()).<span class="kw">await</span><span class="question-mark">??</span>;
-        <span class="macro">assert_eq!</span>(ev, <span class="prelude-val">Some</span>(Event::Gossip(GossipEvent::NeighborDown(node_id2))));
+        <span class="macro">assert_eq!</span>(ev, <span class="prelude-val">Some</span>(Event::NeighborDown(node_id2)));
         <span class="macro">tracing::info!</span>(<span class="string">"node 2 left"</span>);
 
         <span class="comment">// signal node_2 to subscribe again
@@ -3466,7 +3440,7 @@
 
         <span class="kw">let </span>conn_timeout = Duration::from_millis(<span class="number">500</span>);
         <span class="kw">let </span>ev = timeout(conn_timeout, sub.try_next()).<span class="kw">await</span><span class="question-mark">??</span>;
-        <span class="macro">assert_eq!</span>(ev, <span class="prelude-val">Some</span>(Event::Gossip(GossipEvent::NeighborUp(node_id2))));
+        <span class="macro">assert_eq!</span>(ev, <span class="prelude-val">Some</span>(Event::NeighborUp(node_id2)));
         <span class="macro">tracing::info!</span>(<span class="string">"node 2 rejoined!"</span>);
 
         <span class="comment">// cleanup and ensure everything went as expected
@@ -3551,7 +3525,7 @@
                 addr_tx.send(addr).unwrap();
                 <span class="kw">let </span><span class="kw-2">mut </span>topic = gossip.subscribe_and_join(topic_id, <span class="macro">vec!</span>[]).<span class="kw">await</span><span class="question-mark">?</span>;
                 <span class="kw">while let </span><span class="prelude-val">Some</span>(event) = topic.try_next().<span class="kw">await</span>.unwrap() {
-                    <span class="kw">if let </span>Event::Gossip(GossipEvent::Received(message)) = event {
+                    <span class="kw">if let </span>Event::Received(message) = event {
                         <span class="kw">let </span>message = std::str::from_utf8(<span class="kw-2">&amp;</span>message.content)<span class="question-mark">?</span>.to_string();
                         msgs_recv_tx.send(message).<span class="kw">await</span><span class="question-mark">?</span>;
                     }

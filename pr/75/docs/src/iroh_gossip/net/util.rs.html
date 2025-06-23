@@ -389,12 +389,55 @@
 <a href="#388" id="388">388</a>
 <a href="#389" id="389">389</a>
 <a href="#390" id="390">390</a>
-<a href="#391" id="391">391</a></pre></div><pre class="rust"><code><span class="doccomment">//! Utilities for iroh-gossip networking
+<a href="#391" id="391">391</a>
+<a href="#392" id="392">392</a>
+<a href="#393" id="393">393</a>
+<a href="#394" id="394">394</a>
+<a href="#395" id="395">395</a>
+<a href="#396" id="396">396</a>
+<a href="#397" id="397">397</a>
+<a href="#398" id="398">398</a>
+<a href="#399" id="399">399</a>
+<a href="#400" id="400">400</a>
+<a href="#401" id="401">401</a>
+<a href="#402" id="402">402</a>
+<a href="#403" id="403">403</a>
+<a href="#404" id="404">404</a>
+<a href="#405" id="405">405</a>
+<a href="#406" id="406">406</a>
+<a href="#407" id="407">407</a>
+<a href="#408" id="408">408</a>
+<a href="#409" id="409">409</a>
+<a href="#410" id="410">410</a>
+<a href="#411" id="411">411</a>
+<a href="#412" id="412">412</a>
+<a href="#413" id="413">413</a>
+<a href="#414" id="414">414</a>
+<a href="#415" id="415">415</a>
+<a href="#416" id="416">416</a>
+<a href="#417" id="417">417</a>
+<a href="#418" id="418">418</a>
+<a href="#419" id="419">419</a>
+<a href="#420" id="420">420</a>
+<a href="#421" id="421">421</a>
+<a href="#422" id="422">422</a>
+<a href="#423" id="423">423</a>
+<a href="#424" id="424">424</a>
+<a href="#425" id="425">425</a>
+<a href="#426" id="426">426</a>
+<a href="#427" id="427">427</a>
+<a href="#428" id="428">428</a>
+<a href="#429" id="429">429</a>
+<a href="#430" id="430">430</a>
+<a href="#431" id="431">431</a>
+<a href="#432" id="432">432</a>
+<a href="#433" id="433">433</a></pre></div><pre class="rust"><code><span class="doccomment">//! Utilities for iroh-gossip networking
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map, HashMap},
     io,
     pin::Pin,
+    time::Duration,
 };
 
 <span class="kw">use </span>bytes::{Bytes, BytesMut};
@@ -412,7 +455,7 @@
     sync::mpsc,
     task::JoinSet,
 };
-<span class="kw">use </span>tracing::debug;
+<span class="kw">use </span>tracing::{debug, trace, Instrument};
 
 <span class="kw">use super</span>::{InEvent, ProtoMessage};
 <span class="kw">use </span><span class="kw">crate</span>::proto::{util::TimerMap, TopicId};
@@ -450,12 +493,13 @@
         buffer: <span class="kw-2">&amp;mut </span>BytesMut,
         max_message_size: usize,
     ) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>, ReadError&gt; {
-        <span class="kw">let </span>header: WireStreamHeader = read_message(stream, buffer, max_message_size)
-            .<span class="kw">await</span><span class="question-mark">?
-            </span>.ok_or(ReadError::Io(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                <span class="string">"stream ended before header"</span>,
-            )))<span class="question-mark">?</span>;
+        <span class="kw">let </span>header: WireStreamHeader =
+            read_frame(stream, buffer, max_message_size)
+                .<span class="kw">await</span><span class="question-mark">?
+                </span>.ok_or(ReadError::Io(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    <span class="string">"stream ended before header"</span>,
+                )))<span class="question-mark">?</span>;
         <span class="kw">let </span>WireStreamHeader::V0(header) = header;
         <span class="prelude-val">Ok</span>(header)
     }
@@ -467,7 +511,7 @@
         max_message_size: usize,
     ) -&gt; <span class="prelude-ty">Result</span>&lt;(), WriteError&gt; {
         <span class="kw">let </span>frame = WireStreamHeader::V0(<span class="self">self</span>);
-        write_lp(stream, <span class="kw-2">&amp;</span>frame, buffer, max_message_size).<span class="kw">await</span><span class="question-mark">?</span>;
+        write_frame(stream, <span class="kw-2">&amp;</span>frame, buffer, max_message_size).<span class="kw">await</span><span class="question-mark">?</span>;
         <span class="prelude-val">Ok</span>(())
     }
 }
@@ -497,31 +541,47 @@
     <span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">async fn </span>run(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;(), ReadError&gt; {
         <span class="kw">let </span><span class="kw-2">mut </span>read_futures = FuturesUnordered::new();
         <span class="kw">let </span>closed = <span class="self">self</span>.conn.closed();
+        <span class="kw">let </span><span class="kw-2">mut </span>is_closed = <span class="bool-val">false</span>;
         <span class="macro">tokio::pin!</span>(closed);
         <span class="kw">loop </span>{
             <span class="macro">tokio::select!</span> {
-                <span class="kw">_ </span>= <span class="kw-2">&amp;mut </span>closed =&gt; <span class="kw">break</span>,
-                stream = <span class="self">self</span>.conn.accept_uni() =&gt; {
-                    <span class="kw">let </span>stream = stream.map_err(io::Error::other)<span class="question-mark">?</span>;
-                    <span class="kw">let </span>state = RecvStreamState::init(stream, <span class="self">self</span>.max_message_size).<span class="kw">await</span><span class="question-mark">?</span>;
+                <span class="kw">_ </span>= <span class="kw-2">&amp;mut </span>closed =&gt; {
+                    is_closed = <span class="bool-val">true</span>;
+                }
+                stream = <span class="self">self</span>.conn.accept_uni(), <span class="kw">if </span>!is_closed =&gt; {
+                    <span class="kw">let </span>stream = <span class="kw">match </span>stream {
+                        <span class="prelude-val">Ok</span>(stream) =&gt; stream,
+                        <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; {
+                            is_closed = <span class="bool-val">true</span>;
+                            <span class="kw">continue</span>;
+                        }
+                    };
+                    <span class="kw">let </span>state = RecvStreamState::new(stream, <span class="self">self</span>.max_message_size).<span class="kw">await</span><span class="question-mark">?</span>;
                     <span class="macro">debug!</span>(topic=%state.header.topic_id.fmt_short(), <span class="string">"stream opened"</span>);
-                    read_futures.push(state.read_next());
+                    read_futures.push(state.next());
                 }
                 <span class="prelude-val">Some</span>(res) = read_futures.next(), <span class="kw">if </span>!read_futures.is_empty() =&gt; {
-                    <span class="kw">let </span>(state, msg) = res<span class="question-mark">?</span>;
+                    <span class="kw">let </span>(state, msg) = <span class="kw">match </span>res {
+                        <span class="prelude-val">Ok</span>((state, msg)) =&gt; (state, msg),
+                        <span class="prelude-val">Err</span>(err) =&gt; {
+                            <span class="macro">debug!</span>(<span class="string">"recv stream closed with error: {err:#}"</span>);
+                            <span class="kw">continue</span>;
+                        }
+                    };
                     <span class="kw">match </span>msg {
                         <span class="prelude-val">None </span>=&gt; <span class="macro">debug!</span>(topic=%state.header.topic_id.fmt_short(), <span class="string">"stream closed"</span>),
                         <span class="prelude-val">Some</span>(msg) =&gt; {
                             <span class="kw">if </span><span class="self">self</span>.in_event_tx.send(InEvent::RecvMessage(<span class="self">self</span>.remote_node_id, msg)).<span class="kw">await</span>.is_err() {
+                                <span class="macro">debug!</span>(<span class="string">"stop recv loop: actor closed"</span>);
                                 <span class="kw">break</span>;
                             }
-                            read_futures.push(state.read_next());
+                            read_futures.push(state.next());
                         }
                     }
                 }
             }
         }
-        <span class="macro">debug!</span>(<span class="string">"done"</span>);
+        <span class="macro">debug!</span>(<span class="string">"recv loop closed"</span>);
         <span class="prelude-val">Ok</span>(())
     }
 }
@@ -535,7 +595,7 @@
 }
 
 <span class="kw">impl </span>RecvStreamState {
-    <span class="kw">pub async fn </span>init(<span class="kw-2">mut </span>stream: RecvStream, max_message_size: usize) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>, ReadError&gt; {
+    <span class="kw">async fn </span>new(<span class="kw-2">mut </span>stream: RecvStream, max_message_size: usize) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>, ReadError&gt; {
         <span class="kw">let </span><span class="kw-2">mut </span>buffer = BytesMut::new();
         <span class="kw">let </span>header = StreamHeader::read(<span class="kw-2">&amp;mut </span>stream, <span class="kw-2">&amp;mut </span>buffer, max_message_size).<span class="kw">await</span><span class="question-mark">?</span>;
         <span class="prelude-val">Ok</span>(<span class="self">Self </span>{
@@ -546,8 +606,15 @@
         })
     }
 
-    <span class="kw">pub async fn </span>read_next(<span class="kw-2">mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;(<span class="self">Self</span>, <span class="prelude-ty">Option</span>&lt;ProtoMessage&gt;), ReadError&gt; {
-        <span class="kw">let </span>msg = read_message(<span class="kw-2">&amp;mut </span><span class="self">self</span>.stream, <span class="kw-2">&amp;mut </span><span class="self">self</span>.buffer, <span class="self">self</span>.max_message_size).<span class="kw">await</span><span class="question-mark">?</span>;
+    <span class="doccomment">/// Reads the next message from the stream.
+    ///
+    /// Returns `self` and the next message, or `None` if the stream ended gracefully.
+    ///
+    /// ## Cancellation safety
+    ///
+    /// This function is not cancellation-safe.
+    </span><span class="kw">async fn </span>next(<span class="kw-2">mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;(<span class="self">Self</span>, <span class="prelude-ty">Option</span>&lt;ProtoMessage&gt;), ReadError&gt; {
+        <span class="kw">let </span>msg = read_frame(<span class="kw-2">&amp;mut </span><span class="self">self</span>.stream, <span class="kw-2">&amp;mut </span><span class="self">self</span>.buffer, <span class="self">self</span>.max_message_size).<span class="kw">await</span><span class="question-mark">?</span>;
         <span class="kw">let </span>msg = msg.map(|msg| ProtoMessage {
             topic: <span class="self">self</span>.header.topic_id,
             message: msg,
@@ -599,15 +666,31 @@
         }
 
         <span class="comment">// Close remaining streams.
-        </span><span class="kw">for </span>(<span class="kw">_</span>, <span class="kw-2">mut </span>stream) <span class="kw">in </span><span class="self">self</span>.streams.drain() {
+        </span><span class="kw">for </span>(topic_id, <span class="kw-2">mut </span>stream) <span class="kw">in </span><span class="self">self</span>.streams.drain() {
             stream.finish().ok();
-            <span class="self">self</span>.finishing.spawn(<span class="kw">async move </span>{
-                stream.stopped().<span class="kw">await</span>.ok();
-            });
+            <span class="self">self</span>.finishing.spawn(
+                <span class="kw">async move </span>{
+                    stream.stopped().<span class="kw">await</span>.ok();
+                    <span class="macro">debug!</span>(topic=%topic_id.fmt_short(), <span class="string">"stream closed"</span>);
+                }
+                .instrument(tracing::Span::current()),
+            );
         }
-        <span class="comment">// Wait for the remote to acknowledge all streams are stopped.
-        // TODO(Frando): We likely want to apply a timeout here.
-        </span><span class="kw">while </span><span class="self">self</span>.finishing.join_next().<span class="kw">await</span>.is_some() {}
+        <span class="kw">if </span>!<span class="self">self</span>.finishing.is_empty() {
+            <span class="macro">trace!</span>(
+                <span class="string">"send loop closing, waiting for {} send streams to finish"</span>,
+                <span class="self">self</span>.finishing.len()
+            );
+            <span class="comment">// Wait for the remote to acknowledge all streams are finished.
+            </span><span class="kw">if let </span><span class="prelude-val">Err</span>(_elapsed) = n0_future::time::timeout(Duration::from_secs(<span class="number">5</span>), <span class="kw">async move </span>{
+                <span class="kw">while </span><span class="self">self</span>.finishing.join_next().<span class="kw">await</span>.is_some() {}
+            })
+            .<span class="kw">await
+            </span>{
+                <span class="macro">debug!</span>(<span class="string">"not all send streams finished within timeout, abort"</span>)
+            }
+        }
+        <span class="macro">debug!</span>(<span class="string">"send loop closed"</span>);
         <span class="prelude-val">Ok</span>(())
     }
 
@@ -616,8 +699,8 @@
     /// If no stream is opened yet, this opens a new stream for the topic and writes the topic header.
     ///
     /// This function is not cancellation-safe.
-    </span><span class="kw">pub async fn </span>write_message(<span class="kw-2">&amp;mut </span><span class="self">self</span>, frame: <span class="kw-2">&amp;</span>ProtoMessage) -&gt; <span class="prelude-ty">Result</span>&lt;(), WriteError&gt; {
-        <span class="kw">let </span>ProtoMessage { topic, message } = frame;
+    </span><span class="kw">pub async fn </span>write_message(<span class="kw-2">&amp;mut </span><span class="self">self</span>, message: <span class="kw-2">&amp;</span>ProtoMessage) -&gt; <span class="prelude-ty">Result</span>&lt;(), WriteError&gt; {
+        <span class="kw">let </span>ProtoMessage { topic, message } = message;
         <span class="kw">let </span>topic_id = <span class="kw-2">*</span>topic;
         <span class="kw">let </span>is_last = message.is_disconnect();
 
@@ -629,22 +712,25 @@
                 header
                     .write(<span class="kw-2">&amp;mut </span>stream, <span class="kw-2">&amp;mut </span><span class="self">self</span>.buffer, <span class="self">self</span>.max_message_size)
                     .<span class="kw">await</span><span class="question-mark">?</span>;
-                <span class="macro">debug!</span>(topic=%topic_id.fmt_short(), <span class="string">"stream accepted"</span>);
+                <span class="macro">debug!</span>(topic=%topic_id.fmt_short(), <span class="string">"stream opened"</span>);
                 entry.insert_entry(stream)
             }
         };
         <span class="kw">let </span>stream = entry.get_mut();
 
-        write_lp(stream, message, <span class="kw-2">&amp;mut </span><span class="self">self</span>.buffer, <span class="self">self</span>.max_message_size).<span class="kw">await</span><span class="question-mark">?</span>;
+        write_frame(stream, message, <span class="kw-2">&amp;mut </span><span class="self">self</span>.buffer, <span class="self">self</span>.max_message_size).<span class="kw">await</span><span class="question-mark">?</span>;
 
         <span class="kw">if </span>is_last {
-            <span class="macro">debug!</span>(topic=%topic_id.fmt_short(), <span class="string">"stream closing"</span>);
+            <span class="macro">trace!</span>(topic=%topic_id.fmt_short(), <span class="string">"stream closing"</span>);
             <span class="kw">let </span><span class="kw-2">mut </span>stream = entry.remove();
             <span class="kw">if </span>stream.finish().is_ok() {
-                <span class="self">self</span>.finishing.spawn(<span class="kw">async move </span>{
-                    stream.stopped().<span class="kw">await</span>.ok();
-                    <span class="macro">debug!</span>(topic=%topic_id.fmt_short(), <span class="string">"stream closed"</span>);
-                });
+                <span class="self">self</span>.finishing.spawn(
+                    <span class="kw">async move </span>{
+                        stream.stopped().<span class="kw">await</span>.ok();
+                        <span class="macro">debug!</span>(topic=%topic_id.fmt_short(), <span class="string">"stream closed"</span>);
+                    }
+                    .instrument(tracing::Span::current()),
+                );
             }
         }
 
@@ -666,8 +752,8 @@
     </span>TooLarge,
 }
 
-<span class="doccomment">/// Read a length-prefixed message and decode with postcard.
-</span><span class="kw">pub async fn </span>read_message&lt;T: DeserializeOwned&gt;(
+<span class="doccomment">/// Read a length-prefixed frame and decode with postcard.
+</span><span class="kw">pub async fn </span>read_frame&lt;T: DeserializeOwned&gt;(
     reader: <span class="kw-2">&amp;mut </span>RecvStream,
     buffer: <span class="kw-2">&amp;mut </span>BytesMut,
     max_message_size: usize,
@@ -681,12 +767,10 @@
     }
 }
 
-<span class="doccomment">/// Reads a length prefixed message.
+<span class="doccomment">/// Reads a length prefixed buffer.
 ///
-/// # Returns
-///
-/// The message as raw bytes.  If the end of the stream is reached and there is no partial
-/// message, returns `None`.
+/// Returns the frame as raw bytes.  If the end of the stream is reached before
+/// the frame length starts, `None` is returned.
 </span><span class="kw">pub async fn </span>read_lp(
     reader: <span class="kw-2">&amp;mut </span>RecvStream,
     buffer: <span class="kw-2">&amp;mut </span>BytesMut,
@@ -710,8 +794,8 @@
     <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(buffer.split_to(size).freeze()))
 }
 
-<span class="doccomment">/// Writes a length-prefixed message.
-</span><span class="kw">pub async fn </span>write_lp&lt;T: Serialize&gt;(
+<span class="doccomment">/// Writes a length-prefixed frame.
+</span><span class="kw">pub async fn </span>write_frame&lt;T: Serialize&gt;(
     stream: <span class="kw-2">&amp;mut </span>SendStream,
     message: <span class="kw-2">&amp;</span>T,
     buffer: <span class="kw-2">&amp;mut </span>Vec&lt;u8&gt;,
