@@ -4,6 +4,7 @@ use std::{
     collections::{hash_map, HashMap},
     io,
     pin::Pin,
+    time::Duration,
 };
 
 use bytes::{Bytes, BytesMut};
@@ -21,7 +22,7 @@ use tokio::{
     sync::mpsc,
     task::JoinSet,
 };
-use tracing::debug;
+use tracing::{debug, trace, Instrument};
 
 use super::{InEvent, ProtoMessage};
 use crate::proto::{util::TimerMap, TopicId};
@@ -59,12 +60,13 @@ impl StreamHeader {
         buffer: &mut BytesMut,
         max_message_size: usize,
     ) -> Result<Self, ReadError> {
-        let header: WireStreamHeader = read_message(stream, buffer, max_message_size)
-            .await?
-            .ok_or(ReadError::Io(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "stream ended before header",
-            )))?;
+        let header: WireStreamHeader =
+            read_frame(stream, buffer, max_message_size)
+                .await?
+                .ok_or(ReadError::Io(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "stream ended before header",
+                )))?;
         let WireStreamHeader::V0(header) = header;
         Ok(header)
     }
@@ -76,7 +78,7 @@ impl StreamHeader {
         max_message_size: usize,
     ) -> Result<(), WriteError> {
         let frame = WireStreamHeader::V0(self);
-        write_lp(stream, &frame, buffer, max_message_size).await?;
+        write_frame(stream, &frame, buffer, max_message_size).await?;
         Ok(())
     }
 }
@@ -106,31 +108,47 @@ impl RecvLoop {
     pub(crate) async fn run(&mut self) -> Result<(), ReadError> {
         let mut read_futures = FuturesUnordered::new();
         let closed = self.conn.closed();
+        let mut is_closed = false;
         tokio::pin!(closed);
         loop {
             tokio::select! {
-                _ = &mut closed => break,
-                stream = self.conn.accept_uni() => {
-                    let stream = stream.map_err(io::Error::other)?;
-                    let state = RecvStreamState::init(stream, self.max_message_size).await?;
+                _ = &mut closed => {
+                    is_closed = true;
+                }
+                stream = self.conn.accept_uni(), if !is_closed => {
+                    let stream = match stream {
+                        Ok(stream) => stream,
+                        Err(_) => {
+                            is_closed = true;
+                            continue;
+                        }
+                    };
+                    let state = RecvStreamState::new(stream, self.max_message_size).await?;
                     debug!(topic=%state.header.topic_id.fmt_short(), "stream opened");
-                    read_futures.push(state.read_next());
+                    read_futures.push(state.next());
                 }
                 Some(res) = read_futures.next(), if !read_futures.is_empty() => {
-                    let (state, msg) = res?;
+                    let (state, msg) = match res {
+                        Ok((state, msg)) => (state, msg),
+                        Err(err) => {
+                            debug!("recv stream closed with error: {err:#}");
+                            continue;
+                        }
+                    };
                     match msg {
                         None => debug!(topic=%state.header.topic_id.fmt_short(), "stream closed"),
                         Some(msg) => {
                             if self.in_event_tx.send(InEvent::RecvMessage(self.remote_node_id, msg)).await.is_err() {
+                                debug!("stop recv loop: actor closed");
                                 break;
                             }
-                            read_futures.push(state.read_next());
+                            read_futures.push(state.next());
                         }
                     }
                 }
             }
         }
-        debug!("done");
+        debug!("recv loop closed");
         Ok(())
     }
 }
@@ -144,7 +162,7 @@ struct RecvStreamState {
 }
 
 impl RecvStreamState {
-    pub async fn init(mut stream: RecvStream, max_message_size: usize) -> Result<Self, ReadError> {
+    async fn new(mut stream: RecvStream, max_message_size: usize) -> Result<Self, ReadError> {
         let mut buffer = BytesMut::new();
         let header = StreamHeader::read(&mut stream, &mut buffer, max_message_size).await?;
         Ok(Self {
@@ -155,8 +173,15 @@ impl RecvStreamState {
         })
     }
 
-    pub async fn read_next(mut self) -> Result<(Self, Option<ProtoMessage>), ReadError> {
-        let msg = read_message(&mut self.stream, &mut self.buffer, self.max_message_size).await?;
+    /// Reads the next message from the stream.
+    ///
+    /// Returns `self` and the next message, or `None` if the stream ended gracefully.
+    ///
+    /// ## Cancellation safety
+    ///
+    /// This function is not cancellation-safe.
+    async fn next(mut self) -> Result<(Self, Option<ProtoMessage>), ReadError> {
+        let msg = read_frame(&mut self.stream, &mut self.buffer, self.max_message_size).await?;
         let msg = msg.map(|msg| ProtoMessage {
             topic: self.header.topic_id,
             message: msg,
@@ -208,15 +233,31 @@ impl SendLoop {
         }
 
         // Close remaining streams.
-        for (_, mut stream) in self.streams.drain() {
+        for (topic_id, mut stream) in self.streams.drain() {
             stream.finish().ok();
-            self.finishing.spawn(async move {
-                stream.stopped().await.ok();
-            });
+            self.finishing.spawn(
+                async move {
+                    stream.stopped().await.ok();
+                    debug!(topic=%topic_id.fmt_short(), "stream closed");
+                }
+                .instrument(tracing::Span::current()),
+            );
         }
-        // Wait for the remote to acknowledge all streams are stopped.
-        // TODO(Frando): We likely want to apply a timeout here.
-        while self.finishing.join_next().await.is_some() {}
+        if !self.finishing.is_empty() {
+            trace!(
+                "send loop closing, waiting for {} send streams to finish",
+                self.finishing.len()
+            );
+            // Wait for the remote to acknowledge all streams are finished.
+            if let Err(_elapsed) = n0_future::time::timeout(Duration::from_secs(5), async move {
+                while self.finishing.join_next().await.is_some() {}
+            })
+            .await
+            {
+                debug!("not all send streams finished within timeout, abort")
+            }
+        }
+        debug!("send loop closed");
         Ok(())
     }
 
@@ -225,8 +266,8 @@ impl SendLoop {
     /// If no stream is opened yet, this opens a new stream for the topic and writes the topic header.
     ///
     /// This function is not cancellation-safe.
-    pub async fn write_message(&mut self, frame: &ProtoMessage) -> Result<(), WriteError> {
-        let ProtoMessage { topic, message } = frame;
+    pub async fn write_message(&mut self, message: &ProtoMessage) -> Result<(), WriteError> {
+        let ProtoMessage { topic, message } = message;
         let topic_id = *topic;
         let is_last = message.is_disconnect();
 
@@ -238,22 +279,25 @@ impl SendLoop {
                 header
                     .write(&mut stream, &mut self.buffer, self.max_message_size)
                     .await?;
-                debug!(topic=%topic_id.fmt_short(), "stream accepted");
+                debug!(topic=%topic_id.fmt_short(), "stream opened");
                 entry.insert_entry(stream)
             }
         };
         let stream = entry.get_mut();
 
-        write_lp(stream, message, &mut self.buffer, self.max_message_size).await?;
+        write_frame(stream, message, &mut self.buffer, self.max_message_size).await?;
 
         if is_last {
-            debug!(topic=%topic_id.fmt_short(), "stream closing");
+            trace!(topic=%topic_id.fmt_short(), "stream closing");
             let mut stream = entry.remove();
             if stream.finish().is_ok() {
-                self.finishing.spawn(async move {
-                    stream.stopped().await.ok();
-                    debug!(topic=%topic_id.fmt_short(), "stream closed");
-                });
+                self.finishing.spawn(
+                    async move {
+                        stream.stopped().await.ok();
+                        debug!(topic=%topic_id.fmt_short(), "stream closed");
+                    }
+                    .instrument(tracing::Span::current()),
+                );
             }
         }
 
@@ -275,8 +319,8 @@ pub enum ReadError {
     TooLarge,
 }
 
-/// Read a length-prefixed message and decode with postcard.
-pub async fn read_message<T: DeserializeOwned>(
+/// Read a length-prefixed frame and decode with postcard.
+pub async fn read_frame<T: DeserializeOwned>(
     reader: &mut RecvStream,
     buffer: &mut BytesMut,
     max_message_size: usize,
@@ -290,12 +334,10 @@ pub async fn read_message<T: DeserializeOwned>(
     }
 }
 
-/// Reads a length prefixed message.
+/// Reads a length prefixed buffer.
 ///
-/// # Returns
-///
-/// The message as raw bytes.  If the end of the stream is reached and there is no partial
-/// message, returns `None`.
+/// Returns the frame as raw bytes.  If the end of the stream is reached before
+/// the frame length starts, `None` is returned.
 pub async fn read_lp(
     reader: &mut RecvStream,
     buffer: &mut BytesMut,
@@ -319,8 +361,8 @@ pub async fn read_lp(
     Ok(Some(buffer.split_to(size).freeze()))
 }
 
-/// Writes a length-prefixed message.
-pub async fn write_lp<T: Serialize>(
+/// Writes a length-prefixed frame.
+pub async fn write_frame<T: Serialize>(
     stream: &mut SendStream,
     message: &T,
     buffer: &mut Vec<u8>,
