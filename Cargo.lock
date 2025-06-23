@@ -1755,7 +1755,7 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "0.35.0"
-source = "git+https://github.com/n0-computer/iroh?branch=Frando%2Ffix-wasm-watcher-lifetime#b94a1376a85d23a36a8bcdb6b8ab0c969cb104b2"
+source = "git+https://github.com/n0-computer/iroh?branch=main#518400b0d7fa1851b49da3598995ff9f0aeece3b"
 dependencies = [
  "aead",
  "anyhow",
@@ -1817,7 +1817,7 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "0.35.0"
-source = "git+https://github.com/n0-computer/iroh?branch=Frando%2Ffix-wasm-watcher-lifetime#b94a1376a85d23a36a8bcdb6b8ab0c969cb104b2"
+source = "git+https://github.com/n0-computer/iroh?branch=main#518400b0d7fa1851b49da3598995ff9f0aeece3b"
 dependencies = [
  "curve25519-dalek",
  "data-encoding",
@@ -1983,7 +1983,7 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "0.35.0"
-source = "git+https://github.com/n0-computer/iroh?branch=Frando%2Ffix-wasm-watcher-lifetime#b94a1376a85d23a36a8bcdb6b8ab0c969cb104b2"
+source = "git+https://github.com/n0-computer/iroh?branch=main#518400b0d7fa1851b49da3598995ff9f0aeece3b"
 dependencies = [
  "ahash",
  "bytes",

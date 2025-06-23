@@ -47,7 +47,7 @@ ed25519-dalek = { version = "2.0.0", features = ["serde", "rand_core"] }
 hex = "0.4.3"
 indexmap = "2.0"
 iroh-metrics = { version = "0.34", default-features = false }
-iroh-base = { git = "https://github.com/n0-computer/iroh", branch = "Frando/fix-wasm-watcher-lifetime", default-features = false, features = [
+iroh-base = { git = "https://github.com/n0-computer/iroh", branch = "main", default-features = false, features = [
     "key",
 ] }
 n0-future = "0.1.2"
@@ -64,7 +64,7 @@ serde = { version = "1.0.164", features = ["derive"] }
 futures-lite = { version = "2.3", optional = true }
 futures-concurrency = { version = "7.6.1", optional = true }
 futures-util = { version = "0.3.30", optional = true }
-iroh = { git = "https://github.com/n0-computer/iroh", branch = "Frando/fix-wasm-watcher-lifetime", default-features = false, optional = true }
+iroh = { git = "https://github.com/n0-computer/iroh", branch = "main", default-features = false, optional = true }
 tokio = { version = "1", optional = true, features = ["io-util", "sync"] }
 tokio-util = { version = "0.7.12", optional = true, features = ["codec"] }
 tracing = "0.1"
@@ -108,7 +108,7 @@ tokio = { version = "1", features = [
 ] }
 clap = { version = "4", features = ["derive"] }
 humantime-serde = { version = "1.1.1" }
-iroh = { git = "https://github.com/n0-computer/iroh", branch = "Frando/fix-wasm-watcher-lifetime", default-features = false, features = [
+iroh = { git = "https://github.com/n0-computer/iroh", branch = "main", default-features = false, features = [
     "metrics",
     "test-utils",
 ] }
