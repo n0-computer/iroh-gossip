@@ -416,20 +416,23 @@
 <a href="#415" id="415">415</a>
 <a href="#416" id="416">416</a>
 <a href="#417" id="417">417</a>
-<a href="#418" id="418">418</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::{
+<a href="#418" id="418">418</a>
+<a href="#419" id="419">419</a>
+<a href="#420" id="420">420</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::{
     collections::HashMap,
     path::{Path, PathBuf},
 };
 
-<span class="kw">use </span>anyhow::{Context, <span class="prelude-ty">Result</span>};
 <span class="kw">use </span>clap::Parser;
 <span class="kw">use </span>comfy_table::{presets::NOTHING, Cell, CellAlignment, Table};
 <span class="kw">use </span>iroh_gossip::proto::sim::{
     BootstrapMode, NetworkConfig, RoundStats, RoundStatsAvg, RoundStatsDiff, Simulator,
     SimulatorConfig,
 };
+<span class="kw">use </span>n0_snafu::{<span class="prelude-ty">Result</span>, ResultExt};
 <span class="kw">use </span>rayon::iter::{IntoParallelIterator, ParallelIterator};
 <span class="kw">use </span>serde::{Deserialize, Serialize};
+<span class="kw">use </span>snafu::Snafu;
 <span class="kw">use </span>tracing::{error_span, info, warn};
 
 <span class="attr">#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -521,8 +524,8 @@
             single_threaded,
             filter,
         } =&gt; {
-            <span class="kw">let </span>config_text = std::fs::read_to_string(<span class="kw-2">&amp;</span>config_path)<span class="question-mark">?</span>;
-            <span class="kw">let </span>config: SimConfig = toml::from_str(<span class="kw-2">&amp;</span>config_text)<span class="question-mark">?</span>;
+            <span class="kw">let </span>config_text = std::fs::read_to_string(<span class="kw-2">&amp;</span>config_path).e()<span class="question-mark">?</span>;
+            <span class="kw">let </span>config: SimConfig = toml::from_str(<span class="kw-2">&amp;</span>config_text).e()<span class="question-mark">?</span>;
 
             <span class="kw">let </span>base_config = config.config.unwrap_or_default();
             <span class="macro">info!</span>(<span class="string">"base config: {base_config:?}"</span>);
@@ -533,7 +536,7 @@
             }
 
             <span class="kw">if let </span><span class="prelude-val">Some</span>(out_dir) = out_dir.as_ref() {
-                std::fs::create_dir_all(out_dir)<span class="question-mark">?</span>;
+                std::fs::create_dir_all(out_dir).e()<span class="question-mark">?</span>;
             }
 
             <span class="kw">let </span>filter_fn = |s: <span class="kw-2">&amp;</span>ScenarioDescription| {
@@ -588,19 +591,19 @@
 
     <span class="kw">if let </span><span class="prelude-val">Some</span>(out_dir) = out_dir.as_ref() {
         <span class="kw">let </span>path = out_dir.as_ref().join(<span class="macro">format!</span>(<span class="string">"{label}.config.toml"</span>));
-        <span class="kw">let </span>encoded = toml::to_string(<span class="kw-2">&amp;</span>scenario)<span class="question-mark">?</span>;
-        std::fs::write(path, encoded)<span class="question-mark">?</span>;
+        <span class="kw">let </span>encoded = toml::to_string(<span class="kw-2">&amp;</span>scenario).e()<span class="question-mark">?</span>;
+        std::fs::write(path, encoded).e()<span class="question-mark">?</span>;
     }
 
     <span class="kw">let </span>result = run_simulation(seeds, scenario);
 
     <span class="kw">if let </span><span class="prelude-val">Some</span>(out_dir) = out_dir.as_ref() {
         <span class="kw">let </span>path = out_dir.as_ref().join(<span class="macro">format!</span>(<span class="string">"{label}.results.json"</span>));
-        <span class="kw">let </span>encoded = serde_json::to_string(<span class="kw-2">&amp;</span>result)<span class="question-mark">?</span>;
-        std::fs::write(path, encoded)<span class="question-mark">?</span>;
+        <span class="kw">let </span>encoded = serde_json::to_string(<span class="kw-2">&amp;</span>result).e()<span class="question-mark">?</span>;
+        std::fs::write(path, encoded).e()<span class="question-mark">?</span>;
     }
 
-    anyhow::Ok(result)
+    <span class="prelude-val">Ok</span>(result)
 }
 
 <span class="attr">#[derive(Debug, Serialize, Deserialize, Clone)]
@@ -613,16 +616,16 @@
 
 <span class="kw">impl </span>SimulationResults {
     <span class="kw">fn </span>load_from_file(path: <span class="kw">impl </span>AsRef&lt;Path&gt;) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>&gt; {
-        <span class="kw">let </span>s = std::fs::read_to_string(path.as_ref())<span class="question-mark">?</span>;
-        <span class="kw">let </span>out = serde_json::from_str(<span class="kw-2">&amp;</span>s)<span class="question-mark">?</span>;
+        <span class="kw">let </span>s = std::fs::read_to_string(path.as_ref()).e()<span class="question-mark">?</span>;
+        <span class="kw">let </span>out = serde_json::from_str(<span class="kw-2">&amp;</span>s).e()<span class="question-mark">?</span>;
         <span class="prelude-val">Ok</span>(out)
     }
 }
 
-<span class="attr">#[derive(Debug, Serialize, Deserialize, Clone, thiserror::Error)]
+<span class="attr">#[derive(Debug, Serialize, Deserialize, Clone, Snafu)]
 </span><span class="kw">enum </span>SimulationError {
-    <span class="attr">#[error(<span class="string">"failed to bootstrap"</span>)]
-    </span>FailedToBootstrap,
+    <span class="attr">#[snafu(display(<span class="string">"failed to bootstrap"</span>))]
+    </span>FailedToBootstrap {},
 }
 
 <span class="kw">fn </span>run_simulation(seeds: <span class="kw-2">&amp;</span>[u64], scenario: ScenarioDescription) -&gt; SimulationResults {
@@ -744,7 +747,8 @@
 
 <span class="kw">fn </span>compare_dirs(baseline_dir: PathBuf, current_path: PathBuf, filter: Vec&lt;String&gt;) -&gt; <span class="prelude-ty">Result</span>&lt;()&gt; {
     <span class="kw">let </span><span class="kw-2">mut </span>paths = <span class="macro">vec!</span>[];
-    <span class="kw">for </span>entry <span class="kw">in </span>std::fs::read_dir(<span class="kw-2">&amp;</span>current_path)<span class="question-mark">?
+    <span class="kw">for </span>entry <span class="kw">in </span>std::fs::read_dir(<span class="kw-2">&amp;</span>current_path)
+        .e()<span class="question-mark">?
         </span>.filter_map(Result::ok)
         .filter(|x| x.path().is_file())
     {
