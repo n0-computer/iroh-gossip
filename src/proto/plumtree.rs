@@ -244,7 +244,7 @@ pub struct Graft {
 #[serde(default)]
 pub struct Config {
     /// When receiving an `IHave` message, this timeout is registered. If the message for the
-    /// [`IHave`] was not received once the timeout is expired, a `Graft` message is sent to the
+    /// `IHave` was not received once the timeout is expired, a `Graft` message is sent to the
     /// peer that sent us the `IHave` to request the message payload.
     ///
     /// The plumtree paper notes:
