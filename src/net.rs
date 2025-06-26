@@ -1280,7 +1280,7 @@ pub(crate) mod test {
         // publish messages on node1
         let pub1 = spawn(async move {
             for i in 0..len {
-                let message = format!("hi{}", i);
+                let message = format!("hi{i}");
                 info!("go1 broadcast: {message:?}");
                 sink1.broadcast(message.into_bytes().into()).await.unwrap();
                 tokio::time::sleep(Duration::from_micros(1)).await;

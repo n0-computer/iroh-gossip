@@ -344,13 +344,13 @@ fn compare_dirs(baseline_dir: PathBuf, current_path: PathBuf, filter: Vec<String
         }
         let baseline_file = baseline_dir.join(filename);
         if !baseline_file.exists() {
-            println!("skip {} (not in baseline)", filename);
+            println!("skip {filename} (not in baseline)");
         }
         paths.push((basename.to_string(), baseline_file, current_file));
     }
     paths.sort();
     for (basename, baseline_file, current_file) in paths {
-        println!("comparing {}", basename);
+        println!("comparing {basename}");
         if let Err(err) = compare_files(&baseline_file, &current_file) {
             println!("  skip (reason: {err:#}");
         }

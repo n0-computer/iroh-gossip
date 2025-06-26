@@ -190,7 +190,7 @@ async fn subscribe_loop(mut receiver: GossipReceiver) -> Result<()> {
                     let name = names
                         .get(&from)
                         .map_or_else(|| from.fmt_short(), String::to_string);
-                    println!("{}: {}", name, text);
+                    println!("{name}: {text}");
                 }
             }
         }
@@ -266,7 +266,7 @@ impl fmt::Display for Ticket {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut text = data_encoding::BASE32_NOPAD.encode(&self.to_bytes()[..]);
         text.make_ascii_lowercase();
-        write!(f, "{}", text)
+        write!(f, "{text}")
     }
 }
 

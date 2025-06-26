@@ -240,8 +240,7 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
     pub fn with_rng(me: PI, me_data: Option<PeerData>, config: Config, rng: R) -> Self {
         assert!(
             config.max_message_size >= MIN_MAX_MESSAGE_SIZE,
-            "max_message_size must be at least {}",
-            MIN_MAX_MESSAGE_SIZE
+            "max_message_size must be at least {MIN_MAX_MESSAGE_SIZE}"
         );
         let max_payload_size =
             config.max_message_size - super::Message::<PI>::postcard_header_size();
