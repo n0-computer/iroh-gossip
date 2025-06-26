@@ -2,6 +2,7 @@
 ignore = [
     "RUSTSEC-2024-0384",
     "RUSTSEC-2024-0436",
+    "RUSTSEC-2023-0089",
 ]
 
 [bans]
@@ -37,6 +38,3 @@ name = "ring"
 [[licenses.clarify.license-files]]
 hash = 3171872035
 path = "LICENSE"
-
-[sources]
-allow-git = ["https://github.com/n0-computer/iroh.git"]
