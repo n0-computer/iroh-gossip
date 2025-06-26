@@ -33,8 +33,6 @@ use crate::proto::{util::TimerMap, TopicId};
 #[allow(missing_docs)]
 #[common_fields({
     backtrace: Option<snafu::Backtrace>,
-    // #[snafu(implicit)]
-    // span_trace: n0_snafu::SpanTrace,
 })]
 #[derive(Debug, Snafu)]
 #[snafu(module)]
@@ -274,7 +272,7 @@ impl SendLoop {
         Ok(())
     }
 
-    /// Write a `ProtoMessage` as a length-prefixed, postcard-encoded message on its stream.
+    /// Write a [`ProtoMessage`] as a length-prefixed, postcard-encoded message on its stream.
     ///
     /// If no stream is opened yet, this opens a new stream for the topic and writes the topic header.
     ///
@@ -322,8 +320,6 @@ impl SendLoop {
 #[allow(missing_docs)]
 #[common_fields({
     backtrace: Option<snafu::Backtrace>,
-    // #[snafu(implicit)]
-    // span_trace: n0_snafu::SpanTrace,
 })]
 #[derive(Debug, Snafu)]
 #[snafu(module)]
@@ -339,12 +335,6 @@ pub(crate) enum ReadError {
     #[snafu(display("message too large"))]
     TooLarge {},
 }
-
-// impl From<io::Error> for ReadError {
-//     fn from(source: io::Error) -> Self {
-//         self::read_error::IoSnafu { source }.build()
-//     }
-// }
 
 /// Read a length-prefixed frame and decode with postcard.
 pub async fn read_frame<T: DeserializeOwned>(
