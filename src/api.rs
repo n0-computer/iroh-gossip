@@ -12,7 +12,9 @@ use bytes::Bytes;
 use iroh_base::NodeId;
 use irpc::{channel::mpsc, rpc_requests, Client};
 use n0_future::{boxed::BoxStream, Stream, StreamExt, TryStreamExt};
+use nested_enum_utils::common_fields;
 use serde::{Deserialize, Serialize};
+use snafu::Snafu;
 
 use crate::proto::{DeliveryScope, TopicId};
 
@@ -40,26 +42,31 @@ pub(crate) struct JoinRequest {
     pub bootstrap: BTreeSet<NodeId>,
 }
 
-/// Errors returned from methods in [`GossipApi`]
-#[derive(Debug, thiserror::Error)]
+#[allow(missing_docs)]
+#[common_fields({
+    backtrace: Option<snafu::Backtrace>,
+    #[snafu(implicit)]
+    span_trace: n0_snafu::SpanTrace,
+})]
+#[derive(Debug, Snafu)]
+#[non_exhaustive]
 pub enum ApiError {
-    /// RPC error
-    #[error(transparent)]
-    Rpc(#[from] irpc::Error),
+    #[snafu(transparent)]
+    Rpc { source: irpc::Error },
     /// The gossip topic was closed.
-    #[error("topic closed")]
-    Closed,
+    #[snafu(display("topic closed"))]
+    Closed {},
 }
 
 impl From<irpc::channel::SendError> for ApiError {
     fn from(value: irpc::channel::SendError) -> Self {
-        Self::Rpc(value.into())
+        irpc::Error::from(value).into()
     }
 }
 
 impl From<irpc::channel::RecvError> for ApiError {
     fn from(value: irpc::channel::RecvError) -> Self {
-        Self::Rpc(value.into())
+        irpc::Error::from(value).into()
     }
 }
 
@@ -301,7 +308,7 @@ impl GossipReceiver {
     /// continue to track `NeighborUp` events on the event stream.
     pub async fn joined(&mut self) -> Result<(), ApiError> {
         while !self.is_joined() {
-            let _event = self.next().await.ok_or(ApiError::Closed)??;
+            let _event = self.next().await.ok_or(ClosedSnafu.build())??;
         }
         Ok(())
     }
@@ -416,9 +423,11 @@ mod tests {
     #[cfg(all(feature = "rpc", feature = "net"))]
     #[tokio::test]
     #[tracing_test::traced_test]
-    async fn test_rpc() -> testresult::TestResult {
+    async fn test_rpc() -> n0_snafu::Result {
         use iroh::{protocol::Router, RelayMap};
         use n0_future::{time::Duration, StreamExt};
+        use n0_snafu::{Error, Result, ResultExt};
+        use n0_watcher::Watcher;
         use rand::SeedableRng;
 
         use crate::{
@@ -434,9 +443,9 @@ mod tests {
         async fn create_gossip_endpoint(
             rng: &mut rand_chacha::ChaCha12Rng,
             relay_map: RelayMap,
-        ) -> anyhow::Result<(Router, Gossip)> {
+        ) -> Result<(Router, Gossip)> {
             let endpoint = create_endpoint(rng, relay_map).await?;
-            let gossip = Gossip::builder().spawn(endpoint.clone()).await?;
+            let gossip = Gossip::builder().spawn(endpoint.clone());
             let router = Router::builder(endpoint)
                 .accept(ALPN, gossip.clone())
                 .spawn();
@@ -451,12 +460,12 @@ mod tests {
         // create a second node so that we can test actually joining
         let (node2_id, node2_addr, node2_task) = {
             let (router, gossip) = create_gossip_endpoint(&mut rng, relay_map.clone()).await?;
-            let node_addr = router.endpoint().node_addr().await?;
+            let node_addr = router.endpoint().node_addr().initialized().await?;
             let node_id = router.endpoint().node_id();
             let task = tokio::task::spawn(async move {
                 let mut topic = gossip.subscribe_and_join(topic_id, vec![]).await?;
                 topic.broadcast(b"hello".to_vec().into()).await?;
-                anyhow::Ok(router)
+                Result::<_, Error>::Ok(router)
             });
             (node_id, node_addr, task)
         };
@@ -465,15 +474,17 @@ mod tests {
 
         // expose the gossip node over RPC
         let (rpc_server_endpoint, rpc_server_cert) =
-            irpc::util::make_server_endpoint("127.0.0.1:0".parse().unwrap())?;
-        let rpc_server_addr = rpc_server_endpoint.local_addr()?;
+            irpc::util::make_server_endpoint("127.0.0.1:0".parse().unwrap())
+                .map_err(Error::anyhow)?;
+        let rpc_server_addr = rpc_server_endpoint.local_addr().e()?;
         let rpc_server_task = tokio::task::spawn(async move {
             gossip.listen(rpc_server_endpoint).await;
         });
 
         // connect to the RPC node with a new client
         let rpc_client_endpoint =
-            irpc::util::make_client_endpoint("127.0.0.1:0".parse().unwrap(), &[&rpc_server_cert])?;
+            irpc::util::make_client_endpoint("127.0.0.1:0".parse().unwrap(), &[&rpc_server_cert])
+                .map_err(Error::anyhow)?;
         let rpc_client = GossipApi::connect(rpc_client_endpoint, rpc_server_addr);
 
         // join via RPC
@@ -492,17 +503,19 @@ mod tests {
                     _ => {}
                 }
             }
-            anyhow::Ok(())
+            Result::<_, Error>::Ok(())
         };
 
         // timeout to not hang in case of failure
-        tokio::time::timeout(Duration::from_secs(10), recv).await??;
+        tokio::time::timeout(Duration::from_secs(10), recv)
+            .await
+            .e()??;
 
         // shutdown
         rpc_server_task.abort();
-        router.shutdown().await?;
-        let router2 = node2_task.await??;
-        router2.shutdown().await?;
+        router.shutdown().await.e()?;
+        let router2 = node2_task.await.e()??;
+        router2.shutdown().await.e()?;
         Ok(())
     }
 }
