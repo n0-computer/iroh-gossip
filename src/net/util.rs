@@ -118,19 +118,19 @@ impl RecvLoop {
 
     pub(crate) async fn run(&mut self) -> Result<(), ReadError> {
         let mut read_futures = FuturesUnordered::new();
+        let mut conn_is_closed = false;
         let closed = self.conn.closed();
-        let mut is_closed = false;
         tokio::pin!(closed);
-        loop {
+        while !conn_is_closed || !read_futures.is_empty() {
             tokio::select! {
-                _ = &mut closed => {
-                    is_closed = true;
+                _ = &mut closed, if !conn_is_closed => {
+                    conn_is_closed = true;
                 }
-                stream = self.conn.accept_uni(), if !is_closed => {
+                stream = self.conn.accept_uni(), if !conn_is_closed => {
                     let stream = match stream {
                         Ok(stream) => stream,
                         Err(_) => {
-                            is_closed = true;
+                            conn_is_closed = true;
                             continue;
                         }
                     };
