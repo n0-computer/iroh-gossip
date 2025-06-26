@@ -5,7 +5,6 @@ use std::{
     str::FromStr,
 };
 
-use anyhow::{bail, Result};
 use bytes::Bytes;
 use clap::Parser;
 use ed25519_dalek::Signature;
@@ -17,7 +16,10 @@ use iroh_gossip::{
     proto::TopicId,
 };
 use n0_future::task;
+use n0_snafu::{Result, ResultExt};
+use n0_watcher::Watcher;
 use serde::{Deserialize, Serialize};
+use snafu::whatever;
 
 /// Chat over iroh-gossip
 ///
@@ -98,7 +100,9 @@ async fn main() -> Result<()> {
         (false, None) => RelayMode::Default,
         (false, Some(url)) => RelayMode::Custom(url.into()),
         (true, None) => RelayMode::Disabled,
-        (true, Some(_)) => bail!("You cannot set --no-relay and --relay at the same time"),
+        (true, Some(_)) => {
+            whatever!("You cannot set --no-relay and --relay at the same time")
+        }
     };
     println!("> using relay servers: {}", fmt_relay_mode(&relay_mode));
 
@@ -112,11 +116,11 @@ async fn main() -> Result<()> {
     println!("> our node id: {}", endpoint.node_id());
 
     // create the gossip protocol
-    let gossip = Gossip::builder().spawn(endpoint.clone()).await?;
+    let gossip = Gossip::builder().spawn(endpoint.clone());
 
     // print a ticket that includes our own node id and endpoint addresses
     let ticket = {
-        let me = endpoint.node_addr().await?;
+        let me = endpoint.node_addr().initialized().await?;
         let peers = peers.iter().cloned().chain([me]).collect();
         Ticket { topic, peers }
     };
@@ -166,7 +170,7 @@ async fn main() -> Result<()> {
     }
 
     // shutdown
-    router.shutdown().await?;
+    router.shutdown().await.e()?;
 
     Ok(())
 }
@@ -198,8 +202,8 @@ fn input_loop(line_tx: tokio::sync::mpsc::Sender<String>) -> Result<()> {
     let mut buffer = String::new();
     let stdin = std::io::stdin(); // We get `Stdin` here.
     loop {
-        stdin.read_line(&mut buffer)?;
-        line_tx.blocking_send(buffer.clone())?;
+        stdin.read_line(&mut buffer).e()?;
+        line_tx.blocking_send(buffer.clone()).e()?;
         buffer.clear();
     }
 }
@@ -213,15 +217,16 @@ struct SignedMessage {
 
 impl SignedMessage {
     pub fn verify_and_decode(bytes: &[u8]) -> Result<(PublicKey, Message)> {
-        let signed_message: Self = postcard::from_bytes(bytes)?;
+        let signed_message: Self = postcard::from_bytes(bytes).e()?;
         let key: PublicKey = signed_message.from;
-        key.verify(&signed_message.data, &signed_message.signature)?;
-        let message: Message = postcard::from_bytes(&signed_message.data)?;
+        key.verify(&signed_message.data, &signed_message.signature)
+            .e()?;
+        let message: Message = postcard::from_bytes(&signed_message.data).e()?;
         Ok((signed_message.from, message))
     }
 
     pub fn sign_and_encode(secret_key: &SecretKey, message: &Message) -> Result<Bytes> {
-        let data: Bytes = postcard::to_stdvec(&message)?.into();
+        let data: Bytes = postcard::to_stdvec(&message).e()?.into();
         let signature = secret_key.sign(&data);
         let from: PublicKey = secret_key.public();
         let signed_message = Self {
@@ -229,7 +234,7 @@ impl SignedMessage {
             data,
             signature,
         };
-        let encoded = postcard::to_stdvec(&signed_message)?;
+        let encoded = postcard::to_stdvec(&signed_message).e()?;
         Ok(encoded.into())
     }
 }
@@ -248,7 +253,7 @@ struct Ticket {
 impl Ticket {
     /// Deserializes from bytes.
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        postcard::from_bytes(bytes).map_err(Into::into)
+        postcard::from_bytes(bytes).e()
     }
     /// Serializes to bytes.
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -267,9 +272,11 @@ impl fmt::Display for Ticket {
 
 /// Deserializes from base32.
 impl FromStr for Ticket {
-    type Err = anyhow::Error;
+    type Err = n0_snafu::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let bytes = data_encoding::BASE32_NOPAD.decode(s.to_ascii_uppercase().as_bytes())?;
+        let bytes = data_encoding::BASE32_NOPAD
+            .decode(s.to_ascii_uppercase().as_bytes())
+            .e()?;
         Self::from_bytes(&bytes)
     }
 }

@@ -16,7 +16,9 @@ use n0_future::{
     time::{sleep_until, Instant, Sleep},
     FuturesUnordered, StreamExt,
 };
+use nested_enum_utils::common_fields;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use snafu::Snafu;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::mpsc,
@@ -28,20 +30,30 @@ use super::{InEvent, ProtoMessage};
 use crate::proto::{util::TimerMap, TopicId};
 
 /// Errors related to message writing
-#[derive(Debug, thiserror::Error)]
-pub enum WriteError {
+#[allow(missing_docs)]
+#[common_fields({
+    backtrace: Option<snafu::Backtrace>,
+    // #[snafu(implicit)]
+    // span_trace: n0_snafu::SpanTrace,
+})]
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+#[non_exhaustive]
+pub(crate) enum WriteError {
     /// Connection error
-    #[error(transparent)]
-    Connection(#[from] iroh::endpoint::ConnectionError),
+    #[snafu(transparent)]
+    Connection {
+        source: iroh::endpoint::ConnectionError,
+    },
     /// Serialization failed
-    #[error(transparent)]
-    Ser(#[from] postcard::Error),
+    #[snafu(transparent)]
+    Ser { source: postcard::Error },
     /// IO error
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
+    #[snafu(transparent)]
+    Io { source: std::io::Error },
     /// Message was larger than the configured maximum message size
-    #[error("message too large")]
-    TooLarge,
+    #[snafu(display("message too large"))]
+    TooLarge {},
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -60,13 +72,14 @@ impl StreamHeader {
         buffer: &mut BytesMut,
         max_message_size: usize,
     ) -> Result<Self, ReadError> {
-        let header: WireStreamHeader =
-            read_frame(stream, buffer, max_message_size)
-                .await?
-                .ok_or(ReadError::Io(io::Error::new(
+        let header: WireStreamHeader = read_frame(stream, buffer, max_message_size)
+            .await?
+            .ok_or_else(|| {
+                ReadError::from(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "stream ended before header",
-                )))?;
+                ))
+            })?;
         let WireStreamHeader::V0(header) = header;
         Ok(header)
     }
@@ -306,18 +319,32 @@ impl SendLoop {
 }
 
 /// Errors related to message reading
-#[derive(Debug, thiserror::Error)]
-pub enum ReadError {
+#[allow(missing_docs)]
+#[common_fields({
+    backtrace: Option<snafu::Backtrace>,
+    // #[snafu(implicit)]
+    // span_trace: n0_snafu::SpanTrace,
+})]
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+#[non_exhaustive]
+pub(crate) enum ReadError {
     /// Deserialization failed
-    #[error(transparent)]
-    De(#[from] postcard::Error),
+    #[snafu(transparent)]
+    De { source: postcard::Error },
     /// IO error
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
+    #[snafu(transparent)]
+    Io { source: std::io::Error },
     /// Message was larger than the configured maximum message size
-    #[error("message too large")]
-    TooLarge,
+    #[snafu(display("message too large"))]
+    TooLarge {},
 }
+
+// impl From<io::Error> for ReadError {
+//     fn from(source: io::Error) -> Self {
+//         self::read_error::IoSnafu { source }.build()
+//     }
+// }
 
 /// Read a length-prefixed frame and decode with postcard.
 pub async fn read_frame<T: DeserializeOwned>(
@@ -348,10 +375,9 @@ pub async fn read_lp(
         Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(err) => return Err(err.into()),
     };
-    // let mut reader = reader.take(size as u64);
-    let size = usize::try_from(size).map_err(|_| ReadError::TooLarge)?;
+    let size = usize::try_from(size).map_err(|_| read_error::TooLargeSnafu.build())?;
     if size > max_message_size {
-        return Err(ReadError::TooLarge);
+        return Err(read_error::TooLargeSnafu.build());
     }
     buffer.resize(size, 0u8);
     reader
@@ -370,7 +396,7 @@ pub async fn write_frame<T: Serialize>(
 ) -> Result<(), WriteError> {
     let len = postcard::experimental::serialized_size(&message)?;
     if len >= max_message_size {
-        return Err(WriteError::TooLarge);
+        return Err(write_error::TooLargeSnafu.build());
     }
     buffer.clear();
     buffer.resize(len, 0u8);
