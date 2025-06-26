@@ -239,7 +239,7 @@ jobs:
     - name: Docs
       run: cargo doc --workspace --all-features --no-deps --document-private-items
       env:
-        RUSTDOCFLAGS: --cfg docsrs
+        RUSTDOCFLAGS: --cfg iroh_docsrs -Dwarnings
 
   clippy_check:
     timeout-minutes: 30
