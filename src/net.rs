@@ -8,7 +8,6 @@ use std::{
     task::{Context, Poll},
 };
 
-use bytes::BytesMut;
 use futures_concurrency::stream::{stream_group, StreamGroup};
 use futures_util::FutureExt as _;
 use iroh::{
@@ -32,19 +31,17 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, error_span, trace, warn, Instrument};
 
-use self::util::{read_message, write_message, Timers};
+use self::util::{RecvLoop, SendLoop, Timers};
 use crate::{
-    api::RpcMessage,
+    api::{self, Command, Event, GossipApi, RpcMessage},
     metrics::Metrics,
     proto::{self, HyparviewConfig, PeerData, PlumtreeConfig, Scope, TopicId},
 };
 
-pub mod util;
-
-use crate::api::{self, Command, Event, GossipApi};
+mod util;
 
 /// ALPN protocol name
-pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/0";
+pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/1";
 
 /// Channel capacity for the send queue (one per connection)
 const SEND_QUEUE_CAP: usize = 64;
@@ -523,10 +520,10 @@ impl Actor {
             async move {
                 let res = connection_loop(
                     peer_id,
-                    &conn,
+                    conn.clone(),
                     origin,
                     send_rx,
-                    &in_event_tx,
+                    in_event_tx,
                     max_message_size,
                     queue,
                 )
@@ -855,48 +852,22 @@ impl<T> From<mpsc::error::SendError<T>> for ConnectionLoopError {
 
 async fn connection_loop(
     from: PublicKey,
-    conn: &Connection,
+    conn: Connection,
     origin: ConnOrigin,
-    mut send_rx: mpsc::Receiver<ProtoMessage>,
-    in_event_tx: &mpsc::Sender<InEvent>,
+    send_rx: mpsc::Receiver<ProtoMessage>,
+    in_event_tx: mpsc::Sender<InEvent>,
     max_message_size: usize,
     queue: Vec<ProtoMessage>,
 ) -> Result<(), ConnectionLoopError> {
-    let (mut send, mut recv) = match origin {
-        ConnOrigin::Accept => conn.accept_bi().await?,
-        ConnOrigin::Dial => conn.open_bi().await?,
-    };
     debug!(?origin, "connection established");
-    let mut send_buf = BytesMut::new();
-    let mut recv_buf = BytesMut::new();
 
-    let send_loop = async {
-        for msg in queue {
-            write_message(&mut send, &mut send_buf, &msg, max_message_size).await?;
-        }
-        while let Some(msg) = send_rx.recv().await {
-            write_message(&mut send, &mut send_buf, &msg, max_message_size).await?;
-        }
-        // notify the other node no more data will be sent
-        let _ = send.finish();
-        // wait for the other node to ack all the sent data
-        let _ = send.stopped().await;
-        Result::<_, ConnectionLoopError>::Ok(())
-    };
+    let mut send_loop = SendLoop::new(conn.clone(), send_rx, max_message_size);
+    let mut recv_loop = RecvLoop::new(from, conn, in_event_tx, max_message_size);
 
-    let recv_loop = async {
-        loop {
-            let msg = read_message(&mut recv, &mut recv_buf, max_message_size).await?;
+    let send_fut = send_loop.run(queue).instrument(error_span!("send"));
+    let recv_fut = recv_loop.run().instrument(error_span!("recv"));
 
-            match msg {
-                None => break,
-                Some(msg) => in_event_tx.send(InEvent::RecvMessage(from, msg)).await?,
-            }
-        }
-        Result::<_, ConnectionLoopError>::Ok(())
-    };
-
-    let (send_res, recv_res) = tokio::join!(send_loop, recv_loop);
+    let (send_res, recv_res) = tokio::join!(send_fut, recv_fut);
     send_res?;
     recv_res?;
     Ok(())

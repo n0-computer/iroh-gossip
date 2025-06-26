@@ -1866,6 +1866,7 @@ dependencies = [
  "serde_json",
  "snafu",
  "testresult",
+ "thiserror 2.0.12",
  "tokio",
  "tokio-util",
  "toml",

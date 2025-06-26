@@ -21,6 +21,14 @@ use crate::{
 pub struct TopicId([u8; 32]);
 idbytes_impls!(TopicId, "TopicId");
 
+impl TopicId {
+    /// Convert to a hex string limited to the first 5 bytes for a friendly string
+    /// representation of the key.
+    pub fn fmt_short(&self) -> String {
+        data_encoding::HEXLOWER.encode(&self.as_bytes()[..5])
+    }
+}
+
 /// Protocol wire message
 ///
 /// This is the wire frame of the `iroh-gossip` protocol.
