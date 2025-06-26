@@ -175,8 +175,7 @@ impl<PI: PeerIdentity, R: Rng + Clone> State<PI, R> {
     pub fn new(me: PI, me_data: PeerData, config: Config, rng: R) -> Self {
         assert!(
             config.max_message_size >= MIN_MAX_MESSAGE_SIZE,
-            "max_message_size must be at least {}",
-            MIN_MAX_MESSAGE_SIZE
+            "max_message_size must be at least {MIN_MAX_MESSAGE_SIZE}"
         );
         Self {
             me,
