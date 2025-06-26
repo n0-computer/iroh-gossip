@@ -55,11 +55,6 @@ pub(crate) enum WriteError {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-enum WireStreamHeader {
-    V0(StreamHeader),
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct StreamHeader {
     pub(crate) topic_id: TopicId,
 }
@@ -70,7 +65,7 @@ impl StreamHeader {
         buffer: &mut BytesMut,
         max_message_size: usize,
     ) -> Result<Self, ReadError> {
-        let header: WireStreamHeader = read_frame(stream, buffer, max_message_size)
+        let header: Self = read_frame(stream, buffer, max_message_size)
             .await?
             .ok_or_else(|| {
                 ReadError::from(io::Error::new(
@@ -78,7 +73,6 @@ impl StreamHeader {
                     "stream ended before header",
                 ))
             })?;
-        let WireStreamHeader::V0(header) = header;
         Ok(header)
     }
 
@@ -88,8 +82,7 @@ impl StreamHeader {
         buffer: &mut Vec<u8>,
         max_message_size: usize,
     ) -> Result<(), WriteError> {
-        let frame = WireStreamHeader::V0(self);
-        write_frame(stream, &frame, buffer, max_message_size).await?;
+        write_frame(stream, &self, buffer, max_message_size).await?;
         Ok(())
     }
 }
