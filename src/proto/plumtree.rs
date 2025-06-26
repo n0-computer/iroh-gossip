@@ -243,28 +243,28 @@ pub struct Graft {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// When receiving an [`IHave`] message, this timeout is registered. If the message for the
-    /// [`IHave`] was not received once the timeout is expired, a [`Graft`] message is sent to the
-    /// peer that sent us the [`IHave`] to request the message payload.
+    /// When receiving an `IHave` message, this timeout is registered. If the message for the
+    /// `IHave` was not received once the timeout is expired, a `Graft` message is sent to the
+    /// peer that sent us the `IHave` to request the message payload.
     ///
     /// The plumtree paper notes:
     /// > The timeout value is a protocol parameter that should be configured considering the
     /// > diameter of the overlay and a target maximum recovery latency, defined by the application
     /// > requirements. (p.8)
     pub graft_timeout_1: Duration,
-    /// This timeout is registered when sending a [`Graft`] message. If a reply has not been
-    /// received once the timeout expires, we send another [`Graft`] message to the next peer that
-    /// sent us an [`IHave`] for this message.
+    /// This timeout is registered when sending a `Graft` message. If a reply has not been
+    /// received once the timeout expires, we send another `Graft` message to the next peer that
+    /// sent us an `IHave` for this message.
     ///
     /// The plumtree paper notes:
     /// > This second timeout value should be smaller that the first, in the order of an average
     /// > round trip time to a neighbor.
     pub graft_timeout_2: Duration,
-    /// Timeout after which [`IHave`] messages are pushed to peers.
+    /// Timeout after which `IHave` messages are pushed to peers.
     pub dispatch_timeout: Duration,
     /// The protocol performs a tree optimization, which promotes lazy peers to eager peers if the
-    /// [`Message::IHave`] messages received from them have a lower number of hops from the
-    /// message's origin as the [`InEvent::Broadcast`] messages received from our eager peers. This
+    /// `Message::IHave` messages received from them have a lower number of hops from the
+    /// message's origin as the `InEvent::Broadcast` messages received from our eager peers. This
     /// parameter is the number of hops that the lazy peers must be closer to the origin than our
     /// eager peers to be promoted to become an eager peer.
     pub optimization_threshold: Round,
@@ -278,7 +278,7 @@ pub struct Config {
     /// Should be at least around several round trip times to peers.
     pub message_cache_retention: Duration,
 
-    /// Duration for which to keep the [`MessageId`]s for received messages.
+    /// Duration for which to keep the `MessageId`s for received messages.
     ///
     /// Should be at least as long as [`Self::message_cache_retention`], usually will be longer to
     /// not accidentally receive messages multiple times.
