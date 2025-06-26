@@ -440,14 +440,7 @@
 <a href="#439" id="439">439</a>
 <a href="#440" id="440">440</a>
 <a href="#441" id="441">441</a>
-<a href="#442" id="442">442</a>
-<a href="#443" id="443">443</a>
-<a href="#444" id="444">444</a>
-<a href="#445" id="445">445</a>
-<a href="#446" id="446">446</a>
-<a href="#447" id="447">447</a>
-<a href="#448" id="448">448</a>
-<a href="#449" id="449">449</a></pre></div><pre class="rust"><code><span class="doccomment">//! Utilities for iroh-gossip networking
+<a href="#442" id="442">442</a></pre></div><pre class="rust"><code><span class="doccomment">//! Utilities for iroh-gossip networking
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map, HashMap},
@@ -504,11 +497,6 @@
 }
 
 <span class="attr">#[derive(Debug, Serialize, Deserialize)]
-</span><span class="kw">enum </span>WireStreamHeader {
-    V0(StreamHeader),
-}
-
-<span class="attr">#[derive(Debug, Serialize, Deserialize)]
 </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">struct </span>StreamHeader {
     <span class="kw">pub</span>(<span class="kw">crate</span>) topic_id: TopicId,
 }
@@ -519,7 +507,7 @@
         buffer: <span class="kw-2">&amp;mut </span>BytesMut,
         max_message_size: usize,
     ) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>, ReadError&gt; {
-        <span class="kw">let </span>header: WireStreamHeader = read_frame(stream, buffer, max_message_size)
+        <span class="kw">let </span>header: <span class="self">Self </span>= read_frame(stream, buffer, max_message_size)
             .<span class="kw">await</span><span class="question-mark">?
             </span>.ok_or_else(|| {
                 ReadError::from(io::Error::new(
@@ -527,7 +515,6 @@
                     <span class="string">"stream ended before header"</span>,
                 ))
             })<span class="question-mark">?</span>;
-        <span class="kw">let </span>WireStreamHeader::V0(header) = header;
         <span class="prelude-val">Ok</span>(header)
     }
 
@@ -537,8 +524,7 @@
         buffer: <span class="kw-2">&amp;mut </span>Vec&lt;u8&gt;,
         max_message_size: usize,
     ) -&gt; <span class="prelude-ty">Result</span>&lt;(), WriteError&gt; {
-        <span class="kw">let </span>frame = WireStreamHeader::V0(<span class="self">self</span>);
-        write_frame(stream, <span class="kw-2">&amp;</span>frame, buffer, max_message_size).<span class="kw">await</span><span class="question-mark">?</span>;
+        write_frame(stream, <span class="kw-2">&amp;</span><span class="self">self</span>, buffer, max_message_size).<span class="kw">await</span><span class="question-mark">?</span>;
         <span class="prelude-val">Ok</span>(())
     }
 }
