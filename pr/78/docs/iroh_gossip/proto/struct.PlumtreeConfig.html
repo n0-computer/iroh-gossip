@@ -10,7 +10,7 @@
 <p>Currently, the expectation is that the configuration is the same for all peers in the
 network (as recommended in the paper).</p>
 </div></details><h2 id="fields" class="fields section-header">Fields<a href="#fields" class="anchor">§</a></h2><span id="structfield.graft_timeout_1" class="structfield section-header"><a href="#structfield.graft_timeout_1" class="anchor field">§</a><code>graft_timeout_1: <a class="struct" href="https://doc.rust-lang.org/nightly/core/time/struct.Duration.html" title="struct core::time::Duration">Duration</a></code></span><div class="docblock"><p>When receiving an <code>IHave</code> message, this timeout is registered. If the message for the
-[<code>IHave</code>] was not received once the timeout is expired, a <code>Graft</code> message is sent to the
+<code>IHave</code> was not received once the timeout is expired, a <code>Graft</code> message is sent to the
 peer that sent us the <code>IHave</code> to request the message payload.</p>
 <p>The plumtree paper notes:</p>
 <blockquote>
