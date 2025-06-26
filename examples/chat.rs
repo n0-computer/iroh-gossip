@@ -93,7 +93,10 @@ async fn main() -> Result<()> {
         None => SecretKey::generate(rand::rngs::OsRng),
         Some(key) => key.parse()?,
     };
-    println!("> our secret key: {}", data_encoding::HEXLOWER.encode(&secret_key.to_bytes()));
+    println!(
+        "> our secret key: {}",
+        data_encoding::HEXLOWER.encode(&secret_key.to_bytes())
+    );
 
     // configure our relay map
     let relay_mode = match (args.no_relay, args.relay) {
