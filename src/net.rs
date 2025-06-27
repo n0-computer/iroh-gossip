@@ -1595,7 +1595,7 @@ pub(crate) mod test {
                 .bind()
                 .await?;
             let gossip = Gossip::builder().spawn(ep.clone());
-            let router = Router::builder(ep.clone())
+            let router = Router::builder(ep)
                 .accept(GOSSIP_ALPN, gossip.clone())
                 .spawn();
             Ok((router, gossip))
@@ -1632,6 +1632,11 @@ pub(crate) mod test {
             let secret_key = SecretKey::generate(&mut rng);
             async move {
                 let (router, gossip) = spawn_gossip(secret_key, relay_map).await?;
+                // wait for the relay to be set. iroh currently has issues when trying
+                // to immediately reconnect with changed direct addresses, but when the
+                // relay path is available it works.
+                // See https://github.com/n0-computer/iroh/pull/3372
+                router.endpoint().home_relay().initialized().await?;
                 let addr = router.endpoint().node_addr().initialized().await?;
                 info!(node_id = %addr.node_id.fmt_short(), "recv node spawned");
                 addr_tx.send(addr).unwrap();
