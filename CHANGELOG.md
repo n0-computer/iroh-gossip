@@ -2,6 +2,46 @@
 
 All notable changes to iroh-gossip will be documented in this file.
 
+## [0.90.0](https://github.com/n0-computer/iroh-gossip/compare/v0.35.0..0.90.0) - 2025-06-27
+
+### ⛰️  Features
+
+- *(net)* Add shutdown function ([#69](https://github.com/n0-computer/iroh-gossip/issues/69)) - ([3cf2cd2](https://github.com/n0-computer/iroh-gossip/commit/3cf2cd2f3af5c79832b335b525b34db4290d0332))
+
+### 🐛 Bug Fixes
+
+- *(hyparview)* [**breaking**] Only add peers to active view after receiving neighbor messages ([#56](https://github.com/n0-computer/iroh-gossip/issues/56)) - ([5a441e6](https://github.com/n0-computer/iroh-gossip/commit/5a441e6cf5589fc3c7cf3c290005b1094895038c))
+- *(hyparview)* Use shuffle replies as intended ([#57](https://github.com/n0-computer/iroh-gossip/issues/57)) - ([9632ced](https://github.com/n0-computer/iroh-gossip/commit/9632ced028ad7c211ac256b89d7ac0fcb32f55a6))
+- *(hyparview)* Don't emit PeerData event for empty PeerData - ([c345f0a](https://github.com/n0-computer/iroh-gossip/commit/c345f0a0a6a099643f13a7a6743b308548a1c40e))
+- *(plumtree)* Ensure eager relation is symmetrical - ([0abface](https://github.com/n0-computer/iroh-gossip/commit/0abface77c81dfde91c9f37da1f00bfee36f86d7))
+- *(plumtree)* Clear graft timer to allow retry on new ihaves - ([b65cdce](https://github.com/n0-computer/iroh-gossip/commit/b65cdcea36c8b30ac3ab6443645c6e69795f6ebf))
+
+### 🚜 Refactor
+
+- *(hyparview)* Improve disconnect handling - ([5156d00](https://github.com/n0-computer/iroh-gossip/commit/5156d00f72be478872e7cecdf1b95d739b3b4fca))
+- *(hyparview)* Remove obsolete parameter in hyparview - ([d954aa6](https://github.com/n0-computer/iroh-gossip/commit/d954aa62272d7f781ce762b42b06d2521e7d1b30))
+- *(net)* [**breaking**] Remove `Joined` event, use `NeighborUp` ([#49](https://github.com/n0-computer/iroh-gossip/issues/49)) - ([c06f2ed](https://github.com/n0-computer/iroh-gossip/commit/c06f2ed64cb887d0714dfa1e75c0d66051c9d3e1))
+- [**breaking**] Port to irpc, flatten event enum, remove cli impl ([#67](https://github.com/n0-computer/iroh-gossip/issues/67)) - ([a8d5cd2](https://github.com/n0-computer/iroh-gossip/commit/a8d5cd2b4c749993dd99f9d5eead073fd4b2498d))
+- [**breaking**] Port to iroh@0.90 and n0-snafu ([#77](https://github.com/n0-computer/iroh-gossip/issues/77)) - ([1523227](https://github.com/n0-computer/iroh-gossip/commit/1523227c980c7d58efff805645aa50bea17402b0))
+- [**breaking**] Change wire protocol to use uni streams per topic ([#75](https://github.com/n0-computer/iroh-gossip/issues/75)) - ([db1a135](https://github.com/n0-computer/iroh-gossip/commit/db1a13550d7b014e959fe807b45c3614e26e7105))
+
+### 📚 Documentation
+
+- Deny warnings for docs in CI ([#78](https://github.com/n0-computer/iroh-gossip/issues/78)) - ([b38b38f](https://github.com/n0-computer/iroh-gossip/commit/b38b38fc5970164a3c037b4d6306d8b7aee10f4f))
+
+### 🧪 Testing
+
+- Improve simulator ([#52](https://github.com/n0-computer/iroh-gossip/issues/52)) - ([8c30674](https://github.com/n0-computer/iroh-gossip/commit/8c306742c5823f8a6655252b1dbbbfb021c3400d))
+
+### ⚙️ Miscellaneous Tasks
+
+- Update clippy ([#79](https://github.com/n0-computer/iroh-gossip/issues/79)) - ([07b7b77](https://github.com/n0-computer/iroh-gossip/commit/07b7b77a8ceacad8094ec83209aa3d701a63d5b4))
+- Upgrade to `iroh` at `0.90.0` and `irpc` at `0.5.0` ([#80](https://github.com/n0-computer/iroh-gossip/issues/80)) - ([0e613d8](https://github.com/n0-computer/iroh-gossip/commit/0e613d884e95203940d94b3b5363c972f4ef00d1))
+
+### Change
+
+- *(hyparview)* Send a ShuffleReply before disconnecting ([#59](https://github.com/n0-computer/iroh-gossip/issues/59)) - ([fd379fc](https://github.com/n0-computer/iroh-gossip/commit/fd379fc5f32ee52c2c7aad03c03c373c2ac69816))
+
 ## [0.35.0](https://github.com/n0-computer/iroh-gossip/compare/v0.34.1..0.35.0) - 2025-05-12
 
 ### 🐛 Bug Fixes
