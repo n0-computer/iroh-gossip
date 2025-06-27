@@ -1696,7 +1696,12 @@
 <a href="#1695" id="1695">1695</a>
 <a href="#1696" id="1696">1696</a>
 <a href="#1697" id="1697">1697</a>
-<a href="#1698" id="1698">1698</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
+<a href="#1698" id="1698">1698</a>
+<a href="#1699" id="1699">1699</a>
+<a href="#1700" id="1700">1700</a>
+<a href="#1701" id="1701">1701</a>
+<a href="#1702" id="1702">1702</a>
+<a href="#1703" id="1703">1703</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
@@ -3293,7 +3298,7 @@
                 .bind()
                 .<span class="kw">await</span><span class="question-mark">?</span>;
             <span class="kw">let </span>gossip = Gossip::builder().spawn(ep.clone());
-            <span class="kw">let </span>router = Router::builder(ep.clone())
+            <span class="kw">let </span>router = Router::builder(ep)
                 .accept(GOSSIP_ALPN, gossip.clone())
                 .spawn();
             <span class="prelude-val">Ok</span>((router, gossip))
@@ -3330,6 +3335,11 @@
             <span class="kw">let </span>secret_key = SecretKey::generate(<span class="kw-2">&amp;mut </span>rng);
             <span class="kw">async move </span>{
                 <span class="kw">let </span>(router, gossip) = spawn_gossip(secret_key, relay_map).<span class="kw">await</span><span class="question-mark">?</span>;
+                <span class="comment">// wait for the relay to be set. iroh currently has issues when trying
+                // to immediately reconnect with changed direct addresses, but when the
+                // relay path is available it works.
+                // See https://github.com/n0-computer/iroh/pull/3372
+                </span>router.endpoint().home_relay().initialized().<span class="kw">await</span><span class="question-mark">?</span>;
                 <span class="kw">let </span>addr = router.endpoint().node_addr().initialized().<span class="kw">await</span><span class="question-mark">?</span>;
                 <span class="macro">info!</span>(node_id = %addr.node_id.fmt_short(), <span class="string">"recv node spawned"</span>);
                 addr_tx.send(addr).unwrap();
