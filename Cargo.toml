@@ -47,8 +47,8 @@ derive_more = { version = "1.0.0", features = [
 ed25519-dalek = { version = "2.0.0", features = ["serde", "rand_core"] }
 hex = "0.4.3"
 indexmap = "2.0"
-iroh-metrics = { version = "0.34", default-features = false }
-iroh-base = { git = "https://github.com/n0-computer/iroh", branch = "main", default-features = false, features = [
+iroh-metrics = { version = "0.35", default-features = false }
+iroh-base = { version = "0.90", default-features = false, features = [
     "key",
 ] }
 n0-future = "0.1.2"
@@ -65,12 +65,12 @@ serde = { version = "1.0.164", features = ["derive"] }
 futures-lite = { version = "2.3", optional = true }
 futures-concurrency = { version = "7.6.1", optional = true }
 futures-util = { version = "0.3.30", optional = true }
-iroh = { git = "https://github.com/n0-computer/iroh", branch = "main", default-features = false, optional = true }
+iroh = { version = "0.90", default-features = false, optional = true }
 tokio = { version = "1", optional = true, features = ["io-util", "sync"] }
 tokio-util = { version = "0.7.12", optional = true, features = ["codec"] }
 tracing = "0.1"
 thiserror = { version = "2.0", optional = true }
-irpc = { version = "0.4.0", optional = true, default-features = false, features = [
+irpc = { version = "0.5.0", optional = true, default-features = false, features = [
     "derive",
     "stream",
     "message_spans",
@@ -81,7 +81,7 @@ nested_enum_utils = { version = "0.2.2", optional = true }
 snafu = { version = "0.8.5", features = ["rust_1_81"], optional = true }
 
 # rpc dependencies (optional)
-quinn = { package = "iroh-quinn", version = "0.13.0", optional = true }
+quinn = { package = "iroh-quinn", version = "0.14.0", optional = true }
 
 # test-utils dependencies (optional)
 rand_chacha = { version = "0.3.1", optional = true }
@@ -109,7 +109,7 @@ tokio = { version = "1", features = [
 ] }
 clap = { version = "4", features = ["derive"] }
 humantime-serde = { version = "1.1.1" }
-iroh = { git = "https://github.com/n0-computer/iroh", branch = "main", default-features = false, features = [
+iroh = { version = "0.90", default-features = false, features = [
     "metrics",
     "test-utils",
 ] }

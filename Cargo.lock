@@ -223,6 +223,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "atomic-polyfill"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8cf2bce30dfe09ef0bfaef228b9d414faaf7e563035494d7fe092dba54b300f4"
+dependencies = [
+ "critical-section",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1301,6 +1310,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hash32"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0c35f58762feb77d74ebe43bdbc3210f09be9fe6742234d573bacc26ed92b67"
+dependencies = [
+ "byteorder",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1315,6 +1333,20 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash",
+]
+
+[[package]]
+name = "heapless"
+version = "0.7.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cdc6457c0eb62c71aac4bc17216026d8410337c4126773b9c5daba343f17964f"
+dependencies = [
+ "atomic-polyfill",
+ "hash32",
+ "rustc_version",
+ "serde",
+ "spin",
+ "stable_deref_trait",
 ]
 
 [[package]]
@@ -1754,11 +1786,11 @@ dependencies = [
 
 [[package]]
 name = "iroh"
-version = "0.35.0"
-source = "git+https://github.com/n0-computer/iroh?branch=main#518400b0d7fa1851b49da3598995ff9f0aeece3b"
+version = "0.90.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9436f319c2d24bca1b28a2fab4477c8d2ac795ab2d3aeda142d207b38ec068f4"
 dependencies = [
  "aead",
- "anyhow",
  "axum",
  "backon",
  "bytes",
@@ -1777,7 +1809,7 @@ dependencies = [
  "instant",
  "iroh-base",
  "iroh-metrics",
- "iroh-quinn 0.14.0",
+ "iroh-quinn",
  "iroh-quinn-proto",
  "iroh-quinn-udp",
  "iroh-relay",
@@ -1786,7 +1818,7 @@ dependencies = [
  "n0-watcher",
  "nested_enum_utils",
  "netdev",
- "netwatch 0.6.0",
+ "netwatch",
  "pin-project",
  "pkarr",
  "portmapper",
@@ -1816,8 +1848,9 @@ dependencies = [
 
 [[package]]
 name = "iroh-base"
-version = "0.35.0"
-source = "git+https://github.com/n0-computer/iroh?branch=main#518400b0d7fa1851b49da3598995ff9f0aeece3b"
+version = "0.90.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e0090050c4055b21e61cbcb856f043a2b24ad22c65d76bab91f121b4c7bece3"
 dependencies = [
  "curve25519-dalek",
  "data-encoding",
@@ -1851,7 +1884,7 @@ dependencies = [
  "iroh",
  "iroh-base",
  "iroh-metrics",
- "iroh-quinn 0.13.0",
+ "iroh-quinn",
  "irpc",
  "n0-future",
  "n0-snafu",
@@ -1878,15 +1911,16 @@ dependencies = [
 
 [[package]]
 name = "iroh-metrics"
-version = "0.34.0"
+version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f70466f14caff7420a14373676947e25e2917af6a5b1bec45825beb2bf1eb6a7"
+checksum = "c8922c169f1b84d39d325c02ef1bbe1419d4de6e35f0403462b3c7e60cc19634"
 dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
  "iroh-metrics-derive",
  "itoa",
+ "postcard",
  "reqwest",
  "serde",
  "snafu",
@@ -1904,26 +1938,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.103",
-]
-
-[[package]]
-name = "iroh-quinn"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76c6245c9ed906506ab9185e8d7f64857129aee4f935e899f398a3bd3b70338d"
-dependencies = [
- "bytes",
- "cfg_aliases",
- "iroh-quinn-proto",
- "iroh-quinn-udp",
- "pin-project-lite",
- "rustc-hash",
- "rustls",
- "socket2",
- "thiserror 2.0.12",
- "tokio",
- "tracing",
- "web-time",
 ]
 
 [[package]]
@@ -1983,8 +1997,9 @@ dependencies = [
 
 [[package]]
 name = "iroh-relay"
-version = "0.35.0"
-source = "git+https://github.com/n0-computer/iroh?branch=main#518400b0d7fa1851b49da3598995ff9f0aeece3b"
+version = "0.90.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3f3cdbdaebc92835452e4e1d0d4b36118206b0950089b7bc3654f13e843475b"
 dependencies = [
  "ahash",
  "bytes",
@@ -2003,7 +2018,7 @@ dependencies = [
  "hyper-util",
  "iroh-base",
  "iroh-metrics",
- "iroh-quinn 0.14.0",
+ "iroh-quinn",
  "iroh-quinn-proto",
  "lru",
  "n0-future",
@@ -2029,7 +2044,6 @@ dependencies = [
  "simdutf8",
  "snafu",
  "strum",
- "stun-rs",
  "time",
  "tokio",
  "tokio-rustls",
@@ -2047,14 +2061,14 @@ dependencies = [
 
 [[package]]
 name = "irpc"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ce3631786a8ad447d39cc5da18c659c1b31641dfefad4e9afc07a19ceccacc2"
+checksum = "b355fe12226ee885e1c1056a867c2cf37be2b22032a16f5ab7091069e98a966f"
 dependencies = [
  "anyhow",
  "futures-buffered",
  "futures-util",
- "iroh-quinn 0.13.0",
+ "iroh-quinn",
  "irpc-derive",
  "n0-future",
  "postcard",
@@ -2426,39 +2440,6 @@ dependencies = [
  "libc",
  "log",
  "tokio",
-]
-
-[[package]]
-name = "netwatch"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67eeaa5f7505c93c5a9b35ba84fd21fb8aa3f24678c76acfe8716af7862fb07a"
-dependencies = [
- "atomic-waker",
- "bytes",
- "cfg_aliases",
- "derive_more",
- "iroh-quinn-udp",
- "js-sys",
- "libc",
- "n0-future",
- "nested_enum_utils",
- "netdev",
- "netlink-packet-core",
- "netlink-packet-route 0.23.0",
- "netlink-proto",
- "netlink-sys",
- "serde",
- "snafu",
- "socket2",
- "time",
- "tokio",
- "tokio-util",
- "tracing",
- "web-sys",
- "windows 0.59.0",
- "windows-result",
- "wmi",
 ]
 
 [[package]]
@@ -2904,9 +2885,9 @@ checksum = "f84267b20a16ea918e43c6a88433c2d54fa145c92a811b5b047ccbe153674483"
 
 [[package]]
 name = "portmapper"
-version = "0.5.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d6db66007eac4a0ec8331d0d20c734bd64f6445d64bbaf0d0a27fea7a054e36"
+checksum = "2d82975dc029c00d566f4e0f61f567d31f0297a290cb5416b5580dd8b4b54ade"
 dependencies = [
  "base64",
  "bytes",
@@ -2918,7 +2899,7 @@ dependencies = [
  "iroh-metrics",
  "libc",
  "nested_enum_utils",
- "netwatch 0.5.0",
+ "netwatch",
  "num_enum",
  "rand 0.8.5",
  "serde",
@@ -2942,6 +2923,7 @@ dependencies = [
  "cobs",
  "embedded-io 0.4.0",
  "embedded-io 0.6.1",
+ "heapless",
  "postcard-derive",
  "serde",
 ]
@@ -3818,6 +3800,9 @@ name = "spin"
 version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
+dependencies = [
+ "lock_api",
+]
 
 [[package]]
 name = "spinning_top"
