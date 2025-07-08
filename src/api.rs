@@ -11,7 +11,7 @@ use std::{
 use bytes::Bytes;
 use iroh_base::NodeId;
 use irpc::{channel::mpsc, rpc_requests, Client};
-use n0_future::{boxed::BoxStream, Stream, StreamExt, TryStreamExt};
+use n0_future::{Stream, StreamExt, TryStreamExt};
 use nested_enum_utils::common_fields;
 use serde::{Deserialize, Serialize};
 use snafu::Snafu;
@@ -280,7 +280,7 @@ impl Stream for GossipTopic {
 #[derive(derive_more::Debug)]
 pub struct GossipReceiver {
     #[debug("BoxStream")]
-    stream: BoxStream<Result<Event, ApiError>>,
+    stream: Pin<Box<dyn Stream<Item = Result<Event, ApiError>> + Send + Sync + 'static>>,
     neighbors: HashSet<NodeId>,
 }
 
@@ -420,6 +420,8 @@ impl JoinOptions {
 
 #[cfg(test)]
 mod tests {
+    use crate::api::GossipTopic;
+
     #[cfg(all(feature = "rpc", feature = "net"))]
     #[tokio::test]
     #[tracing_test::traced_test]
@@ -517,5 +519,14 @@ mod tests {
         let router2 = node2_task.await.e()??;
         router2.shutdown().await.e()?;
         Ok(())
+    }
+
+    #[test]
+    fn ensure_gossip_topic_is_sync() {
+        fn get() -> GossipTopic {
+            unimplemented!()
+        }
+        fn check(_t: impl Sync) {}
+        check(get());
     }
 }
