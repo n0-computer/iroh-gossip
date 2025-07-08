@@ -523,10 +523,15 @@ mod tests {
 
     #[test]
     fn ensure_gossip_topic_is_sync() {
+        #[allow(unused)]
         fn get() -> GossipTopic {
             unimplemented!()
         }
+        #[allow(unused)]
         fn check(_t: impl Sync) {}
-        check(get());
+        #[allow(unused)]
+        fn foo() {
+            check(get());
+        }
     }
 }
