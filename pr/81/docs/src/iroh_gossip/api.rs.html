@@ -530,7 +530,12 @@
 <a href="#529" id="529">529</a>
 <a href="#530" id="530">530</a>
 <a href="#531" id="531">531</a>
-<a href="#532" id="532">532</a></pre></div><pre class="rust"><code><span class="doccomment">//! Public API for using iroh-gossip
+<a href="#532" id="532">532</a>
+<a href="#533" id="533">533</a>
+<a href="#534" id="534">534</a>
+<a href="#535" id="535">535</a>
+<a href="#536" id="536">536</a>
+<a href="#537" id="537">537</a></pre></div><pre class="rust"><code><span class="doccomment">//! Public API for using iroh-gossip
 //!
 //! The API is usable both locally and over RPC.
 
@@ -1055,11 +1060,16 @@
 
     <span class="attr">#[test]
     </span><span class="kw">fn </span>ensure_gossip_topic_is_sync() {
-        <span class="kw">fn </span>get() -&gt; GossipTopic {
+        <span class="attr">#[allow(unused)]
+        </span><span class="kw">fn </span>get() -&gt; GossipTopic {
             <span class="macro">unimplemented!</span>()
         }
-        <span class="kw">fn </span>check(_t: <span class="kw">impl </span>Sync) {}
-        check(get());
+        <span class="attr">#[allow(unused)]
+        </span><span class="kw">fn </span>check(_t: <span class="kw">impl </span>Sync) {}
+        <span class="attr">#[allow(unused)]
+        </span><span class="kw">fn </span>foo() {
+            check(get());
+        }
     }
 }
 </code></pre></div></section></main></body></html>
