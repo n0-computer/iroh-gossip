@@ -183,7 +183,7 @@ impl GossipApi {
 }
 
 /// Sender for a gossip topic.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GossipSender(mpsc::Sender<Command>);
 
 impl GossipSender {
@@ -192,24 +192,24 @@ impl GossipSender {
     }
 
     /// Broadcasts a message to all nodes.
-    pub async fn broadcast(&mut self, message: Bytes) -> Result<(), ApiError> {
+    pub async fn broadcast(&self, message: Bytes) -> Result<(), ApiError> {
         self.send(Command::Broadcast(message)).await?;
         Ok(())
     }
 
     /// Broadcasts a message to our direct neighbors.
-    pub async fn broadcast_neighbors(&mut self, message: Bytes) -> Result<(), ApiError> {
+    pub async fn broadcast_neighbors(&self, message: Bytes) -> Result<(), ApiError> {
         self.send(Command::BroadcastNeighbors(message)).await?;
         Ok(())
     }
 
     /// Joins a set of peers.
-    pub async fn join_peers(&mut self, peers: Vec<NodeId>) -> Result<(), ApiError> {
+    pub async fn join_peers(&self, peers: Vec<NodeId>) -> Result<(), ApiError> {
         self.send(Command::JoinPeers(peers)).await?;
         Ok(())
     }
 
-    async fn send(&mut self, command: Command) -> Result<(), irpc::channel::SendError> {
+    async fn send(&self, command: Command) -> Result<(), irpc::channel::SendError> {
         self.0.send(command).await?;
         Ok(())
     }
@@ -382,7 +382,7 @@ pub struct Message {
 }
 
 /// Command for a gossip topic.
-#[derive(Serialize, Deserialize, derive_more::Debug)]
+#[derive(Serialize, Deserialize, derive_more::Debug, Clone)]
 pub enum Command {
     /// Broadcasts a message to all nodes in the swarm.
     Broadcast(#[debug("Bytes({})", _0.len())] Bytes),

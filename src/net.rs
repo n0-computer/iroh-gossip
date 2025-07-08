@@ -1273,7 +1273,7 @@ pub(crate) mod test {
         .await
         .unwrap();
 
-        let (mut sink1, _stream1) = sub1.split();
+        let (sink1, _stream1) = sub1.split();
 
         let len = 2;
 
