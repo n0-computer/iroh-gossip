@@ -599,7 +599,8 @@ impl Actor {
                 if !sender_dead {
                     let fut =
                         topic_subscriber_loop(tx, event_sender.subscribe()).map(move |_| topic_id);
-                    self.topic_event_forwarders.spawn(fut);
+                    self.topic_event_forwarders
+                        .spawn(fut.instrument(tracing::Span::current()));
                 }
                 let command_rx = TopicCommandStream::new(topic_id, Box::pin(rx.into_stream()));
                 let key = self.command_rx.insert(command_rx);
@@ -996,14 +997,17 @@ impl Dialer {
         let cancel = CancellationToken::new();
         self.pending_dials.insert(node_id, cancel.clone());
         let endpoint = self.endpoint.clone();
-        self.pending.spawn(async move {
-            let res = tokio::select! {
-                biased;
-                _ = cancel.cancelled() => None,
-                res = endpoint.connect(node_id, alpn) => Some(res),
-            };
-            (node_id, res)
-        });
+        self.pending.spawn(
+            async move {
+                let res = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => None,
+                    res = endpoint.connect(node_id, alpn) => Some(res),
+                };
+                (node_id, res)
+            }
+            .instrument(tracing::Span::current()),
+        );
     }
 
     /// Checks if a node is currently being dialed.
