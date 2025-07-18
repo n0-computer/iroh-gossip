@@ -6,7 +6,7 @@ The implementation is based on the papers [HyParView](https://asc.di.fct.unl.pt/
 
 The crate is made up from two modules:
 The `proto` module is the protocol implementation, as a state machine without any IO.
-The `net` module connects the protocol to the networking stack from `iroh-net`.
+The `net` module implements networking logic for running `iroh-gossip` on `iroh` connections.
 
 The `net` module is optional behind the `net` feature flag (enabled by default).
 
