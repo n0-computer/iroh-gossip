@@ -411,10 +411,9 @@ mod tests {
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn test_rpc() -> n0_snafu::Result {
-        use iroh::{protocol::Router, RelayMap};
+        use iroh::{protocol::Router, RelayMap, Watcher};
         use n0_future::{time::Duration, StreamExt};
         use n0_snafu::{Error, Result, ResultExt};
-        use n0_watcher::Watcher;
         use rand::SeedableRng;
 
         use crate::{
@@ -447,7 +446,7 @@ mod tests {
         // create a second node so that we can test actually joining
         let (node2_id, node2_addr, node2_task) = {
             let (router, gossip) = create_gossip_endpoint(&mut rng, relay_map.clone()).await?;
-            let node_addr = router.endpoint().node_addr().initialized().await?;
+            let node_addr = router.endpoint().node_addr().initialized().await;
             let node_id = router.endpoint().node_id();
             let task = tokio::task::spawn(async move {
                 let mut topic = gossip.subscribe_and_join(topic_id, vec![]).await?;

@@ -13,7 +13,7 @@ use futures_util::FutureExt as _;
 use iroh::{
     endpoint::Connection,
     protocol::{AcceptError, ProtocolHandler},
-    Endpoint, NodeAddr, NodeId, PublicKey, RelayUrl,
+    Endpoint, NodeAddr, NodeId, PublicKey, RelayUrl, Watcher,
 };
 use irpc::WithChannels;
 use n0_future::{
@@ -21,7 +21,6 @@ use n0_future::{
     time::Instant,
     Stream, StreamExt as _,
 };
-use n0_watcher::Watcher;
 use nested_enum_utils::common_fields;
 use rand::rngs::StdRng;
 use rand_core::SeedableRng;
@@ -337,9 +336,8 @@ impl Actor {
     async fn setup(&mut self) -> impl Stream<Item = NodeAddr> + Send + Unpin {
         let addr_update_stream = self.endpoint.node_addr().stream().filter_map(|x| x);
         // TODO(Frando): Fail if endpoint disconnected?
-        if let Ok(initial_addr) = self.endpoint.node_addr().initialized().await {
-            self.handle_addr_update(initial_addr).await;
-        }
+        let initial_addr = self.endpoint.node_addr().initialized().await;
+        self.handle_addr_update(initial_addr).await;
         addr_update_stream
     }
 
@@ -1056,9 +1054,7 @@ pub(crate) mod test {
     use futures_concurrency::future::TryJoin;
     use iroh::{endpoint::BindError, protocol::Router, RelayMap, RelayMode, SecretKey};
     use n0_snafu::{Result, ResultExt};
-    use nested_enum_utils::common_fields;
     use rand::Rng;
-    use snafu::Snafu;
     use tokio::{spawn, time::timeout};
     use tokio_util::sync::CancellationToken;
     use tracing::{info, instrument};
@@ -1116,19 +1112,6 @@ pub(crate) mod test {
         }
     }
 
-    #[allow(missing_docs)]
-    #[common_fields({
-        backtrace: Option<snafu::Backtrace>,
-    })]
-    #[derive(Debug, Snafu)]
-    #[non_exhaustive]
-    pub(crate) enum CreateEndpointError {
-        #[snafu(transparent)]
-        Bind { source: BindError },
-        #[snafu(transparent)]
-        Dropped { source: n0_watcher::Disconnected },
-    }
-
     impl Gossip {
         /// Creates a testing gossip instance and its actor without spawning it.
         ///
@@ -1141,7 +1124,7 @@ pub(crate) mod test {
             config: proto::Config,
             relay_map: RelayMap,
             cancel: &CancellationToken,
-        ) -> Result<(Self, Actor, EndpointHandle), CreateEndpointError> {
+        ) -> Result<(Self, Actor, EndpointHandle), BindError> {
             let endpoint = create_endpoint(rng, relay_map).await?;
             let metrics = Arc::new(Metrics::default());
 
@@ -1176,7 +1159,7 @@ pub(crate) mod test {
             config: proto::Config,
             relay_map: RelayMap,
             cancel: &CancellationToken,
-        ) -> Result<(Self, Endpoint, EndpointHandle, impl Drop), CreateEndpointError> {
+        ) -> Result<(Self, Endpoint, EndpointHandle, impl Drop), BindError> {
             let (g, actor, ep_handle) =
                 Gossip::t_new_with_actor(rng, config, relay_map, cancel).await?;
             let ep = actor.endpoint.clone();
@@ -1190,7 +1173,7 @@ pub(crate) mod test {
     pub(crate) async fn create_endpoint(
         rng: &mut rand_chacha::ChaCha12Rng,
         relay_map: RelayMap,
-    ) -> Result<Endpoint, CreateEndpointError> {
+    ) -> Result<Endpoint, BindError> {
         let ep = Endpoint::builder()
             .secret_key(SecretKey::generate(rng))
             .alpns(vec![GOSSIP_ALPN.to_vec()])
@@ -1199,7 +1182,7 @@ pub(crate) mod test {
             .bind()
             .await?;
 
-        ep.home_relay().initialized().await?;
+        ep.home_relay().initialized().await;
         Ok(ep)
     }
 
@@ -1640,8 +1623,8 @@ pub(crate) mod test {
                 // to immediately reconnect with changed direct addresses, but when the
                 // relay path is available it works.
                 // See https://github.com/n0-computer/iroh/pull/3372
-                router.endpoint().home_relay().initialized().await?;
-                let addr = router.endpoint().node_addr().initialized().await?;
+                router.endpoint().home_relay().initialized().await;
+                let addr = router.endpoint().node_addr().initialized().await;
                 info!(node_id = %addr.node_id.fmt_short(), "recv node spawned");
                 addr_tx.send(addr).unwrap();
                 let mut topic = gossip.subscribe_and_join(topic_id, vec![]).await?;
