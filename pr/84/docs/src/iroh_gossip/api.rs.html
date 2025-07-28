@@ -519,8 +519,7 @@
 <a href="#518" id="518">518</a>
 <a href="#519" id="519">519</a>
 <a href="#520" id="520">520</a>
-<a href="#521" id="521">521</a>
-<a href="#522" id="522">522</a></pre></div><pre class="rust"><code><span class="doccomment">//! Public API for using iroh-gossip
+<a href="#521" id="521">521</a></pre></div><pre class="rust"><code><span class="doccomment">//! Public API for using iroh-gossip
 //!
 //! The API is usable both locally and over RPC.
 
@@ -933,10 +932,9 @@
     #[tokio::test]
     #[tracing_test::traced_test]
     </span><span class="kw">async fn </span>test_rpc() -&gt; n0_snafu::Result {
-        <span class="kw">use </span>iroh::{protocol::Router, RelayMap};
+        <span class="kw">use </span>iroh::{protocol::Router, RelayMap, Watcher};
         <span class="kw">use </span>n0_future::{time::Duration, StreamExt};
         <span class="kw">use </span>n0_snafu::{Error, <span class="prelude-ty">Result</span>, ResultExt};
-        <span class="kw">use </span>n0_watcher::Watcher;
         <span class="kw">use </span>rand::SeedableRng;
 
         <span class="kw">use crate</span>::{
@@ -969,7 +967,7 @@
         <span class="comment">// create a second node so that we can test actually joining
         </span><span class="kw">let </span>(node2_id, node2_addr, node2_task) = {
             <span class="kw">let </span>(router, gossip) = create_gossip_endpoint(<span class="kw-2">&amp;mut </span>rng, relay_map.clone()).<span class="kw">await</span><span class="question-mark">?</span>;
-            <span class="kw">let </span>node_addr = router.endpoint().node_addr().initialized().<span class="kw">await</span><span class="question-mark">?</span>;
+            <span class="kw">let </span>node_addr = router.endpoint().node_addr().initialized().<span class="kw">await</span>;
             <span class="kw">let </span>node_id = router.endpoint().node_id();
             <span class="kw">let </span>task = tokio::task::spawn(<span class="kw">async move </span>{
                 <span class="kw">let </span><span class="kw-2">mut </span>topic = gossip.subscribe_and_join(topic_id, <span class="macro">vec!</span>[]).<span class="kw">await</span><span class="question-mark">?</span>;

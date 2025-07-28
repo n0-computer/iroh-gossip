@@ -1688,24 +1688,7 @@
 <a href="#1687" id="1687">1687</a>
 <a href="#1688" id="1688">1688</a>
 <a href="#1689" id="1689">1689</a>
-<a href="#1690" id="1690">1690</a>
-<a href="#1691" id="1691">1691</a>
-<a href="#1692" id="1692">1692</a>
-<a href="#1693" id="1693">1693</a>
-<a href="#1694" id="1694">1694</a>
-<a href="#1695" id="1695">1695</a>
-<a href="#1696" id="1696">1696</a>
-<a href="#1697" id="1697">1697</a>
-<a href="#1698" id="1698">1698</a>
-<a href="#1699" id="1699">1699</a>
-<a href="#1700" id="1700">1700</a>
-<a href="#1701" id="1701">1701</a>
-<a href="#1702" id="1702">1702</a>
-<a href="#1703" id="1703">1703</a>
-<a href="#1704" id="1704">1704</a>
-<a href="#1705" id="1705">1705</a>
-<a href="#1706" id="1706">1706</a>
-<a href="#1707" id="1707">1707</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
+<a href="#1690" id="1690">1690</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
@@ -1720,7 +1703,7 @@
 <span class="kw">use </span>iroh::{
     endpoint::Connection,
     protocol::{AcceptError, ProtocolHandler},
-    Endpoint, NodeAddr, NodeId, PublicKey, RelayUrl,
+    Endpoint, NodeAddr, NodeId, PublicKey, RelayUrl, Watcher,
 };
 <span class="kw">use </span>irpc::WithChannels;
 <span class="kw">use </span>n0_future::{
@@ -1728,7 +1711,6 @@
     time::Instant,
     Stream, StreamExt <span class="kw">as _</span>,
 };
-<span class="kw">use </span>n0_watcher::Watcher;
 <span class="kw">use </span>nested_enum_utils::common_fields;
 <span class="kw">use </span>rand::rngs::StdRng;
 <span class="kw">use </span>rand_core::SeedableRng;
@@ -2044,9 +2026,8 @@
     </span><span class="kw">async fn </span>setup(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="kw">impl </span>Stream&lt;Item = NodeAddr&gt; + Send + Unpin {
         <span class="kw">let </span>addr_update_stream = <span class="self">self</span>.endpoint.node_addr().stream().filter_map(|x| x);
         <span class="comment">// TODO(Frando): Fail if endpoint disconnected?
-        </span><span class="kw">if let </span><span class="prelude-val">Ok</span>(initial_addr) = <span class="self">self</span>.endpoint.node_addr().initialized().<span class="kw">await </span>{
-            <span class="self">self</span>.handle_addr_update(initial_addr).<span class="kw">await</span>;
-        }
+        </span><span class="kw">let </span>initial_addr = <span class="self">self</span>.endpoint.node_addr().initialized().<span class="kw">await</span>;
+        <span class="self">self</span>.handle_addr_update(initial_addr).<span class="kw">await</span>;
         addr_update_stream
     }
 
@@ -2763,9 +2744,7 @@
     <span class="kw">use </span>futures_concurrency::future::TryJoin;
     <span class="kw">use </span>iroh::{endpoint::BindError, protocol::Router, RelayMap, RelayMode, SecretKey};
     <span class="kw">use </span>n0_snafu::{<span class="prelude-ty">Result</span>, ResultExt};
-    <span class="kw">use </span>nested_enum_utils::common_fields;
     <span class="kw">use </span>rand::Rng;
-    <span class="kw">use </span>snafu::Snafu;
     <span class="kw">use </span>tokio::{spawn, time::timeout};
     <span class="kw">use </span>tokio_util::sync::CancellationToken;
     <span class="kw">use </span>tracing::{info, instrument};
@@ -2823,19 +2802,6 @@
         }
     }
 
-    <span class="attr">#[allow(missing_docs)]
-    #[common_fields({
-        backtrace: <span class="prelude-ty">Option</span>&lt;snafu::Backtrace&gt;,
-    })]
-    #[derive(Debug, Snafu)]
-    #[non_exhaustive]
-    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">enum </span>CreateEndpointError {
-        <span class="attr">#[snafu(transparent)]
-        </span>Bind { source: BindError },
-        <span class="attr">#[snafu(transparent)]
-        </span>Dropped { source: n0_watcher::Disconnected },
-    }
-
     <span class="kw">impl </span>Gossip {
         <span class="doccomment">/// Creates a testing gossip instance and its actor without spawning it.
         ///
@@ -2848,7 +2814,7 @@
             config: proto::Config,
             relay_map: RelayMap,
             cancel: <span class="kw-2">&amp;</span>CancellationToken,
-        ) -&gt; <span class="prelude-ty">Result</span>&lt;(<span class="self">Self</span>, Actor, EndpointHandle), CreateEndpointError&gt; {
+        ) -&gt; <span class="prelude-ty">Result</span>&lt;(<span class="self">Self</span>, Actor, EndpointHandle), BindError&gt; {
             <span class="kw">let </span>endpoint = create_endpoint(rng, relay_map).<span class="kw">await</span><span class="question-mark">?</span>;
             <span class="kw">let </span>metrics = Arc::new(Metrics::default());
 
@@ -2883,7 +2849,7 @@
             config: proto::Config,
             relay_map: RelayMap,
             cancel: <span class="kw-2">&amp;</span>CancellationToken,
-        ) -&gt; <span class="prelude-ty">Result</span>&lt;(<span class="self">Self</span>, Endpoint, EndpointHandle, <span class="kw">impl </span>Drop), CreateEndpointError&gt; {
+        ) -&gt; <span class="prelude-ty">Result</span>&lt;(<span class="self">Self</span>, Endpoint, EndpointHandle, <span class="kw">impl </span>Drop), BindError&gt; {
             <span class="kw">let </span>(g, actor, ep_handle) =
                 Gossip::t_new_with_actor(rng, config, relay_map, cancel).<span class="kw">await</span><span class="question-mark">?</span>;
             <span class="kw">let </span>ep = actor.endpoint.clone();
@@ -2897,7 +2863,7 @@
     <span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">async fn </span>create_endpoint(
         rng: <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng,
         relay_map: RelayMap,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;Endpoint, CreateEndpointError&gt; {
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;Endpoint, BindError&gt; {
         <span class="kw">let </span>ep = Endpoint::builder()
             .secret_key(SecretKey::generate(rng))
             .alpns(<span class="macro">vec!</span>[GOSSIP_ALPN.to_vec()])
@@ -2906,7 +2872,7 @@
             .bind()
             .<span class="kw">await</span><span class="question-mark">?</span>;
 
-        ep.home_relay().initialized().<span class="kw">await</span><span class="question-mark">?</span>;
+        ep.home_relay().initialized().<span class="kw">await</span>;
         <span class="prelude-val">Ok</span>(ep)
     }
 
@@ -3347,8 +3313,8 @@
                 // to immediately reconnect with changed direct addresses, but when the
                 // relay path is available it works.
                 // See https://github.com/n0-computer/iroh/pull/3372
-                </span>router.endpoint().home_relay().initialized().<span class="kw">await</span><span class="question-mark">?</span>;
-                <span class="kw">let </span>addr = router.endpoint().node_addr().initialized().<span class="kw">await</span><span class="question-mark">?</span>;
+                </span>router.endpoint().home_relay().initialized().<span class="kw">await</span>;
+                <span class="kw">let </span>addr = router.endpoint().node_addr().initialized().<span class="kw">await</span>;
                 <span class="macro">info!</span>(node_id = %addr.node_id.fmt_short(), <span class="string">"recv node spawned"</span>);
                 addr_tx.send(addr).unwrap();
                 <span class="kw">let </span><span class="kw-2">mut </span>topic = gossip.subscribe_and_join(topic_id, <span class="macro">vec!</span>[]).<span class="kw">await</span><span class="question-mark">?</span>;
