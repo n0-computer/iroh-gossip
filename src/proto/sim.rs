@@ -89,7 +89,7 @@ impl LatencyConfig {
     }
 
     /// Returns a new latency value to use for a peer connection.
-    pub fn gen(&self, mut rng: impl Rng) -> Duration {
+    pub fn r#gen(&self, mut rng: impl Rng) -> Duration {
         match self {
             Self::Static(d) => *d,
             // TODO(frando): use uniform distribution?
@@ -451,7 +451,7 @@ fn latency_between<PI: PeerIdentity + Ord + PartialOrd, R: Rng>(
     let id: ConnId<PI> = (*a, *b).into();
     *latencies
         .entry(id)
-        .or_insert_with(|| latency_config.gen(rng))
+        .or_insert_with(|| latency_config.r#gen(rng))
 }
 
 #[derive(Debug)]

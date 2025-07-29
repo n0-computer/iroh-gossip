@@ -1806,7 +1806,7 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "0.90.0"
-source = "git+https://github.com/n0-computer/iroh?branch=main#a3187caee475e83c2f6ad8cb57bbfd3825a7c917"
+source = "git+https://github.com/n0-computer/iroh?branch=Frando%2Fwasm2024#3cd8ed59085177f42fd51dcbc858c9a29cf43c8d"
 dependencies = [
  "aead",
  "axum",
@@ -1867,7 +1867,7 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "0.90.0"
-source = "git+https://github.com/n0-computer/iroh?branch=main#a3187caee475e83c2f6ad8cb57bbfd3825a7c917"
+source = "git+https://github.com/n0-computer/iroh?branch=Frando%2Fwasm2024#3cd8ed59085177f42fd51dcbc858c9a29cf43c8d"
 dependencies = [
  "curve25519-dalek",
  "data-encoding",
@@ -2013,7 +2013,7 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "0.90.0"
-source = "git+https://github.com/n0-computer/iroh?branch=main#a3187caee475e83c2f6ad8cb57bbfd3825a7c917"
+source = "git+https://github.com/n0-computer/iroh?branch=Frando%2Fwasm2024#3cd8ed59085177f42fd51dcbc858c9a29cf43c8d"
 dependencies = [
  "ahash",
  "blake3",

@@ -333,7 +333,7 @@ impl Actor {
     ///
     /// This updates our current address and return it. It also returns the home relay stream and
     /// direct addr stream.
-    async fn setup(&mut self) -> impl Stream<Item = NodeAddr> + Send + Unpin {
+    async fn setup(&mut self) -> impl Stream<Item = NodeAddr> + Send + Unpin + use<> {
         let addr_update_stream = self.endpoint.node_addr().stream().filter_map(|x| x);
         // TODO(Frando): Fail if endpoint disconnected?
         let initial_addr = self.endpoint.node_addr().initialized().await;
@@ -1159,7 +1159,7 @@ pub(crate) mod test {
             config: proto::Config,
             relay_map: RelayMap,
             cancel: &CancellationToken,
-        ) -> Result<(Self, Endpoint, EndpointHandle, impl Drop), BindError> {
+        ) -> Result<(Self, Endpoint, EndpointHandle, impl Drop + use<>), BindError> {
             let (g, actor, ep_handle) =
                 Gossip::t_new_with_actor(rng, config, relay_map, cancel).await?;
             let ep = actor.endpoint.clone();
@@ -1608,7 +1608,7 @@ pub(crate) mod test {
 
         let (relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
         let mut rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
-        let topic_id = TopicId::from_bytes(rng.gen());
+        let topic_id = TopicId::from_bytes(rng.r#gen());
 
         // spawn a gossip node, send the node's address on addr_tx,
         // then wait to receive `count` messages, and terminate.
