@@ -2023,7 +2023,7 @@
     ///
     /// This updates our current address and return it. It also returns the home relay stream and
     /// direct addr stream.
-    </span><span class="kw">async fn </span>setup(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="kw">impl </span>Stream&lt;Item = NodeAddr&gt; + Send + Unpin {
+    </span><span class="kw">async fn </span>setup(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="kw">impl </span>Stream&lt;Item = NodeAddr&gt; + Send + Unpin + <span class="kw">use</span>&lt;&gt; {
         <span class="kw">let </span>addr_update_stream = <span class="self">self</span>.endpoint.node_addr().stream().filter_map(|x| x);
         <span class="comment">// TODO(Frando): Fail if endpoint disconnected?
         </span><span class="kw">let </span>initial_addr = <span class="self">self</span>.endpoint.node_addr().initialized().<span class="kw">await</span>;
@@ -2849,7 +2849,7 @@
             config: proto::Config,
             relay_map: RelayMap,
             cancel: <span class="kw-2">&amp;</span>CancellationToken,
-        ) -&gt; <span class="prelude-ty">Result</span>&lt;(<span class="self">Self</span>, Endpoint, EndpointHandle, <span class="kw">impl </span>Drop), BindError&gt; {
+        ) -&gt; <span class="prelude-ty">Result</span>&lt;(<span class="self">Self</span>, Endpoint, EndpointHandle, <span class="kw">impl </span>Drop + <span class="kw">use</span>&lt;&gt;), BindError&gt; {
             <span class="kw">let </span>(g, actor, ep_handle) =
                 Gossip::t_new_with_actor(rng, config, relay_map, cancel).<span class="kw">await</span><span class="question-mark">?</span>;
             <span class="kw">let </span>ep = actor.endpoint.clone();
@@ -3298,7 +3298,7 @@
 
         <span class="kw">let </span>(relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().<span class="kw">await</span>.unwrap();
         <span class="kw">let </span><span class="kw-2">mut </span>rng = <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
-        <span class="kw">let </span>topic_id = TopicId::from_bytes(rng.gen());
+        <span class="kw">let </span>topic_id = TopicId::from_bytes(rng.r#gen());
 
         <span class="comment">// spawn a gossip node, send the node's address on addr_tx,
         // then wait to receive `count` messages, and terminate.
