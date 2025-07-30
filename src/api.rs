@@ -23,13 +23,8 @@ const TOPIC_EVENTS_DEFAULT_CAP: usize = 2048;
 /// Channel capacity for topic command send channels.
 const TOPIC_COMMANDS_CAP: usize = 64;
 
-#[derive(Debug, Clone, Copy)]
-pub(super) struct Service;
-
-impl irpc::Service for Service {}
-
 /// Input messages for the gossip actor.
-#[rpc_requests(Service, message = RpcMessage)]
+#[rpc_requests(message = RpcMessage, rpc_feature = "rpc")]
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) enum Request {
     #[rpc(tx=mpsc::Sender<Event>, rx=mpsc::Receiver<Command>)]
@@ -85,13 +80,13 @@ impl From<irpc::channel::RecvError> for ApiError {
 /// [`Gossip::listen`]: crate::net::Gossip::listen
 #[derive(Debug, Clone)]
 pub struct GossipApi {
-    client: Client<RpcMessage, Request, Service>,
+    client: Client<Request>,
 }
 
 impl GossipApi {
     #[cfg(feature = "net")]
     pub(crate) fn local(tx: tokio::sync::mpsc::Sender<RpcMessage>) -> Self {
-        let local = irpc::LocalSender::<RpcMessage, Service>::from(tx);
+        let local = irpc::LocalSender::<Request>::from(tx);
         Self {
             client: local.into(),
         }
@@ -107,23 +102,13 @@ impl GossipApi {
     /// Listen on a quinn endpoint for incoming RPC connections.
     #[cfg(all(feature = "rpc", feature = "net"))]
     pub(crate) async fn listen(&self, endpoint: quinn::Endpoint) {
-        use std::sync::Arc;
-
-        use irpc::rpc::{listen, Handler};
+        use irpc::rpc::{listen, RemoteService};
 
         let local = self
             .client
-            .local()
-            .expect("cannot listen on remote client")
-            .clone();
-        let handler: Handler<Request> = Arc::new(move |req, rx, tx| {
-            let local = local.clone();
-            Box::pin({
-                match req {
-                    Request::Join(msg) => local.send((msg, tx, rx)),
-                }
-            })
-        });
+            .as_local()
+            .expect("cannot listen on remote client");
+        let handler = Request::remote_handler(local);
 
         listen::<Request>(endpoint, handler).await
     }
@@ -426,10 +411,9 @@ mod tests {
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn test_rpc() -> n0_snafu::Result {
-        use iroh::{protocol::Router, RelayMap};
+        use iroh::{protocol::Router, RelayMap, Watcher};
         use n0_future::{time::Duration, StreamExt};
         use n0_snafu::{Error, Result, ResultExt};
-        use n0_watcher::Watcher;
         use rand::SeedableRng;
 
         use crate::{
@@ -462,7 +446,7 @@ mod tests {
         // create a second node so that we can test actually joining
         let (node2_id, node2_addr, node2_task) = {
             let (router, gossip) = create_gossip_endpoint(&mut rng, relay_map.clone()).await?;
-            let node_addr = router.endpoint().node_addr().initialized().await?;
+            let node_addr = router.endpoint().node_addr().initialized().await;
             let node_id = router.endpoint().node_id();
             let task = tokio::task::spawn(async move {
                 let mut topic = gossip.subscribe_and_join(topic_id, vec![]).await?;

@@ -246,7 +246,10 @@ impl<T> TimerMap<T> {
     }
 
     /// Remove and return all entries before and equal to `from`.
-    pub fn drain_until(&mut self, from: &Instant) -> impl Iterator<Item = (Instant, T)> + '_ {
+    pub fn drain_until(
+        &mut self,
+        from: &Instant,
+    ) -> impl Iterator<Item = (Instant, T)> + '_ + use<'_, T> {
         let from = *from;
         std::iter::from_fn(move || self.pop_before(from))
     }

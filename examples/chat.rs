@@ -9,7 +9,7 @@ use bytes::Bytes;
 use clap::Parser;
 use ed25519_dalek::Signature;
 use futures_lite::StreamExt;
-use iroh::{Endpoint, NodeAddr, PublicKey, RelayMode, RelayUrl, SecretKey};
+use iroh::{Endpoint, NodeAddr, PublicKey, RelayMode, RelayUrl, SecretKey, Watcher};
 use iroh_gossip::{
     api::{Event, GossipReceiver},
     net::{Gossip, GOSSIP_ALPN},
@@ -17,7 +17,6 @@ use iroh_gossip::{
 };
 use n0_future::task;
 use n0_snafu::{Result, ResultExt};
-use n0_watcher::Watcher;
 use serde::{Deserialize, Serialize};
 use snafu::whatever;
 
@@ -123,7 +122,7 @@ async fn main() -> Result<()> {
 
     // print a ticket that includes our own node id and endpoint addresses
     let ticket = {
-        let me = endpoint.node_addr().initialized().await?;
+        let me = endpoint.node_addr().initialized().await;
         let peers = peers.iter().cloned().chain([me]).collect();
         Ticket { topic, peers }
     };

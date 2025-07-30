@@ -235,7 +235,7 @@ impl<PI: PeerIdentity, R: Rng + Clone> State<PI, R> {
         event: InEvent<PI>,
         now: Instant,
         metrics: Option<&Metrics>,
-    ) -> impl Iterator<Item = OutEvent<PI>> + '_ {
+    ) -> impl Iterator<Item = OutEvent<PI>> + '_ + use<'_, PI, R> {
         trace!("in : {event:?}");
         if let Some(metrics) = &metrics {
             track_in_event(&event, metrics);
