@@ -1806,7 +1806,7 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "0.90.0"
-source = "git+https://github.com/n0-computer/iroh?branch=main#a8485ad101c30babda1cb76343d5d242447bf049"
+source = "git+https://github.com/n0-computer/iroh?branch=main#bcb60d42fecd79fcc5e4d064f410367a3f7aa0b2"
 dependencies = [
  "aead",
  "axum",
@@ -1867,7 +1867,7 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "0.90.0"
-source = "git+https://github.com/n0-computer/iroh?branch=main#a8485ad101c30babda1cb76343d5d242447bf049"
+source = "git+https://github.com/n0-computer/iroh?branch=main#bcb60d42fecd79fcc5e4d064f410367a3f7aa0b2"
 dependencies = [
  "curve25519-dalek",
  "data-encoding",
@@ -2013,7 +2013,7 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "0.90.0"
-source = "git+https://github.com/n0-computer/iroh?branch=main#a8485ad101c30babda1cb76343d5d242447bf049"
+source = "git+https://github.com/n0-computer/iroh?branch=main#bcb60d42fecd79fcc5e4d064f410367a3f7aa0b2"
 dependencies = [
  "ahash",
  "blake3",
@@ -2078,7 +2078,7 @@ dependencies = [
 [[package]]
 name = "irpc"
 version = "0.5.0"
-source = "git+https://github.com/n0-computer/irpc?branch=main#b363f00518389cd74722f38f3f73be96582f6940"
+source = "git+https://github.com/n0-computer/irpc?branch=main#fc66b123706f6c59c31159c2434e74f4f50a2533"
 dependencies = [
  "anyhow",
  "futures-buffered",
@@ -2100,7 +2100,7 @@ dependencies = [
 [[package]]
 name = "irpc-derive"
 version = "0.4.0"
-source = "git+https://github.com/n0-computer/irpc?branch=main#b363f00518389cd74722f38f3f73be96582f6940"
+source = "git+https://github.com/n0-computer/irpc?branch=main#fc66b123706f6c59c31159c2434e74f4f50a2533"
 dependencies = [
  "proc-macro2",
  "quote",
