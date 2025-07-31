@@ -2,6 +2,25 @@
 
 All notable changes to iroh-gossip will be documented in this file.
 
+## [0.91.0](https://github.com/n0-computer/iroh-gossip/compare/v0.90.0..0.91.0) - 2025-07-31
+
+### 🐛 Bug Fixes
+
+- Make GossipSender `Clone` and GossipTopic `Sync` ([#81](https://github.com/n0-computer/iroh-gossip/issues/81)) - ([f215aa1](https://github.com/n0-computer/iroh-gossip/commit/f215aa13806425491cf328e42c611a0002da4371))
+
+### 📚 Documentation
+
+- Replace `iroh-net` mention in README ([#83](https://github.com/n0-computer/iroh-gossip/issues/83)) - ([e3df4ec](https://github.com/n0-computer/iroh-gossip/commit/e3df4ec7a56bcff0dafe6940d7d706ece5508891))
+
+### ⚙️ Miscellaneous Tasks
+
+- Add patch for `iroh` dependencies ([#82](https://github.com/n0-computer/iroh-gossip/issues/82)) - ([2e82a68](https://github.com/n0-computer/iroh-gossip/commit/2e82a683f93aa1ae50929da8ce95b23f85b466f1))
+- [**breaking**] Prep for `v0.91.0` release ([#85](https://github.com/n0-computer/iroh-gossip/issues/85)) - ([d1fbfca](https://github.com/n0-computer/iroh-gossip/commit/d1fbfca15f484a41b8d6e8f771d14bf9fe5c7f81))
+
+### Deps
+
+- Update to irpc@main, iroh@main ([#84](https://github.com/n0-computer/iroh-gossip/issues/84)) - ([af7ae1f](https://github.com/n0-computer/iroh-gossip/commit/af7ae1f9bb9fa74aef97d510e062b09c03e96a87))
+
 ## [0.90.0](https://github.com/n0-computer/iroh-gossip/compare/v0.35.0..0.90.0) - 2025-06-27
 
 ### ⛰️  Features

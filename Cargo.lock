@@ -1885,7 +1885,7 @@ dependencies = [
 
 [[package]]
 name = "iroh-gossip"
-version = "0.90.0"
+version = "0.91.0"
 dependencies = [
  "blake3",
  "bytes",
