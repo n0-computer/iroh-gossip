@@ -1805,9 +1805,8 @@ dependencies = [
 
 [[package]]
 name = "iroh"
-version = "0.91.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef05c956df0788a649d65c33fdbbb8fc4442d7716af3d67a1bd6d00a9ee56ead"
+version = "0.91.2"
+source = "git+https://github.com/n0-computer/iroh.git?branch=main#4583b1280b8f5ab9d264940102382956ddbbb1a8"
 dependencies = [
  "aead",
  "axum",
@@ -1867,9 +1866,8 @@ dependencies = [
 
 [[package]]
 name = "iroh-base"
-version = "0.91.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f68b5c5e190d8965699b2fd583f301a7e6094a0b89bb4d6c5baa94761fd1b7a3"
+version = "0.91.2"
+source = "git+https://github.com/n0-computer/iroh.git?branch=main#4583b1280b8f5ab9d264940102382956ddbbb1a8"
 dependencies = [
  "curve25519-dalek",
  "data-encoding",
@@ -2014,9 +2012,8 @@ dependencies = [
 
 [[package]]
 name = "iroh-relay"
-version = "0.91.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49596b5079817d0904fe4985307f532a4e23a33eb494bd680baaf2743f0c456b"
+version = "0.91.2"
+source = "git+https://github.com/n0-computer/iroh.git?branch=main#4583b1280b8f5ab9d264940102382956ddbbb1a8"
 dependencies = [
  "ahash",
  "blake3",
@@ -2081,8 +2078,7 @@ dependencies = [
 [[package]]
 name = "irpc"
 version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9f8f1d0987ea9da3d74698f921d0a817a214c83b2635a33ed4bc3efa4de1acd"
+source = "git+https://github.com/n0-computer/irpc.git?branch=iroh-0-92#deeccb327c23760e0b3ab6c9df053f04d0b70dd6"
 dependencies = [
  "anyhow",
  "futures-buffered",
@@ -2104,8 +2100,7 @@ dependencies = [
 [[package]]
 name = "irpc-derive"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e0b26b834d401a046dd9d47bc236517c746eddbb5d25ff3e1a6075bfa4eebdb"
+source = "git+https://github.com/n0-computer/irpc.git?branch=iroh-0-92#deeccb327c23760e0b3ab6c9df053f04d0b70dd6"
 dependencies = [
  "proc-macro2",
  "quote",

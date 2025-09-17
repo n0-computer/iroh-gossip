@@ -571,7 +571,7 @@ impl Actor {
                 let WithChannels {
                     inner,
                     rx,
-                    mut tx,
+                    tx,
                     // TODO(frando): make use of span?
                     span: _,
                 } = msg;
