@@ -2,6 +2,12 @@
 
 All notable changes to iroh-gossip will be documented in this file.
 
+## [0.92.0](https://github.com/n0-computer/iroh-gossip/compare/v0.91.0..0.92.0) - 2025-09-18
+
+### ⚙️ Miscellaneous Tasks
+
+- Upgrade `iroh`, `iroh-base`, `irpc` ([#91](https://github.com/n0-computer/iroh-gossip/issues/91)) - ([464fe69](https://github.com/n0-computer/iroh-gossip/commit/464fe69789ae8c8fefd7734a2f44db5aa447db26))
+
 ## [0.91.0](https://github.com/n0-computer/iroh-gossip/compare/v0.90.0..0.91.0) - 2025-07-31
 
 ### 🐛 Bug Fixes
