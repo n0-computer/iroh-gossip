@@ -150,6 +150,7 @@ impl ProtocolHandler for Gossip {
 #[derive(Debug, Clone)]
 pub struct Builder {
     config: proto::Config,
+    alpn: Option<Vec<u8>>,
 }
 
 impl Builder {
@@ -172,10 +173,23 @@ impl Builder {
         self
     }
 
+    /// Set the ALPN this gossip instance uses.
+    ///
+    /// It has to be the same for all peers in the network. If you set a custom ALPN,
+    /// you have to use the same ALPN when registering the [`Gossip`] in on a iroh
+    /// router with [`RouterBuilder::accept`].
+    ///
+    /// [`RouterBuilder::accept`]: iroh::protocol::RouterBuilder::accept
+    pub fn alpn(mut self, alpn: impl AsRef<[u8]>) -> Self {
+        self.alpn = Some(alpn.as_ref().to_vec());
+        self
+    }
+
     /// Spawn a gossip actor and get a handle for it
     pub fn spawn(self, endpoint: Endpoint) -> Gossip {
         let metrics = Arc::new(Metrics::default());
-        let (actor, rpc_tx, local_tx) = Actor::new(endpoint, self.config, metrics.clone());
+        let (actor, rpc_tx, local_tx) =
+            Actor::new(endpoint, self.config, metrics.clone(), self.alpn);
         let me = actor.endpoint.node_id().fmt_short();
         let max_message_size = actor.state.max_message_size();
 
@@ -201,6 +215,7 @@ impl Gossip {
     pub fn builder() -> Builder {
         Builder {
             config: Default::default(),
+            alpn: None,
         }
     }
 
@@ -248,6 +263,7 @@ impl Gossip {
 
 /// Actor that sends and handles messages between the connection and main state loops
 struct Actor {
+    alpn: Vec<u8>,
     /// Protocol state
     state: proto::State<PublicKey, StdRng>,
     /// The endpoint through which we dial peers
@@ -282,6 +298,7 @@ impl Actor {
         endpoint: Endpoint,
         config: proto::Config,
         metrics: Arc<Metrics>,
+        alpn: Option<Vec<u8>>,
     ) -> (
         Self,
         mpsc::Sender<RpcMessage>,
@@ -300,6 +317,7 @@ impl Actor {
         let (in_event_tx, in_event_rx) = mpsc::channel(IN_EVENT_CAP);
 
         let actor = Actor {
+            alpn: alpn.unwrap_or_else(|| GOSSIP_ALPN.to_vec()),
             endpoint,
             state,
             dialer,
@@ -664,7 +682,7 @@ impl Actor {
                         PeerState::Pending { queue } => {
                             if queue.is_empty() {
                                 debug!(peer = %peer_id.fmt_short(), "start to dial");
-                                self.dialer.queue_dial(peer_id, GOSSIP_ALPN);
+                                self.dialer.queue_dial(peer_id, self.alpn.clone());
                             }
                             queue.push(message);
                         }
@@ -988,7 +1006,7 @@ impl Dialer {
     }
 
     /// Starts to dial a node by [`NodeId`].
-    fn queue_dial(&mut self, node_id: NodeId, alpn: &'static [u8]) {
+    fn queue_dial(&mut self, node_id: NodeId, alpn: Vec<u8>) {
         if self.is_pending(node_id) {
             return;
         }
@@ -1000,7 +1018,7 @@ impl Dialer {
                 let res = tokio::select! {
                     biased;
                     _ = cancel.cancelled() => None,
-                    res = endpoint.connect(node_id, alpn) => Some(res),
+                    res = endpoint.connect(node_id, &alpn) => Some(res),
                 };
                 (node_id, res)
             }
@@ -1128,7 +1146,7 @@ pub(crate) mod test {
             let endpoint = create_endpoint(rng, relay_map).await?;
             let metrics = Arc::new(Metrics::default());
 
-            let (actor, to_actor_tx, conn_tx) = Actor::new(endpoint, config, metrics.clone());
+            let (actor, to_actor_tx, conn_tx) = Actor::new(endpoint, config, metrics.clone(), None);
             let max_message_size = actor.state.max_message_size();
 
             let _actor_handle =
