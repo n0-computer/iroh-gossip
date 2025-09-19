@@ -1715,8 +1715,8 @@ pub(crate) mod test {
 
         let ep1 = Endpoint::builder().bind().await?;
         let ep2 = Endpoint::builder().bind().await?;
-        let gossip1 = Gossip::builder().alpn(&alpn).spawn(ep1.clone());
-        let gossip2 = Gossip::builder().alpn(&alpn).spawn(ep2.clone());
+        let gossip1 = Gossip::builder().alpn(alpn).spawn(ep1.clone());
+        let gossip2 = Gossip::builder().alpn(alpn).spawn(ep2.clone());
         let router1 = Router::builder(ep1).accept(alpn, gossip1.clone()).spawn();
         let router2 = Router::builder(ep2).accept(alpn, gossip2.clone()).spawn();
 
