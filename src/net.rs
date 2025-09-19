@@ -8,6 +8,7 @@ use std::{
     task::{Context, Poll},
 };
 
+use bytes::Bytes;
 use futures_concurrency::stream::{stream_group, StreamGroup};
 use futures_util::FutureExt as _;
 use iroh::{
@@ -150,6 +151,7 @@ impl ProtocolHandler for Gossip {
 #[derive(Debug, Clone)]
 pub struct Builder {
     config: proto::Config,
+    alpn: Option<Bytes>,
 }
 
 impl Builder {
@@ -172,10 +174,23 @@ impl Builder {
         self
     }
 
+    /// Set the ALPN this gossip instance uses.
+    ///
+    /// It has to be the same for all peers in the network. If you set a custom ALPN,
+    /// you have to use the same ALPN when registering the [`Gossip`] in on a iroh
+    /// router with [`RouterBuilder::accept`].
+    ///
+    /// [`RouterBuilder::accept`]: iroh::protocol::RouterBuilder::accept
+    pub fn alpn(mut self, alpn: impl AsRef<[u8]>) -> Self {
+        self.alpn = Some(alpn.as_ref().to_vec().into());
+        self
+    }
+
     /// Spawn a gossip actor and get a handle for it
     pub fn spawn(self, endpoint: Endpoint) -> Gossip {
         let metrics = Arc::new(Metrics::default());
-        let (actor, rpc_tx, local_tx) = Actor::new(endpoint, self.config, metrics.clone());
+        let (actor, rpc_tx, local_tx) =
+            Actor::new(endpoint, self.config, metrics.clone(), self.alpn);
         let me = actor.endpoint.node_id().fmt_short();
         let max_message_size = actor.state.max_message_size();
 
@@ -201,6 +216,7 @@ impl Gossip {
     pub fn builder() -> Builder {
         Builder {
             config: Default::default(),
+            alpn: None,
         }
     }
 
@@ -248,6 +264,7 @@ impl Gossip {
 
 /// Actor that sends and handles messages between the connection and main state loops
 struct Actor {
+    alpn: Bytes,
     /// Protocol state
     state: proto::State<PublicKey, StdRng>,
     /// The endpoint through which we dial peers
@@ -282,6 +299,7 @@ impl Actor {
         endpoint: Endpoint,
         config: proto::Config,
         metrics: Arc<Metrics>,
+        alpn: Option<Bytes>,
     ) -> (
         Self,
         mpsc::Sender<RpcMessage>,
@@ -300,6 +318,7 @@ impl Actor {
         let (in_event_tx, in_event_rx) = mpsc::channel(IN_EVENT_CAP);
 
         let actor = Actor {
+            alpn: alpn.unwrap_or_else(|| GOSSIP_ALPN.to_vec().into()),
             endpoint,
             state,
             dialer,
@@ -664,7 +683,7 @@ impl Actor {
                         PeerState::Pending { queue } => {
                             if queue.is_empty() {
                                 debug!(peer = %peer_id.fmt_short(), "start to dial");
-                                self.dialer.queue_dial(peer_id, GOSSIP_ALPN);
+                                self.dialer.queue_dial(peer_id, self.alpn.clone());
                             }
                             queue.push(message);
                         }
@@ -988,7 +1007,7 @@ impl Dialer {
     }
 
     /// Starts to dial a node by [`NodeId`].
-    fn queue_dial(&mut self, node_id: NodeId, alpn: &'static [u8]) {
+    fn queue_dial(&mut self, node_id: NodeId, alpn: Bytes) {
         if self.is_pending(node_id) {
             return;
         }
@@ -1000,7 +1019,7 @@ impl Dialer {
                 let res = tokio::select! {
                     biased;
                     _ = cancel.cancelled() => None,
-                    res = endpoint.connect(node_id, alpn) => Some(res),
+                    res = endpoint.connect(node_id, &alpn) => Some(res),
                 };
                 (node_id, res)
             }
@@ -1128,7 +1147,7 @@ pub(crate) mod test {
             let endpoint = create_endpoint(rng, relay_map).await?;
             let metrics = Arc::new(Metrics::default());
 
-            let (actor, to_actor_tx, conn_tx) = Actor::new(endpoint, config, metrics.clone());
+            let (actor, to_actor_tx, conn_tx) = Actor::new(endpoint, config, metrics.clone(), None);
             let max_message_size = actor.state.max_message_size();
 
             let _actor_handle =
@@ -1685,6 +1704,37 @@ pub(crate) mod test {
         assert!(join_handle_1.join().unwrap().is_none());
         assert!(join_handle_2.join().unwrap().is_none());
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn gossip_change_alpn() -> n0_snafu::Result<()> {
+        let alpn = b"my-gossip-alpn";
+        let topic_id = TopicId::from([0u8; 32]);
+
+        let ep1 = Endpoint::builder().bind().await?;
+        let ep2 = Endpoint::builder().bind().await?;
+        let gossip1 = Gossip::builder().alpn(alpn).spawn(ep1.clone());
+        let gossip2 = Gossip::builder().alpn(alpn).spawn(ep2.clone());
+        let router1 = Router::builder(ep1).accept(alpn, gossip1.clone()).spawn();
+        let router2 = Router::builder(ep2).accept(alpn, gossip2.clone()).spawn();
+
+        let addr1 = router1.endpoint().node_addr().initialized().await;
+        let id1 = addr1.node_id;
+        router2.endpoint().add_node_addr(addr1)?;
+
+        let mut topic1 = gossip1.subscribe(topic_id, vec![]).await?;
+        let mut topic2 = gossip2.subscribe(topic_id, vec![id1]).await?;
+
+        timeout(Duration::from_secs(3), topic1.joined())
+            .await
+            .e()??;
+        timeout(Duration::from_secs(3), topic2.joined())
+            .await
+            .e()??;
+        router1.shutdown().await.e()?;
+        router2.shutdown().await.e()?;
         Ok(())
     }
 }
