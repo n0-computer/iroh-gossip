@@ -3455,8 +3455,8 @@
 
         <span class="kw">let </span>ep1 = Endpoint::builder().bind().<span class="kw">await</span><span class="question-mark">?</span>;
         <span class="kw">let </span>ep2 = Endpoint::builder().bind().<span class="kw">await</span><span class="question-mark">?</span>;
-        <span class="kw">let </span>gossip1 = Gossip::builder().alpn(<span class="kw-2">&amp;</span>alpn).spawn(ep1.clone());
-        <span class="kw">let </span>gossip2 = Gossip::builder().alpn(<span class="kw-2">&amp;</span>alpn).spawn(ep2.clone());
+        <span class="kw">let </span>gossip1 = Gossip::builder().alpn(alpn).spawn(ep1.clone());
+        <span class="kw">let </span>gossip2 = Gossip::builder().alpn(alpn).spawn(ep2.clone());
         <span class="kw">let </span>router1 = Router::builder(ep1).accept(alpn, gossip1.clone()).spawn();
         <span class="kw">let </span>router2 = Router::builder(ep2).accept(alpn, gossip2.clone()).spawn();
 
