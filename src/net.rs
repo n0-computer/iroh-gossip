@@ -680,18 +680,19 @@ impl TopicActor {
 
         // This is like an async send + retain (remove failed senders)
         // TODO: check perf / optimize if needed
-        let senders = std::mem::take(&mut self.api_senders);
-        self.api_senders = senders
-            .into_iter()
-            .map(move |tx| {
+        let to_remove = self
+            .api_senders
+            .iter()
+            .enumerate()
+            .map(move |(i, tx)| {
                 let event = event.clone();
-                async move { tx.send(event).await.ok().map(|_| tx) }
+                async move { tx.send(event).await.err().map(|_| i) }
             })
             .join_all()
-            .await
-            .into_iter()
-            .flatten()
-            .collect();
+            .await;
+        for i in to_remove.into_iter().flatten().rev() {
+            self.api_senders.remove(i);
+        }
     }
 }
 
