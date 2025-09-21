@@ -35,20 +35,12 @@ unused-async = "warn"
 blake3 = "1.8"
 bytes = { version = "1.7", features = ["serde"] }
 data-encoding = "2.6.0"
-derive_more = { version = "2.0.1", features = [
-    "add",
-    "debug",
-    "deref",
-    "display",
-    "from",
-    "try_into",
-    "into",
-] }
-ed25519-dalek = { version = "3.0.0-pre.1", features = ["serde", "rand_core"] }
+derive_more = { version = "1.0.0", features = ["add", "debug", "deref", "display", "from", "try_into", "into", "deref_mut"] }
 hex = "0.4.3"
 indexmap = "2.0"
 iroh-metrics = { version = "0.37", default-features = false }
 iroh-base = { version = "0.95", default-features = false, features = ["key"] }
+n0-error = { version = "0.1", features = ["anyhow"] }
 n0-future = "0.3"
 postcard = { version = "1", default-features = false, features = [
     "alloc",
@@ -64,14 +56,16 @@ futures-concurrency = { version = "7.6.1", optional = true }
 futures-util = { version = "0.3.30", optional = true }
 iroh = { version = "0.95", default-features = false, optional = true }
 tokio = { version = "1", optional = true, features = ["io-util", "sync"] }
-tokio-util = { version = "0.7.12", optional = true, features = ["codec"] }
+tokio-util = { version = "0.7.12", optional = true, features = ["codec", "time"] }
 tracing = "0.1"
 irpc = { version = "0.11.0", optional = true, default-features = false, features = [
     "derive",
     "stream",
     "spans",
 ] }
-n0-error = { version = "0.1", features = ["anyhow"] }
+irpc-iroh = { version = "0.11.0", optional = true }
+n0-watcher = { version = "0.5.0", optional = true }
+strum = { version = "0.27.2", features = ["derive"], optional = true }
 
 # rpc dependencies (optional)
 quinn = { package = "iroh-quinn", version = "0.14.0", optional = true }
@@ -101,6 +95,7 @@ tokio = { version = "1", features = [
     "fs",
 ] }
 clap = { version = "4", features = ["derive"] }
+ed25519-dalek = { version = "3.0.0-pre.1", features = ["serde", "rand_core"] }
 humantime-serde = { version = "1.1.1" }
 iroh = { version = "0.95", default-features = false, features = [
     "metrics",
@@ -116,13 +111,16 @@ serde-byte-array = "0.1.2"
 [features]
 default = ["net", "metrics"]
 net = [
-    "dep:irpc",
+    "dep:futures-concurrency",
     "dep:futures-lite",
+    "dep:futures-util",
     "dep:iroh",
+    "dep:irpc",
+    "dep:irpc-iroh",
+    "dep:n0-watcher",
+    "dep:strum",
     "dep:tokio",
     "dep:tokio-util",
-    "dep:futures-util",
-    "dep:futures-concurrency",
 ]
 rpc = [
     "dep:irpc",

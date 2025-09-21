@@ -367,7 +367,7 @@ pub struct Message {
 }
 
 /// Command for a gossip topic.
-#[derive(Serialize, Deserialize, derive_more::Debug, Clone)]
+#[derive(Serialize, Deserialize, derive_more::Debug, Clone, strum::Display)]
 pub enum Command {
     /// Broadcasts a message to all endpoints in the swarm.
     Broadcast(#[debug("Bytes({})", _0.len())] Bytes),
@@ -375,6 +375,18 @@ pub enum Command {
     BroadcastNeighbors(#[debug("Bytes({})", _0.len())] Bytes),
     /// Connects to a set of peers.
     JoinPeers(Vec<EndpointId>),
+}
+
+impl From<Command> for crate::proto::Command<EndpointId> {
+    fn from(value: Command) -> Self {
+        match value {
+            Command::Broadcast(bytes) => Self::Broadcast(bytes, crate::proto::Scope::Swarm),
+            Command::BroadcastNeighbors(bytes) => {
+                Self::Broadcast(bytes, crate::proto::Scope::Neighbors)
+            }
+            Command::JoinPeers(peers) => Self::Join(peers),
+        }
+    }
 }
 
 /// Options for joining a gossip topic.
@@ -418,7 +430,7 @@ mod tests {
 
         use crate::{
             api::{Event, GossipApi},
-            net::{test::create_endpoint, Gossip},
+            net::{tests::create_endpoint, Gossip},
             proto::TopicId,
             ALPN,
         };
