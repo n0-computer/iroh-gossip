@@ -377,6 +377,18 @@ pub enum Command {
     JoinPeers(Vec<NodeId>),
 }
 
+impl From<Command> for crate::proto::Command<NodeId> {
+    fn from(value: Command) -> Self {
+        match value {
+            Command::Broadcast(bytes) => Self::Broadcast(bytes, crate::proto::Scope::Swarm),
+            Command::BroadcastNeighbors(bytes) => {
+                Self::Broadcast(bytes, crate::proto::Scope::Neighbors)
+            }
+            Command::JoinPeers(peers) => Self::Join(peers),
+        }
+    }
+}
+
 /// Options for joining a gossip topic.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct JoinOptions {
