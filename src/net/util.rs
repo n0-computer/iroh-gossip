@@ -1,391 +1,111 @@
 //! Utilities for iroh-gossip networking
 
 use std::{
-    collections::{hash_map, HashMap},
-    io,
+    collections::BTreeSet,
+    net::SocketAddr,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
-use bytes::{Bytes, BytesMut};
-use iroh::{
-    endpoint::{Connection, RecvStream, SendStream},
-    NodeId,
-};
+use iroh::{endpoint::Connection, NodeAddr, NodeId, RelayUrl};
+use irpc::rpc::RemoteService;
 use n0_future::{
+    future::Boxed as BoxFuture,
     time::{sleep_until, Instant},
-    FuturesUnordered, StreamExt,
+    Stream,
 };
-use nested_enum_utils::common_fields;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use snafu::Snafu;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    sync::mpsc,
-    task::JoinSet,
-};
-use tracing::{debug, trace, Instrument};
+use serde::{Deserialize, Serialize};
+use tokio::sync::Notify;
 
-use super::{InEvent, ProtoMessage};
-use crate::proto::{util::TimerMap, TopicId};
+use crate::proto::{util::TimerMap, PeerData};
 
-/// Errors related to message writing
-#[allow(missing_docs)]
-#[common_fields({
-    backtrace: Option<snafu::Backtrace>,
-})]
-#[derive(Debug, Snafu)]
-#[snafu(module)]
-#[non_exhaustive]
-pub(crate) enum WriteError {
-    /// Connection error
-    #[snafu(transparent)]
-    Connection {
-        source: iroh::endpoint::ConnectionError,
-    },
-    /// Serialization failed
-    #[snafu(transparent)]
-    Ser { source: postcard::Error },
-    /// IO error
-    #[snafu(transparent)]
-    Io { source: std::io::Error },
-    /// Message was larger than the configured maximum message size
-    #[snafu(display("message too large"))]
-    TooLarge {},
-}
+/// A connection to a remote service.
+#[derive(Debug, Clone)]
+pub struct IrohRemoteConnection(Connection);
 
-#[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct StreamHeader {
-    pub(crate) topic_id: TopicId,
-}
-
-impl StreamHeader {
-    pub(crate) async fn read(
-        stream: &mut RecvStream,
-        buffer: &mut BytesMut,
-        max_message_size: usize,
-    ) -> Result<Self, ReadError> {
-        let header: Self = read_frame(stream, buffer, max_message_size)
-            .await?
-            .ok_or_else(|| {
-                ReadError::from(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "stream ended before header",
-                ))
-            })?;
-        Ok(header)
-    }
-
-    pub(crate) async fn write(
-        self,
-        stream: &mut SendStream,
-        buffer: &mut Vec<u8>,
-        max_message_size: usize,
-    ) -> Result<(), WriteError> {
-        write_frame(stream, &self, buffer, max_message_size).await?;
-        Ok(())
+impl IrohRemoteConnection {
+    pub fn new(connection: Connection) -> Self {
+        Self(connection)
     }
 }
 
-pub(crate) struct RecvLoop {
-    remote_node_id: NodeId,
-    conn: Connection,
-    max_message_size: usize,
-    in_event_tx: mpsc::Sender<InEvent>,
-}
-
-impl RecvLoop {
-    pub(crate) fn new(
-        remote_node_id: NodeId,
-        conn: Connection,
-        in_event_tx: mpsc::Sender<InEvent>,
-        max_message_size: usize,
-    ) -> Self {
-        Self {
-            remote_node_id,
-            conn,
-            max_message_size,
-            in_event_tx,
-        }
+impl irpc::rpc::RemoteConnection for IrohRemoteConnection {
+    fn clone_boxed(&self) -> Box<dyn irpc::rpc::RemoteConnection> {
+        Box::new(self.clone())
     }
 
-    pub(crate) async fn run(&mut self) -> Result<(), ReadError> {
-        let mut read_futures = FuturesUnordered::new();
-        let mut conn_is_closed = false;
-        let closed = self.conn.closed();
-        tokio::pin!(closed);
-        while !conn_is_closed || !read_futures.is_empty() {
-            tokio::select! {
-                _ = &mut closed, if !conn_is_closed => {
-                    conn_is_closed = true;
-                }
-                stream = self.conn.accept_uni(), if !conn_is_closed => {
-                    let stream = match stream {
-                        Ok(stream) => stream,
-                        Err(_) => {
-                            conn_is_closed = true;
-                            continue;
-                        }
-                    };
-                    let state = RecvStreamState::new(stream, self.max_message_size).await?;
-                    debug!(topic=%state.header.topic_id.fmt_short(), "stream opened");
-                    read_futures.push(state.next());
-                }
-                Some(res) = read_futures.next(), if !read_futures.is_empty() => {
-                    let (state, msg) = match res {
-                        Ok((state, msg)) => (state, msg),
-                        Err(err) => {
-                            debug!("recv stream closed with error: {err:#}");
-                            continue;
-                        }
-                    };
-                    match msg {
-                        None => debug!(topic=%state.header.topic_id.fmt_short(), "stream closed"),
-                        Some(msg) => {
-                            if self.in_event_tx.send(InEvent::RecvMessage(self.remote_node_id, msg)).await.is_err() {
-                                debug!("stop recv loop: actor closed");
-                                break;
-                            }
-                            read_futures.push(state.next());
-                        }
-                    }
-                }
-            }
-        }
-        debug!("recv loop closed");
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-struct RecvStreamState {
-    stream: RecvStream,
-    header: StreamHeader,
-    buffer: BytesMut,
-    max_message_size: usize,
-}
-
-impl RecvStreamState {
-    async fn new(mut stream: RecvStream, max_message_size: usize) -> Result<Self, ReadError> {
-        let mut buffer = BytesMut::new();
-        let header = StreamHeader::read(&mut stream, &mut buffer, max_message_size).await?;
-        Ok(Self {
-            buffer: BytesMut::new(),
-            max_message_size,
-            stream,
-            header,
+    fn open_bi(
+        &self,
+    ) -> BoxFuture<
+        Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream), irpc::RequestError>,
+    > {
+        let this = self.0.clone();
+        Box::pin(async move {
+            let pair = this.open_bi().await?;
+            Ok(pair)
         })
     }
-
-    /// Reads the next message from the stream.
-    ///
-    /// Returns `self` and the next message, or `None` if the stream ended gracefully.
-    ///
-    /// ## Cancellation safety
-    ///
-    /// This function is not cancellation-safe.
-    async fn next(mut self) -> Result<(Self, Option<ProtoMessage>), ReadError> {
-        let msg = read_frame(&mut self.stream, &mut self.buffer, self.max_message_size).await?;
-        let msg = msg.map(|msg| ProtoMessage {
-            topic: self.header.topic_id,
-            message: msg,
-        });
-        Ok((self, msg))
-    }
 }
 
-pub(crate) struct SendLoop {
-    conn: Connection,
-    streams: HashMap<TopicId, SendStream>,
-    buffer: Vec<u8>,
-    max_message_size: usize,
-    finishing: JoinSet<()>,
-    send_rx: mpsc::Receiver<ProtoMessage>,
+pub(crate) fn accept_stream<T: RemoteService>(
+    connection: Connection,
+) -> impl Stream<Item = std::io::Result<T::Message>> {
+    n0_future::stream::unfold(Some(connection), async |conn| {
+        let conn = conn?;
+        match irpc_iroh::read_request::<T>(&conn).await {
+            Err(err) => Some((Err(err), None)),
+            Ok(None) => None,
+            Ok(Some(request)) => Some((Ok(request), Some(conn))),
+        }
+    })
 }
 
-impl SendLoop {
-    pub(crate) fn new(
-        conn: Connection,
-        send_rx: mpsc::Receiver<ProtoMessage>,
-        max_message_size: usize,
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AddrInfo {
+    pub(crate) relay_url: Option<RelayUrl>,
+    pub(crate) direct_addresses: BTreeSet<SocketAddr>,
+}
+
+impl From<NodeAddr> for AddrInfo {
+    fn from(
+        NodeAddr {
+            relay_url,
+            direct_addresses,
+            ..
+        }: NodeAddr,
     ) -> Self {
         Self {
-            conn,
-            max_message_size,
-            buffer: Default::default(),
-            streams: Default::default(),
-            finishing: Default::default(),
-            send_rx,
-        }
-    }
-
-    pub(crate) async fn run(&mut self, queue: Vec<ProtoMessage>) -> Result<(), WriteError> {
-        for msg in queue {
-            self.write_message(&msg).await?;
-        }
-        let conn_clone = self.conn.clone();
-        let closed = conn_clone.closed();
-        tokio::pin!(closed);
-        loop {
-            tokio::select! {
-                biased;
-                _ = &mut closed => break,
-                Some(msg) = self.send_rx.recv() => self.write_message(&msg).await?,
-                _ = self.finishing.join_next(), if !self.finishing.is_empty() => {}
-                else => break,
-            }
-        }
-
-        // Close remaining streams.
-        for (topic_id, mut stream) in self.streams.drain() {
-            stream.finish().ok();
-            self.finishing.spawn(
-                async move {
-                    stream.stopped().await.ok();
-                    debug!(topic=%topic_id.fmt_short(), "stream closed");
-                }
-                .instrument(tracing::Span::current()),
-            );
-        }
-        if !self.finishing.is_empty() {
-            trace!(
-                "send loop closing, waiting for {} send streams to finish",
-                self.finishing.len()
-            );
-            // Wait for the remote to acknowledge all streams are finished.
-            if let Err(_elapsed) = n0_future::time::timeout(Duration::from_secs(5), async move {
-                while self.finishing.join_next().await.is_some() {}
-            })
-            .await
-            {
-                debug!("not all send streams finished within timeout, abort")
-            }
-        }
-        debug!("send loop closed");
-        Ok(())
-    }
-
-    /// Write a [`ProtoMessage`] as a length-prefixed, postcard-encoded message on its stream.
-    ///
-    /// If no stream is opened yet, this opens a new stream for the topic and writes the topic header.
-    ///
-    /// This function is not cancellation-safe.
-    pub async fn write_message(&mut self, message: &ProtoMessage) -> Result<(), WriteError> {
-        let ProtoMessage { topic, message } = message;
-        let topic_id = *topic;
-        let is_last = message.is_disconnect();
-
-        let mut entry = match self.streams.entry(topic_id) {
-            hash_map::Entry::Occupied(entry) => entry,
-            hash_map::Entry::Vacant(entry) => {
-                let mut stream = self.conn.open_uni().await?;
-                let header = StreamHeader { topic_id };
-                header
-                    .write(&mut stream, &mut self.buffer, self.max_message_size)
-                    .await?;
-                debug!(topic=%topic_id.fmt_short(), "stream opened");
-                entry.insert_entry(stream)
-            }
-        };
-        let stream = entry.get_mut();
-
-        write_frame(stream, message, &mut self.buffer, self.max_message_size).await?;
-
-        if is_last {
-            trace!(topic=%topic_id.fmt_short(), "stream closing");
-            let mut stream = entry.remove();
-            if stream.finish().is_ok() {
-                self.finishing.spawn(
-                    async move {
-                        stream.stopped().await.ok();
-                        debug!(topic=%topic_id.fmt_short(), "stream closed");
-                    }
-                    .instrument(tracing::Span::current()),
-                );
-            }
-        }
-
-        Ok(())
-    }
-}
-
-/// Errors related to message reading
-#[allow(missing_docs)]
-#[common_fields({
-    backtrace: Option<snafu::Backtrace>,
-})]
-#[derive(Debug, Snafu)]
-#[snafu(module)]
-#[non_exhaustive]
-pub(crate) enum ReadError {
-    /// Deserialization failed
-    #[snafu(transparent)]
-    De { source: postcard::Error },
-    /// IO error
-    #[snafu(transparent)]
-    Io { source: std::io::Error },
-    /// Message was larger than the configured maximum message size
-    #[snafu(display("message too large"))]
-    TooLarge {},
-}
-
-/// Read a length-prefixed frame and decode with postcard.
-pub async fn read_frame<T: DeserializeOwned>(
-    reader: &mut RecvStream,
-    buffer: &mut BytesMut,
-    max_message_size: usize,
-) -> Result<Option<T>, ReadError> {
-    match read_lp(reader, buffer, max_message_size).await? {
-        None => Ok(None),
-        Some(data) => {
-            let message = postcard::from_bytes(&data)?;
-            Ok(Some(message))
+            relay_url,
+            direct_addresses,
         }
     }
 }
 
-/// Reads a length prefixed buffer.
-///
-/// Returns the frame as raw bytes.  If the end of the stream is reached before
-/// the frame length starts, `None` is returned.
-pub async fn read_lp(
-    reader: &mut RecvStream,
-    buffer: &mut BytesMut,
-    max_message_size: usize,
-) -> Result<Option<Bytes>, ReadError> {
-    let size = match reader.read_u32().await {
-        Ok(size) => size,
-        Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(err) => return Err(err.into()),
-    };
-    let size = usize::try_from(size).map_err(|_| read_error::TooLargeSnafu.build())?;
-    if size > max_message_size {
-        return Err(read_error::TooLargeSnafu.build());
+impl AddrInfo {
+    pub(crate) fn encode(&self) -> PeerData {
+        let bytes = postcard::to_stdvec(self).expect("serializing AddrInfo may not fail");
+        PeerData::new(bytes)
     }
-    buffer.resize(size, 0u8);
-    reader
-        .read_exact(&mut buffer[..])
-        .await
-        .map_err(io::Error::other)?;
-    Ok(Some(buffer.split_to(size).freeze()))
-}
 
-/// Writes a length-prefixed frame.
-pub async fn write_frame<T: Serialize>(
-    stream: &mut SendStream,
-    message: &T,
-    buffer: &mut Vec<u8>,
-    max_message_size: usize,
-) -> Result<(), WriteError> {
-    let len = postcard::experimental::serialized_size(&message)?;
-    if len >= max_message_size {
-        return Err(write_error::TooLargeSnafu.build());
+    pub(crate) fn decode(peer_data: &PeerData) -> Result<AddrInfo, postcard::Error> {
+        let bytes = peer_data.as_bytes();
+        if bytes.is_empty() {
+            return Ok(AddrInfo::default());
+        }
+        let info = postcard::from_bytes(bytes)?;
+        Ok(info)
     }
-    buffer.clear();
-    buffer.resize(len, 0u8);
-    let slice = postcard::to_slice(&message, buffer)?;
-    stream.write_u32(len as u32).await?;
-    stream.write_all(slice).await.map_err(io::Error::other)?;
-    Ok(())
+
+    pub(crate) fn into_node_addr(self, node_id: NodeId) -> NodeAddr {
+        NodeAddr {
+            node_id,
+            relay_url: self.relay_url,
+            direct_addresses: self.direct_addresses,
+        }
+    }
 }
 
 /// A [`TimerMap`] with an async method to wait for the next timer expiration.
@@ -403,11 +123,6 @@ impl<T> Default for Timers<T> {
 }
 
 impl<T> Timers<T> {
-    /// Creates a new timer map.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Inserts a new entry at the specified instant
     pub fn insert(&mut self, instant: Instant, item: T) {
         self.map.insert(instant, item);
@@ -427,5 +142,102 @@ impl<T> Timers<T> {
     /// Pops the earliest timer that expires at or before `now`.
     pub fn pop_before(&mut self, now: Instant) -> Option<(Instant, T)> {
         self.map.pop_before(now)
+    }
+}
+
+#[derive(Debug)]
+struct ConnectionCounterInner {
+    count: AtomicUsize,
+    notify: Notify,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ConnectionCounter {
+    inner: Arc<ConnectionCounterInner>,
+}
+
+impl ConnectionCounter {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: Arc::new(ConnectionCounterInner {
+                count: Default::default(),
+                notify: Notify::new(),
+            }),
+        }
+    }
+
+    /// Increase the connection count and return a guard for the new connection
+    pub(crate) fn get_one(&self) -> OneConnection {
+        self.inner.count.fetch_add(1, Ordering::SeqCst);
+        OneConnection {
+            inner: self.inner.clone(),
+        }
+    }
+
+    pub(crate) fn guard<T>(&self, item: T) -> Guarded<T> {
+        Guarded::new(item, self.get_one())
+    }
+
+    pub(crate) fn is_idle(&self) -> bool {
+        self.inner.count.load(Ordering::SeqCst) == 0
+    }
+
+    pub(crate) async fn idle(&self) {
+        self.inner.notify.notified().await
+    }
+
+    pub(crate) async fn idle_for(&self, duration: Duration) {
+        let fut = self.idle();
+        tokio::pin!(fut);
+        loop {
+            (&mut fut).await;
+            fut.set(self.idle());
+            tokio::time::sleep(duration).await;
+            if self.is_idle() {
+                break;
+            }
+        }
+    }
+}
+
+/// Guard for one connection
+#[derive(Debug)]
+pub(crate) struct OneConnection {
+    inner: Arc<ConnectionCounterInner>,
+}
+
+impl Clone for OneConnection {
+    fn clone(&self) -> Self {
+        self.inner.count.fetch_add(1, Ordering::SeqCst);
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl Drop for OneConnection {
+    fn drop(&mut self) {
+        let prev = self.inner.count.fetch_sub(1, Ordering::SeqCst);
+        if prev == 1 {
+            self.inner.notify.notify_waiters();
+        }
+    }
+}
+
+#[derive(derive_more::Deref, derive_more::DerefMut, Debug)]
+pub(crate) struct Guarded<T> {
+    #[deref]
+    #[deref_mut]
+    inner: T,
+    guard: OneConnection,
+}
+
+impl<T> Guarded<T> {
+    pub(crate) fn new(inner: T, guard: OneConnection) -> Self {
+        Self { inner, guard }
+    }
+
+    pub(crate) fn split(self) -> (T, OneConnection) {
+        (self.inner, self.guard)
     }
 }
