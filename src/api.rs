@@ -25,7 +25,7 @@ const TOPIC_COMMANDS_CAP: usize = 64;
 
 /// Input messages for the gossip actor.
 #[rpc_requests(message = RpcMessage, rpc_feature = "rpc")]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, strum::Display)]
 pub(crate) enum Request {
     #[rpc(tx=mpsc::Sender<Event>, rx=mpsc::Receiver<Command>)]
     Join(JoinRequest),
@@ -367,7 +367,7 @@ pub struct Message {
 }
 
 /// Command for a gossip topic.
-#[derive(Serialize, Deserialize, derive_more::Debug, Clone)]
+#[derive(Serialize, Deserialize, derive_more::Debug, Clone, strum::Display)]
 pub enum Command {
     /// Broadcasts a message to all nodes in the swarm.
     Broadcast(#[debug("Bytes({})", _0.len())] Bytes),

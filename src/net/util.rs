@@ -2,13 +2,12 @@
 
 use std::{collections::BTreeSet, net::SocketAddr, pin::Pin};
 
-use iroh::{
-    endpoint::Connection,
-    NodeAddr, NodeId, RelayUrl,
-};
+use iroh::{endpoint::Connection, NodeAddr, NodeId, RelayUrl};
+use irpc::{rpc::RemoteService, RpcMessage};
 use n0_future::{
     boxed::BoxFuture,
-    time::{sleep_until, Instant, Sleep}, StreamExt,
+    time::{sleep_until, Instant, Sleep},
+    Stream, StreamExt,
 };
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +37,21 @@ impl irpc::rpc::RemoteConnection for IrohRemoteConnection {
         Box::pin(async move {
             let pair = this.open_bi().await?;
             Ok(pair)
+        })
+    }
+}
+
+impl IrohRemoteConnection {
+    pub(crate) fn into_request_stream<T: RemoteService>(
+        self,
+    ) -> impl Stream<Item = std::io::Result<T::Message>> {
+        n0_future::stream::unfold(Some(self.0), async |conn| {
+            let conn = conn?;
+            match irpc_iroh::read_request::<T>(&conn).await {
+                Err(err) => Some((Err(err), None)),
+                Ok(None) => None,
+                Ok(Some(request)) => Some((Ok(request), Some(conn))),
+            }
         })
     }
 }

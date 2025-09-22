@@ -1919,6 +1919,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu",
+ "strum",
  "testresult",
  "tokio",
  "tokio-util",
