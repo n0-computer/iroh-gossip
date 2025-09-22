@@ -268,11 +268,7 @@ enum Incoming {
 
 enum ActorToTopic {
     Api(ApiJoinRequest),
-    RemoteConnected(
-        NodeId,
-        channel::mpsc::Sender<ProtoMessageOpt>,
-        channel::mpsc::Receiver<ProtoMessageOpt>,
-    ),
+    RemoteConnected(NodeId, RemoteJoinRequest),
 }
 
 enum TopicToActor {
@@ -312,7 +308,7 @@ impl Actor {
             tokio::select! {
                 Some(addr) = node_addr_stream.next() => {
                     let data = addr.map(|addr| AddrInfo::from(addr).encode());
-                    self.me_data.set(data);
+                    let _ = self.me_data.set(data);
                 }
                 Some(msg) = self.incoming_rx.recv() => {
                     match msg {
@@ -424,8 +420,9 @@ impl Actor {
                     return;
                 }
             };
+            let msg = WithChannels::from((req, tx, rx));
             if let Err(_) = handle
-                .send(ActorToTopic::RemoteConnected(remote, tx, rx))
+                .send(ActorToTopic::RemoteConnected(remote, msg))
                 .await
             {
                 warn!(topic=%topic_id.fmt_short(), "Topic actor dead");
@@ -435,14 +432,11 @@ impl Actor {
 
     #[instrument("request", skip_all, fields(remote=%remote.fmt_short()))]
     async fn handle_remote_request(&mut self, remote: NodeId, request: GossipMessage) {
-        let (topic_id, msg) = match request {
+        let (topic_id, req) = match request {
             GossipMessage::Join(req) => (req.inner.topic_id, req),
         };
         if let Some(topic) = self.topics.get(&topic_id) {
-            if let Err(_err) = topic
-                .send(ActorToTopic::RemoteConnected(remote, msg.tx, msg.rx))
-                .await
-            {
+            if let Err(_err) = topic.send(ActorToTopic::RemoteConnected(remote, req)).await {
                 warn!(topic=%topic_id.fmt_short(), "Topic actor dead");
             }
         } else {
@@ -560,7 +554,8 @@ impl TopicActor {
 
     async fn handle_message(&mut self, msg: ActorToTopic) {
         match msg {
-            ActorToTopic::RemoteConnected(remote, tx, rx) => {
+            ActorToTopic::RemoteConnected(remote, msg) => {
+                let WithChannels { tx, rx, .. } = msg;
                 self.remote_receivers
                     .push(Box::pin(into_stream(rx).map(move |msg| (remote, msg))));
                 let sender = self.remote_senders.entry(remote).or_default();
