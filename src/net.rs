@@ -9,7 +9,7 @@ use bytes::Bytes;
 use iroh::{
     endpoint::{ConnectError, Connection},
     protocol::{AcceptError, ProtocolHandler},
-    Endpoint, NodeAddr, NodeId, Watcher,
+    Endpoint, NodeId, Watcher,
 };
 use irpc::{
     channel::{self, RecvError},
@@ -678,19 +678,19 @@ impl TopicActor {
         }
         let event = api::Event::from(event);
 
-        // This is like an async send + retain (remove failed senders)
-        // TODO: check perf / optimize if needed
+        // This is an async send + retain (remove failed senders)
+        // TODO: check perf and optimize if needed.
+        // TODO: Add timeout to not let slow receivers stall everything.
         let to_remove = self
             .api_senders
             .iter()
             .enumerate()
-            .map(move |(i, tx)| {
-                let event = event.clone();
-                async move { tx.send(event).await.err().map(|_| i) }
-            })
+            .map(async |(i, tx)| tx.send(event.clone()).await.err().map(|_| i))
             .join_all()
-            .await;
-        for i in to_remove.into_iter().flatten().rev() {
+            .await
+            .into_iter()
+            .flatten();
+        for i in to_remove.rev() {
             self.api_senders.remove(i);
         }
     }

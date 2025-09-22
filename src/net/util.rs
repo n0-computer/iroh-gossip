@@ -1,29 +1,18 @@
 //! Utilities for iroh-gossip networking
 
-use std::{collections::BTreeSet, io, net::SocketAddr, pin::Pin, time::Duration};
+use std::{collections::BTreeSet, net::SocketAddr, pin::Pin};
 
-use bytes::{Bytes, BytesMut};
 use iroh::{
-    endpoint::{Connection, RecvStream, SendStream},
+    endpoint::Connection,
     NodeAddr, NodeId, RelayUrl,
 };
 use n0_future::{
     boxed::BoxFuture,
-    time::{sleep_until, Instant, Sleep},
-    FuturesUnordered, Stream, StreamExt,
+    time::{sleep_until, Instant, Sleep}, StreamExt,
 };
-use nested_enum_utils::common_fields;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use snafu::Snafu;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    sync::mpsc,
-    task::JoinSet,
-};
-use tracing::{debug, trace, Instrument};
+use serde::{Deserialize, Serialize};
 
-use super::{InEvent, ProtoMessage};
-use crate::proto::{topic::Message, util::TimerMap, PeerData, TopicId};
+use crate::proto::{util::TimerMap, PeerData};
 
 /// A connection to a remote service.
 #[derive(Debug, Clone)]
