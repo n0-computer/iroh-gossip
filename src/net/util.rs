@@ -99,7 +99,7 @@ impl AddrInfo {
         Ok(info)
     }
 
-    pub(crate) fn to_node_addr(self, node_id: NodeId) -> NodeAddr {
+    pub(crate) fn into_node_addr(self, node_id: NodeId) -> NodeAddr {
         NodeAddr {
             node_id,
             relay_url: self.relay_url,
@@ -184,6 +184,10 @@ impl ConnectionCounter {
         }
     }
 
+    pub(crate) fn guard<T>(&self, item: T) -> Guarded<T> {
+        Guarded::new(item, self.get_one())
+    }
+
     pub(crate) fn is_idle(&self) -> bool {
         self.inner.count.load(Ordering::SeqCst) == 0
     }
@@ -217,5 +221,23 @@ impl Drop for OneConnection {
             tracing::trace!("OneConnection dead");
             self.inner.notify.notify_waiters();
         }
+    }
+}
+
+#[derive(derive_more::Deref, derive_more::DerefMut, Debug)]
+pub(crate) struct Guarded<T> {
+    #[deref]
+    #[deref_mut]
+    inner: T,
+    guard: OneConnection,
+}
+
+impl<T> Guarded<T> {
+    pub(crate) fn new(inner: T, guard: OneConnection) -> Self {
+        Self { inner, guard }
+    }
+
+    pub(crate) fn split(self) -> (T, OneConnection) {
+        (self.inner, self.guard)
     }
 }

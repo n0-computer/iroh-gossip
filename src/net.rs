@@ -27,23 +27,24 @@ use n0_future::{
 };
 use n0_watcher::{Direct, Watchable};
 use rand::rngs::StdRng;
-use snafu::{ResultExt, Snafu};
+use snafu::Snafu;
 use tokio::{
     sync::{broadcast, mpsc},
     task::JoinSet,
 };
 use tracing::{debug, error_span, info, instrument, trace, warn, Instrument};
 
+use self::{
+    dialer::Dialer,
+    net_proto::GossipMessage,
+    util::{AddrInfo, ConnectionCounter, Guarded, IrohRemoteConnection, Timers},
+};
 use crate::{
     api::{self, GossipApi},
     metrics::{inc, Metrics},
     net::util::accept_stream,
     proto::{self, Config, HyparviewConfig, PeerData, PlumtreeConfig, TopicId},
 };
-
-use self::dialer::Dialer;
-use self::net_proto::GossipMessage;
-use self::util::{AddrInfo, ConnectionCounter, IrohRemoteConnection, OneConnection, Timers};
 
 mod connection_pool;
 mod dialer;
@@ -283,6 +284,8 @@ enum ActorToTopic {
 type ApiJoinRequest = WithChannels<api::JoinRequest, api::Request>;
 type ApiRecvStream = BoxStream<Result<api::Command, channel::RecvError>>;
 type RemoteRecvStream = BoxStream<(NodeId, Result<Option<ProtoMessage>, channel::RecvError>)>;
+type AcceptRemoteRequestsStream =
+    MergeUnbounded<BoxStream<(NodeId, std::io::Result<Guarded<net_proto::GossipMessage>>)>>;
 
 struct Actor {
     me: NodeId,
@@ -300,12 +303,7 @@ struct Actor {
     our_peer_data: n0_watcher::Watchable<Option<PeerData>>,
     metrics: Arc<Metrics>,
     node_addr_updates: BoxStream<Option<NodeAddr>>,
-    accepting: MergeUnbounded<
-        BoxStream<(
-            NodeId,
-            std::io::Result<(net_proto::GossipMessage, OneConnection)>,
-        )>,
-    >,
+    accepting: AcceptRemoteRequestsStream,
 }
 
 impl Actor {
@@ -405,7 +403,7 @@ impl Actor {
                             Err(err) => warn!(remote=%node_id.fmt_short(), ?err, len=data.inner().len(), "Failed to decode peer data"),
                             Ok(info) => {
                                 debug!(peer = ?node_id, "add known addrs: {info:?}");
-                                let node_addr = info.to_node_addr(node_id);
+                                let node_addr = info.into_node_addr(node_id);
                                 if let Err(err) = self
                                     .endpoint()
                                     .add_node_addr_with_source(node_addr, DISCOVERY_PROVENANCE)
@@ -426,7 +424,7 @@ impl Actor {
             Some((node_id, res)) = self.accepting.next(), if !self.accepting.is_empty() => {
                 trace!(remote=%node_id.fmt_short(), res=?res.as_ref().map(|_| ()), "tick: accepting");
                 match res {
-                    Ok((request, guard)) => self.handle_remote_message(node_id, request, guard).await,
+                    Ok(request) => self.handle_remote_message(node_id, request).await,
                     Err(err) => {
                         debug!(remote=%node_id.fmt_short(), ?err, "accepting request from remote failed");
                     }
@@ -544,7 +542,7 @@ impl Actor {
         let counter = state.counter.clone();
         self.accepting.push(Box::pin(
             accept_stream::<net_proto::Request>(connection.clone())
-                .map(move |req| (remote, req.map(|r| (r, counter.get_one())))),
+                .map(move |req| (remote, req.map(|r| counter.guard(r)))),
         ));
 
         // Close on idle (if dialed) or await close (if accepted).
@@ -573,21 +571,17 @@ impl Actor {
     }
 
     #[instrument("request", skip_all, fields(remote=%remote.fmt_short()))]
-    async fn handle_remote_message(
-        &mut self,
-        remote: NodeId,
-        request: GossipMessage,
-        guard: OneConnection,
-    ) {
-        let (topic_id, req) = match request {
+    async fn handle_remote_message(&mut self, remote: NodeId, request: Guarded<GossipMessage>) {
+        let (request, guard) = request.split();
+        let (topic_id, request) = match request {
             GossipMessage::Join(req) => (req.inner.topic_id, req),
         };
         if let Some(topic) = self.topics.get(&topic_id) {
             if let Err(_err) = topic
                 .send(ActorToTopic::Connected {
                     remote,
-                    tx: Guarded::new(req.tx, guard.clone()),
-                    rx: Guarded::new(req.rx, guard.clone()),
+                    tx: Guarded::new(request.tx, guard.clone()),
+                    rx: Guarded::new(request.rx, guard.clone()),
                 })
                 .await
             {
@@ -614,7 +608,7 @@ impl Actor {
             self.topic_tasks.spawn(fut);
             handle
         });
-        if let Err(_) = topic.send(ActorToTopic::Api(msg)).await {
+        if topic.send(ActorToTopic::Api(msg)).await.is_err() {
             warn!(topic=%topic_id.fmt_short(), "Topic actor dead");
         }
     }
@@ -703,10 +697,10 @@ impl TopicHandle {
             to_actor_tx,
             peer_data,
             forward_event_tx,
+            metrics,
             init: false,
             #[cfg(test)]
             joined: joined.clone(),
-            metrics,
             timers: Default::default(),
             neighbors: Default::default(),
             out_events: Default::default(),
@@ -714,7 +708,7 @@ impl TopicHandle {
             remote_senders: Default::default(),
             remote_receivers: Default::default(),
             drop_peers_queue: Default::default(),
-            forward_event_tasks: JoinSet::new(),
+            forward_event_tasks: Default::default(),
         };
         let fut = actor
             .run()
@@ -888,7 +882,7 @@ impl TopicActor {
                     self.send(node_id, message).await;
                 }
                 OutEvent::EmitEvent(event) => {
-                    self.handle_event(event).await;
+                    self.handle_event(event);
                 }
                 OutEvent::ScheduleTimer(delay, timer) => {
                     self.timers.insert(now + delay, timer);
@@ -925,7 +919,7 @@ impl TopicActor {
         }
     }
 
-    async fn handle_event(&mut self, event: ProtoEvent) {
+    fn handle_event(&mut self, event: ProtoEvent) {
         match &event {
             ProtoEvent::NeighborUp(n) => {
                 #[cfg(test)]
@@ -965,23 +959,6 @@ async fn forward_events(
         };
         if let Err(_err) = tx.send(event).await {
             break;
-        }
-    }
-}
-
-#[derive(derive_more::Deref, derive_more::DerefMut, Debug)]
-struct Guarded<T> {
-    #[deref]
-    #[deref_mut]
-    inner: T,
-    _guard: OneConnection,
-}
-
-impl<T> Guarded<T> {
-    fn new(inner: T, guard: OneConnection) -> Self {
-        Self {
-            inner,
-            _guard: guard,
         }
     }
 }
@@ -1342,7 +1319,7 @@ pub(crate) mod tests {
                     match ev {
                         Event::Lagged => tracing::debug!("missed some messages :("),
                         Event::Received(_) => unreachable!("test does not send messages"),
-                        other @ _ => tracing::debug!(?other, "gs event"),
+                        other => tracing::debug!(?other, "gs event"),
                     }
                 }
 
