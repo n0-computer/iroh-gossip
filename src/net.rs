@@ -1054,7 +1054,10 @@ pub(crate) mod tests {
     use tracing_test::traced_test;
 
     use super::*;
-    use crate::{api::Event, ALPN};
+    use crate::{
+        api::{ApiError, Event},
+        ALPN,
+    };
 
     impl Gossip {
         pub(super) async fn t_new(
@@ -1276,11 +1279,11 @@ pub(crate) mod tests {
     /// - Subscribe both nodes to the same topic. The first node will subscribe twice and connect
     ///   to the second node. The second node will subscribe without bootstrap.
     /// - Ensure that the first node removes the subscription iff all topic handles have been
-    ///   droppetopicd
+    ///   dropped.
     // NOTE: this is a regression test.
     #[tokio::test]
     #[traced_test]
-    async fn subscription_cleanup() -> testresult::TestResult {
+    async fn subscription_cleanup() -> Result {
         let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
         let ct = CancellationToken::new();
         let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
@@ -1345,7 +1348,6 @@ pub(crate) mod tests {
             // first subscribe is done immediately
             tracing::info!("subscribing the first time");
             let sub_1a = go1.subscribe_and_join(topic, vec![node_id2]).await?;
-            tracing::info!("subscribed!");
 
             // wait for signal to subscribe a second time
             rx.recv().await.expect("signal for second subscribe");
@@ -1360,7 +1362,6 @@ pub(crate) mod tests {
 
             // wait for cancellation
             ct1.cancelled().await;
-            tracing::info!("go1 dropped!");
             drop(go1);
 
             Ok::<_, n0_snafu::Error>(())
@@ -1369,35 +1370,36 @@ pub(crate) mod tests {
         let go1_handle = task::spawn(go1_task);
 
         // advance and check that the topic is now subscribed
-        tracing::info!("now wait subscribe 1");
-        actor.steps(4).await?; // api_rx subscribe; topic_rx connection request; dialer connected; topic_rx update peer data
+        actor.steps(4).await?; // api_rx subscribe;
+                               // internal_rx connection request (from topic actor);
+                               // dialer connected;
+                               // internal_rx update peer data (from topic actor);
         tracing::info!("subscribe and join done, should be joined");
         let state = actor.topics.get(&topic).expect("get registered topic");
         assert!(state.joined());
 
         // signal the second subscribe, we should remain subscribed
-        tx.send(()).await?;
-        tracing::info!("now wait subscribe 2");
-        actor.steps(1).await?; // api_subscribe
+        tx.send(()).await.e()?;
+        actor.steps(1).await?; // api_rx subscribe;
         let state = actor.topics.get(&topic).expect("get registered topic");
         assert!(state.joined());
 
         // signal to drop the second handle, the topic should no longer be subscribed
-        tx.send(()).await?;
-        actor.steps(1).await?; // topic closed
+        tx.send(()).await.e()?;
+        actor.steps(1).await?; // topic task finished
 
         assert!(!actor.topics.contains_key(&topic));
 
         // cleanup and ensure everything went as expected
         ct.cancel();
-        let wait = Duration::from_secs(5);
-        timeout(wait, ep1_handle).await?;
-        timeout(wait, ep2_handle).await?;
-        timeout(wait, go1_handle).await???;
-        timeout(wait, go2_handle).await???;
-        timeout(wait, actor.finish()).await?;
+        let wait = Duration::from_secs(2);
+        timeout(wait, ep1_handle).await.e()?;
+        timeout(wait, ep2_handle).await.e()?;
+        timeout(wait, go1_handle).await.e()?.e()??;
+        timeout(wait, go2_handle).await.e()?.e()??;
+        timeout(wait, actor.finish()).await.e()?;
 
-        testresult::TestResult::Ok(())
+        Ok(())
     }
 
     /// Test that nodes can reconnect to each other.
@@ -1407,9 +1409,8 @@ pub(crate) mod tests {
     /// times.
     // NOTE: This is a regression test
     #[tokio::test(flavor = "multi_thread")]
-    // #[traced_test]
-    async fn can_reconnect() -> testresult::TestResult {
-        tracing_subscriber::fmt::try_init().ok();
+    #[traced_test]
+    async fn can_reconnect() -> Result {
         let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
         let ct = CancellationToken::new();
         let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
@@ -1436,23 +1437,20 @@ pub(crate) mod tests {
         let addr1 = NodeAddr::new(node_id1).with_relay_url(relay_url.clone());
         ep2.add_node_addr(addr1)?;
         let go2_task = async move {
-            info!("go2 sub1 subscribe");
             let mut sub = go2.subscribe(topic, Vec::new()).await?;
             sub.joined().await?;
-            info!("go2 sub1 joined");
 
             rx.recv().await.expect("signal to unsubscribe");
-            tracing::info!("go2 sub1 drop");
+            tracing::info!("unsubscribing");
             drop(sub);
 
             rx.recv().await.expect("signal to subscribe again");
-            tracing::info!("go2 sub2 subscribe");
+            tracing::info!("resubscribing");
             let mut sub = go2.subscribe(topic, vec![node_id1]).await?;
 
             sub.joined().await?;
-            tracing::info!("go2 sub2 joined!");
 
-            Ok::<_, n0_snafu::Error>(())
+            Result::<_, ApiError>::Ok(())
         }
         .instrument(tracing::debug_span!("node_2", node_id2=%node_id2.fmt_short()));
         let go2_handle = task::spawn(go2_task);
@@ -1466,33 +1464,33 @@ pub(crate) mod tests {
         info!("go1 joined");
 
         // signal node_2 to unsubscribe
-        tx.send(()).await?;
+        tx.send(()).await.e()?;
 
         info!("wait for neighbor down");
         // we should receive a Neighbor down event
-        let conn_timeout = Duration::from_millis(2000);
-        let ev = timeout(conn_timeout, sub.try_next()).await??;
+        let conn_timeout = Duration::from_millis(500);
+        let ev = timeout(conn_timeout, sub.try_next()).await.e()??;
         assert_eq!(ev, Some(Event::NeighborDown(node_id2)));
         tracing::info!("node 2 left");
 
         // signal node_2 to subscribe again
-        tx.send(()).await?;
+        tx.send(()).await.e()?;
 
         info!("wait for neighbor up");
         let conn_timeout = Duration::from_millis(500);
-        let ev = timeout(conn_timeout, sub.try_next()).await??;
+        let ev = timeout(conn_timeout, sub.try_next()).await.e()??;
         assert_eq!(ev, Some(Event::NeighborUp(node_id2)));
         tracing::info!("node 2 rejoined!");
 
         // wait for go2 to also be rejoined, then the task terminates
         let wait = Duration::from_secs(2);
-        timeout(wait, go2_handle).await???;
+        timeout(wait, go2_handle).await.e()?.e()??;
         ct.cancel();
         // cleanup and ensure everything went as expected
-        timeout(wait, ep1_handle).await?;
-        timeout(wait, ep2_handle).await?;
+        timeout(wait, ep1_handle).await.e()?;
+        timeout(wait, ep2_handle).await.e()?;
 
-        testresult::TestResult::Ok(())
+        Ok(())
     }
 
     #[tokio::test]
