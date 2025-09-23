@@ -67,7 +67,7 @@ type Command = proto::topic::Command<NodeId>;
 ///
 /// Each topic is a separate broadcast tree with separate memberships.
 /// A topic has to be joined before you can publish or subscribe on the topic.
-/// To join the swarm for a topic, you have to know the [`PublicKey`] of at least one peer that also joined the topic.
+/// To join the swarm for a topic, you have to know the [`NodeId`] of at least one peer that also joined the topic.
 ///
 /// Messages published on the swarm will be delivered to all peers that joined the swarm for that
 /// topic. You will also be relaying (gossiping) messages published by other peers.
