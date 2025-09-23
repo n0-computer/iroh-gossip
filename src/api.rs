@@ -25,7 +25,7 @@ const TOPIC_COMMANDS_CAP: usize = 64;
 
 /// Input messages for the gossip actor.
 #[rpc_requests(message = RpcMessage, rpc_feature = "rpc")]
-#[derive(Debug, Serialize, Deserialize, strum::Display)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) enum Request {
     #[rpc(tx=mpsc::Sender<Event>, rx=mpsc::Receiver<Command>)]
     Join(JoinRequest),
@@ -430,7 +430,7 @@ mod tests {
 
         use crate::{
             api::{Event, GossipApi},
-            net::{test::create_endpoint, Gossip},
+            net::{tests::create_endpoint, Gossip},
             proto::TopicId,
             ALPN,
         };

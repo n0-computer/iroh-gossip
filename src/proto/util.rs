@@ -3,14 +3,9 @@
 use std::{
     collections::{hash_map, BinaryHeap, HashMap},
     hash::Hash,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
 };
 
 use n0_future::time::Instant;
-use n0_watcher::Stream;
 use rand::{
     seq::{IteratorRandom, SliceRandom},
     Rng,
@@ -73,7 +68,6 @@ macro_rules! idbytes_impls {
 }
 
 pub(crate) use idbytes_impls;
-use tokio::sync::Notify;
 
 /// A hash set where the iteration order of the values is independent of their
 /// hash values.
@@ -396,88 +390,6 @@ impl<K: Hash + Eq + Clone, V> TimeBoundCache<K, V> {
             }
         }
         count
-    }
-}
-
-#[derive(Debug)]
-struct ConnectionCounterInner {
-    count: AtomicUsize,
-    notify: Notify,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct ConnectionCounter {
-    inner: Arc<ConnectionCounterInner>,
-}
-
-impl ConnectionCounter {
-    pub(crate) fn new() -> Self {
-        Self {
-            inner: Arc::new(ConnectionCounterInner {
-                count: Default::default(),
-                notify: Notify::new(),
-            }),
-        }
-    }
-
-    pub(crate) fn current(&self) -> usize {
-        self.inner.count.load(Ordering::SeqCst)
-    }
-
-    /// Increase the connection count and return a guard for the new connection
-    pub(crate) fn get_one(&self) -> OneConnection {
-        self.inner.count.fetch_add(1, Ordering::SeqCst);
-        OneConnection {
-            inner: self.inner.clone(),
-        }
-    }
-
-    pub(crate) fn is_idle(&self) -> bool {
-        self.inner.count.load(Ordering::SeqCst) == 0
-    }
-
-    /// Infinite stream that yields when the connection is briefly idle.
-    ///
-    /// Note that you still have to check if the connection is still idle when
-    /// you get the notification.
-    ///
-    /// Also note that this stream is triggered on [OneConnection::drop], so it
-    /// won't trigger initially even though a [ConnectionCounter] starts up as
-    /// idle.
-    pub(crate) fn idle_stream(&self) -> impl n0_future::Stream<Item = ()> + 'static {
-        let inner = self.inner.clone();
-        n0_future::stream::unfold(inner, |inner| async move {
-            inner.notify.notified().await;
-            Some(((), inner))
-        })
-    }
-
-    pub(crate) fn idle(&self) -> impl std::future::Future<Output = ()> + 'static {
-        let inner = self.inner.clone();
-        async move { inner.notify.notified().await }
-    }
-}
-
-/// Guard for one connection
-#[derive(Debug)]
-pub(crate) struct OneConnection {
-    inner: Arc<ConnectionCounterInner>,
-}
-
-impl Clone for OneConnection {
-    fn clone(&self) -> Self {
-        self.inner.count.fetch_add(1, Ordering::SeqCst);
-        Self {
-            inner: self.inner.clone(),
-        }
-    }
-}
-
-impl Drop for OneConnection {
-    fn drop(&mut self) {
-        if self.inner.count.fetch_sub(1, Ordering::SeqCst) == 1 {
-            self.inner.notify.notify_waiters();
-        }
     }
 }
 

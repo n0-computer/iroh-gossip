@@ -5,11 +5,11 @@ use std::sync::atomic::AtomicBool;
 use std::{
     collections::{hash_map, BTreeSet, HashMap, HashSet, VecDeque},
     ops::DerefMut,
-    sync::{atomic::AtomicUsize, Arc},
+    sync::Arc,
+    time::Duration,
 };
 
 use bytes::Bytes;
-use futures_util::future::Remote;
 use iroh::{
     endpoint::{ConnectError, Connection},
     protocol::{AcceptError, ProtocolHandler},
@@ -20,33 +20,30 @@ use irpc::{
     WithChannels,
 };
 use n0_future::{
-    boxed::{BoxFuture, BoxStream},
+    boxed::BoxStream,
     task::{self, AbortOnDropHandle},
     time::Instant,
-    FuturesUnordered, IterExt, MergeUnbounded, Stream, StreamExt,
+    MergeUnbounded, Stream, StreamExt,
 };
 use n0_watcher::{Direct, Watchable};
 use rand::rngs::StdRng;
 use snafu::Snafu;
 use tokio::{
-    sync::{broadcast, mpsc, Notify},
+    sync::{broadcast, mpsc},
     task::JoinSet,
 };
-use tracing::{debug, error, error_span, instrument, trace, warn, Instrument};
+use tracing::{debug, error_span, info, instrument, trace, warn, Instrument};
 
 use crate::{
     api::{self, GossipApi},
-    metrics::Metrics,
-    proto::{
-        self,
-        util::{ConnectionCounter, OneConnection},
-        Config, HyparviewConfig, PeerData, PlumtreeConfig, TopicId,
-    },
+    metrics::{inc, Metrics},
+    net::util::accept_stream,
+    proto::{self, Config, HyparviewConfig, PeerData, PlumtreeConfig, TopicId},
 };
 
 use self::dialer::Dialer;
 use self::net_proto::GossipMessage;
-use self::util::{AddrInfo, IrohRemoteConnection, Timers};
+use self::util::{AddrInfo, ConnectionCounter, IrohRemoteConnection, OneConnection, Timers};
 
 mod connection_pool;
 mod dialer;
@@ -67,8 +64,6 @@ type ProtoEvent = proto::topic::Event<NodeId>;
 type OutEvent = proto::topic::OutEvent<NodeId>;
 type InEvent = proto::topic::InEvent<NodeId>;
 type Command = proto::topic::Command<NodeId>;
-
-type RemoteClient = irpc::Client<net_proto::Request>;
 
 /// Builder to configure and construct [`Gossip`].
 #[derive(Debug, Clone)]
@@ -154,7 +149,7 @@ mod net_proto {
 /// The gossip actor will, however, initiate new connections to other peers by itself.
 #[derive(Debug, Clone, derive_more::Deref)]
 pub struct Gossip {
-    incoming_tx: mpsc::Sender<Incoming>,
+    internal_tx: mpsc::Sender<InternalMessage>,
     #[deref]
     api: GossipApi,
     metrics: Arc<Metrics>,
@@ -166,7 +161,7 @@ impl Drop for Gossip {
     fn drop(&mut self) {
         // let backtrace = snafu::Backtrace::new();
         // tracing::info!(?backtrace, "GOSSIP DROPPED");
-        tracing::info!("GOSSIP DROPPED");
+        info!("GOSSIP DROPPED");
     }
 }
 
@@ -213,8 +208,8 @@ impl Gossip {
         remote: NodeId,
         connection: Connection,
     ) -> Result<(), iroh::protocol::AcceptError> {
-        self.incoming_tx
-            .send(Incoming::HandleConnection(remote, connection))
+        self.internal_tx
+            .send(InternalMessage::HandleConnection(remote, connection))
             .await
             .map_err(|_| AcceptError::from_err(ActorDiedError))?;
         Ok(())
@@ -237,7 +232,7 @@ impl Gossip {
         );
 
         Self {
-            incoming_tx,
+            internal_tx: incoming_tx,
             max_message_size,
             api: GossipApi::local(api_tx),
             metrics,
@@ -252,7 +247,7 @@ impl Gossip {
         let (api_tx, incoming_tx, actor) = Actor::new(endpoint, config, alpn, metrics.clone());
 
         let handle = Self {
-            incoming_tx,
+            internal_tx: incoming_tx,
             max_message_size,
             api: GossipApi::local(api_tx),
             metrics,
@@ -262,54 +257,48 @@ impl Gossip {
     }
 }
 
-#[derive(derive_more::Debug)]
-enum Incoming {
-    #[debug("HandleConnection({})", _0.fmt_short())]
-    HandleConnection(NodeId, Connection),
-}
-
 #[derive(strum::Display)]
 enum ActorToTopic {
     Api(ApiJoinRequest),
-    RemoteEstablished {
+    Connected {
         remote: NodeId,
         tx: Guarded<channel::mpsc::Sender<ProtoMessage>>,
         rx: Guarded<channel::mpsc::Receiver<ProtoMessage>>,
     },
-    DialFailed(NodeId),
+    ConnectionFailed(NodeId),
 }
 
-#[derive(strum::Display)]
-enum TopicToActor {
-    EstablishRemote(NodeId, TopicId),
+#[derive(derive_more::Debug)]
+enum InternalMessage {
+    #[debug("HandleConnection({})", _0.fmt_short())]
+    HandleConnection(NodeId, Connection),
+    #[debug("Connect({}, {})", _0.fmt_short(), _1.fmt_short())]
+    Connect(NodeId, TopicId),
+    #[debug("SetPeerData({}, {})", _0.fmt_short(), _1.as_bytes().len())]
     SetPeerData(NodeId, PeerData),
-    Closed(TopicId),
 }
 
 type ApiJoinRequest = WithChannels<api::JoinRequest, api::Request>;
-type RemoteJoinRequest = WithChannels<net_proto::JoinRequest, net_proto::Request>;
-
 type ApiRecvStream = BoxStream<Result<api::Command, channel::RecvError>>;
 type RemoteRecvStream = BoxStream<(NodeId, Result<Option<ProtoMessage>, channel::RecvError>)>;
-// type RemoteRecvStream = BoxStream<(NodeId, Result<Option<Message>, ReadError>)>;
 
 struct Actor {
     me: NodeId,
     alpn: Bytes,
     config: Config,
-    incoming_rx: mpsc::Receiver<Incoming>,
-    topic_to_actor_tx: mpsc::Sender<TopicToActor>,
-    topic_to_actor_rx: mpsc::Receiver<TopicToActor>,
+    internal_rx: mpsc::Receiver<InternalMessage>,
+    internal_tx: mpsc::Sender<InternalMessage>,
     api_rx: mpsc::Receiver<api::RpcMessage>,
     topics: HashMap<TopicId, TopicHandle>,
+    topic_pending_remotes: HashMap<NodeId, HashSet<TopicId>>,
+    topic_tasks: JoinSet<TopicActor>,
     remotes: HashMap<NodeId, RemoteState>,
-    conn_tasks: JoinSet<()>,
-    pending_dials: HashMap<NodeId, Vec<TopicId>>,
+    close_connections: JoinSet<(NodeId, Connection)>,
     dialer: Dialer,
-    me_data: n0_watcher::Watchable<Option<PeerData>>,
+    our_peer_data: n0_watcher::Watchable<Option<PeerData>>,
     metrics: Arc<Metrics>,
-    node_addr_stream: BoxStream<Option<NodeAddr>>,
-    remote_requests: MergeUnbounded<
+    node_addr_updates: BoxStream<Option<NodeAddr>>,
+    accepting: MergeUnbounded<
         BoxStream<(
             NodeId,
             std::io::Result<(net_proto::GossipMessage, OneConnection)>,
@@ -317,9 +306,50 @@ struct Actor {
     >,
 }
 
+#[derive(Clone)]
 struct RemoteState {
+    node_id: NodeId,
+    conn_id: usize,
     client: irpc::Client<net_proto::Request>,
+    #[allow(dead_code)]
     direction: Direction,
+    counter: ConnectionCounter,
+}
+
+impl RemoteState {
+    fn new(node_id: NodeId, connection: Connection, direction: Direction) -> Self {
+        let conn_id = connection.stable_id();
+        let irpc_conn = IrohRemoteConnection::new(connection);
+        let client = irpc::Client::boxed(irpc_conn);
+        let counter = ConnectionCounter::new();
+        RemoteState {
+            client,
+            direction,
+            conn_id,
+            counter,
+            node_id,
+        }
+    }
+
+    fn same_connection(&self, conn: &Connection) -> bool {
+        self.conn_id == conn.stable_id()
+    }
+
+    async fn open_topic(&self, topic_id: TopicId) -> ActorToTopic {
+        let guard = self.counter.get_one();
+        let req = net_proto::JoinRequest { topic_id };
+        match self.client.bidi_streaming(req.clone(), 64, 64).await {
+            Ok((tx, rx)) => ActorToTopic::Connected {
+                remote: self.node_id,
+                tx: Guarded::new(tx, guard.clone()),
+                rx: Guarded::new(rx, guard),
+            },
+            Err(err) => {
+                warn!(?topic_id, ?err, "failed to open stream with remote");
+                ActorToTopic::ConnectionFailed(self.node_id)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -334,37 +364,40 @@ impl Actor {
         config: Config,
         alpn: Option<Bytes>,
         metrics: Arc<Metrics>,
-    ) -> (mpsc::Sender<api::RpcMessage>, mpsc::Sender<Incoming>, Self) {
+    ) -> (
+        mpsc::Sender<api::RpcMessage>,
+        mpsc::Sender<InternalMessage>,
+        Self,
+    ) {
         let (api_tx, api_rx) = tokio::sync::mpsc::channel(16);
-        let (topic_to_actor_tx, topic_to_actor_rx) = tokio::sync::mpsc::channel(16);
-        let (incoming_tx, incoming_rx) = tokio::sync::mpsc::channel(16);
+        let (internal_tx, internal_rx) = tokio::sync::mpsc::channel(16);
 
         let me = endpoint.node_id();
-        let me_data = endpoint
+        let node_addr_updates = endpoint.node_addr().stream();
+        let initial_peer_data = endpoint
             .node_addr()
             .get()
             .map(|addr| AddrInfo::from(addr).encode());
-        let node_addr_stream = endpoint.node_addr().stream();
         (
             api_tx,
-            incoming_tx,
+            internal_tx.clone(),
             Actor {
                 me,
-                incoming_rx,
                 config,
                 api_rx,
-                topic_to_actor_rx,
-                topic_to_actor_tx,
-                node_addr_stream: Box::pin(node_addr_stream),
+                internal_tx,
+                internal_rx,
+                node_addr_updates: Box::pin(node_addr_updates),
                 dialer: Dialer::new(endpoint),
-                me_data: Watchable::new(me_data),
+                our_peer_data: Watchable::new(initial_peer_data),
                 alpn: alpn.unwrap_or_else(|| crate::ALPN.to_vec().into()),
                 metrics: metrics.clone(),
                 topics: Default::default(),
-                pending_dials: Default::default(),
+                topic_pending_remotes: Default::default(),
                 remotes: Default::default(),
-                conn_tasks: JoinSet::new(),
-                remote_requests: Default::default(),
+                close_connections: JoinSet::new(),
+                topic_tasks: JoinSet::new(),
+                accepting: Default::default(),
             },
         )
     }
@@ -392,9 +425,10 @@ impl Actor {
 
     async fn tick(&mut self) -> bool {
         trace!("wait for tick");
+        self.metrics.actor_tick_main.inc();
         tokio::select! {
-            addr = self.node_addr_stream.next() => {
-                trace!("tick: node_addr_stream");
+            addr = self.node_addr_updates.next() => {
+                trace!("tick: node_addr_update");
                 match addr {
                     None => {
                         warn!("address stream returned None - endpoint has shut down");
@@ -402,32 +436,21 @@ impl Actor {
                     }
                     Some(addr) => {
                         let data = addr.map(|addr| AddrInfo::from(addr).encode());
-                        let _ = self.me_data.set(data);
+                        self.our_peer_data.set(data).ok();
                         true
                     }
                 }
             }
-            msg = self.incoming_rx.recv() => {
-                trace!("tick: incoming_rx {msg:?}");
+            Some(msg) = self.internal_rx.recv() => {
+                trace!("tick: internal_rx {msg:?}");
                 match msg {
-                    Some(Incoming::HandleConnection(node_id, connection)) => {
+                    InternalMessage::HandleConnection(node_id, connection) => {
                         self.handle_remote_connection(node_id, Ok(connection), Direction::Accept).await;
-                        true
                     }
-                    None => {
-                        trace!("all incoming senders dropped, stop actor");
-                        false
+                    InternalMessage::Connect(node_id, topic_id) => {
+                        self.connect(node_id, topic_id);
                     }
-                }
-            }
-            Some(msg) = self.topic_to_actor_rx.recv() => {
-                trace!("tick: topic_to_actor_rx {msg}");
-                match msg {
-                    TopicToActor::EstablishRemote(node_id, topic_id) => {
-                        self.dialer.queue_dial(node_id, self.alpn.clone());
-                        self.pending_dials.entry(node_id).or_default().push(topic_id);
-                    }
-                    TopicToActor::SetPeerData(node_id, data) => {
+                    InternalMessage::SetPeerData(node_id, data) => {
                         match AddrInfo::decode(&data) {
                             Err(err) => warn!(remote=%node_id.fmt_short(), ?err, len=data.inner().len(), "Failed to decode peer data"),
                             Ok(info) => {
@@ -442,23 +465,20 @@ impl Actor {
                             }
                         }
                     }
-                    TopicToActor::Closed(topic_id) => {
-                        self.topics.remove(&topic_id);
-                    }
                 }
                 true
             }
             (node_id, res) = self.dialer.next_conn() => {
-                trace!(remote=%node_id.fmt_short(), ok=res.is_ok(), "tick: dialer");
+                trace!(remote=%node_id.fmt_short(), ok=res.is_ok(), "tick: dialed");
                 self.handle_remote_connection(node_id, res, Direction::Dial).await;
                 true
             }
-            Some((node_id, res)) = self.remote_requests.next(), if !self.remote_requests.is_empty() => {
-                trace!(remote=%node_id.fmt_short(), res=?res.as_ref().map(|_| ()), "tick: remote_requests");
+            Some((node_id, res)) = self.accepting.next(), if !self.accepting.is_empty() => {
+                trace!(remote=%node_id.fmt_short(), res=?res.as_ref().map(|_| ()), "tick: accepting");
                 match res {
                     Ok((request, guard)) => self.handle_remote_message(node_id, request, guard).await,
-                    Err(_) => {
-                        // TODO: remove from self.peers, but only if it is still the same connection
+                    Err(err) => {
+                        debug!(remote=%node_id.fmt_short(), ?err, "accepting request from remote failed");
                     }
                 }
                 true
@@ -476,6 +496,22 @@ impl Actor {
                     }
                 }
             }
+            Some(res) = self.close_connections.join_next(), if !self.close_connections.is_empty() => {
+                let (node_id, connection) = res.expect("connection task panicked");
+                trace!(remote=%node_id.fmt_short(), "tick: connection closed");
+                if let Some(state) = self.remotes.get(&node_id) {
+                    if state.same_connection(&connection) {
+                        self.remotes.remove(&node_id);
+                    }
+                }
+                true
+            }
+            Some(actor) = self.topic_tasks.join_next(), if !self.topic_tasks.is_empty() => {
+                let actor = actor.expect("topic actor task panicked");
+                trace!(topic=%actor.topic_id.fmt_short(), "tick: topic actor finished");
+                self.topics.remove(&actor.topic_id);
+                true
+            }
             else => unreachable!("reached else arm, but all fallible cases should be handled"),
         }
     }
@@ -484,15 +520,35 @@ impl Actor {
         self.dialer.endpoint()
     }
 
-    fn pending_dials_by(
+    fn drain_pending_dials(
         &mut self,
         remote: &NodeId,
     ) -> impl Iterator<Item = (TopicId, &TopicHandle)> {
-        self.pending_dials
+        self.topic_pending_remotes
             .remove(remote)
             .into_iter()
             .flatten()
             .flat_map(|topic_id| self.topics.get(&topic_id).map(|handle| (topic_id, handle)))
+    }
+
+    fn connect(&mut self, remote: NodeId, topic_id: TopicId) {
+        let Some(handle) = self.topics.get(&topic_id) else {
+            return;
+        };
+        if let Some(state) = self.remotes.get(&remote) {
+            let tx = handle.tx.clone();
+            let state = state.clone();
+            task::spawn(async move {
+                let msg = state.open_topic(topic_id).await;
+                tx.send(msg).await.ok();
+            });
+        } else {
+            self.dialer.queue_dial(remote, self.alpn.clone());
+            self.topic_pending_remotes
+                .entry(remote)
+                .or_default()
+                .insert(topic_id);
+        }
     }
 
     #[instrument("connection", skip_all, fields(remote=%remote.fmt_short()))]
@@ -502,77 +558,68 @@ impl Actor {
         res: Result<Connection, ConnectError>,
         direction: Direction,
     ) {
-        // Read incoming requests.
-        let res = match res {
-            Ok(connection) => {
-                let irpc_conn = IrohRemoteConnection::new(connection.clone());
-                let client = irpc::Client::boxed(irpc_conn.clone());
-                let counter = ConnectionCounter::new();
-                let guard = counter.get_one();
-                if matches!(direction, Direction::Dial) {
-                    self.conn_tasks.spawn({
-                        let counter = counter.clone();
-                        async move {
-                            let stream = counter.idle_stream();
-                            tokio::pin!(stream);
-                            loop {
-                                let _ = stream.next().await;
-                                if counter.is_idle() {
-                                    connection.close(1u32.into(), b"idle");
-                                    break;
-                                }
-                            }
-                        }
-                    });
-                }
-
-                // TODO we keep dead clients around.
-                let state = RemoteState {
-                    client: client.clone(),
-                    direction,
-                };
-                self.remotes.insert(remote, state);
-                self.remote_requests.push(Box::pin(
-                    irpc_conn
-                        .into_request_stream::<net_proto::Request>()
-                        .map(move |req| (remote, req.map(|r| (r, counter.get_one())))),
-                ));
-                Ok((client, guard))
-            }
+        match (res.as_ref(), direction) {
+            (Ok(_), Direction::Dial) => inc(&self.metrics.remotes_connected_success),
+            (Err(_), Direction::Dial) => inc(&self.metrics.remotes_connected_failure),
+            (Ok(_), Direction::Accept) => inc(&self.metrics.remotes_accepted),
+            (Err(_), Direction::Accept) => {}
+        }
+        let connection = match res {
             Err(err) => {
                 debug!(?err, "Connection failed");
-                Err(())
+                for (_, handle) in self.drain_pending_dials(&remote) {
+                    handle
+                        .send(ActorToTopic::ConnectionFailed(remote))
+                        .await
+                        .ok();
+                }
+                return;
             }
+            Ok(connection) => connection,
         };
 
-        // Inform topics that wanted a stream to that node.
-        for (topic_id, handle) in self.pending_dials_by(&remote) {
-            let Ok(permit) = handle.tx.clone().reserve_owned().await else {
-                warn!(topic=%topic_id.fmt_short(), "Topic actor dead");
-                continue;
-            };
-            let client = res.clone();
+        let state = RemoteState::new(remote, connection.clone(), direction);
+
+        // Open requests for pending topics.
+        for (topic_id, handle) in self.drain_pending_dials(&remote) {
+            let tx = handle.tx.clone();
+            let state = state.clone();
             task::spawn(async move {
-                let msg = match client {
-                    Err(()) => ActorToTopic::DialFailed(remote),
-                    Ok((client, guard)) => {
-                        let req = net_proto::JoinRequest { topic_id };
-                        match client.bidi_streaming(req.clone(), 64, 64).await {
-                            Ok((tx, rx)) => ActorToTopic::RemoteEstablished {
-                                remote,
-                                tx: Guarded::new(tx, guard.clone()),
-                                rx: Guarded::new(rx, guard),
-                            },
-                            Err(err) => {
-                                warn!(?topic_id, ?err, "failed to open stream with remote");
-                                ActorToTopic::DialFailed(remote)
-                            }
-                        }
-                    }
-                };
-                permit.send(msg);
+                let msg = state.open_topic(topic_id).await;
+                tx.send(msg).await.ok();
             });
         }
+
+        // Read incoming requests.
+        let counter = state.counter.clone();
+        self.accepting.push(Box::pin(
+            accept_stream::<net_proto::Request>(connection.clone())
+                .map(move |req| (remote, req.map(|r| (r, counter.get_one())))),
+        ));
+
+        // Close on idle (if dialed) or await close (if accepted).
+        let counter = state.counter.clone();
+        let fut = async move {
+            match direction {
+                Direction::Dial => {
+                    while !counter.is_idle() {
+                        counter.idle().await;
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    info!("close connection (from dial): unused");
+                    connection.close(1u32.into(), b"idle");
+                }
+                Direction::Accept => {
+                    let reason = connection.closed().await;
+                    info!(?reason, "connection closed (from accept)")
+                }
+            }
+            (remote, connection)
+        };
+        self.close_connections
+            .spawn(fut.instrument(error_span!("conn", remote=%remote.fmt_short())));
+
+        self.remotes.insert(remote, state);
     }
 
     #[instrument("request", skip_all, fields(remote=%remote.fmt_short()))]
@@ -587,7 +634,7 @@ impl Actor {
         };
         if let Some(topic) = self.topics.get(&topic_id) {
             if let Err(_err) = topic
-                .send(ActorToTopic::RemoteEstablished {
+                .send(ActorToTopic::Connected {
                     remote,
                     tx: Guarded::new(req.tx, guard.clone()),
                     rx: Guarded::new(req.rx, guard.clone()),
@@ -606,16 +653,19 @@ impl Actor {
             api::RpcMessage::Join(msg) => (msg.inner.topic_id, msg),
         };
         let topic = self.topics.entry(topic_id).or_insert_with(|| {
-            TopicHandle::new(
+            let (handle, fut) = TopicHandle::new(
                 self.me,
                 topic_id,
                 self.config.clone(),
-                self.topic_to_actor_tx.clone(),
-                self.me_data.watch(),
-            )
+                self.internal_tx.clone(),
+                self.our_peer_data.watch(),
+                self.metrics.clone(),
+            );
+            self.topic_tasks.spawn(fut);
+            handle
         });
         if let Err(_) = topic.send(ActorToTopic::Api(msg)).await {
-            error!(topic=%topic_id.fmt_short(), "Topic actor dead");
+            warn!(topic=%topic_id.fmt_short(), "Topic actor dead");
         }
     }
 }
@@ -624,7 +674,6 @@ struct TopicHandle {
     tx: mpsc::Sender<ActorToTopic>,
     #[cfg(test)]
     joined: Arc<AtomicBool>,
-    _task: AbortOnDropHandle<()>,
 }
 
 impl TopicHandle {
@@ -632,9 +681,13 @@ impl TopicHandle {
         me: NodeId,
         topic_id: TopicId,
         config: proto::Config,
-        to_actor_tx: mpsc::Sender<TopicToActor>,
+        to_actor_tx: mpsc::Sender<InternalMessage>,
         peer_data: Direct<Option<PeerData>>,
-    ) -> Self {
+        metrics: Arc<Metrics>,
+    ) -> (
+        Self,
+        impl std::future::Future<Output = TopicActor> + Send + 'static,
+    ) {
         let (tx, rx) = mpsc::channel(16);
         // TODO: peer_data
         let state = State::new(me, None, config);
@@ -659,18 +712,17 @@ impl TopicHandle {
             init: false,
             #[cfg(test)]
             joined: joined.clone(),
+            metrics,
         };
-        let task = task::spawn(
-            actor
-                .run()
-                .instrument(error_span!("topic", topic=%topic_id.fmt_short())),
-        );
-        Self {
+        let fut = actor
+            .run()
+            .instrument(error_span!("topic", topic=%topic_id.fmt_short()));
+        let handle = Self {
             tx,
-            _task: AbortOnDropHandle::new(task),
             #[cfg(test)]
             joined,
-        }
+        };
+        (handle, fut)
     }
 
     async fn send(&self, msg: ActorToTopic) -> Result<(), mpsc::error::SendError<ActorToTopic>> {
@@ -685,7 +737,7 @@ impl TopicHandle {
 
 struct TopicActor {
     topic_id: TopicId,
-    to_actor_tx: mpsc::Sender<TopicToActor>,
+    to_actor_tx: mpsc::Sender<InternalMessage>,
     state: State,
     actor_rx: mpsc::Receiver<ActorToTopic>,
     timers: Timers<Timer>,
@@ -701,10 +753,12 @@ struct TopicActor {
     joined: Arc<AtomicBool>,
     init: bool,
     drop_peers_queue: HashSet<NodeId>,
+    metrics: Arc<Metrics>,
 }
 
 impl TopicActor {
-    pub async fn run(mut self) {
+    pub async fn run(mut self) -> Self {
+        self.metrics.topics_joined.inc();
         let peer_data = self.peer_data.clone().stream();
         tokio::pin!(peer_data);
         loop {
@@ -753,15 +807,13 @@ impl TopicActor {
                 break;
             }
         }
-        self.to_actor_tx
-            .send(TopicToActor::Closed(self.topic_id))
-            .await
-            .ok();
+        self.metrics.topics_quit.inc();
+        self
     }
 
     async fn handle_actor_message(&mut self, msg: ActorToTopic) {
         match msg {
-            ActorToTopic::RemoteEstablished { remote, rx, tx } => {
+            ActorToTopic::Connected { remote, rx, tx } => {
                 self.remote_receivers
                     .push(Box::pin(into_stream(rx).map(move |msg| (remote, msg))));
                 let sender = self.remote_senders.entry(remote).or_default();
@@ -783,7 +835,7 @@ impl TopicActor {
                 )))
                 .await;
             }
-            ActorToTopic::DialFailed(node_id) => {
+            ActorToTopic::ConnectionFailed(node_id) => {
                 self.handle_in_event(InEvent::PeerDisconnected(node_id))
                     .await
             }
@@ -795,22 +847,18 @@ impl TopicActor {
         remote: NodeId,
         message: Result<Option<ProtoMessage>, RecvError>,
     ) {
-        match message {
-            Ok(Some(message)) => {
-                self.handle_in_event(InEvent::RecvMessage(remote, message))
-                    .await;
-            }
+        let event = match message {
+            Ok(Some(message)) => InEvent::RecvMessage(remote, message),
             Ok(None) => {
                 debug!(remote=%remote.fmt_short(), "Recv stream from remote closed");
-                self.handle_in_event(InEvent::PeerDisconnected(remote))
-                    .await;
+                InEvent::PeerDisconnected(remote)
             }
             Err(err) => {
                 warn!(remote=%remote.fmt_short(), ?err, "Recv stream from remote failed");
-                self.handle_in_event(InEvent::PeerDisconnected(remote))
-                    .await;
+                InEvent::PeerDisconnected(remote)
             }
-        }
+        };
+        self.handle_in_event(event).await;
     }
 
     async fn handle_api_command(&mut self, command: Result<api::Command, channel::RecvError>) {
@@ -826,12 +874,15 @@ impl TopicActor {
     async fn handle_in_event(&mut self, event: InEvent) {
         trace!("tick: in event {event:?}");
         let now = Instant::now();
+        self.metrics.track_in_event(&event);
         self.out_events.extend(self.state.handle(event, now));
         self.process_out_events(now).await;
     }
+
     async fn process_out_events(&mut self, now: Instant) {
         while let Some(event) = self.out_events.pop_front() {
             trace!("tick: out event {event:?}");
+            self.metrics.track_out_event(&event);
             match event {
                 OutEvent::SendMessage(node_id, message) => {
                     self.send(node_id, message).await;
@@ -848,7 +899,7 @@ impl TopicActor {
                 }
                 OutEvent::PeerData(node_id, peer_data) => {
                     self.to_actor_tx
-                        .send(TopicToActor::SetPeerData(node_id, peer_data))
+                        .send(InternalMessage::SetPeerData(node_id, peer_data))
                         .await
                         .ok();
                 }
@@ -856,7 +907,6 @@ impl TopicActor {
         }
     }
 
-    // TODO: Error handling
     #[instrument(skip_all, fields(remote=%remote.fmt_short()))]
     async fn send(&mut self, remote: NodeId, message: ProtoMessage) {
         let sender = match self.remote_senders.entry(remote) {
@@ -864,7 +914,7 @@ impl TopicActor {
             hash_map::Entry::Vacant(entry) => {
                 debug!("requesting new connection");
                 self.to_actor_tx
-                    .send(TopicToActor::EstablishRemote(remote, self.topic_id))
+                    .send(InternalMessage::Connect(remote, self.topic_id))
                     .await
                     .ok();
                 entry.insert(Default::default())
@@ -887,7 +937,7 @@ impl TopicActor {
             ProtoEvent::NeighborDown(n) => {
                 self.neighbors.remove(n);
             }
-            ProtoEvent::Received(_gossip_event) => {}
+            ProtoEvent::Received(_) => {}
         }
         self.forward_event_tx.send(event).ok();
         // let event = api::Event::from(event);
@@ -935,7 +985,6 @@ async fn forward_events(
             break;
         }
     }
-    tracing::info!("CLOSING EVENT FWD TASK");
 }
 
 #[derive(derive_more::Deref, derive_more::DerefMut, Debug)]
@@ -1003,13 +1052,11 @@ impl Default for MaybeSender {
 // TODO: Upstream to irpc: This differs from Receiver::into_stream: it returns
 // None after the first error, whereas upstream would loop on the error
 fn into_stream<T: irpc::RpcMessage>(
-    // receiver: channel::mpsc::Receiver<T>,
     receiver: impl DerefMut<Target = channel::mpsc::Receiver<T>> + Send + Sync + 'static,
 ) -> impl Stream<Item = Result<Option<T>, RecvError>> + Send + Sync + 'static {
     n0_future::stream::unfold(Some(receiver), |recv| async move {
         let mut recv = recv?;
         let res = recv.recv().await;
-        debug!("RECV {res:?}");
         match res {
             Err(err) => Some((Err(err), None)),
             Ok(Some(res)) => Some((Ok(Some(res)), Some(recv))),
@@ -1032,16 +1079,23 @@ fn into_stream2<T: irpc::RpcMessage>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{future::Future, time::Duration};
 
-    use iroh::{protocol::Router, RelayMap, RelayMode, SecretKey, Watcher};
-    use n0_snafu::ResultExt;
-    use tokio::time::timeout;
+    use bytes::Bytes;
+    use futures_concurrency::future::TryJoin;
+    use iroh::{
+        endpoint::BindError, protocol::Router, NodeAddr, RelayMap, RelayMode, SecretKey, Watcher,
+    };
+    use n0_snafu::{Result, ResultExt};
+    use rand::{Rng, SeedableRng};
+    use tokio::{spawn, time::timeout};
     use tokio_util::sync::CancellationToken;
+    use tracing::info;
     use tracing_test::traced_test;
 
     use super::*;
+    use crate::{api::Event, ALPN};
 
     impl Gossip {
         pub(super) async fn t_new(
@@ -1073,7 +1127,7 @@ mod tests {
 
             endpoint.home_relay().initialized().await;
             let (gossip, mut actor) = Gossip::new_with_actor(endpoint.clone(), config, None);
-            actor.node_addr_stream = Box::pin(n0_future::stream::pending());
+            actor.node_addr_updates = Box::pin(n0_future::stream::pending());
             let router = Router::builder(endpoint)
                 .accept(GOSSIP_ALPN, gossip.clone())
                 .spawn();
@@ -1093,8 +1147,7 @@ mod tests {
 
     #[tokio::test]
     #[traced_test]
-    async fn gossip_smokenew() -> n0_snafu::Result<()> {
-        // tracing_subscriber::fmt::try_init().ok();
+    async fn gossip_smoke_2() -> n0_snafu::Result<()> {
         let topic_id = TopicId::from([0u8; 32]);
 
         let ep1 = Endpoint::builder().bind().await?;
@@ -1125,24 +1178,6 @@ mod tests {
         router2.shutdown().await.e()?;
         Ok(())
     }
-}
-
-#[cfg(test)]
-pub(crate) mod test {
-    use std::time::Duration;
-
-    use bytes::Bytes;
-    use futures_concurrency::future::TryJoin;
-    use iroh::{endpoint::BindError, protocol::Router, NodeAddr, RelayMap, RelayMode, SecretKey};
-    use n0_snafu::{Result, ResultExt};
-    use rand::{Rng, SeedableRng};
-    use tokio::{spawn, time::timeout};
-    use tokio_util::sync::CancellationToken;
-    use tracing::info;
-    use tracing_test::traced_test;
-
-    use super::*;
-    use crate::{api::Event, ALPN};
 
     pub(crate) async fn create_endpoint(
         rng: &mut rand_chacha::ChaCha12Rng,

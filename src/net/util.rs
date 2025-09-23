@@ -1,15 +1,24 @@
 //! Utilities for iroh-gossip networking
 
-use std::{collections::BTreeSet, net::SocketAddr, pin::Pin};
+use std::{
+    collections::BTreeSet,
+    net::SocketAddr,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
 
 use iroh::{endpoint::Connection, NodeAddr, NodeId, RelayUrl};
-use irpc::{rpc::RemoteService, RpcMessage};
+use irpc::rpc::RemoteService;
 use n0_future::{
     boxed::BoxFuture,
     time::{sleep_until, Instant, Sleep},
-    Stream, StreamExt,
+    Stream,
 };
 use serde::{Deserialize, Serialize};
+use tokio::sync::Notify;
 
 use crate::proto::{util::TimerMap, PeerData};
 
@@ -41,19 +50,17 @@ impl irpc::rpc::RemoteConnection for IrohRemoteConnection {
     }
 }
 
-impl IrohRemoteConnection {
-    pub(crate) fn into_request_stream<T: RemoteService>(
-        self,
-    ) -> impl Stream<Item = std::io::Result<T::Message>> {
-        n0_future::stream::unfold(Some(self.0), async |conn| {
-            let conn = conn?;
-            match irpc_iroh::read_request::<T>(&conn).await {
-                Err(err) => Some((Err(err), None)),
-                Ok(None) => None,
-                Ok(Some(request)) => Some((Ok(request), Some(conn))),
-            }
-        })
-    }
+pub(crate) fn accept_stream<T: RemoteService>(
+    connection: Connection,
+) -> impl Stream<Item = std::io::Result<T::Message>> {
+    n0_future::stream::unfold(Some(connection), async |conn| {
+        let conn = conn?;
+        match irpc_iroh::read_request::<T>(&conn).await {
+            Err(err) => Some((Err(err), None)),
+            Ok(None) => None,
+            Ok(Some(request)) => Some((Ok(request), Some(conn))),
+        }
+    })
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
@@ -118,11 +125,6 @@ impl<T> Default for Timers<T> {
 }
 
 impl<T> Timers<T> {
-    /// Creates a new timer map.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Inserts a new entry at the specified instant
     pub fn insert(&mut self, instant: Instant, item: T) {
         self.map.insert(instant, item);
@@ -150,5 +152,70 @@ impl<T> Timers<T> {
     /// Pops the earliest timer that expires at or before `now`.
     pub fn pop_before(&mut self, now: Instant) -> Option<(Instant, T)> {
         self.map.pop_before(now)
+    }
+}
+
+#[derive(Debug)]
+struct ConnectionCounterInner {
+    count: AtomicUsize,
+    notify: Notify,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ConnectionCounter {
+    inner: Arc<ConnectionCounterInner>,
+}
+
+impl ConnectionCounter {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: Arc::new(ConnectionCounterInner {
+                count: Default::default(),
+                notify: Notify::new(),
+            }),
+        }
+    }
+
+    /// Increase the connection count and return a guard for the new connection
+    pub(crate) fn get_one(&self) -> OneConnection {
+        self.inner.count.fetch_add(1, Ordering::SeqCst);
+        OneConnection {
+            inner: self.inner.clone(),
+        }
+    }
+
+    pub(crate) fn is_idle(&self) -> bool {
+        self.inner.count.load(Ordering::SeqCst) == 0
+    }
+
+    pub(crate) async fn idle(&self) {
+        self.inner.notify.notified().await
+    }
+}
+
+/// Guard for one connection
+#[derive(Debug)]
+pub(crate) struct OneConnection {
+    inner: Arc<ConnectionCounterInner>,
+}
+
+impl Clone for OneConnection {
+    fn clone(&self) -> Self {
+        let prev = self.inner.count.fetch_add(1, Ordering::SeqCst);
+        tracing::trace!(c = prev, "OneConnection up");
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl Drop for OneConnection {
+    fn drop(&mut self) {
+        let prev = self.inner.count.fetch_sub(1, Ordering::SeqCst);
+        tracing::trace!(c = prev, "OneConnection down");
+        if prev == 1 {
+            tracing::trace!("OneConnection dead");
+            self.inner.notify.notify_waiters();
+        }
     }
 }
