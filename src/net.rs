@@ -506,9 +506,9 @@ impl Actor {
         direction: Direction,
     ) {
         match (res.as_ref(), direction) {
-            (Ok(_), Direction::Dial) => inc(&self.metrics.remotes_connected_success),
-            (Err(_), Direction::Dial) => inc(&self.metrics.remotes_connected_failure),
-            (Ok(_), Direction::Accept) => inc(&self.metrics.remotes_accepted),
+            (Ok(_), Direction::Dial) => inc(&self.metrics.peers_dialed_success),
+            (Err(_), Direction::Dial) => inc(&self.metrics.peers_dialed_failure),
+            (Ok(_), Direction::Accept) => inc(&self.metrics.peers_accepted),
             (Err(_), Direction::Accept) => {}
         }
         let connection = match res {

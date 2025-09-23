@@ -14,7 +14,7 @@ use std::{
 use iroh::{endpoint::Connection, NodeAddr, NodeId, RelayUrl};
 use irpc::rpc::RemoteService;
 use n0_future::{
-    boxed::BoxFuture,
+    future::Boxed as BoxFuture,
     time::{sleep_until, Instant, Sleep},
     Stream,
 };

@@ -42,18 +42,18 @@ pub struct Metrics {
     /// Number of topcis we left.
     pub topics_quit: Counter,
     /// Number of times we succesfully dialed a remote node.
-    pub remotes_connected_success: Counter,
+    pub peers_dialed_success: Counter,
     /// Number of times we failed to dial a remote node.
-    pub remotes_connected_failure: Counter,
+    pub peers_dialed_failure: Counter,
     /// Number of times we accepted a connection from a remote node.
-    pub remotes_accepted: Counter,
+    pub peers_accepted: Counter,
     /// Number of times the main actor loop ticked
     pub actor_tick_main: Counter,
 }
 
-#[cfg(feature = "net")]
 impl Metrics {
-    pub(crate) fn track_in_event<PI: Serialize>(&self, in_event: &InEvent<PI>) {
+    /// Track an [`InEvent`].
+    pub fn track_in_event<PI: Serialize>(&self, in_event: &InEvent<PI>) {
         match in_event {
             InEvent::RecvMessage(_, message) => match message.kind() {
                 MessageKind::Data => {
@@ -81,7 +81,8 @@ impl Metrics {
         }
     }
 
-    pub(crate) fn track_out_event<PI: Serialize>(&self, out_event: &OutEvent<PI>) {
+    /// Track an [`OutEvent`].
+    pub fn track_out_event<PI: Serialize>(&self, out_event: &OutEvent<PI>) {
         match out_event {
             OutEvent::SendMessage(_to, message) => match message.kind() {
                 MessageKind::Data => {
