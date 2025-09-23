@@ -573,6 +573,7 @@ impl<PI: PeerIdentity> State<PI> {
         // if we already received this message: move peer to lazy set
         // and notify peer about this.
         if self.received_messages.contains_key(&message.id) {
+            debug!("Received duplicate message... ignoring");
             if from_peer {
                 self.add_lazy(sender);
             }
