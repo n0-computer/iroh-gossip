@@ -424,8 +424,8 @@ impl Actor {
                 trace!(remote=%node_id.fmt_short(), res=?res.as_ref().map(|_| ()), "tick: accepting");
                 match res {
                     Ok(request) => self.handle_remote_message(node_id, request).await,
-                    Err(err) => {
-                        debug!(remote=%node_id.fmt_short(), ?err, "accepting request from remote failed");
+                    Err(reason) => {
+                        debug!(remote=%node_id.fmt_short(), ?reason, "accept loop for remote closed");
                     }
                 }
                 true
@@ -531,10 +531,13 @@ impl Actor {
         for (topic_id, handle) in self.drain_pending_dials(&remote) {
             let tx = handle.tx.clone();
             let state = state.clone();
-            task::spawn(async move {
-                let msg = state.open_topic(topic_id).await;
-                tx.send(msg).await.ok();
-            });
+            task::spawn(
+                async move {
+                    let msg = state.open_topic(topic_id).await;
+                    tx.send(msg).await.ok();
+                }
+                .instrument(tracing::Span::current()),
+            );
         }
 
         // Read incoming requests.
@@ -549,10 +552,7 @@ impl Actor {
         let fut = async move {
             match direction {
                 Direction::Dial => {
-                    while !counter.is_idle() {
-                        counter.idle().await;
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
+                    counter.idle_for(Duration::from_millis(500)).await;
                     info!("close connection (from dial): unused");
                     connection.close(1u32.into(), b"idle");
                 }

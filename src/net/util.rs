@@ -8,6 +8,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
+    time::Duration,
 };
 
 use iroh::{endpoint::Connection, NodeAddr, NodeId, RelayUrl};
@@ -195,6 +196,19 @@ impl ConnectionCounter {
     pub(crate) async fn idle(&self) {
         self.inner.notify.notified().await
     }
+
+    pub(crate) async fn idle_for(&self, duration: Duration) {
+        let fut = self.idle();
+        tokio::pin!(fut);
+        loop {
+            (&mut fut).await;
+            fut.set(self.idle());
+            tokio::time::sleep(duration).await;
+            if self.is_idle() {
+                break;
+            }
+        }
+    }
 }
 
 /// Guard for one connection
@@ -205,8 +219,7 @@ pub(crate) struct OneConnection {
 
 impl Clone for OneConnection {
     fn clone(&self) -> Self {
-        let prev = self.inner.count.fetch_add(1, Ordering::SeqCst);
-        tracing::trace!(c = prev, "OneConnection up");
+        self.inner.count.fetch_add(1, Ordering::SeqCst);
         Self {
             inner: self.inner.clone(),
         }
@@ -216,9 +229,7 @@ impl Clone for OneConnection {
 impl Drop for OneConnection {
     fn drop(&mut self) {
         let prev = self.inner.count.fetch_sub(1, Ordering::SeqCst);
-        tracing::trace!(c = prev, "OneConnection down");
         if prev == 1 {
-            tracing::trace!("OneConnection dead");
             self.inner.notify.notify_waiters();
         }
     }
