@@ -46,7 +46,6 @@ use crate::{
     proto::{self, Config, HyparviewConfig, PeerData, PlumtreeConfig, TopicId},
 };
 
-mod connection_pool;
 mod dialer;
 mod util;
 
