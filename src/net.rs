@@ -20,7 +20,7 @@ use irpc::{
     WithChannels,
 };
 use n0_future::{
-    boxed::BoxStream,
+    stream::Boxed as BoxStream,
     task::{self, AbortOnDropHandle},
     time::Instant,
     MergeUnbounded, Stream, StreamExt,
