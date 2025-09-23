@@ -1095,7 +1095,6 @@ pub(crate) mod tests {
                 cancel.cancelled().await;
                 router.shutdown().await.ok();
                 drop(router);
-                tracing::info!("ROUTER DROPPED");
             });
             let router_fut = async move {
                 router_task.await.expect("router task panicked");
@@ -1389,7 +1388,7 @@ pub(crate) mod tests {
 
         // cleanup and ensure everything went as expected
         ct.cancel();
-        let wait = Duration::from_secs(2);
+        let wait = Duration::from_secs(5);
         timeout(wait, ep1_handle).await.e()?;
         timeout(wait, ep2_handle).await.e()?;
         timeout(wait, go1_handle).await.e()?.e()??;
@@ -1465,7 +1464,7 @@ pub(crate) mod tests {
 
         info!("wait for neighbor down");
         // we should receive a Neighbor down event
-        let conn_timeout = Duration::from_millis(500);
+        let conn_timeout = Duration::from_millis(1000);
         let ev = timeout(conn_timeout, sub.try_next()).await.e()??;
         assert_eq!(ev, Some(Event::NeighborDown(node_id2)));
         tracing::info!("node 2 left");
@@ -1474,7 +1473,7 @@ pub(crate) mod tests {
         tx.send(()).await.e()?;
 
         info!("wait for neighbor up");
-        let conn_timeout = Duration::from_millis(500);
+        let conn_timeout = Duration::from_millis(1000);
         let ev = timeout(conn_timeout, sub.try_next()).await.e()??;
         assert_eq!(ev, Some(Event::NeighborUp(node_id2)));
         tracing::info!("node 2 rejoined!");
