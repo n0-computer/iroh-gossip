@@ -115,6 +115,13 @@ impl<PI> Message<PI> {
     }
 }
 
+impl<PI: Serialize> Message<PI> {
+    /// Get the encoded size of this message
+    pub fn size(&self) -> postcard::Result<usize> {
+        postcard::experimental::serialized_size(&self)
+    }
+}
+
 /// An event to be emitted to the application for a particular topic.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum Event<PI> {
