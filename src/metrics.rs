@@ -41,7 +41,7 @@ pub struct Metrics {
     pub topics_joined: Counter,
     /// Number of topcis we left.
     pub topics_quit: Counter,
-    /// Number of times we succesfully dialed a remote node.
+    /// Number of times we successfully dialed a remote node.
     pub peers_dialed_success: Counter,
     /// Number of times we failed to dial a remote node.
     pub peers_dialed_failure: Counter,
@@ -106,7 +106,6 @@ impl Metrics {
     }
 }
 
-#[cfg(feature = "net")]
 pub(crate) fn inc(counter: &Counter) {
     counter.inc();
 }

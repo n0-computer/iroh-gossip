@@ -596,7 +596,7 @@ impl Actor {
             api::RpcMessage::Join(msg) => (msg.inner.topic_id, msg),
         };
         let topic = self.topics.entry(topic_id).or_insert_with(|| {
-            let (handle, fut) = TopicHandle::new(
+            let (handle, actor) = TopicHandle::new(
                 self.me,
                 topic_id,
                 self.config.clone(),
@@ -604,7 +604,11 @@ impl Actor {
                 self.our_peer_data.watch(),
                 self.metrics.clone(),
             );
-            self.topic_tasks.spawn(fut);
+            self.topic_tasks.spawn(
+                actor
+                    .run()
+                    .instrument(error_span!("topic", topic=%topic_id.fmt_short())),
+            );
             handle
         });
         if topic.send(ActorToTopic::Api(msg)).await.is_err() {
@@ -679,10 +683,7 @@ impl TopicHandle {
         to_actor_tx: mpsc::Sender<LocalActorMessage>,
         peer_data: Direct<Option<PeerData>>,
         metrics: Arc<Metrics>,
-    ) -> (
-        Self,
-        impl std::future::Future<Output = TopicActor> + Send + 'static,
-    ) {
+    ) -> (Self, TopicActor) {
         let (tx, rx) = mpsc::channel(16);
         // TODO: peer_data
         let state = State::new(me, None, config);
@@ -709,15 +710,12 @@ impl TopicHandle {
             drop_peers_queue: Default::default(),
             forward_event_tasks: Default::default(),
         };
-        let fut = actor
-            .run()
-            .instrument(error_span!("topic", topic=%topic_id.fmt_short()));
         let handle = Self {
             tx,
             #[cfg(test)]
             joined,
         };
-        (handle, fut)
+        (handle, actor)
     }
 
     async fn send(&self, msg: ActorToTopic) -> Result<(), mpsc::error::SendError<ActorToTopic>> {
