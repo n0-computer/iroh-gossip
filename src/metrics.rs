@@ -51,6 +51,7 @@ pub struct Metrics {
     pub actor_tick_main: Counter,
 }
 
+#[cfg(feature = "net")]
 impl Metrics {
     pub(crate) fn track_in_event<PI: Serialize>(&self, in_event: &InEvent<PI>) {
         match in_event {
@@ -104,6 +105,7 @@ impl Metrics {
     }
 }
 
+#[cfg(feature = "net")]
 pub(crate) fn inc(counter: &Counter) {
     counter.inc();
 }
