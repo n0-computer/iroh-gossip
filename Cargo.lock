@@ -2085,8 +2085,7 @@ dependencies = [
 [[package]]
 name = "irpc"
 version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "092c0b20697bbc7de4839eebcb49be975cc09221021626d301eea55fc10bfeb7"
+source = "git+https://github.com/n0-computer/irpc?branch=Frando%2Ffix-irpc-iroh-wasm#9e575203fc79e7fa08f03150797d6197c4d42947"
 dependencies = [
  "anyhow",
  "futures-buffered",
@@ -2108,8 +2107,7 @@ dependencies = [
 [[package]]
 name = "irpc-derive"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "209d38d83c0f7043916e90de2d3a8d01035db3a2f49ea7d5fb41b8f43e889924"
+source = "git+https://github.com/n0-computer/irpc?branch=Frando%2Ffix-irpc-iroh-wasm#9e575203fc79e7fa08f03150797d6197c4d42947"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2119,8 +2117,7 @@ dependencies = [
 [[package]]
 name = "irpc-iroh"
 version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dba5a31134415cdcfe65c309b4d3a9560764ca938e98e8717a25d3973f141ac1"
+source = "git+https://github.com/n0-computer/irpc?branch=Frando%2Ffix-irpc-iroh-wasm#9e575203fc79e7fa08f03150797d6197c4d42947"
 dependencies = [
  "anyhow",
  "getrandom 0.3.3",
