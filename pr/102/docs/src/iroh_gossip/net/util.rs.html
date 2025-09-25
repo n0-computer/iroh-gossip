@@ -426,7 +426,10 @@
 <a href="#425" id="425">425</a>
 <a href="#426" id="426">426</a>
 <a href="#427" id="427">427</a>
-<a href="#428" id="428">428</a></pre></div><pre class="rust"><code><span class="doccomment">//! Utilities for iroh-gossip networking
+<a href="#428" id="428">428</a>
+<a href="#429" id="429">429</a>
+<a href="#430" id="430">430</a>
+<a href="#431" id="431">431</a></pre></div><pre class="rust"><code><span class="doccomment">//! Utilities for iroh-gossip networking
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map, HashMap},
@@ -439,7 +442,10 @@
     endpoint::{Connection, RecvStream, SendStream},
     NodeId,
 };
-<span class="kw">use </span>n0_future::{time::Instant, FuturesUnordered, StreamExt};
+<span class="kw">use </span>n0_future::{
+    time::{sleep_until, Instant},
+    FuturesUnordered, StreamExt,
+};
 <span class="kw">use </span>nested_enum_utils::common_fields;
 <span class="kw">use </span>serde::{de::DeserializeOwned, Deserialize, Serialize};
 <span class="kw">use </span>snafu::Snafu;
@@ -843,7 +849,7 @@
         <span class="kw">match </span><span class="self">self</span>.map.first() {
             <span class="prelude-val">None </span>=&gt; std::future::pending::&lt;Instant&gt;().<span class="kw">await</span>,
             <span class="prelude-val">Some</span>(instant) =&gt; {
-                tokio::time::sleep_until(<span class="kw-2">*</span>instant).<span class="kw">await</span>;
+                sleep_until(<span class="kw-2">*</span>instant).<span class="kw">await</span>;
                 <span class="kw-2">*</span>instant
             }
         }
