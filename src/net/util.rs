@@ -11,7 +11,10 @@ use iroh::{
     endpoint::{Connection, RecvStream, SendStream},
     NodeId,
 };
-use n0_future::{time::Instant, FuturesUnordered, StreamExt};
+use n0_future::{
+    time::{sleep_until, Instant},
+    FuturesUnordered, StreamExt,
+};
 use nested_enum_utils::common_fields;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use snafu::Snafu;
@@ -415,7 +418,7 @@ impl<T> Timers<T> {
         match self.map.first() {
             None => std::future::pending::<Instant>().await,
             Some(instant) => {
-                tokio::time::sleep_until(*instant).await;
+                sleep_until(*instant).await;
                 *instant
             }
         }
