@@ -369,6 +369,16 @@ impl<K: Hash + Eq + Clone, V> TimeBoundCache<K, V> {
     ///
     /// Returns the number of items that were removed.
     pub fn expire_until(&mut self, instant: Instant) -> usize {
+        println!(
+            "expire pre:  ExpiryMap(len {} cap {} seq {} size {}M) ValueMap (len {} cap {} size {}M)",
+            self.expiry.heap.len(),
+            self.expiry.heap.capacity(),
+            self.expiry.seq,
+            self.expiry.heap.capacity() * std::mem::size_of::<TimerMapEntry<K>>() / 1024 / 1024,
+            self.map.len(),
+            self.map.capacity(),
+            self.map.capacity() * std::mem::size_of::<(K, (Instant, V))>() / 1024 / 1024
+        );
         let drain = self.expiry.drain_until(&instant);
         let mut count = 0;
         for (time, key) in drain {
@@ -389,6 +399,23 @@ impl<K: Hash + Eq + Clone, V> TimeBoundCache<K, V> {
                 }
             }
         }
+        println!(
+            "expire post: ExpiryMap(len {} cap {} seq {} size {}M) ValueMap (len {} cap {} size {}M) rem {count}",
+            self.expiry.heap.len(),
+            self.expiry.heap.capacity(),
+            self.expiry.seq,
+            self.expiry.heap.capacity() * std::mem::size_of::<TimerMapEntry<K>>() / 1024 / 1024,
+            self.map.len(),
+            self.map.capacity(),
+            self.map.capacity() * std::mem::size_of::<(K, (Instant, V))>() / 1024 / 1024
+        );
+        println!(
+            "size k {} v {} entry heap {} map {}",
+            std::mem::size_of::<K>(),
+            std::mem::size_of::<V>(),
+            std::mem::size_of::<TimerMapEntry<K>>(),
+            std::mem::size_of::<(K, (Instant, V))>()
+        );
         count
     }
 }
