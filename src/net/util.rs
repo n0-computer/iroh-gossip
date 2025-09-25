@@ -3,7 +3,6 @@
 use std::{
     collections::{hash_map, HashMap},
     io,
-    pin::Pin,
     time::Duration,
 };
 
@@ -13,7 +12,7 @@ use iroh::{
     NodeId,
 };
 use n0_future::{
-    time::{sleep_until, Instant, Sleep},
+    time::{sleep_until, Instant},
     FuturesUnordered, StreamExt,
 };
 use nested_enum_utils::common_fields;
@@ -392,14 +391,12 @@ pub async fn write_frame<T: Serialize>(
 /// A [`TimerMap`] with an async method to wait for the next timer expiration.
 #[derive(Debug)]
 pub struct Timers<T> {
-    next: Option<(Instant, Pin<Box<Sleep>>)>,
     map: TimerMap<T>,
 }
 
 impl<T> Default for Timers<T> {
     fn default() -> Self {
         Self {
-            next: None,
             map: TimerMap::default(),
         }
     }
@@ -416,22 +413,14 @@ impl<T> Timers<T> {
         self.map.insert(instant, item);
     }
 
-    fn reset(&mut self) {
-        self.next = self
-            .map
-            .first()
-            .map(|instant| (*instant, Box::pin(sleep_until(*instant))))
-    }
-
     /// Waits for the next timer to elapse.
     pub async fn wait_next(&mut self) -> Instant {
-        self.reset();
-        match self.next.as_mut() {
-            Some((instant, sleep)) => {
-                sleep.await;
+        match self.map.first() {
+            None => std::future::pending::<Instant>().await,
+            Some(instant) => {
+                sleep_until(*instant).await;
                 *instant
             }
-            None => std::future::pending().await,
         }
     }
 
