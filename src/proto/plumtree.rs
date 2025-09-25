@@ -9,6 +9,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     hash::Hash,
+    sync::Arc,
 };
 
 use bytes::Bytes;
@@ -137,7 +138,7 @@ impl Round {
 pub enum Message {
     /// When receiving Gossip, emit as event and forward full message to eager peer and (after a
     /// delay) message IDs to lazy peers.
-    Gossip(Gossip),
+    Gossip(Arc<Gossip>),
     /// When receiving Prune, move the peer from the eager to the lazy set.
     Prune,
     /// When receiving Graft, move the peer to the eager set and send the full content for the
@@ -198,14 +199,14 @@ pub enum Scope {
 
 impl Gossip {
     /// Get a clone of this `Gossip` message and increase the delivery round by 1.
-    pub fn next_round(&self) -> Option<Gossip> {
+    pub fn next_round(&self) -> Option<Arc<Gossip>> {
         match self.scope {
             DeliveryScope::Neighbors => None,
-            DeliveryScope::Swarm(round) => Some(Gossip {
+            DeliveryScope::Swarm(round) => Some(Arc::new(Gossip {
                 id: self.id,
                 content: self.content.clone(),
                 scope: DeliveryScope::Swarm(round.next()),
-            }),
+            })),
         }
     }
 
@@ -366,7 +367,7 @@ pub struct State<PI> {
     /// Messages for which the full payload has been seen.
     received_messages: TimeBoundCache<MessageId, ()>,
     /// Payloads of received messages.
-    cache: TimeBoundCache<MessageId, Gossip>,
+    cache: TimeBoundCache<MessageId, Arc<Gossip>>,
 
     /// Message ids for which a [`Timer::SendGraft`] has been scheduled.
     graft_timer_scheduled: HashSet<MessageId>,
@@ -470,7 +471,7 @@ impl<PI: PeerIdentity> State<PI> {
             Scope::Neighbors => DeliveryScope::Neighbors,
             Scope::Swarm => DeliveryScope::Swarm(Round(0)),
         };
-        let message = Gossip { id, content, scope };
+        let message = Arc::new(Gossip { id, content, scope });
         let me = self.me;
         if let DeliveryScope::Swarm(_) = scope {
             self.received_messages
@@ -480,14 +481,14 @@ impl<PI: PeerIdentity> State<PI> {
                 message.clone(),
                 now + self.config.message_cache_retention,
             );
-            self.lazy_push(message.clone(), &me, io);
+            self.lazy_push(&message, &me, io);
         }
 
         self.eager_push(message.clone(), &me, io);
     }
 
     /// Handle receiving a [`Message::Gossip`].
-    fn on_gossip(&mut self, sender: PI, message: Gossip, now: Instant, io: &mut impl IO<PI>) {
+    fn on_gossip(&mut self, sender: PI, message: Arc<Gossip>, now: Instant, io: &mut impl IO<PI>) {
         // Validate that the message id is the blake3 hash of the message content.
         if !message.validate() {
             // TODO: Do we want to take any measures against the sender if we received a message
@@ -525,7 +526,7 @@ impl<PI: PeerIdentity> State<PI> {
                 );
                 // push the message to our peers
                 self.eager_push(message.clone(), &sender, io);
-                self.lazy_push(message.clone(), &sender, io);
+                self.lazy_push(&message, &sender, io);
                 // cleanup places where we track missing messages
                 self.graft_timer_scheduled.remove(&message.id);
                 let previous_ihaves = self.missing_messages.remove(&message.id);
@@ -699,7 +700,7 @@ impl<PI: PeerIdentity> State<PI> {
     }
 
     /// Immediately sends message to eager peers.
-    fn eager_push(&mut self, gossip: Gossip, sender: &PI, io: &mut impl IO<PI>) {
+    fn eager_push(&mut self, gossip: Arc<Gossip>, sender: &PI, io: &mut impl IO<PI>) {
         for peer in self
             .eager_push_peers
             .iter()
@@ -714,7 +715,7 @@ impl<PI: PeerIdentity> State<PI> {
 
     /// Queue lazy message announcements into the queue that will be sent out as batched
     /// [`Message::IHave`] messages once the [`Timer::DispatchLazyPush`] timer is triggered.
-    fn lazy_push(&mut self, gossip: Gossip, sender: &PI, io: &mut impl IO<PI>) {
+    fn lazy_push(&mut self, gossip: &Gossip, sender: &PI, io: &mut impl IO<PI>) {
         let Some(round) = gossip.round() else {
             return;
         };
@@ -764,11 +765,11 @@ mod test {
         // because we use the default config which has `optimization_threshold: 7`
         let event = InEvent::RecvMessage(
             3,
-            Message::Gossip(Gossip {
+            Message::Gossip(Arc::new(Gossip {
                 id,
                 content: content.clone(),
                 scope: DeliveryScope::Swarm(Round(6)),
-            }),
+            })),
         );
         state.handle(event, now, &mut io);
         let expected = {
@@ -807,11 +808,11 @@ mod test {
 
         let event = InEvent::RecvMessage(
             3,
-            Message::Gossip(Gossip {
+            Message::Gossip(Arc::new(Gossip {
                 id,
                 content: content.clone(),
                 scope: DeliveryScope::Swarm(Round(9)),
-            }),
+            })),
         );
         state.handle(event, now, &mut io);
         let expected = {
@@ -844,11 +845,11 @@ mod test {
 
         // we recv a correct gossip message and expect the Received event to be emitted
         let content: Bytes = b"hello1".to_vec().into();
-        let message = Message::Gossip(Gossip {
+        let message = Message::Gossip(Arc::new(Gossip {
             content: content.clone(),
             id: MessageId::from_content(&content),
             scope: DeliveryScope::Swarm(Round(1)),
-        });
+        }));
         let mut io = VecDeque::new();
         state.handle(InEvent::RecvMessage(2, message), now, &mut io);
         let expected = {
@@ -872,11 +873,11 @@ mod test {
 
         // now we recv with a spoofed id and expect no event to be emitted
         let content: Bytes = b"hello2".to_vec().into();
-        let message = Message::Gossip(Gossip {
+        let message = Message::Gossip(Arc::new(Gossip {
             content,
             id: MessageId::from_content(b"foo"),
             scope: DeliveryScope::Swarm(Round(1)),
-        });
+        }));
         let mut io = VecDeque::new();
         state.handle(InEvent::RecvMessage(2, message), now, &mut io);
         let expected = VecDeque::new();
@@ -889,11 +890,11 @@ mod test {
         let mut state = State::new(1, config.clone(), 1024);
         let now = Instant::now();
         let content: Bytes = b"hello1".to_vec().into();
-        let message = Message::Gossip(Gossip {
+        let message = Message::Gossip(Arc::new(Gossip {
             content: content.clone(),
             id: MessageId::from_content(&content),
             scope: DeliveryScope::Swarm(Round(1)),
-        });
+        }));
         let mut io = VecDeque::new();
         state.handle(InEvent::RecvMessage(2, message), now, &mut io);
         assert_eq!(state.cache.len(), 1);
