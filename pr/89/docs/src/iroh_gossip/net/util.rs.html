@@ -429,23 +429,11 @@
 <a href="#428" id="428">428</a>
 <a href="#429" id="429">429</a>
 <a href="#430" id="430">430</a>
-<a href="#431" id="431">431</a>
-<a href="#432" id="432">432</a>
-<a href="#433" id="433">433</a>
-<a href="#434" id="434">434</a>
-<a href="#435" id="435">435</a>
-<a href="#436" id="436">436</a>
-<a href="#437" id="437">437</a>
-<a href="#438" id="438">438</a>
-<a href="#439" id="439">439</a>
-<a href="#440" id="440">440</a>
-<a href="#441" id="441">441</a>
-<a href="#442" id="442">442</a></pre></div><pre class="rust"><code><span class="doccomment">//! Utilities for iroh-gossip networking
+<a href="#431" id="431">431</a></pre></div><pre class="rust"><code><span class="doccomment">//! Utilities for iroh-gossip networking
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map, HashMap},
     io,
-    pin::Pin,
     time::Duration,
 };
 
@@ -455,7 +443,7 @@
     NodeId,
 };
 <span class="kw">use </span>n0_future::{
-    time::{sleep_until, Instant, Sleep},
+    time::{sleep_until, Instant},
     FuturesUnordered, StreamExt,
 };
 <span class="kw">use </span>nested_enum_utils::common_fields;
@@ -834,14 +822,12 @@
 <span class="doccomment">/// A [`TimerMap`] with an async method to wait for the next timer expiration.
 </span><span class="attr">#[derive(Debug)]
 </span><span class="kw">pub struct </span>Timers&lt;T&gt; {
-    next: <span class="prelude-ty">Option</span>&lt;(Instant, Pin&lt;Box&lt;Sleep&gt;&gt;)&gt;,
     map: TimerMap&lt;T&gt;,
 }
 
 <span class="kw">impl</span>&lt;T&gt; Default <span class="kw">for </span>Timers&lt;T&gt; {
     <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
         <span class="self">Self </span>{
-            next: <span class="prelude-val">None</span>,
             map: TimerMap::default(),
         }
     }
@@ -858,22 +844,14 @@
         <span class="self">self</span>.map.insert(instant, item);
     }
 
-    <span class="kw">fn </span>reset(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
-        <span class="self">self</span>.next = <span class="self">self
-            </span>.map
-            .first()
-            .map(|instant| (<span class="kw-2">*</span>instant, Box::pin(sleep_until(<span class="kw-2">*</span>instant))))
-    }
-
     <span class="doccomment">/// Waits for the next timer to elapse.
     </span><span class="kw">pub async fn </span>wait_next(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; Instant {
-        <span class="self">self</span>.reset();
-        <span class="kw">match </span><span class="self">self</span>.next.as_mut() {
-            <span class="prelude-val">Some</span>((instant, sleep)) =&gt; {
-                sleep.<span class="kw">await</span>;
+        <span class="kw">match </span><span class="self">self</span>.map.first() {
+            <span class="prelude-val">None </span>=&gt; std::future::pending::&lt;Instant&gt;().<span class="kw">await</span>,
+            <span class="prelude-val">Some</span>(instant) =&gt; {
+                sleep_until(<span class="kw-2">*</span>instant).<span class="kw">await</span>;
                 <span class="kw-2">*</span>instant
             }
-            <span class="prelude-val">None </span>=&gt; std::future::pending().<span class="kw">await</span>,
         }
     }
 

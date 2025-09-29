@@ -1688,7 +1688,57 @@
 <a href="#1687" id="1687">1687</a>
 <a href="#1688" id="1688">1688</a>
 <a href="#1689" id="1689">1689</a>
-<a href="#1690" id="1690">1690</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
+<a href="#1690" id="1690">1690</a>
+<a href="#1691" id="1691">1691</a>
+<a href="#1692" id="1692">1692</a>
+<a href="#1693" id="1693">1693</a>
+<a href="#1694" id="1694">1694</a>
+<a href="#1695" id="1695">1695</a>
+<a href="#1696" id="1696">1696</a>
+<a href="#1697" id="1697">1697</a>
+<a href="#1698" id="1698">1698</a>
+<a href="#1699" id="1699">1699</a>
+<a href="#1700" id="1700">1700</a>
+<a href="#1701" id="1701">1701</a>
+<a href="#1702" id="1702">1702</a>
+<a href="#1703" id="1703">1703</a>
+<a href="#1704" id="1704">1704</a>
+<a href="#1705" id="1705">1705</a>
+<a href="#1706" id="1706">1706</a>
+<a href="#1707" id="1707">1707</a>
+<a href="#1708" id="1708">1708</a>
+<a href="#1709" id="1709">1709</a>
+<a href="#1710" id="1710">1710</a>
+<a href="#1711" id="1711">1711</a>
+<a href="#1712" id="1712">1712</a>
+<a href="#1713" id="1713">1713</a>
+<a href="#1714" id="1714">1714</a>
+<a href="#1715" id="1715">1715</a>
+<a href="#1716" id="1716">1716</a>
+<a href="#1717" id="1717">1717</a>
+<a href="#1718" id="1718">1718</a>
+<a href="#1719" id="1719">1719</a>
+<a href="#1720" id="1720">1720</a>
+<a href="#1721" id="1721">1721</a>
+<a href="#1722" id="1722">1722</a>
+<a href="#1723" id="1723">1723</a>
+<a href="#1724" id="1724">1724</a>
+<a href="#1725" id="1725">1725</a>
+<a href="#1726" id="1726">1726</a>
+<a href="#1727" id="1727">1727</a>
+<a href="#1728" id="1728">1728</a>
+<a href="#1729" id="1729">1729</a>
+<a href="#1730" id="1730">1730</a>
+<a href="#1731" id="1731">1731</a>
+<a href="#1732" id="1732">1732</a>
+<a href="#1733" id="1733">1733</a>
+<a href="#1734" id="1734">1734</a>
+<a href="#1735" id="1735">1735</a>
+<a href="#1736" id="1736">1736</a>
+<a href="#1737" id="1737">1737</a>
+<a href="#1738" id="1738">1738</a>
+<a href="#1739" id="1739">1739</a>
+<a href="#1740" id="1740">1740</a></pre></div><pre class="rust"><code><span class="doccomment">//! Networking for the `iroh-gossip` protocol
 
 </span><span class="kw">use </span>std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
@@ -1698,6 +1748,7 @@
     task::{Context, Poll},
 };
 
+<span class="kw">use </span>bytes::Bytes;
 <span class="kw">use </span>futures_concurrency::stream::{stream_group, StreamGroup};
 <span class="kw">use </span>futures_util::FutureExt <span class="kw">as _</span>;
 <span class="kw">use </span>iroh::{
@@ -1840,6 +1891,7 @@
 </span><span class="attr">#[derive(Debug, Clone)]
 </span><span class="kw">pub struct </span>Builder {
     config: proto::Config,
+    alpn: <span class="prelude-ty">Option</span>&lt;Bytes&gt;,
 }
 
 <span class="kw">impl </span>Builder {
@@ -1862,10 +1914,23 @@
         <span class="self">self
     </span>}
 
+    <span class="doccomment">/// Set the ALPN this gossip instance uses.
+    ///
+    /// It has to be the same for all peers in the network. If you set a custom ALPN,
+    /// you have to use the same ALPN when registering the [`Gossip`] in on a iroh
+    /// router with [`RouterBuilder::accept`].
+    ///
+    /// [`RouterBuilder::accept`]: iroh::protocol::RouterBuilder::accept
+    </span><span class="kw">pub fn </span>alpn(<span class="kw-2">mut </span><span class="self">self</span>, alpn: <span class="kw">impl </span>AsRef&lt;[u8]&gt;) -&gt; <span class="self">Self </span>{
+        <span class="self">self</span>.alpn = <span class="prelude-val">Some</span>(alpn.as_ref().to_vec().into());
+        <span class="self">self
+    </span>}
+
     <span class="doccomment">/// Spawn a gossip actor and get a handle for it
     </span><span class="kw">pub fn </span>spawn(<span class="self">self</span>, endpoint: Endpoint) -&gt; Gossip {
         <span class="kw">let </span>metrics = Arc::new(Metrics::default());
-        <span class="kw">let </span>(actor, rpc_tx, local_tx) = Actor::new(endpoint, <span class="self">self</span>.config, metrics.clone());
+        <span class="kw">let </span>(actor, rpc_tx, local_tx) =
+            Actor::new(endpoint, <span class="self">self</span>.config, metrics.clone(), <span class="self">self</span>.alpn);
         <span class="kw">let </span>me = actor.endpoint.node_id().fmt_short();
         <span class="kw">let </span>max_message_size = actor.state.max_message_size();
 
@@ -1891,6 +1956,7 @@
     </span><span class="kw">pub fn </span>builder() -&gt; Builder {
         Builder {
             config: Default::default(),
+            alpn: <span class="prelude-val">None</span>,
         }
     }
 
@@ -1938,6 +2004,7 @@
 
 <span class="doccomment">/// Actor that sends and handles messages between the connection and main state loops
 </span><span class="kw">struct </span>Actor {
+    alpn: Bytes,
     <span class="doccomment">/// Protocol state
     </span>state: proto::State&lt;PublicKey, StdRng&gt;,
     <span class="doccomment">/// The endpoint through which we dial peers
@@ -1972,6 +2039,7 @@
         endpoint: Endpoint,
         config: proto::Config,
         metrics: Arc&lt;Metrics&gt;,
+        alpn: <span class="prelude-ty">Option</span>&lt;Bytes&gt;,
     ) -&gt; (
         <span class="self">Self</span>,
         mpsc::Sender&lt;RpcMessage&gt;,
@@ -1990,6 +2058,7 @@
         <span class="kw">let </span>(in_event_tx, in_event_rx) = mpsc::channel(IN_EVENT_CAP);
 
         <span class="kw">let </span>actor = Actor {
+            alpn: alpn.unwrap_or_else(|| GOSSIP_ALPN.to_vec().into()),
             endpoint,
             state,
             dialer,
@@ -2261,7 +2330,7 @@
                 <span class="kw">let </span>WithChannels {
                     inner,
                     rx,
-                    <span class="kw-2">mut </span>tx,
+                    tx,
                     <span class="comment">// TODO(frando): make use of span?
                     </span>span: <span class="kw">_</span>,
                 } = msg;
@@ -2354,7 +2423,7 @@
                         PeerState::Pending { queue } =&gt; {
                             <span class="kw">if </span>queue.is_empty() {
                                 <span class="macro">debug!</span>(peer = %peer_id.fmt_short(), <span class="string">"start to dial"</span>);
-                                <span class="self">self</span>.dialer.queue_dial(peer_id, GOSSIP_ALPN);
+                                <span class="self">self</span>.dialer.queue_dial(peer_id, <span class="self">self</span>.alpn.clone());
                             }
                             queue.push(message);
                         }
@@ -2678,7 +2747,7 @@
     }
 
     <span class="doccomment">/// Starts to dial a node by [`NodeId`].
-    </span><span class="kw">fn </span>queue_dial(<span class="kw-2">&amp;mut </span><span class="self">self</span>, node_id: NodeId, alpn: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>[u8]) {
+    </span><span class="kw">fn </span>queue_dial(<span class="kw-2">&amp;mut </span><span class="self">self</span>, node_id: NodeId, alpn: Bytes) {
         <span class="kw">if </span><span class="self">self</span>.is_pending(node_id) {
             <span class="kw">return</span>;
         }
@@ -2690,7 +2759,7 @@
                 <span class="kw">let </span>res = <span class="macro">tokio::select!</span> {
                     biased;
                     <span class="kw">_ </span>= cancel.cancelled() =&gt; <span class="prelude-val">None</span>,
-                    res = endpoint.connect(node_id, alpn) =&gt; <span class="prelude-val">Some</span>(res),
+                    res = endpoint.connect(node_id, <span class="kw-2">&amp;</span>alpn) =&gt; <span class="prelude-val">Some</span>(res),
                 };
                 (node_id, res)
             }
@@ -2818,7 +2887,7 @@
             <span class="kw">let </span>endpoint = create_endpoint(rng, relay_map).<span class="kw">await</span><span class="question-mark">?</span>;
             <span class="kw">let </span>metrics = Arc::new(Metrics::default());
 
-            <span class="kw">let </span>(actor, to_actor_tx, conn_tx) = Actor::new(endpoint, config, metrics.clone());
+            <span class="kw">let </span>(actor, to_actor_tx, conn_tx) = Actor::new(endpoint, config, metrics.clone(), <span class="prelude-val">None</span>);
             <span class="kw">let </span>max_message_size = actor.state.max_message_size();
 
             <span class="kw">let </span>_actor_handle =
@@ -3375,6 +3444,37 @@
         <span class="macro">assert!</span>(join_handle_1.join().unwrap().is_none());
         <span class="macro">assert!</span>(join_handle_2.join().unwrap().is_none());
 
+        <span class="prelude-val">Ok</span>(())
+    }
+
+    <span class="attr">#[tokio::test]
+    #[traced_test]
+    </span><span class="kw">async fn </span>gossip_change_alpn() -&gt; n0_snafu::Result&lt;()&gt; {
+        <span class="kw">let </span>alpn = <span class="string">b"my-gossip-alpn"</span>;
+        <span class="kw">let </span>topic_id = TopicId::from([<span class="number">0u8</span>; <span class="number">32</span>]);
+
+        <span class="kw">let </span>ep1 = Endpoint::builder().bind().<span class="kw">await</span><span class="question-mark">?</span>;
+        <span class="kw">let </span>ep2 = Endpoint::builder().bind().<span class="kw">await</span><span class="question-mark">?</span>;
+        <span class="kw">let </span>gossip1 = Gossip::builder().alpn(alpn).spawn(ep1.clone());
+        <span class="kw">let </span>gossip2 = Gossip::builder().alpn(alpn).spawn(ep2.clone());
+        <span class="kw">let </span>router1 = Router::builder(ep1).accept(alpn, gossip1.clone()).spawn();
+        <span class="kw">let </span>router2 = Router::builder(ep2).accept(alpn, gossip2.clone()).spawn();
+
+        <span class="kw">let </span>addr1 = router1.endpoint().node_addr().initialized().<span class="kw">await</span>;
+        <span class="kw">let </span>id1 = addr1.node_id;
+        router2.endpoint().add_node_addr(addr1)<span class="question-mark">?</span>;
+
+        <span class="kw">let </span><span class="kw-2">mut </span>topic1 = gossip1.subscribe(topic_id, <span class="macro">vec!</span>[]).<span class="kw">await</span><span class="question-mark">?</span>;
+        <span class="kw">let </span><span class="kw-2">mut </span>topic2 = gossip2.subscribe(topic_id, <span class="macro">vec!</span>[id1]).<span class="kw">await</span><span class="question-mark">?</span>;
+
+        timeout(Duration::from_secs(<span class="number">3</span>), topic1.joined())
+            .<span class="kw">await
+            </span>.e()<span class="question-mark">??</span>;
+        timeout(Duration::from_secs(<span class="number">3</span>), topic2.joined())
+            .<span class="kw">await
+            </span>.e()<span class="question-mark">??</span>;
+        router1.shutdown().<span class="kw">await</span>.e()<span class="question-mark">?</span>;
+        router2.shutdown().<span class="kw">await</span>.e()<span class="question-mark">?</span>;
         <span class="prelude-val">Ok</span>(())
     }
 }
