@@ -36,7 +36,7 @@ jobs:
         echo "RELEASE_VERSION=${{ github.event.inputs.release_version }}" >> $GITHUB_ENV
         echo "version is: ${{ env.RELEASE_VERSION }}"
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
       with:
         fetch-depth: 1
     - name: Create GitHub release
