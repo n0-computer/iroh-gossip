@@ -352,7 +352,7 @@ impl Actor {
     /// This updates our current address and return it. It also returns the home relay stream and
     /// direct addr stream.
     async fn setup(&mut self) -> impl Stream<Item = NodeAddr> + Send + Unpin + use<> {
-        let addr_update_stream = self.endpoint.watch_node_addr().stream().filter_map(|x| x);
+        let addr_update_stream = self.endpoint.watch_node_addr().stream();
         // TODO(Frando): Fail if endpoint disconnected?
         let initial_addr = self.endpoint.node_addr();
         self.handle_addr_update(initial_addr).await;
@@ -1072,9 +1072,7 @@ pub(crate) mod test {
     use bytes::Bytes;
     use futures_concurrency::future::TryJoin;
     use iroh::{
-        discovery::static_provider::{self, StaticProvider},
-        endpoint::BindError,
-        protocol::Router,
+        discovery::static_provider::StaticProvider, endpoint::BindError, protocol::Router,
         RelayMap, RelayMode, SecretKey,
     };
     use n0_snafu::{Result, ResultExt};
@@ -1149,7 +1147,7 @@ pub(crate) mod test {
             relay_map: RelayMap,
             cancel: &CancellationToken,
         ) -> Result<(Self, Actor, EndpointHandle), BindError> {
-            let endpoint = create_endpoint(rng, relay_map).await?;
+            let endpoint = create_endpoint(rng, relay_map, None).await?;
             let metrics = Arc::new(Metrics::default());
 
             let (actor, to_actor_tx, conn_tx) = Actor::new(endpoint, config, metrics.clone(), None);
@@ -1197,6 +1195,7 @@ pub(crate) mod test {
     pub(crate) async fn create_endpoint(
         rng: &mut rand_chacha::ChaCha12Rng,
         relay_map: RelayMap,
+        static_provider: Option<StaticProvider>,
     ) -> Result<Endpoint, BindError> {
         let ep = Endpoint::builder()
             .secret_key(SecretKey::generate(rng))
@@ -1206,6 +1205,9 @@ pub(crate) mod test {
             .bind()
             .await?;
 
+        if let Some(static_provider) = static_provider {
+            ep.discovery().add(static_provider);
+        }
         ep.online().await;
         Ok(ep)
     }
@@ -1245,9 +1247,17 @@ pub(crate) mod test {
         let mut rng = rand_chacha::ChaCha12Rng::seed_from_u64(1);
         let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
 
-        let ep1 = create_endpoint(&mut rng, relay_map.clone()).await.unwrap();
-        let ep2 = create_endpoint(&mut rng, relay_map.clone()).await.unwrap();
-        let ep3 = create_endpoint(&mut rng, relay_map.clone()).await.unwrap();
+        let static_provider = StaticProvider::new();
+
+        let ep1 = create_endpoint(&mut rng, relay_map.clone(), Some(static_provider.clone()))
+            .await
+            .unwrap();
+        let ep2 = create_endpoint(&mut rng, relay_map.clone(), Some(static_provider.clone()))
+            .await
+            .unwrap();
+        let ep3 = create_endpoint(&mut rng, relay_map.clone(), Some(static_provider.clone()))
+            .await
+            .unwrap();
 
         let go1 = Gossip::builder().spawn(ep1.clone());
         let go2 = Gossip::builder().spawn(ep2.clone());
@@ -1270,8 +1280,8 @@ pub(crate) mod test {
 
         let addr1 = NodeAddr::new(pi1).with_relay_url(relay_url.clone());
         let addr2 = NodeAddr::new(pi2).with_relay_url(relay_url);
-        ep2.add_node_addr(addr1.clone()).unwrap();
-        ep3.add_node_addr(addr2).unwrap();
+        static_provider.add_node_info(addr1.clone());
+        static_provider.add_node_info(addr2.clone());
 
         debug!("----- joining  ----- ");
         // join the topics and wait for the connection to succeed
@@ -1385,8 +1395,8 @@ pub(crate) mod test {
         let node_id1 = actor.endpoint.node_id();
         let node_id2 = ep2.node_id();
         tracing::info!(
-            node_1 = node_id1.fmt_short(),
-            node_2 = node_id2.fmt_short(),
+            node_1 = %node_id1.fmt_short(),
+            node_2 = %node_id2.fmt_short(),
             "nodes ready"
         );
 
@@ -1426,7 +1436,9 @@ pub(crate) mod test {
 
         // first node
         let addr2 = NodeAddr::new(node_id2).with_relay_url(relay_url);
-        actor.endpoint.add_node_addr(addr2)?;
+        let static_provider = StaticProvider::new();
+        static_provider.add_node_info(addr2);
+        actor.endpoint.discovery().add(static_provider);
         // we use a channel to signal advancing steps to the task
         let (tx, mut rx) = mpsc::channel::<()>(1);
         let ct1 = ct.clone();
@@ -1507,8 +1519,8 @@ pub(crate) mod test {
         let node_id1 = ep1.node_id();
         let node_id2 = ep2.node_id();
         tracing::info!(
-            node_1 = node_id1.fmt_short(),
-            node_2 = node_id2.fmt_short(),
+            node_1 = %node_id1.fmt_short(),
+            node_2 = %node_id2.fmt_short(),
             "nodes ready"
         );
 
@@ -1519,7 +1531,9 @@ pub(crate) mod test {
         // channel used to signal the second gossip instance to advance the test
         let (tx, mut rx) = mpsc::channel::<()>(1);
         let addr1 = NodeAddr::new(node_id1).with_relay_url(relay_url.clone());
-        ep2.add_node_addr(addr1)?;
+        let static_provider = StaticProvider::new();
+        static_provider.add_node_info(addr1);
+        ep2.discovery().add(static_provider.clone());
         let go2_task = async move {
             let mut sub = go2.subscribe(topic, Vec::new()).await?;
             sub.joined().await?;
@@ -1543,7 +1557,8 @@ pub(crate) mod test {
         let go2_handle = task::spawn(go2_task);
 
         let addr2 = NodeAddr::new(node_id2).with_relay_url(relay_url);
-        ep1.add_node_addr(addr2)?;
+        static_provider.add_node_info(addr2);
+        ep1.discovery().add(static_provider);
 
         let mut sub = go1.subscribe(topic, vec![node_id2]).await?;
         // wait for subscribed notification
@@ -1623,7 +1638,9 @@ pub(crate) mod test {
             let (router, gossip) = spawn_gossip(secret_key, relay_map).await?;
             info!(node_id = %router.endpoint().node_id().fmt_short(), "broadcast node spawned");
             let bootstrap = vec![bootstrap_addr.node_id];
-            router.endpoint().add_node_addr(bootstrap_addr)?;
+            let static_provider = StaticProvider::new();
+            static_provider.add_node_info(bootstrap_addr);
+            router.endpoint().discovery().add(static_provider);
             let mut topic = gossip.subscribe_and_join(topic_id, bootstrap).await?;
             topic.broadcast(message.as_bytes().to_vec().into()).await?;
             std::future::pending::<()>().await;
@@ -1647,8 +1664,8 @@ pub(crate) mod test {
                 // to immediately reconnect with changed direct addresses, but when the
                 // relay path is available it works.
                 // See https://github.com/n0-computer/iroh/pull/3372
-                router.endpoint().home_relay().initialized().await;
-                let addr = router.endpoint().node_addr().initialized().await;
+                router.endpoint().online().await;
+                let addr = router.endpoint().node_addr();
                 info!(node_id = %addr.node_id.fmt_short(), "recv node spawned");
                 addr_tx.send(addr).unwrap();
                 let mut topic = gossip.subscribe_and_join(topic_id, vec![]).await?;
@@ -1725,9 +1742,11 @@ pub(crate) mod test {
         let router1 = Router::builder(ep1).accept(alpn, gossip1.clone()).spawn();
         let router2 = Router::builder(ep2).accept(alpn, gossip2.clone()).spawn();
 
-        let addr1 = router1.endpoint().node_addr().initialized().await;
+        let addr1 = router1.endpoint().node_addr();
         let id1 = addr1.node_id;
-        router2.endpoint().add_node_addr(addr1)?;
+        let static_provider = StaticProvider::new();
+        static_provider.add_node_info(addr1);
+        router2.endpoint().discovery().add(static_provider);
 
         let mut topic1 = gossip1.subscribe(topic_id, vec![]).await?;
         let mut topic2 = gossip2.subscribe(topic_id, vec![id1]).await?;

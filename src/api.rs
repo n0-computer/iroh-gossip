@@ -436,7 +436,7 @@ mod tests {
             rng: &mut rand_chacha::ChaCha12Rng,
             relay_map: RelayMap,
         ) -> Result<(Router, Gossip)> {
-            let endpoint = create_endpoint(rng, relay_map).await?;
+            let endpoint = create_endpoint(rng, relay_map, None).await?;
             let gossip = Gossip::builder().spawn(endpoint.clone());
             let router = Router::builder(endpoint)
                 .accept(ALPN, gossip.clone())
