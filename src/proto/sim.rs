@@ -8,9 +8,8 @@ use std::{
 
 use bytes::Bytes;
 use n0_future::time::{Duration, Instant};
-use rand::{seq::IteratorRandom, Rng};
+use rand::{seq::IteratorRandom, Rng, SeedableRng};
 use rand_chacha::ChaCha12Rng;
-use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, debug_span, info, info_span, trace, warn};
 
@@ -93,7 +92,7 @@ impl LatencyConfig {
         match self {
             Self::Static(d) => *d,
             // TODO(frando): use uniform distribution?
-            Self::Dynamic { min, max } => rng.gen_range(*min..*max),
+            Self::Dynamic { min, max } => rng.random_range(*min..*max),
         }
     }
 }
@@ -157,7 +156,7 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng + Clone> Network<PI, 
             !self.peers.contains_key(&peer_id),
             "duplicate peer: {peer_id:?}"
         );
-        let rng = R::from_rng(&mut self.rng).unwrap();
+        let rng = R::from_rng(&mut self.rng);
         let state = State::new(peer_id, PeerData::default(), config, rng);
         self.peers.insert(peer_id, state);
     }
@@ -873,7 +872,7 @@ impl Simulator {
 
     /// Creates a new random number generator, derived from the simuator's RNG.
     pub fn rng(&mut self) -> ChaCha12Rng {
-        ChaCha12Rng::from_rng(&mut self.network.rng).unwrap()
+        ChaCha12Rng::from_rng(&mut self.network.rng)
     }
 
     /// Returns the peer id of a random peer.
@@ -942,7 +941,7 @@ impl Simulator {
                 self.network.run_trips(7);
 
                 for i in count..node_count {
-                    let contact = self.network.rng.gen_range(0..count);
+                    let contact = self.network.rng.random_range(0..count);
                     self.network.insert_and_join(i, TOPIC, vec![contact]);
                 }
 

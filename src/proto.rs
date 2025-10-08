@@ -128,11 +128,10 @@ impl<PI> From<(PI, Option<PeerData>)> for PeerInfo<PI> {
 
 #[cfg(test)]
 mod test {
-
     use std::{collections::HashSet, env, fmt, str::FromStr};
 
+    use rand::SeedableRng;
     use rand_chacha::ChaCha12Rng;
-    use rand_core::SeedableRng;
     use tracing_test::traced_test;
 
     use super::{Command, Config, Event};
@@ -145,7 +144,7 @@ mod test {
     #[traced_test]
     fn hyparview_smoke() {
         // Create a network with 4 nodes and active_view_capacity 2
-        let rng = ChaCha12Rng::from_seed(read_var("SEED", 0));
+        let rng = ChaCha12Rng::seed_from_u64(read_var("SEED", 0));
         let mut config = Config::default();
         config.membership.active_view_capacity = 2;
         let network_config = NetworkConfig {

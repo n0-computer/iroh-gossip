@@ -23,8 +23,7 @@ use n0_future::{
     Stream, StreamExt as _,
 };
 use nested_enum_utils::common_fields;
-use rand::rngs::StdRng;
-use rand_core::SeedableRng;
+use rand::{rngs::StdRng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use snafu::Snafu;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -1633,7 +1632,7 @@ pub(crate) mod test {
 
         let (relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
         let mut rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
-        let topic_id = TopicId::from_bytes(rng.r#gen());
+        let topic_id = TopicId::from_bytes(rng.random());
 
         // spawn a gossip node, send the node's address on addr_tx,
         // then wait to receive `count` messages, and terminate.

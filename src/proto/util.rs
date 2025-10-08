@@ -398,7 +398,7 @@ mod test {
     use std::str::FromStr;
 
     use n0_future::time::{Duration, Instant};
-    use rand_core::SeedableRng;
+    use rand::SeedableRng;
 
     use super::{IndexSet, TimeBoundCache, TimerMap};
 
