@@ -115,7 +115,7 @@ tracing-test = "0.2.5"
 url = "2.4.0"
 
 [features]
-default = ["net", "metrics", "rpc"]
+default = ["net", "metrics"]
 net = [
     "dep:irpc",
     "dep:futures-lite",
