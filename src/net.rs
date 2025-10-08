@@ -311,7 +311,7 @@ impl Actor {
             peer_id,
             Default::default(),
             config,
-            rand::rngs::StdRng::from_entropy(),
+            rand::rngs::StdRng::from_rng(&mut rand::rng()),
         );
         let (rpc_tx, rpc_rx) = mpsc::channel(TO_ACTOR_CAP);
         let (local_tx, local_rx) = mpsc::channel(16);
@@ -353,9 +353,9 @@ impl Actor {
     /// This updates our current address and return it. It also returns the home relay stream and
     /// direct addr stream.
     async fn setup(&mut self) -> impl Stream<Item = NodeAddr> + Send + Unpin + use<> {
-        let addr_update_stream = self.endpoint.node_addr().stream().filter_map(|x| x);
+        let addr_update_stream = self.endpoint.watch_node_addr().stream().filter_map(|x| x);
         // TODO(Frando): Fail if endpoint disconnected?
-        let initial_addr = self.endpoint.node_addr().initialized().await;
+        let initial_addr = self.endpoint.node_addr();
         self.handle_addr_update(initial_addr).await;
         addr_update_stream
     }
@@ -949,7 +949,8 @@ async fn topic_subscriber_loop(
 }
 
 /// A stream of commands for a gossip subscription.
-type BoxedCommandReceiver = n0_future::stream::Boxed<Result<Command, irpc::channel::RecvError>>;
+type BoxedCommandReceiver =
+    n0_future::stream::Boxed<Result<Command, irpc::channel::mpsc::RecvError>>;
 
 #[derive(derive_more::Debug)]
 struct TopicCommandStream {
@@ -1071,7 +1072,12 @@ pub(crate) mod test {
 
     use bytes::Bytes;
     use futures_concurrency::future::TryJoin;
-    use iroh::{endpoint::BindError, protocol::Router, RelayMap, RelayMode, SecretKey};
+    use iroh::{
+        discovery::static_provider::{self, StaticProvider},
+        endpoint::BindError,
+        protocol::Router,
+        RelayMap, RelayMode, SecretKey,
+    };
     use n0_snafu::{Result, ResultExt};
     use rand::Rng;
     use tokio::{spawn, time::timeout};
@@ -1201,7 +1207,7 @@ pub(crate) mod test {
             .bind()
             .await?;
 
-        ep.home_relay().initialized().await;
+        ep.online().await;
         Ok(ep)
     }
 
