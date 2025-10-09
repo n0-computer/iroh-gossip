@@ -2,6 +2,22 @@
 
 All notable changes to iroh-gossip will be documented in this file.
 
+## [0.93.0](https://github.com/n0-computer/iroh-gossip/compare/v0.92.0..0.93.0) - 2025-10-09
+
+### ⛰️  Features
+
+- *(ci)* Add auto release on tag version push ([#93](https://github.com/n0-computer/iroh-gossip/issues/93)) - ([afa6e1d](https://github.com/n0-computer/iroh-gossip/commit/afa6e1dca9cef061642bece52fcdad5e877496e3))
+- Set custom ALPN ([#92](https://github.com/n0-computer/iroh-gossip/issues/92)) - ([ff87b6a](https://github.com/n0-computer/iroh-gossip/commit/ff87b6a380a39c8274376ff26f874824ff80d752))
+
+### ⚡ Performance
+
+- Don't allocate in `Timers::wait_next` ([#102](https://github.com/n0-computer/iroh-gossip/issues/102)) - ([65278b7](https://github.com/n0-computer/iroh-gossip/commit/65278b75aa67cb6bed06c9770cacf701e952c0d3))
+
+### ⚙️ Miscellaneous Tasks
+
+- *(ci)* Fix url of the beta notification ([#94](https://github.com/n0-computer/iroh-gossip/issues/94)) - ([2021566](https://github.com/n0-computer/iroh-gossip/commit/20215660a71f192562477dafd677d5a974c6a7f3))
+- Release prep ([#106](https://github.com/n0-computer/iroh-gossip/issues/106)) - ([099196e](https://github.com/n0-computer/iroh-gossip/commit/099196e72d806392ed609dfe36510b130839d52e))
+
 ## [0.92.0](https://github.com/n0-computer/iroh-gossip/compare/v0.91.0..0.92.0) - 2025-09-18
 
 ### ⚙️ Miscellaneous Tasks
