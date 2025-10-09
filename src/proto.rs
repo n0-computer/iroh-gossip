@@ -128,7 +128,6 @@ impl<PI> From<(PI, Option<PeerData>)> for PeerInfo<PI> {
 
 #[cfg(test)]
 mod test {
-
     use std::{collections::HashSet, env, fmt, str::FromStr};
 
     use rand::SeedableRng;

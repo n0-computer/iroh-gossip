@@ -9,7 +9,10 @@ use bytes::Bytes;
 use clap::Parser;
 use ed25519_dalek::Signature;
 use futures_lite::StreamExt;
-use iroh::{Endpoint, NodeAddr, PublicKey, RelayMode, RelayUrl, SecretKey, Watcher};
+use iroh::{
+    discovery::static_provider::StaticProvider, Endpoint, NodeAddr, PublicKey, RelayMode, RelayUrl,
+    SecretKey,
+};
 use iroh_gossip::{
     api::{Event, GossipReceiver},
     net::{Gossip, GOSSIP_ALPN},
@@ -89,7 +92,7 @@ async fn main() -> Result<()> {
 
     // parse or generate our secret key
     let secret_key = match args.secret_key {
-        None => SecretKey::generate(rand::rngs::OsRng),
+        None => SecretKey::generate(&mut rand::rng()),
         Some(key) => key.parse()?,
     };
     println!(
@@ -108,10 +111,14 @@ async fn main() -> Result<()> {
     };
     println!("> using relay servers: {}", fmt_relay_mode(&relay_mode));
 
+    // create a static provider to pass in node addresses to
+    let static_provider = StaticProvider::new();
+
     // build our magic endpoint
     let endpoint = Endpoint::builder()
         .secret_key(secret_key)
-        .relay_mode(relay_mode)
+        .add_discovery(static_provider.clone())
+        .relay_mode(relay_mode.clone())
         .bind_addr_v4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))
         .bind()
         .await?;
@@ -121,8 +128,13 @@ async fn main() -> Result<()> {
     let gossip = Gossip::builder().spawn(endpoint.clone());
 
     // print a ticket that includes our own node id and endpoint addresses
+    if !matches!(relay_mode, RelayMode::Disabled) {
+        // if we are expecting a relay, wait until we get a home relay
+        // before moving on
+        endpoint.online().await;
+    }
     let ticket = {
-        let me = endpoint.node_addr().initialized().await;
+        let me = endpoint.node_addr();
         let peers = peers.iter().cloned().chain([me]).collect();
         Ticket { topic, peers }
     };
@@ -141,7 +153,7 @@ async fn main() -> Result<()> {
         println!("> trying to connect to {} peers...", peers.len());
         // add the peer addrs from the ticket to our endpoint's addressbook so that they can be dialed
         for peer in peers.into_iter() {
-            endpoint.add_node_addr(peer)?;
+            static_provider.add_node_info(peer);
         }
     };
     let (sender, receiver) = gossip.subscribe_and_join(topic, peer_ids).await?.split();
@@ -191,7 +203,7 @@ async fn subscribe_loop(mut receiver: GossipReceiver) -> Result<()> {
                 Message::Message { text } => {
                     let name = names
                         .get(&from)
-                        .map_or_else(|| from.fmt_short(), String::to_string);
+                        .map_or_else(|| from.fmt_short().to_string(), String::to_string);
                     println!("{name}: {text}");
                 }
             }

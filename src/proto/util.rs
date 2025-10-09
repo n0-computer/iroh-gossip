@@ -118,7 +118,7 @@ impl<T: Hash + Eq + PartialEq> IndexSet<T> {
         if self.is_empty() {
             None
         } else {
-            Some(rng.gen_range(0..self.inner.len()))
+            Some(rng.random_range(0..self.inner.len()))
         }
     }
 
@@ -398,7 +398,7 @@ mod test {
     use std::str::FromStr;
 
     use n0_future::time::{Duration, Instant};
-    use rand_core::SeedableRng;
+    use rand::SeedableRng;
 
     use super::{IndexSet, TimeBoundCache, TimerMap};
 
@@ -411,24 +411,24 @@ mod test {
         let elems = [1, 2, 3, 4];
         let set = IndexSet::from_iter(elems);
         let x = set.shuffled(&mut test_rng());
-        assert_eq!(x, vec![4, 2, 1, 3]);
+        assert_eq!(x, vec![2, 1, 4, 3]);
         let x = set.shuffled_and_capped(2, &mut test_rng());
-        assert_eq!(x, vec![4, 2]);
+        assert_eq!(x, vec![2, 1]);
         let x = set.shuffled_without(&[&1], &mut test_rng());
-        assert_eq!(x, vec![4, 3, 2]);
+        assert_eq!(x, vec![3, 2, 4]);
         let x = set.shuffled_without_and_capped(&[&1], 2, &mut test_rng());
-        assert_eq!(x, vec![4, 3]);
+        assert_eq!(x, vec![3, 2]);
 
         // recreate the rng - otherwise we get failures on some architectures when cross-compiling,
         // likely due to usize differences pulling different amounts of randomness.
         let x = set.pick_random(&mut test_rng());
-        assert_eq!(x, Some(&3));
+        assert_eq!(x, Some(&1));
         let x = set.pick_random_without(&[&3], &mut test_rng());
         assert_eq!(x, Some(&4));
 
         let mut set = set;
         set.remove_random(&mut test_rng());
-        assert_eq!(set, IndexSet::from_iter([1, 2, 4]));
+        assert_eq!(set, IndexSet::from_iter([2, 3, 4]));
     }
 
     #[test]

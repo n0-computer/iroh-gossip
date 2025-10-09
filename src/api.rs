@@ -59,8 +59,14 @@ impl From<irpc::channel::SendError> for ApiError {
     }
 }
 
-impl From<irpc::channel::RecvError> for ApiError {
-    fn from(value: irpc::channel::RecvError) -> Self {
+impl From<irpc::channel::mpsc::RecvError> for ApiError {
+    fn from(value: irpc::channel::mpsc::RecvError) -> Self {
+        irpc::Error::from(value).into()
+    }
+}
+
+impl From<irpc::channel::oneshot::RecvError> for ApiError {
+    fn from(value: irpc::channel::oneshot::RecvError) -> Self {
         irpc::Error::from(value).into()
     }
 }
@@ -411,10 +417,10 @@ mod tests {
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn test_rpc() -> n0_snafu::Result {
-        use iroh::{protocol::Router, RelayMap, Watcher};
+        use iroh::{discovery::static_provider::StaticProvider, protocol::Router, RelayMap};
         use n0_future::{time::Duration, StreamExt};
         use n0_snafu::{Error, Result, ResultExt};
-        use rand::SeedableRng;
+        use rand_chacha::rand_core::SeedableRng;
 
         use crate::{
             api::{Event, GossipApi},
@@ -430,7 +436,7 @@ mod tests {
             rng: &mut rand_chacha::ChaCha12Rng,
             relay_map: RelayMap,
         ) -> Result<(Router, Gossip)> {
-            let endpoint = create_endpoint(rng, relay_map).await?;
+            let endpoint = create_endpoint(rng, relay_map, None).await?;
             let gossip = Gossip::builder().spawn(endpoint.clone());
             let router = Router::builder(endpoint)
                 .accept(ALPN, gossip.clone())
@@ -446,7 +452,7 @@ mod tests {
         // create a second node so that we can test actually joining
         let (node2_id, node2_addr, node2_task) = {
             let (router, gossip) = create_gossip_endpoint(&mut rng, relay_map.clone()).await?;
-            let node_addr = router.endpoint().node_addr().initialized().await;
+            let node_addr = router.endpoint().node_addr();
             let node_id = router.endpoint().node_id();
             let task = tokio::task::spawn(async move {
                 let mut topic = gossip.subscribe_and_join(topic_id, vec![]).await?;
@@ -456,7 +462,11 @@ mod tests {
             (node_id, node_addr, task)
         };
 
-        router.endpoint().add_node_addr(node2_addr)?;
+        // create static provider to add node addr manually
+        let static_provider = StaticProvider::new();
+        static_provider.add_node_info(node2_addr);
+
+        router.endpoint().discovery().add(static_provider);
 
         // expose the gossip node over RPC
         let (rpc_server_endpoint, rpc_server_cert) =
