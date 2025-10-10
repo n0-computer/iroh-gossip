@@ -12,6 +12,7 @@ use bytes::Bytes;
 use futures_concurrency::stream::{stream_group, StreamGroup};
 use futures_util::FutureExt as _;
 use iroh::{
+    discovery::static_provider::StaticProvider,
     endpoint::Connection,
     protocol::{AcceptError, ProtocolHandler},
     Endpoint, NodeAddr, NodeId, PublicKey, RelayUrl, Watcher,
@@ -50,8 +51,6 @@ const TO_ACTOR_CAP: usize = 64;
 const IN_EVENT_CAP: usize = 1024;
 /// Channel capacity for broadcast subscriber event queue (one per topic)
 const TOPIC_EVENT_CAP: usize = 256;
-/// Name used for logging when new node addresses are added from gossip.
-const SOURCE_NAME: &str = "gossip";
 
 /// Events emitted from the gossip protocol
 pub type ProtoEvent = proto::Event<PublicKey>;
@@ -62,6 +61,8 @@ type InEvent = proto::InEvent<PublicKey>;
 type OutEvent = proto::OutEvent<PublicKey>;
 type Timer = proto::Timer<PublicKey>;
 type ProtoMessage = proto::Message<PublicKey>;
+
+type GossipDiscovery = StaticProvider;
 
 /// Publish and subscribe on gossiping topics.
 ///
@@ -188,8 +189,10 @@ impl Builder {
     /// Spawn a gossip actor and get a handle for it
     pub fn spawn(self, endpoint: Endpoint) -> Gossip {
         let metrics = Arc::new(Metrics::default());
+        let discovery = GossipDiscovery::default();
+        endpoint.discovery().add(discovery.clone());
         let (actor, rpc_tx, local_tx) =
-            Actor::new(endpoint, self.config, metrics.clone(), self.alpn);
+            Actor::new(endpoint, self.config, metrics.clone(), self.alpn, discovery);
         let me = actor.endpoint.node_id().fmt_short();
         let max_message_size = actor.state.max_message_size();
 
@@ -291,6 +294,7 @@ struct Actor {
     connection_tasks: JoinSet<(NodeId, Connection, Result<(), ConnectionLoopError>)>,
     metrics: Arc<Metrics>,
     topic_event_forwarders: JoinSet<TopicId>,
+    discovery: GossipDiscovery,
 }
 
 impl Actor {
@@ -299,6 +303,7 @@ impl Actor {
         config: proto::Config,
         metrics: Arc<Metrics>,
         alpn: Option<Bytes>,
+        discovery: GossipDiscovery,
     ) -> (
         Self,
         mpsc::Sender<RpcMessage>,
@@ -333,6 +338,7 @@ impl Actor {
             metrics,
             local_rx,
             topic_event_forwarders: Default::default(),
+            discovery,
         };
 
         (actor, rpc_tx, local_tx)
@@ -353,7 +359,6 @@ impl Actor {
     /// direct addr stream.
     async fn setup(&mut self) -> impl Stream<Item = NodeAddr> + Send + Unpin + use<> {
         let addr_update_stream = self.endpoint.watch_node_addr().stream();
-        // TODO(Frando): Fail if endpoint disconnected?
         let initial_addr = self.endpoint.node_addr();
         self.handle_addr_update(initial_addr).await;
         addr_update_stream
@@ -730,12 +735,7 @@ impl Actor {
                             relay_url: info.relay_url,
                             direct_addresses: info.direct_addresses,
                         };
-                        if let Err(err) = self
-                            .endpoint
-                            .add_node_addr_with_source(node_addr, SOURCE_NAME)
-                        {
-                            debug!(peer = ?node_id, "add known failed: {err:?}");
-                        }
+                        self.discovery.add_node_info(node_addr);
                     }
                 },
             }
@@ -1149,8 +1149,11 @@ pub(crate) mod test {
         ) -> Result<(Self, Actor, EndpointHandle), BindError> {
             let endpoint = create_endpoint(rng, relay_map, None).await?;
             let metrics = Arc::new(Metrics::default());
+            let discovery = GossipDiscovery::default();
+            endpoint.discovery().add(discovery.clone());
 
-            let (actor, to_actor_tx, conn_tx) = Actor::new(endpoint, config, metrics.clone(), None);
+            let (actor, to_actor_tx, conn_tx) =
+                Actor::new(endpoint, config, metrics.clone(), None, discovery);
             let max_message_size = actor.state.max_message_size();
 
             let _actor_handle =
