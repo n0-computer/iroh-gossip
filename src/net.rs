@@ -1076,14 +1076,14 @@ pub(crate) mod test {
         RelayMap, RelayMode, SecretKey,
     };
     use n0_snafu::{Result, ResultExt};
-    use rand::Rng;
+    use rand::{CryptoRng, Rng};
     use tokio::{spawn, time::timeout};
     use tokio_util::sync::CancellationToken;
     use tracing::{info, instrument};
     use tracing_test::traced_test;
 
     use super::*;
-    use crate::api::ApiError;
+    use crate::api::{ApiError, GossipReceiver, GossipSender};
 
     struct ManualActorLoop {
         actor: Actor,
@@ -1763,5 +1763,79 @@ pub(crate) mod test {
         router1.shutdown().await.e()?;
         router2.shutdown().await.e()?;
         Ok(())
+    }
+
+    #[tokio::test]
+    // #[traced_test]
+    async fn gossip_rely_on_gossip_discovery() -> n0_snafu::Result<()> {
+        tracing_subscriber::fmt::init();
+        let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
+
+        async fn spawn(
+            rng: &mut impl CryptoRng,
+        ) -> n0_snafu::Result<(NodeId, Router, Gossip, GossipSender, GossipReceiver)> {
+            let topic_id = TopicId::from([0u8; 32]);
+            let ep = Endpoint::builder()
+                .secret_key(SecretKey::generate(rng))
+                .relay_mode(RelayMode::Disabled)
+                .bind()
+                .await?;
+            let node_id = ep.node_id();
+            let gossip = Gossip::builder().spawn(ep.clone());
+            let router = Router::builder(ep)
+                .accept(GOSSIP_ALPN, gossip.clone())
+                .spawn();
+            let topic = gossip.subscribe(topic_id, vec![]).await?;
+            let (sender, receiver) = topic.split();
+            Ok((node_id, router, gossip, sender, receiver))
+        }
+
+        // spawn 3 nodes without relay or discovery
+        let (n1, r1, _g1, _tx1, mut rx1) = spawn(rng).await?;
+        let (n2, r2, _g2, tx2, mut rx2) = spawn(rng).await?;
+        let (n3, r3, _g3, tx3, mut rx3) = spawn(rng).await?;
+
+        println!("nodes {:?}", [n1, n2, n3]);
+
+        // create a static discovery that has only node 1 addr info set
+        let addr1 = r1.endpoint().node_addr();
+        let disco = StaticProvider::new();
+        disco.add_node_info(addr1);
+
+        // add addr info of node1 to node2 and join node1
+        r2.endpoint().discovery().add(disco.clone());
+        tx2.join_peers(vec![n1]).await?;
+
+        // await join node2 -> nodde1
+        timeout(Duration::from_secs(3), rx1.joined()).await.e()??;
+        timeout(Duration::from_secs(3), rx2.joined()).await.e()??;
+
+        // add addr info of node1 to node3 and join node1
+        r3.endpoint().discovery().add(disco.clone());
+        tx3.join_peers(vec![n1]).await?;
+
+        // await join at node3: n1 and n2
+        // n2 only works because because we use gossip discovery!
+        let ev = timeout(Duration::from_secs(3), rx3.next()).await.e()?;
+        assert!(matches!(ev, Some(Ok(Event::NeighborUp(_)))));
+        let ev = timeout(Duration::from_secs(3), rx3.next()).await.e()?;
+        assert!(matches!(ev, Some(Ok(Event::NeighborUp(_)))));
+
+        assert_eq!(sorted(rx3.neighbors()), sorted([n1, n2]));
+
+        let ev = timeout(Duration::from_secs(3), rx2.next()).await.e()?;
+        assert!(matches!(ev, Some(Ok(Event::NeighborUp(n))) if n == n3));
+
+        let ev = timeout(Duration::from_secs(3), rx1.next()).await.e()?;
+        assert!(matches!(ev, Some(Ok(Event::NeighborUp(n))) if n == n3));
+
+        tokio::try_join!(r1.shutdown(), r2.shutdown(), r3.shutdown()).e()?;
+        Ok(())
+    }
+
+    fn sorted<T: Ord>(input: impl IntoIterator<Item = T>) -> Vec<T> {
+        let mut out: Vec<_> = input.into_iter().collect();
+        out.sort();
+        out
     }
 }
