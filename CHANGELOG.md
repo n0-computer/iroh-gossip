@@ -2,6 +2,12 @@
 
 All notable changes to iroh-gossip will be documented in this file.
 
+## [0.93.1](https://github.com/n0-computer/iroh-gossip/compare/v0.93.0..0.93.1) - 2025-10-11
+
+### ⚙️ Miscellaneous Tasks
+
+- Update nightly version in CI and docs workflows ([#107](https://github.com/n0-computer/iroh-gossip/issues/107)) - ([b5e3414](https://github.com/n0-computer/iroh-gossip/commit/b5e3414f8db03910b6cea691bad69f798f1c34c6))
+
 ## [0.93.0](https://github.com/n0-computer/iroh-gossip/compare/v0.92.0..0.93.0) - 2025-10-09
 
 ### ⛰️  Features
