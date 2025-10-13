@@ -1766,76 +1766,75 @@
 <a href=#1766 id=1766 data-nosnippet>1766</a>    }
 <a href=#1767 id=1767 data-nosnippet>1767</a>
 <a href=#1768 id=1768 data-nosnippet>1768</a>    <span class="attr">#[tokio::test]
-<a href=#1769 id=1769 data-nosnippet>1769</a>    </span><span class="comment">// #[traced_test]
+<a href=#1769 id=1769 data-nosnippet>1769</a>    #[traced_test]
 <a href=#1770 id=1770 data-nosnippet>1770</a>    </span><span class="kw">async fn </span>gossip_rely_on_gossip_discovery() -&gt; n0_snafu::Result&lt;()&gt; {
-<a href=#1771 id=1771 data-nosnippet>1771</a>        tracing_subscriber::fmt::init();
-<a href=#1772 id=1772 data-nosnippet>1772</a>        <span class="kw">let </span>rng = <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
-<a href=#1773 id=1773 data-nosnippet>1773</a>
-<a href=#1774 id=1774 data-nosnippet>1774</a>        <span class="kw">async fn </span>spawn(
-<a href=#1775 id=1775 data-nosnippet>1775</a>            rng: <span class="kw-2">&amp;mut </span><span class="kw">impl </span>CryptoRng,
-<a href=#1776 id=1776 data-nosnippet>1776</a>        ) -&gt; n0_snafu::Result&lt;(NodeId, Router, Gossip, GossipSender, GossipReceiver)&gt; {
-<a href=#1777 id=1777 data-nosnippet>1777</a>            <span class="kw">let </span>topic_id = TopicId::from([<span class="number">0u8</span>; <span class="number">32</span>]);
-<a href=#1778 id=1778 data-nosnippet>1778</a>            <span class="kw">let </span>ep = Endpoint::builder()
-<a href=#1779 id=1779 data-nosnippet>1779</a>                .secret_key(SecretKey::generate(rng))
-<a href=#1780 id=1780 data-nosnippet>1780</a>                .relay_mode(RelayMode::Disabled)
-<a href=#1781 id=1781 data-nosnippet>1781</a>                .bind()
-<a href=#1782 id=1782 data-nosnippet>1782</a>                .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1783 id=1783 data-nosnippet>1783</a>            <span class="kw">let </span>node_id = ep.node_id();
-<a href=#1784 id=1784 data-nosnippet>1784</a>            <span class="kw">let </span>gossip = Gossip::builder().spawn(ep.clone());
-<a href=#1785 id=1785 data-nosnippet>1785</a>            <span class="kw">let </span>router = Router::builder(ep)
-<a href=#1786 id=1786 data-nosnippet>1786</a>                .accept(GOSSIP_ALPN, gossip.clone())
-<a href=#1787 id=1787 data-nosnippet>1787</a>                .spawn();
-<a href=#1788 id=1788 data-nosnippet>1788</a>            <span class="kw">let </span>topic = gossip.subscribe(topic_id, <span class="macro">vec!</span>[]).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1789 id=1789 data-nosnippet>1789</a>            <span class="kw">let </span>(sender, receiver) = topic.split();
-<a href=#1790 id=1790 data-nosnippet>1790</a>            <span class="prelude-val">Ok</span>((node_id, router, gossip, sender, receiver))
-<a href=#1791 id=1791 data-nosnippet>1791</a>        }
-<a href=#1792 id=1792 data-nosnippet>1792</a>
-<a href=#1793 id=1793 data-nosnippet>1793</a>        <span class="comment">// spawn 3 nodes without relay or discovery
-<a href=#1794 id=1794 data-nosnippet>1794</a>        </span><span class="kw">let </span>(n1, r1, _g1, _tx1, <span class="kw-2">mut </span>rx1) = spawn(rng).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1795 id=1795 data-nosnippet>1795</a>        <span class="kw">let </span>(n2, r2, _g2, tx2, <span class="kw-2">mut </span>rx2) = spawn(rng).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1796 id=1796 data-nosnippet>1796</a>        <span class="kw">let </span>(n3, r3, _g3, tx3, <span class="kw-2">mut </span>rx3) = spawn(rng).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1797 id=1797 data-nosnippet>1797</a>
-<a href=#1798 id=1798 data-nosnippet>1798</a>        <span class="macro">println!</span>(<span class="string">"nodes {:?}"</span>, [n1, n2, n3]);
-<a href=#1799 id=1799 data-nosnippet>1799</a>
-<a href=#1800 id=1800 data-nosnippet>1800</a>        <span class="comment">// create a static discovery that has only node 1 addr info set
-<a href=#1801 id=1801 data-nosnippet>1801</a>        </span><span class="kw">let </span>addr1 = r1.endpoint().node_addr();
-<a href=#1802 id=1802 data-nosnippet>1802</a>        <span class="kw">let </span>disco = StaticProvider::new();
-<a href=#1803 id=1803 data-nosnippet>1803</a>        disco.add_node_info(addr1);
-<a href=#1804 id=1804 data-nosnippet>1804</a>
-<a href=#1805 id=1805 data-nosnippet>1805</a>        <span class="comment">// add addr info of node1 to node2 and join node1
-<a href=#1806 id=1806 data-nosnippet>1806</a>        </span>r2.endpoint().discovery().add(disco.clone());
-<a href=#1807 id=1807 data-nosnippet>1807</a>        tx2.join_peers(<span class="macro">vec!</span>[n1]).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1808 id=1808 data-nosnippet>1808</a>
-<a href=#1809 id=1809 data-nosnippet>1809</a>        <span class="comment">// await join node2 -&gt; nodde1
-<a href=#1810 id=1810 data-nosnippet>1810</a>        </span>timeout(Duration::from_secs(<span class="number">3</span>), rx1.joined()).<span class="kw">await</span>.e()<span class="question-mark">??</span>;
-<a href=#1811 id=1811 data-nosnippet>1811</a>        timeout(Duration::from_secs(<span class="number">3</span>), rx2.joined()).<span class="kw">await</span>.e()<span class="question-mark">??</span>;
-<a href=#1812 id=1812 data-nosnippet>1812</a>
-<a href=#1813 id=1813 data-nosnippet>1813</a>        <span class="comment">// add addr info of node1 to node3 and join node1
-<a href=#1814 id=1814 data-nosnippet>1814</a>        </span>r3.endpoint().discovery().add(disco.clone());
-<a href=#1815 id=1815 data-nosnippet>1815</a>        tx3.join_peers(<span class="macro">vec!</span>[n1]).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1816 id=1816 data-nosnippet>1816</a>
-<a href=#1817 id=1817 data-nosnippet>1817</a>        <span class="comment">// await join at node3: n1 and n2
-<a href=#1818 id=1818 data-nosnippet>1818</a>        // n2 only works because because we use gossip discovery!
-<a href=#1819 id=1819 data-nosnippet>1819</a>        </span><span class="kw">let </span>ev = timeout(Duration::from_secs(<span class="number">3</span>), rx3.next()).<span class="kw">await</span>.e()<span class="question-mark">?</span>;
-<a href=#1820 id=1820 data-nosnippet>1820</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(ev, <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(Event::NeighborUp(<span class="kw">_</span>)))));
-<a href=#1821 id=1821 data-nosnippet>1821</a>        <span class="kw">let </span>ev = timeout(Duration::from_secs(<span class="number">3</span>), rx3.next()).<span class="kw">await</span>.e()<span class="question-mark">?</span>;
-<a href=#1822 id=1822 data-nosnippet>1822</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(ev, <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(Event::NeighborUp(<span class="kw">_</span>)))));
-<a href=#1823 id=1823 data-nosnippet>1823</a>
-<a href=#1824 id=1824 data-nosnippet>1824</a>        <span class="macro">assert_eq!</span>(sorted(rx3.neighbors()), sorted([n1, n2]));
-<a href=#1825 id=1825 data-nosnippet>1825</a>
-<a href=#1826 id=1826 data-nosnippet>1826</a>        <span class="kw">let </span>ev = timeout(Duration::from_secs(<span class="number">3</span>), rx2.next()).<span class="kw">await</span>.e()<span class="question-mark">?</span>;
-<a href=#1827 id=1827 data-nosnippet>1827</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(ev, <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(Event::NeighborUp(n))) <span class="kw">if </span>n == n3));
-<a href=#1828 id=1828 data-nosnippet>1828</a>
-<a href=#1829 id=1829 data-nosnippet>1829</a>        <span class="kw">let </span>ev = timeout(Duration::from_secs(<span class="number">3</span>), rx1.next()).<span class="kw">await</span>.e()<span class="question-mark">?</span>;
-<a href=#1830 id=1830 data-nosnippet>1830</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(ev, <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(Event::NeighborUp(n))) <span class="kw">if </span>n == n3));
-<a href=#1831 id=1831 data-nosnippet>1831</a>
-<a href=#1832 id=1832 data-nosnippet>1832</a>        <span class="macro">tokio::try_join!</span>(r1.shutdown(), r2.shutdown(), r3.shutdown()).e()<span class="question-mark">?</span>;
-<a href=#1833 id=1833 data-nosnippet>1833</a>        <span class="prelude-val">Ok</span>(())
-<a href=#1834 id=1834 data-nosnippet>1834</a>    }
-<a href=#1835 id=1835 data-nosnippet>1835</a>
-<a href=#1836 id=1836 data-nosnippet>1836</a>    <span class="kw">fn </span>sorted&lt;T: Ord&gt;(input: <span class="kw">impl </span>IntoIterator&lt;Item = T&gt;) -&gt; Vec&lt;T&gt; {
-<a href=#1837 id=1837 data-nosnippet>1837</a>        <span class="kw">let </span><span class="kw-2">mut </span>out: Vec&lt;<span class="kw">_</span>&gt; = input.into_iter().collect();
-<a href=#1838 id=1838 data-nosnippet>1838</a>        out.sort();
-<a href=#1839 id=1839 data-nosnippet>1839</a>        out
-<a href=#1840 id=1840 data-nosnippet>1840</a>    }
-<a href=#1841 id=1841 data-nosnippet>1841</a>}</code></pre></div></section></main></body></html>
+<a href=#1771 id=1771 data-nosnippet>1771</a>        <span class="kw">let </span>rng = <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
+<a href=#1772 id=1772 data-nosnippet>1772</a>
+<a href=#1773 id=1773 data-nosnippet>1773</a>        <span class="kw">async fn </span>spawn(
+<a href=#1774 id=1774 data-nosnippet>1774</a>            rng: <span class="kw-2">&amp;mut </span><span class="kw">impl </span>CryptoRng,
+<a href=#1775 id=1775 data-nosnippet>1775</a>        ) -&gt; n0_snafu::Result&lt;(NodeId, Router, Gossip, GossipSender, GossipReceiver)&gt; {
+<a href=#1776 id=1776 data-nosnippet>1776</a>            <span class="kw">let </span>topic_id = TopicId::from([<span class="number">0u8</span>; <span class="number">32</span>]);
+<a href=#1777 id=1777 data-nosnippet>1777</a>            <span class="kw">let </span>ep = Endpoint::builder()
+<a href=#1778 id=1778 data-nosnippet>1778</a>                .secret_key(SecretKey::generate(rng))
+<a href=#1779 id=1779 data-nosnippet>1779</a>                .relay_mode(RelayMode::Disabled)
+<a href=#1780 id=1780 data-nosnippet>1780</a>                .bind()
+<a href=#1781 id=1781 data-nosnippet>1781</a>                .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1782 id=1782 data-nosnippet>1782</a>            <span class="kw">let </span>node_id = ep.node_id();
+<a href=#1783 id=1783 data-nosnippet>1783</a>            <span class="kw">let </span>gossip = Gossip::builder().spawn(ep.clone());
+<a href=#1784 id=1784 data-nosnippet>1784</a>            <span class="kw">let </span>router = Router::builder(ep)
+<a href=#1785 id=1785 data-nosnippet>1785</a>                .accept(GOSSIP_ALPN, gossip.clone())
+<a href=#1786 id=1786 data-nosnippet>1786</a>                .spawn();
+<a href=#1787 id=1787 data-nosnippet>1787</a>            <span class="kw">let </span>topic = gossip.subscribe(topic_id, <span class="macro">vec!</span>[]).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1788 id=1788 data-nosnippet>1788</a>            <span class="kw">let </span>(sender, receiver) = topic.split();
+<a href=#1789 id=1789 data-nosnippet>1789</a>            <span class="prelude-val">Ok</span>((node_id, router, gossip, sender, receiver))
+<a href=#1790 id=1790 data-nosnippet>1790</a>        }
+<a href=#1791 id=1791 data-nosnippet>1791</a>
+<a href=#1792 id=1792 data-nosnippet>1792</a>        <span class="comment">// spawn 3 nodes without relay or discovery
+<a href=#1793 id=1793 data-nosnippet>1793</a>        </span><span class="kw">let </span>(n1, r1, _g1, _tx1, <span class="kw-2">mut </span>rx1) = spawn(rng).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1794 id=1794 data-nosnippet>1794</a>        <span class="kw">let </span>(n2, r2, _g2, tx2, <span class="kw-2">mut </span>rx2) = spawn(rng).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1795 id=1795 data-nosnippet>1795</a>        <span class="kw">let </span>(n3, r3, _g3, tx3, <span class="kw-2">mut </span>rx3) = spawn(rng).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1796 id=1796 data-nosnippet>1796</a>
+<a href=#1797 id=1797 data-nosnippet>1797</a>        <span class="macro">println!</span>(<span class="string">"nodes {:?}"</span>, [n1, n2, n3]);
+<a href=#1798 id=1798 data-nosnippet>1798</a>
+<a href=#1799 id=1799 data-nosnippet>1799</a>        <span class="comment">// create a static discovery that has only node 1 addr info set
+<a href=#1800 id=1800 data-nosnippet>1800</a>        </span><span class="kw">let </span>addr1 = r1.endpoint().node_addr();
+<a href=#1801 id=1801 data-nosnippet>1801</a>        <span class="kw">let </span>disco = StaticProvider::new();
+<a href=#1802 id=1802 data-nosnippet>1802</a>        disco.add_node_info(addr1);
+<a href=#1803 id=1803 data-nosnippet>1803</a>
+<a href=#1804 id=1804 data-nosnippet>1804</a>        <span class="comment">// add addr info of node1 to node2 and join node1
+<a href=#1805 id=1805 data-nosnippet>1805</a>        </span>r2.endpoint().discovery().add(disco.clone());
+<a href=#1806 id=1806 data-nosnippet>1806</a>        tx2.join_peers(<span class="macro">vec!</span>[n1]).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1807 id=1807 data-nosnippet>1807</a>
+<a href=#1808 id=1808 data-nosnippet>1808</a>        <span class="comment">// await join node2 -&gt; nodde1
+<a href=#1809 id=1809 data-nosnippet>1809</a>        </span>timeout(Duration::from_secs(<span class="number">3</span>), rx1.joined()).<span class="kw">await</span>.e()<span class="question-mark">??</span>;
+<a href=#1810 id=1810 data-nosnippet>1810</a>        timeout(Duration::from_secs(<span class="number">3</span>), rx2.joined()).<span class="kw">await</span>.e()<span class="question-mark">??</span>;
+<a href=#1811 id=1811 data-nosnippet>1811</a>
+<a href=#1812 id=1812 data-nosnippet>1812</a>        <span class="comment">// add addr info of node1 to node3 and join node1
+<a href=#1813 id=1813 data-nosnippet>1813</a>        </span>r3.endpoint().discovery().add(disco.clone());
+<a href=#1814 id=1814 data-nosnippet>1814</a>        tx3.join_peers(<span class="macro">vec!</span>[n1]).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1815 id=1815 data-nosnippet>1815</a>
+<a href=#1816 id=1816 data-nosnippet>1816</a>        <span class="comment">// await join at node3: n1 and n2
+<a href=#1817 id=1817 data-nosnippet>1817</a>        // n2 only works because because we use gossip discovery!
+<a href=#1818 id=1818 data-nosnippet>1818</a>        </span><span class="kw">let </span>ev = timeout(Duration::from_secs(<span class="number">3</span>), rx3.next()).<span class="kw">await</span>.e()<span class="question-mark">?</span>;
+<a href=#1819 id=1819 data-nosnippet>1819</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(ev, <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(Event::NeighborUp(<span class="kw">_</span>)))));
+<a href=#1820 id=1820 data-nosnippet>1820</a>        <span class="kw">let </span>ev = timeout(Duration::from_secs(<span class="number">3</span>), rx3.next()).<span class="kw">await</span>.e()<span class="question-mark">?</span>;
+<a href=#1821 id=1821 data-nosnippet>1821</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(ev, <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(Event::NeighborUp(<span class="kw">_</span>)))));
+<a href=#1822 id=1822 data-nosnippet>1822</a>
+<a href=#1823 id=1823 data-nosnippet>1823</a>        <span class="macro">assert_eq!</span>(sorted(rx3.neighbors()), sorted([n1, n2]));
+<a href=#1824 id=1824 data-nosnippet>1824</a>
+<a href=#1825 id=1825 data-nosnippet>1825</a>        <span class="kw">let </span>ev = timeout(Duration::from_secs(<span class="number">3</span>), rx2.next()).<span class="kw">await</span>.e()<span class="question-mark">?</span>;
+<a href=#1826 id=1826 data-nosnippet>1826</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(ev, <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(Event::NeighborUp(n))) <span class="kw">if </span>n == n3));
+<a href=#1827 id=1827 data-nosnippet>1827</a>
+<a href=#1828 id=1828 data-nosnippet>1828</a>        <span class="kw">let </span>ev = timeout(Duration::from_secs(<span class="number">3</span>), rx1.next()).<span class="kw">await</span>.e()<span class="question-mark">?</span>;
+<a href=#1829 id=1829 data-nosnippet>1829</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(ev, <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(Event::NeighborUp(n))) <span class="kw">if </span>n == n3));
+<a href=#1830 id=1830 data-nosnippet>1830</a>
+<a href=#1831 id=1831 data-nosnippet>1831</a>        <span class="macro">tokio::try_join!</span>(r1.shutdown(), r2.shutdown(), r3.shutdown()).e()<span class="question-mark">?</span>;
+<a href=#1832 id=1832 data-nosnippet>1832</a>        <span class="prelude-val">Ok</span>(())
+<a href=#1833 id=1833 data-nosnippet>1833</a>    }
+<a href=#1834 id=1834 data-nosnippet>1834</a>
+<a href=#1835 id=1835 data-nosnippet>1835</a>    <span class="kw">fn </span>sorted&lt;T: Ord&gt;(input: <span class="kw">impl </span>IntoIterator&lt;Item = T&gt;) -&gt; Vec&lt;T&gt; {
+<a href=#1836 id=1836 data-nosnippet>1836</a>        <span class="kw">let </span><span class="kw-2">mut </span>out: Vec&lt;<span class="kw">_</span>&gt; = input.into_iter().collect();
+<a href=#1837 id=1837 data-nosnippet>1837</a>        out.sort();
+<a href=#1838 id=1838 data-nosnippet>1838</a>        out
+<a href=#1839 id=1839 data-nosnippet>1839</a>    }
+<a href=#1840 id=1840 data-nosnippet>1840</a>}</code></pre></div></section></main></body></html>
