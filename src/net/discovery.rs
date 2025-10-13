@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use iroh::discovery::{Discovery, DiscoveryError, DiscoveryItem, NodeData, NodeInfo};
 use iroh_base::NodeId;
 use n0_future::{
     boxed::BoxStream,
@@ -13,8 +14,6 @@ use n0_future::{
     task::AbortOnDropHandle,
     time::SystemTime,
 };
-
-use iroh::discovery::{Discovery, DiscoveryError, DiscoveryItem, NodeData, NodeInfo};
 
 pub(crate) struct RetentionOpts {
     retention: Duration,
@@ -66,9 +65,9 @@ impl GossipDiscovery {
         let nodes: NodeMap = Default::default();
         let task = {
             let nodes = Arc::downgrade(&nodes);
-            tokio::task::spawn(async move {
+            n0_future::task::spawn(async move {
                 loop {
-                    tokio::time::sleep(opts.check_interval).await;
+                    n0_future::time::sleep(opts.check_interval).await;
                     let now = SystemTime::now();
                     if let Some(nodes) = nodes.upgrade() {
                         let mut inner = nodes.write().expect("poisoned");
@@ -175,6 +174,6 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(700)).await;
 
-        assert!(matches!(disco.resolve(k1.public()), None));
+        assert!(disco.resolve(k1.public()).is_none());
     }
 }
