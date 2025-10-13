@@ -30,14 +30,15 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, error_span, trace, warn, Instrument};
 
+use self::{
+    discovery::GossipDiscovery,
+    util::{RecvLoop, SendLoop, Timers},
+};
 use crate::{
     api::{self, Command, Event, GossipApi, RpcMessage},
     metrics::Metrics,
     proto::{self, HyparviewConfig, PeerData, PlumtreeConfig, Scope, TopicId},
 };
-
-use self::discovery::GossipDiscovery;
-use self::util::{RecvLoop, SendLoop, Timers};
 
 mod discovery;
 mod util;
