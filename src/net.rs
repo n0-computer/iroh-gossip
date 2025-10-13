@@ -12,7 +12,6 @@ use bytes::Bytes;
 use futures_concurrency::stream::{stream_group, StreamGroup};
 use futures_util::FutureExt as _;
 use iroh::{
-    discovery::static_provider::StaticProvider,
     endpoint::Connection,
     protocol::{AcceptError, ProtocolHandler},
     Endpoint, NodeAddr, NodeId, PublicKey, RelayUrl, Watcher,
@@ -31,13 +30,16 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, error_span, trace, warn, Instrument};
 
-use self::util::{RecvLoop, SendLoop, Timers};
 use crate::{
     api::{self, Command, Event, GossipApi, RpcMessage},
     metrics::Metrics,
     proto::{self, HyparviewConfig, PeerData, PlumtreeConfig, Scope, TopicId},
 };
 
+use self::discovery::GossipDiscovery;
+use self::util::{RecvLoop, SendLoop, Timers};
+
+mod discovery;
 mod util;
 
 /// ALPN protocol name
@@ -61,8 +63,6 @@ type InEvent = proto::InEvent<PublicKey>;
 type OutEvent = proto::OutEvent<PublicKey>;
 type Timer = proto::Timer<PublicKey>;
 type ProtoMessage = proto::Message<PublicKey>;
-
-type GossipDiscovery = StaticProvider;
 
 /// Publish and subscribe on gossiping topics.
 ///
@@ -735,7 +735,7 @@ impl Actor {
                             relay_url: info.relay_url,
                             direct_addresses: info.direct_addresses,
                         };
-                        self.discovery.add_node_info(node_addr);
+                        self.discovery.add(node_addr);
                     }
                 },
             }
