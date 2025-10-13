@@ -1766,9 +1766,8 @@ pub(crate) mod test {
     }
 
     #[tokio::test]
-    // #[traced_test]
+    #[traced_test]
     async fn gossip_rely_on_gossip_discovery() -> n0_snafu::Result<()> {
-        tracing_subscriber::fmt::init();
         let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
 
         async fn spawn(
