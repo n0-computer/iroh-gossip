@@ -68,16 +68,14 @@ impl GossipDiscovery {
             n0_future::task::spawn(async move {
                 loop {
                     n0_future::time::sleep(opts.check_interval).await;
-                    let now = SystemTime::now();
-                    if let Some(nodes) = nodes.upgrade() {
-                        let mut inner = nodes.write().expect("poisoned");
-                        inner.retain(|_k, v| {
-                            let age = now.duration_since(v.last_updated).unwrap_or(Duration::MAX);
-                            age < opts.retention
-                        });
-                    } else {
+                    let Some(nodes) = nodes.upgrade() else {
                         break;
-                    }
+                    };
+                    let now = SystemTime::now();
+                    nodes.write().expect("poisoned").retain(|_k, v| {
+                        let age = now.duration_since(v.last_updated).unwrap_or(Duration::MAX);
+                        age <= opts.retention
+                    });
                 }
             })
         };
@@ -114,27 +112,20 @@ impl GossipDiscovery {
 }
 
 impl Discovery for GossipDiscovery {
-    fn publish(&self, _data: &NodeData) {}
-
     fn resolve(&self, node_id: NodeId) -> Option<BoxStream<Result<DiscoveryItem, DiscoveryError>>> {
         let guard = self.nodes.read().expect("poisoned");
-        let info = guard.get(&node_id);
-        match info {
-            Some(node_info) => {
-                let last_updated = node_info
-                    .last_updated
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .expect("time drift")
-                    .as_micros() as u64;
-                let item = DiscoveryItem::new(
-                    NodeInfo::from_parts(node_id, node_info.data.clone()),
-                    Self::PROVENANCE,
-                    Some(last_updated),
-                );
-                Some(stream::iter(Some(Ok(item))).boxed())
-            }
-            None => None,
-        }
+        let info = guard.get(&node_id)?;
+        let last_updated = info
+            .last_updated
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("time drift")
+            .as_micros() as u64;
+        let item = DiscoveryItem::new(
+            NodeInfo::from_parts(node_id, info.data.clone()),
+            Self::PROVENANCE,
+            Some(last_updated),
+        );
+        Some(stream::iter(Some(Ok(item))).boxed())
     }
 }
 
