@@ -287,13 +287,14 @@ type AcceptRemoteRequestsStream =
 
 struct Actor {
     me: NodeId,
+    endpoint: Endpoint,
     alpn: Bytes,
     config: Config,
     local_rx: mpsc::Receiver<LocalActorMessage>,
     local_tx: mpsc::Sender<LocalActorMessage>,
     api_rx: mpsc::Receiver<api::RpcMessage>,
     topics: HashMap<TopicId, TopicHandle>,
-    topic_pending_remotes: HashMap<NodeId, HashSet<TopicId>>,
+    pending_remotes_with_topics: HashMap<NodeId, HashSet<TopicId>>,
     topic_tasks: JoinSet<TopicActor>,
     remotes: HashMap<NodeId, RemoteState>,
     close_connections: JoinSet<(NodeId, Connection)>,
@@ -332,18 +333,19 @@ impl Actor {
             api_tx,
             local_tx.clone(),
             Actor {
+                endpoint,
                 me,
                 config,
                 api_rx,
                 local_tx,
                 local_rx,
                 node_addr_updates: Box::pin(node_addr_updates),
-                dialer: Dialer::new(endpoint),
+                dialer: Dialer::default(),
                 our_peer_data: Watchable::new(initial_peer_data),
                 alpn: alpn.unwrap_or_else(|| crate::ALPN.to_vec().into()),
                 metrics: metrics.clone(),
                 topics: Default::default(),
-                topic_pending_remotes: Default::default(),
+                pending_remotes_with_topics: Default::default(),
                 remotes: Default::default(),
                 close_connections: JoinSet::new(),
                 topic_tasks: JoinSet::new(),
@@ -414,7 +416,7 @@ impl Actor {
                 }
                 true
             }
-            (node_id, res) = self.dialer.next_conn() => {
+            Some((node_id, res)) = self.dialer.next(), if !self.dialer.is_empty() => {
                 trace!(remote=%node_id.fmt_short(), ok=res.is_ok(), "tick: dialed");
                 self.handle_remote_connection(node_id, res, Direction::Dial).await;
                 true
@@ -464,14 +466,14 @@ impl Actor {
 
     #[cfg(test)]
     fn endpoint(&self) -> &Endpoint {
-        self.dialer.endpoint()
+        &self.endpoint
     }
 
     fn drain_pending_dials(
         &mut self,
         remote: &NodeId,
     ) -> impl Iterator<Item = (TopicId, &TopicHandle)> {
-        self.topic_pending_remotes
+        self.pending_remotes_with_topics
             .remove(remote)
             .into_iter()
             .flatten()
@@ -485,13 +487,15 @@ impl Actor {
         if let Some(state) = self.remotes.get(&remote) {
             let tx = handle.tx.clone();
             let state = state.clone();
+            // TODO: Track task?
             task::spawn(async move {
                 let msg = state.open_topic(topic_id).await;
                 tx.send(msg).await.ok();
             });
         } else {
-            self.dialer.queue_dial(remote, self.alpn.clone());
-            self.topic_pending_remotes
+            self.dialer
+                .queue_dial(&self.endpoint, remote, self.alpn.clone());
+            self.pending_remotes_with_topics
                 .entry(remote)
                 .or_default()
                 .insert(topic_id);

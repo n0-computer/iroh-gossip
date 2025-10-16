@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::HashSet;
 
 use bytes::Bytes;
 use iroh::{
@@ -6,75 +6,41 @@ use iroh::{
     Endpoint, NodeId,
 };
 use tokio::task::JoinSet;
-use tracing::{error, Instrument};
+use tracing::Instrument;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct Dialer {
-    endpoint: Endpoint,
-    pending: JoinSet<(NodeId, Result<Connection, ConnectError>)>,
-    pending_dials: HashMap<NodeId, ()>,
+    pending_tasks: JoinSet<(NodeId, Result<Connection, ConnectError>)>,
+    pending_nodes: HashSet<NodeId>,
 }
 
 impl Dialer {
-    /// Create a new dialer for a [`Endpoint`]
-    pub(crate) fn new(endpoint: Endpoint) -> Self {
-        Self {
-            endpoint,
-            pending: Default::default(),
-            pending_dials: Default::default(),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn endpoint(&self) -> &Endpoint {
-        &self.endpoint
-    }
-
     /// Starts to dial a node by [`NodeId`].
-    pub(crate) fn queue_dial(&mut self, node_id: NodeId, alpn: Bytes) {
-        if self.is_pending(node_id) {
-            return;
+    pub(crate) fn queue_dial(&mut self, endpoint: &Endpoint, node_id: NodeId, alpn: Bytes) {
+        if self.pending_nodes.insert(node_id) {
+            let endpoint = endpoint.clone();
+            let fut = async move { (node_id, endpoint.connect(node_id, &alpn).await) }
+                .instrument(tracing::Span::current());
+            self.pending_tasks.spawn(fut);
         }
-        self.pending_dials.insert(node_id, ());
-        let endpoint = self.endpoint.clone();
-        self.pending.spawn(
-            async move {
-                let res = endpoint.connect(node_id, &alpn).await;
-                (node_id, res)
-            }
-            .instrument(tracing::Span::current()),
-        );
     }
 
-    /// Checks if a node is currently being dialed.
-    pub(crate) fn is_pending(&self, node: NodeId) -> bool {
-        self.pending_dials.contains_key(&node)
+    pub(crate) fn is_empty(&self) -> bool {
+        self.pending_tasks.is_empty()
     }
 
     /// Waits for the next dial operation to complete.
     /// `None` means disconnected
-    pub(crate) async fn next_conn(&mut self) -> (NodeId, Result<Connection, ConnectError>) {
-        match self.pending_dials.is_empty() {
-            false => {
-                let (node_id, res) = loop {
-                    match self.pending.join_next().await {
-                        Some(Ok((node_id, res))) => {
-                            self.pending_dials.remove(&node_id);
-                            break (node_id, res);
-                        }
-                        Some(Err(e)) => {
-                            error!("next conn error: {:?}", e);
-                        }
-                        None => {
-                            error!("no more pending conns available");
-                            std::future::pending().await
-                        }
-                    }
-                };
-
-                (node_id, res)
+    ///
+    /// Will be pending forever if no connections are in progress.
+    pub(crate) async fn next(&mut self) -> Option<(NodeId, Result<Connection, ConnectError>)> {
+        match self.pending_tasks.join_next().await {
+            Some(res) => {
+                let (node_id, res) = res.expect("connect task panicked");
+                self.pending_nodes.remove(&node_id);
+                Some((node_id, res))
             }
-            true => std::future::pending().await,
+            None => None,
         }
     }
 }
