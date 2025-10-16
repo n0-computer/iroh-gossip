@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use bytes::Bytes;
 use derive_more::From;
 use n0_future::time::{Duration, Instant};
-use rand::Rng;
+use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -114,6 +114,13 @@ impl<PI> Message<PI> {
     }
 }
 
+impl<PI: Serialize> Message<PI> {
+    /// Get the encoded size of this message
+    pub fn size(&self) -> postcard::Result<usize> {
+        postcard::experimental::serialized_size(&self)
+    }
+}
+
 /// An event to be emitted to the application for a particular topic.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum Event<PI> {
@@ -212,14 +219,14 @@ pub struct State<PI, R> {
     stats: Stats,
 }
 
-impl<PI: PeerIdentity> State<PI, rand::rngs::ThreadRng> {
+impl<PI: PeerIdentity> State<PI, rand::rngs::StdRng> {
     /// Initialize the local state with the default random number generator.
     ///
     /// ## Panics
     ///
     /// Panics if [`Config::max_message_size`] is below [`MIN_MAX_MESSAGE_SIZE`].
     pub fn new(me: PI, me_data: Option<PeerData>, config: Config) -> Self {
-        Self::with_rng(me, me_data, config, rand::rng())
+        Self::with_rng(me, me_data, config, rand::rngs::StdRng::from_os_rng())
     }
 }
 

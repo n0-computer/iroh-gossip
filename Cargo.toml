@@ -35,21 +35,12 @@ unused-async = "warn"
 blake3 = "1.8"
 bytes = { version = "1.7", features = ["serde"] }
 data-encoding = "2.6.0"
-derive_more = { version = "2.0.1", features = [
-    "add",
-    "debug",
-    "deref",
-    "display",
-    "from",
-    "try_into",
-    "into",
-] }
-ed25519-dalek = { version = "3.0.0-pre.1", features = ["serde", "rand_core"] }
+derive_more = { version = "1.0.0", features = ["add", "debug", "deref", "display", "from", "try_into", "into", "deref_mut"] }
 hex = "0.4.3"
 indexmap = "2.0"
 iroh-metrics = { version = "0.36", default-features = false }
 iroh-base = { version = "0.93", default-features = false, features = ["key"] }
-n0-future = "0.1.2"
+n0-future = "0.2"
 postcard = { version = "1", default-features = false, features = [
     "alloc",
     "use-std",
@@ -64,13 +55,16 @@ futures-concurrency = { version = "7.6.1", optional = true }
 futures-util = { version = "0.3.30", optional = true }
 iroh = { version = "0.93", default-features = false, optional = true }
 tokio = { version = "1", optional = true, features = ["io-util", "sync"] }
-tokio-util = { version = "0.7.12", optional = true, features = ["codec"] }
+tokio-util = { version = "0.7.12", optional = true, features = ["codec", "time"] }
 tracing = "0.1"
 irpc = { version = "0.9.0", optional = true, default-features = false, features = [
     "derive",
     "stream",
     "spans",
 ] }
+irpc-iroh = { version = "0.9.0", optional = true }
+n0-watcher = { version = "0.3.0", optional = true }
+strum = { version = "0.27.2", features = ["derive"], optional = true }
 n0-snafu = { version = "0.2.2", optional = true }
 nested_enum_utils = { version = "0.2.2", optional = true }
 snafu = { version = "0.8.5", features = ["rust_1_81"], optional = true }
@@ -103,6 +97,7 @@ tokio = { version = "1", features = [
     "fs",
 ] }
 clap = { version = "4", features = ["derive"] }
+ed25519-dalek = { version = "3.0.0-pre.1", features = ["serde", "rand_core"] }
 humantime-serde = { version = "1.1.1" }
 iroh = { version = "0.93", default-features = false, features = [
     "metrics",
@@ -117,16 +112,19 @@ url = "2.4.0"
 [features]
 default = ["net", "metrics"]
 net = [
-    "dep:irpc",
+    "dep:futures-concurrency",
     "dep:futures-lite",
+    "dep:futures-util",
     "dep:iroh",
+    "dep:irpc",
+    "dep:irpc-iroh",
+    "dep:n0-snafu",
+    "dep:n0-watcher",
+    "dep:nested_enum_utils",
+    "dep:snafu",
+    "dep:strum",
     "dep:tokio",
     "dep:tokio-util",
-    "dep:futures-util",
-    "dep:futures-concurrency",
-    "dep:nested_enum_utils",
-    "dep:n0-snafu",
-    "dep:snafu",
 ]
 rpc = [
     "dep:irpc",
