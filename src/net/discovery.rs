@@ -16,7 +16,9 @@ use n0_future::{
 };
 
 pub(crate) struct RetentionOpts {
+    /// How long to keep received node info records alive before pruning them
     retention: Duration,
+    /// How often to check for expired entries
     evict_interval: Duration,
 }
 
