@@ -17,14 +17,14 @@ use n0_future::{
 
 pub(crate) struct RetentionOpts {
     retention: Duration,
-    check_interval: Duration,
+    evict_interval: Duration,
 }
 
 impl Default for RetentionOpts {
     fn default() -> Self {
         Self {
             retention: Duration::from_secs(60 * 5),
-            check_interval: Duration::from_secs(30),
+            evict_interval: Duration::from_secs(30),
         }
     }
 }
@@ -67,7 +67,7 @@ impl GossipDiscovery {
             let nodes = Arc::downgrade(&nodes);
             n0_future::task::spawn(async move {
                 loop {
-                    n0_future::time::sleep(opts.check_interval).await;
+                    n0_future::time::sleep(opts.evict_interval).await;
                     let Some(nodes) = nodes.upgrade() else {
                         break;
                     };
@@ -141,7 +141,7 @@ mod tests {
     #[tokio::test]
     async fn test_retention() {
         let opts = RetentionOpts {
-            check_interval: Duration::from_millis(100),
+            evict_interval: Duration::from_millis(100),
             retention: Duration::from_millis(500),
         };
         let disco = GossipDiscovery::with_opts(opts);
