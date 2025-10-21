@@ -10,6 +10,8 @@
 #![cfg_attr(iroh_docsrs, feature(doc_cfg))]
 
 #[cfg(feature = "net")]
+pub use net::Gossip;
+#[cfg(feature = "net")]
 #[doc(inline)]
 pub use net::GOSSIP_ALPN as ALPN;
 
@@ -19,3 +21,5 @@ pub mod metrics;
 #[cfg(feature = "net")]
 pub mod net;
 pub mod proto;
+
+pub use proto::TopicId;

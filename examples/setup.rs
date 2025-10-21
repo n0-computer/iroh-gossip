@@ -6,7 +6,7 @@ use n0_snafu::ResultExt;
 async fn main() -> n0_snafu::Result<()> {
     // create an iroh endpoint that includes the standard discovery mechanisms
     // we've built at number0
-    let endpoint = Endpoint::builder().discovery_n0().bind().await?;
+    let endpoint = Endpoint::bind().await?;
 
     // build gossip protocol
     let gossip = Gossip::builder().spawn(endpoint.clone());

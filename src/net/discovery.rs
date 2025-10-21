@@ -6,8 +6,8 @@ use std::{
     time::Duration,
 };
 
-use iroh::discovery::{Discovery, DiscoveryError, DiscoveryItem, NodeData, NodeInfo};
-use iroh_base::NodeId;
+use iroh::discovery::{Discovery, DiscoveryError, DiscoveryItem, EndpointData, EndpointInfo};
+use iroh_base::EndpointId;
 use n0_future::{
     boxed::BoxStream,
     stream::{self, StreamExt},
@@ -16,7 +16,7 @@ use n0_future::{
 };
 
 pub(crate) struct RetentionOpts {
-    /// How long to keep received node info records alive before pruning them
+    /// How long to keep received endpoint info records alive before pruning them
     retention: Duration,
     /// How often to check for expired entries
     evict_interval: Duration,
@@ -31,21 +31,21 @@ impl Default for RetentionOpts {
     }
 }
 
-/// A static node discovery that expires nodes after some time.
+/// A static endpoint discovery that expires endpoints after some time.
 ///
 /// It is added to the endpoint when constructing a gossip instance, and the gossip actor
-/// then adds node addresses as received with Join or ForwardJoin messages.
+/// then adds endpoint addresses as received with Join or ForwardJoin messages.
 #[derive(Debug, Clone)]
 pub(crate) struct GossipDiscovery {
-    nodes: NodeMap,
+    endpoints: NodeMap,
     _task_handle: Arc<AbortOnDropHandle<()>>,
 }
 
-type NodeMap = Arc<RwLock<BTreeMap<NodeId, StoredNodeInfo>>>;
+type NodeMap = Arc<RwLock<BTreeMap<EndpointId, StoredEndpointInfo>>>;
 
 #[derive(Debug)]
-struct StoredNodeInfo {
-    data: NodeData,
+struct StoredEndpointInfo {
+    data: EndpointData,
     last_updated: SystemTime,
 }
 
@@ -64,18 +64,18 @@ impl GossipDiscovery {
     }
 
     pub(crate) fn with_opts(opts: RetentionOpts) -> Self {
-        let nodes: NodeMap = Default::default();
+        let endpoints: NodeMap = Default::default();
         let task = {
-            let nodes = Arc::downgrade(&nodes);
+            let endpoints = Arc::downgrade(&endpoints);
             n0_future::task::spawn(async move {
                 let mut interval = n0_future::time::interval(opts.evict_interval);
                 loop {
                     interval.tick().await;
-                    let Some(nodes) = nodes.upgrade() else {
+                    let Some(endpoints) = endpoints.upgrade() else {
                         break;
                     };
                     let now = SystemTime::now();
-                    nodes.write().expect("poisoned").retain(|_k, v| {
+                    endpoints.write().expect("poisoned").retain(|_k, v| {
                         let age = now.duration_since(v.last_updated).unwrap_or(Duration::MAX);
                         age <= opts.retention
                     });
@@ -83,48 +83,48 @@ impl GossipDiscovery {
             })
         };
         Self {
-            nodes,
+            endpoints,
             _task_handle: Arc::new(AbortOnDropHandle::new(task)),
         }
     }
 
-    /// Augments node addressing information for the given node ID.
+    /// Augments endpoint addressing information for the given endpoint ID.
     ///
     /// The provided addressing information is combined with the existing info in the static
     /// provider.  Any new direct addresses are added to those already present while the
     /// relay URL is overwritten.
-    pub(crate) fn add(&self, node_info: impl Into<NodeInfo>) {
+    pub(crate) fn add(&self, endpoint_info: impl Into<EndpointInfo>) {
         let last_updated = SystemTime::now();
-        let NodeInfo { node_id, data } = node_info.into();
-        let mut guard = self.nodes.write().expect("poisoned");
-        match guard.entry(node_id) {
+        let EndpointInfo { endpoint_id, data } = endpoint_info.into();
+        let mut guard = self.endpoints.write().expect("poisoned");
+        match guard.entry(endpoint_id) {
             Entry::Occupied(mut entry) => {
                 let existing = entry.get_mut();
-                existing
-                    .data
-                    .add_direct_addresses(data.direct_addresses().iter().copied());
-                existing.data.set_relay_url(data.relay_url().cloned());
+                existing.data.add_addrs(data.addrs().cloned());
                 existing.data.set_user_data(data.user_data().cloned());
                 existing.last_updated = last_updated;
             }
             Entry::Vacant(entry) => {
-                entry.insert(StoredNodeInfo { data, last_updated });
+                entry.insert(StoredEndpointInfo { data, last_updated });
             }
         }
     }
 }
 
 impl Discovery for GossipDiscovery {
-    fn resolve(&self, node_id: NodeId) -> Option<BoxStream<Result<DiscoveryItem, DiscoveryError>>> {
-        let guard = self.nodes.read().expect("poisoned");
-        let info = guard.get(&node_id)?;
+    fn resolve(
+        &self,
+        endpoint_id: EndpointId,
+    ) -> Option<BoxStream<Result<DiscoveryItem, DiscoveryError>>> {
+        let guard = self.endpoints.read().expect("poisoned");
+        let info = guard.get(&endpoint_id)?;
         let last_updated = info
             .last_updated
             .duration_since(SystemTime::UNIX_EPOCH)
             .expect("time drift")
             .as_micros() as u64;
         let item = DiscoveryItem::new(
-            NodeInfo::from_parts(node_id, info.data.clone()),
+            EndpointInfo::from_parts(endpoint_id, info.data.clone()),
             Self::PROVENANCE,
             Some(last_updated),
         );
@@ -136,7 +136,7 @@ impl Discovery for GossipDiscovery {
 mod tests {
     use std::time::Duration;
 
-    use iroh::{discovery::Discovery, NodeAddr, SecretKey};
+    use iroh::{discovery::Discovery, EndpointAddr, SecretKey};
     use n0_future::StreamExt;
     use rand::SeedableRng;
 
@@ -152,7 +152,7 @@ mod tests {
 
         let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
         let k1 = SecretKey::generate(rng);
-        let a1 = NodeAddr::new(k1.public());
+        let a1 = EndpointAddr::new(k1.public());
 
         disco.add(a1);
 

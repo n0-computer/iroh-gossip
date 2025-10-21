@@ -17,27 +17,61 @@ The `iroh-gossip` protocol was designed to be used in conjunction with `iroh`. [
 Iroh provides a [`Router`](https://docs.rs/iroh/latest/iroh/protocol/struct.Router.html) that takes an [`Endpoint`](https://docs.rs/iroh/latest/iroh/endpoint/struct.Endpoint.html) and any protocols needed for the application. Similar to a router in webserver library, it runs a loop accepting incoming connections and routes them to the specific protocol handler, based on `ALPN`.
 
 Here is a basic example of how to set up `iroh-gossip` with `iroh`:
-```rust
-use iroh::{protocol::Router, Endpoint};
-use iroh_gossip::{net::Gossip, ALPN};
+```rust,no_run
+use iroh::{protocol::Router, Endpoint, EndpointId};
+use iroh_gossip::{api::Event, Gossip, TopicId};
+use n0_future::StreamExt;
 use n0_snafu::ResultExt;
 
 #[tokio::main]
 async fn main() -> n0_snafu::Result<()> {
     // create an iroh endpoint that includes the standard discovery mechanisms
     // we've built at number0
-    let endpoint = Endpoint::builder().discovery_n0().bind().await?;
+    let endpoint = Endpoint::bind().await?;
 
     // build gossip protocol
     let gossip = Gossip::builder().spawn(endpoint.clone());
 
     // setup router
-    let router = Router::builder(endpoint.clone())
-        .accept(ALPN, gossip.clone())
+    let router = Router::builder(endpoint)
+        .accept(iroh_gossip::ALPN, gossip.clone())
         .spawn();
-    // do fun stuff with the gossip protocol
+
+    // gossip swarms are centered around a shared "topic id", which is a 32 byte identifier
+    let topic_id = TopicId::from_bytes([23u8; 32]);
+    // and you need some bootstrap peers to join the swarm
+    let bootstrap_peers = bootstrap_peers();
+
+    // then, you can subscribe to the topic and join your initial peers
+    let (sender, mut receiver) = gossip
+        .subscribe(topic_id, bootstrap_peers)
+        .await?
+        .split();
+
+    // you might want to wait until you joined at least one other peer:
+    receiver.joined().await?;
+
+    // then, you can broadcast messages to all other peers!
+    sender.broadcast(b"hello world this is a gossip message".to_vec().into()).await?;
+
+    // and read messages from others!
+    while let Some(event) = receiver.next().await {
+        match event? {
+            Event::Received(message) => {
+                println!("received a message: {:?}", std::str::from_utf8(&message.content));
+            }
+            _ => {}
+        }
+    }
+
+    // clean shutdown makes sure that other peers are notified that you went offline
     router.shutdown().await.e()?;
     Ok(())
+}
+
+fn bootstrap_peers() -> Vec<EndpointId> {
+    // insert your bootstrap peers here, or get them from your environment
+    vec![]
 }
 ```
 

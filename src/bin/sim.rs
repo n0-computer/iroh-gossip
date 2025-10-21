@@ -29,7 +29,7 @@ enum Simulation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ScenarioDescription {
     sim: Simulation,
-    nodes: u32,
+    endpoints: u32,
     #[serde(default)]
     bootstrap: BootstrapMode,
     #[serde(default = "defaults::rounds")]
@@ -41,12 +41,12 @@ impl ScenarioDescription {
     pub fn label(&self) -> String {
         let &ScenarioDescription {
             sim,
-            nodes,
+            endpoints,
             rounds,
             config: _,
             bootstrap: _,
         } = &self;
-        format!("{sim:?}-n{nodes}-r{rounds}")
+        format!("{sim:?}-n{endpoints}-r{rounds}")
     }
 }
 
@@ -217,7 +217,7 @@ fn run_simulation(seeds: &[u64], scenario: ScenarioDescription) -> SimulationRes
 
         let sim_config = SimulatorConfig {
             rng_seed: seed,
-            peers: scenario.nodes as usize,
+            peers: scenario.endpoints as usize,
             ..Default::default()
         };
         let bootstrap = scenario.bootstrap.clone();
@@ -226,9 +226,9 @@ fn run_simulation(seeds: &[u64], scenario: ScenarioDescription) -> SimulationRes
         let outcome = simulator.bootstrap(bootstrap);
 
         if outcome.has_peers_with_no_neighbors() {
-            warn!("not all nodes active after bootstrap: {outcome:?}");
+            warn!("not all endpoints active after bootstrap: {outcome:?}");
         } else {
-            info!("bootstrapped, all nodes active");
+            info!("bootstrapped, all endpoints active");
         }
         let result = match scenario.sim {
             Simulation::GossipSingle => BigSingle.run(simulator, scenario.rounds as usize),
