@@ -113,6 +113,7 @@ testresult = "0.4.1"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 tracing-test = "0.2.5"
 url = "2.4.0"
+serde-byte-array = "0.1.2"
 
 [features]
 default = ["net", "metrics"]

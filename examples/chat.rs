@@ -7,7 +7,6 @@ use std::{
 
 use bytes::Bytes;
 use clap::Parser;
-use ed25519_dalek::Signature;
 use futures_lite::StreamExt;
 use iroh::{
     discovery::static_provider::StaticProvider, Endpoint, EndpointAddr, PublicKey, RelayMode,
@@ -21,6 +20,7 @@ use iroh_gossip::{
 use n0_future::task;
 use n0_snafu::{Result, ResultExt};
 use serde::{Deserialize, Serialize};
+use serde_byte_array::ByteArray;
 use snafu::whatever;
 
 /// Chat over iroh-gossip
@@ -117,7 +117,7 @@ async fn main() -> Result<()> {
     // build our magic endpoint
     let endpoint = Endpoint::builder()
         .secret_key(secret_key)
-        .add_discovery(static_provider.clone())
+        .discovery(static_provider.clone())
         .relay_mode(relay_mode.clone())
         .bind_addr_v4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))
         .bind()
@@ -222,6 +222,9 @@ fn input_loop(line_tx: tokio::sync::mpsc::Sender<String>) -> Result<()> {
     }
 }
 
+const SIGNATURE_LENGTH: usize = iroh::Signature::LENGTH;
+type Signature = ByteArray<SIGNATURE_LENGTH>;
+
 #[derive(Debug, Serialize, Deserialize)]
 struct SignedMessage {
     from: PublicKey,
@@ -233,8 +236,11 @@ impl SignedMessage {
     pub fn verify_and_decode(bytes: &[u8]) -> Result<(PublicKey, Message)> {
         let signed_message: Self = postcard::from_bytes(bytes).e()?;
         let key: PublicKey = signed_message.from;
-        key.verify(&signed_message.data, &signed_message.signature)
-            .e()?;
+        key.verify(
+            &signed_message.data,
+            &iroh::Signature::from_bytes(&signed_message.signature),
+        )
+        .e()?;
         let message: Message = postcard::from_bytes(&signed_message.data).e()?;
         Ok((signed_message.from, message))
     }
@@ -246,7 +252,7 @@ impl SignedMessage {
         let signed_message = Self {
             from,
             data,
-            signature,
+            signature: ByteArray::new(signature.to_bytes()),
         };
         let encoded = postcard::to_stdvec(&signed_message).e()?;
         Ok(encoded.into())
@@ -303,7 +309,8 @@ fn fmt_relay_mode(relay_mode: &RelayMode) -> String {
         RelayMode::Default => "Default Relay (production) servers".to_string(),
         RelayMode::Staging => "Default Relay (staging) servers".to_string(),
         RelayMode::Custom(map) => map
-            .urls()
+            .urls::<Vec<_>>()
+            .into_iter()
             .map(|url| url.to_string())
             .collect::<Vec<_>>()
             .join(", "),

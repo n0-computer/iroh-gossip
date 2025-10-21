@@ -1844,6 +1844,7 @@ dependencies = [
  "rand_chacha 0.9.0",
  "rayon",
  "serde",
+ "serde-byte-array",
  "serde_json",
  "snafu",
  "testresult",
@@ -3572,6 +3573,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f0e2c6ed6606019b4e29e69dbaba95b11854410e5347d525002456dbbb786b6"
 dependencies = [
  "serde_derive",
+]
+
+[[package]]
+name = "serde-byte-array"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63213ee4ed648dbd87db6fa993d4275b46bfb4ddfd95b3756045007c2b28f742"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
