@@ -146,7 +146,7 @@ async fn main() -> Result<()> {
         .spawn();
 
     // join the gossip topic by connecting to known peers, if any
-    let peer_ids = peers.iter().map(|p| p.endpoint_id).collect();
+    let peer_ids = peers.iter().map(|p| p.id).collect();
     if peers.is_empty() {
         println!("> waiting for peers to join us...");
     } else {

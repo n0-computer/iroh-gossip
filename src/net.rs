@@ -731,11 +731,14 @@ impl Actor {
                     Err(err) => warn!("Failed to decode {data:?} from {endpoint_id}: {err}"),
                     Ok(info) => {
                         debug!(peer = ?endpoint_id, "add known addrs: {info:?}");
-                        let endpoint_addr = EndpointAddr {
-                            endpoint_id,
-                            relay_url: info.relay_url,
-                            direct_addresses: info.direct_addresses,
-                        };
+                        let mut endpoint_addr = EndpointAddr::new(endpoint_id);
+                        for addr in info.direct_addresses {
+                            endpoint_addr = endpoint_addr.with_ip_addr(addr);
+                        }
+                        if let Some(relay_url) = info.relay_url {
+                            endpoint_addr = endpoint_addr.with_relay_url(relay_url);
+                        }
+
                         self.discovery.add(endpoint_addr);
                     }
                 },
@@ -898,16 +901,10 @@ struct AddrInfo {
 }
 
 impl From<EndpointAddr> for AddrInfo {
-    fn from(
-        EndpointAddr {
-            relay_url,
-            direct_addresses,
-            ..
-        }: EndpointAddr,
-    ) -> Self {
+    fn from(endpoint_addr: EndpointAddr) -> Self {
         Self {
-            relay_url,
-            direct_addresses,
+            relay_url: endpoint_addr.relay_urls().next().cloned(),
+            direct_addresses: endpoint_addr.ip_addrs().cloned().collect(),
         }
     }
 }
@@ -1639,7 +1636,7 @@ pub(crate) mod test {
         ) -> Result {
             let (router, gossip) = spawn_gossip(secret_key, relay_map).await?;
             info!(endpoint_id = %router.endpoint().id().fmt_short(), "broadcast endpoint spawned");
-            let bootstrap = vec![bootstrap_addr.endpoint_id];
+            let bootstrap = vec![bootstrap_addr.id];
             let static_provider = StaticProvider::new();
             static_provider.add_endpoint_info(bootstrap_addr);
             router.endpoint().discovery().add(static_provider);
@@ -1668,7 +1665,7 @@ pub(crate) mod test {
                 // See https://github.com/n0-computer/iroh/pull/3372
                 router.endpoint().online().await;
                 let addr = router.endpoint().addr();
-                info!(endpoint_id = %addr.endpoint_id.fmt_short(), "recv endpoint spawned");
+                info!(endpoint_id = %addr.id.fmt_short(), "recv endpoint spawned");
                 addr_tx.send(addr).unwrap();
                 let mut topic = gossip.subscribe_and_join(topic_id, vec![]).await?;
                 while let Some(event) = topic.try_next().await.unwrap() {
@@ -1745,7 +1742,7 @@ pub(crate) mod test {
         let router2 = Router::builder(ep2).accept(alpn, gossip2.clone()).spawn();
 
         let addr1 = router1.endpoint().addr();
-        let id1 = addr1.endpoint_id;
+        let id1 = addr1.id;
         let static_provider = StaticProvider::new();
         static_provider.add_endpoint_info(addr1);
         router2.endpoint().discovery().add(static_provider);
