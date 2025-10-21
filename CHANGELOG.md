@@ -2,6 +2,16 @@
 
 All notable changes to iroh-gossip will be documented in this file.
 
+## [0.94.0](https://github.com/n0-computer/iroh-gossip/compare/v0.93.1..0.94.0) - 2025-10-21
+
+### 🚜 Refactor
+
+- Use discovery service instead of `Endpoint::add_node_addr` ([#108](https://github.com/n0-computer/iroh-gossip/issues/108)) - ([f7e3ef4](https://github.com/n0-computer/iroh-gossip/commit/f7e3ef478a1c4f1ea934e29f3436582e68de734c))
+
+### ⚙️ Miscellaneous Tasks
+
+- Upgrade to iroh 0.94 ([#110](https://github.com/n0-computer/iroh-gossip/issues/110)) - ([ad78602](https://github.com/n0-computer/iroh-gossip/commit/ad78602a4bafad8db2a4264bf16fde12b08f7a5e))
+
 ## [0.93.1](https://github.com/n0-computer/iroh-gossip/compare/v0.93.0..0.93.1) - 2025-10-11
 
 ### ⚙️ Miscellaneous Tasks
