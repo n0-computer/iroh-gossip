@@ -1201,10 +1201,9 @@ pub(crate) mod test {
         relay_map: RelayMap,
         static_provider: Option<StaticProvider>,
     ) -> Result<Endpoint, BindError> {
-        let ep = Endpoint::builder()
+        let ep = Endpoint::empty_builder(RelayMode::Custom(relay_map))
             .secret_key(SecretKey::generate(rng))
             .alpns(vec![GOSSIP_ALPN.to_vec()])
-            .relay_mode(RelayMode::Custom(relay_map))
             .insecure_skip_relay_cert_verify(true)
             .bind()
             .await?;
@@ -1618,9 +1617,8 @@ pub(crate) mod test {
             secret_key: SecretKey,
             relay_map: RelayMap,
         ) -> Result<(Router, Gossip), BindError> {
-            let ep = Endpoint::builder()
+            let ep = Endpoint::empty_builder(RelayMode::Custom(relay_map))
                 .secret_key(secret_key)
-                .relay_mode(RelayMode::Custom(relay_map))
                 .insecure_skip_relay_cert_verify(true)
                 .bind()
                 .await?;
@@ -1739,8 +1737,8 @@ pub(crate) mod test {
         let alpn = b"my-gossip-alpn";
         let topic_id = TopicId::from([0u8; 32]);
 
-        let ep1 = Endpoint::builder().bind().await?;
-        let ep2 = Endpoint::builder().bind().await?;
+        let ep1 = Endpoint::empty_builder(RelayMode::Disabled).bind().await?;
+        let ep2 = Endpoint::empty_builder(RelayMode::Disabled).bind().await?;
         let gossip1 = Gossip::builder().alpn(alpn).spawn(ep1.clone());
         let gossip2 = Gossip::builder().alpn(alpn).spawn(ep2.clone());
         let router1 = Router::builder(ep1).accept(alpn, gossip1.clone()).spawn();
@@ -1775,9 +1773,8 @@ pub(crate) mod test {
             rng: &mut impl CryptoRng,
         ) -> n0_snafu::Result<(EndpointId, Router, Gossip, GossipSender, GossipReceiver)> {
             let topic_id = TopicId::from([0u8; 32]);
-            let ep = Endpoint::builder()
+            let ep = Endpoint::empty_builder(RelayMode::Disabled)
                 .secret_key(SecretKey::generate(rng))
-                .relay_mode(RelayMode::Disabled)
                 .bind()
                 .await?;
             let endpoint_id = ep.id();

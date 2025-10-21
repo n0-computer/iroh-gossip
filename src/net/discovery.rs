@@ -154,7 +154,7 @@ mod tests {
         let disco = GossipDiscovery::with_opts(opts);
 
         let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
-        let k1 = SecretKey::generate(&mut rand::rng());
+        let k1 = SecretKey::generate(rng);
         let a1 = EndpointAddr::new(k1.public());
 
         disco.add(a1);
