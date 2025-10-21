@@ -49,7 +49,7 @@ hex = "0.4.3"
 indexmap = "2.0"
 iroh-metrics = { version = "0.36", default-features = false }
 iroh-base = { version = "0.94", default-features = false, features = ["key"] }
-n0-future = "0.1.2"
+n0-future = "0.3"
 postcard = { version = "1", default-features = false, features = [
     "alloc",
     "use-std",
