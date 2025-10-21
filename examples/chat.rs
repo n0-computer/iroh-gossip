@@ -10,8 +10,8 @@ use clap::Parser;
 use ed25519_dalek::Signature;
 use futures_lite::StreamExt;
 use iroh::{
-    discovery::static_provider::StaticProvider, Endpoint, EndpointAddr, PublicKey, RelayMode, RelayUrl,
-    SecretKey,
+    discovery::static_provider::StaticProvider, Endpoint, EndpointAddr, PublicKey, RelayMode,
+    RelayUrl, SecretKey,
 };
 use iroh_gossip::{
     api::{Event, GossipReceiver},
