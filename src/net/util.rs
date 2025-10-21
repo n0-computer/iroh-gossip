@@ -9,7 +9,7 @@ use std::{
 use bytes::{Bytes, BytesMut};
 use iroh::{
     endpoint::{Connection, RecvStream, SendStream},
-    NodeId,
+    EndpointId,
 };
 use n0_future::{
     time::{sleep_until, Instant},
@@ -87,7 +87,7 @@ impl StreamHeader {
 }
 
 pub(crate) struct RecvLoop {
-    remote_node_id: NodeId,
+    remote_endpoint_id: EndpointId,
     conn: Connection,
     max_message_size: usize,
     in_event_tx: mpsc::Sender<InEvent>,
@@ -95,13 +95,13 @@ pub(crate) struct RecvLoop {
 
 impl RecvLoop {
     pub(crate) fn new(
-        remote_node_id: NodeId,
+        remote_endpoint_id: EndpointId,
         conn: Connection,
         in_event_tx: mpsc::Sender<InEvent>,
         max_message_size: usize,
     ) -> Self {
         Self {
-            remote_node_id,
+            remote_endpoint_id,
             conn,
             max_message_size,
             in_event_tx,
@@ -141,7 +141,7 @@ impl RecvLoop {
                     match msg {
                         None => debug!(topic=%state.header.topic_id.fmt_short(), "stream closed"),
                         Some(msg) => {
-                            if self.in_event_tx.send(InEvent::RecvMessage(self.remote_node_id, msg)).await.is_err() {
+                            if self.in_event_tx.send(InEvent::RecvMessage(self.remote_endpoint_id, msg)).await.is_err() {
                                 debug!("stop recv loop: actor closed");
                                 break;
                             }

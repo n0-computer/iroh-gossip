@@ -10,7 +10,7 @@ use clap::Parser;
 use ed25519_dalek::Signature;
 use futures_lite::StreamExt;
 use iroh::{
-    discovery::static_provider::StaticProvider, Endpoint, NodeAddr, PublicKey, RelayMode, RelayUrl,
+    discovery::static_provider::StaticProvider, Endpoint, EndpointAddr, PublicKey, RelayMode, RelayUrl,
     SecretKey,
 };
 use iroh_gossip::{
@@ -28,7 +28,7 @@ use snafu::whatever;
 /// This broadcasts signed messages over iroh-gossip and verifies signatures
 /// on received messages.
 ///
-/// By default a new node id is created when starting the example. To reuse your identity,
+/// By default a new endpoint id is created when starting the example. To reuse your identity,
 /// set the `--secret-key` flag with the secret key printed on a previous invocation.
 ///
 /// By default, the relay server run by n0 is used. To use a local relay server, run
@@ -36,7 +36,7 @@ use snafu::whatever;
 /// in another terminal and then set the `-d http://localhost:3340` flag on this example.
 #[derive(Parser, Debug)]
 struct Args {
-    /// secret key to derive our node id from.
+    /// secret key to derive our endpoint id from.
     #[clap(long)]
     secret_key: Option<String>,
     /// Set a custom relay server. By default, the relay server hosted by n0 will be used.
@@ -111,7 +111,7 @@ async fn main() -> Result<()> {
     };
     println!("> using relay servers: {}", fmt_relay_mode(&relay_mode));
 
-    // create a static provider to pass in node addresses to
+    // create a static provider to pass in endpoint addresses to
     let static_provider = StaticProvider::new();
 
     // build our magic endpoint
@@ -122,19 +122,19 @@ async fn main() -> Result<()> {
         .bind_addr_v4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))
         .bind()
         .await?;
-    println!("> our node id: {}", endpoint.node_id());
+    println!("> our endpoint id: {}", endpoint.id());
 
     // create the gossip protocol
     let gossip = Gossip::builder().spawn(endpoint.clone());
 
-    // print a ticket that includes our own node id and endpoint addresses
+    // print a ticket that includes our own endpoint id and endpoint addresses
     if !matches!(relay_mode, RelayMode::Disabled) {
         // if we are expecting a relay, wait until we get a home relay
         // before moving on
         endpoint.online().await;
     }
     let ticket = {
-        let me = endpoint.node_addr();
+        let me = endpoint.addr();
         let peers = peers.iter().cloned().chain([me]).collect();
         Ticket { topic, peers }
     };
@@ -146,14 +146,14 @@ async fn main() -> Result<()> {
         .spawn();
 
     // join the gossip topic by connecting to known peers, if any
-    let peer_ids = peers.iter().map(|p| p.node_id).collect();
+    let peer_ids = peers.iter().map(|p| p.endpoint_id).collect();
     if peers.is_empty() {
         println!("> waiting for peers to join us...");
     } else {
         println!("> trying to connect to {} peers...", peers.len());
         // add the peer addrs from the ticket to our endpoint's addressbook so that they can be dialed
         for peer in peers.into_iter() {
-            static_provider.add_node_info(peer);
+            static_provider.add_endpoint_info(peer);
         }
     };
     let (sender, receiver) = gossip.subscribe_and_join(topic, peer_ids).await?.split();
@@ -262,7 +262,7 @@ enum Message {
 #[derive(Debug, Serialize, Deserialize)]
 struct Ticket {
     topic: TopicId,
-    peers: Vec<NodeAddr>,
+    peers: Vec<EndpointAddr>,
 }
 impl Ticket {
     /// Deserializes from bytes.

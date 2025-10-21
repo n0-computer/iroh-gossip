@@ -14,7 +14,7 @@ use futures_util::FutureExt as _;
 use iroh::{
     endpoint::Connection,
     protocol::{AcceptError, ProtocolHandler},
-    Endpoint, NodeAddr, NodeId, PublicKey, RelayUrl, Watcher,
+    Endpoint, EndpointAddr, EndpointId, PublicKey, RelayUrl, Watcher,
 };
 use irpc::WithChannels;
 use n0_future::{
@@ -194,7 +194,7 @@ impl Builder {
         endpoint.discovery().add(discovery.clone());
         let (actor, rpc_tx, local_tx) =
             Actor::new(endpoint, self.config, metrics.clone(), self.alpn, discovery);
-        let me = actor.endpoint.node_id().fmt_short();
+        let me = actor.endpoint.id().fmt_short();
         let max_message_size = actor.state.max_message_size();
 
         let actor_handle = task::spawn(actor.run().instrument(error_span!("gossip", %me)));
@@ -286,13 +286,13 @@ struct Actor {
     /// Map of topics to their state.
     topics: HashMap<TopicId, TopicState>,
     /// Map of peers to their state.
-    peers: HashMap<NodeId, PeerState>,
+    peers: HashMap<EndpointId, PeerState>,
     /// Stream of commands from topic handles.
     command_rx: stream_group::Keyed<TopicCommandStream>,
     /// Internal queue of topic to close because all handles were dropped.
     quit_queue: VecDeque<TopicId>,
     /// Tasks for the connection loops, to keep track of panics.
-    connection_tasks: JoinSet<(NodeId, Connection, Result<(), ConnectionLoopError>)>,
+    connection_tasks: JoinSet<(EndpointId, Connection, Result<(), ConnectionLoopError>)>,
     metrics: Arc<Metrics>,
     topic_event_forwarders: JoinSet<TopicId>,
     discovery: GossipDiscovery,
@@ -310,7 +310,7 @@ impl Actor {
         mpsc::Sender<RpcMessage>,
         mpsc::Sender<LocalActorMessage>,
     ) {
-        let peer_id = endpoint.node_id();
+        let peer_id = endpoint.id();
         let dialer = Dialer::new(endpoint.clone());
         let state = proto::State::new(
             peer_id,
@@ -358,9 +358,9 @@ impl Actor {
     ///
     /// This updates our current address and return it. It also returns the home relay stream and
     /// direct addr stream.
-    async fn setup(&mut self) -> impl Stream<Item = NodeAddr> + Send + Unpin + use<> {
-        let addr_update_stream = self.endpoint.watch_node_addr().stream();
-        let initial_addr = self.endpoint.node_addr();
+    async fn setup(&mut self) -> impl Stream<Item = EndpointAddr> + Send + Unpin + use<> {
+        let addr_update_stream = self.endpoint.watch_addr().stream();
+        let initial_addr = self.endpoint.addr();
         self.handle_addr_update(initial_addr).await;
         addr_update_stream
     }
@@ -370,7 +370,7 @@ impl Actor {
     /// None is returned when no further processing should be performed.
     async fn event_loop(
         &mut self,
-        addr_updates: &mut (impl Stream<Item = NodeAddr> + Send + Unpin),
+        addr_updates: &mut (impl Stream<Item = EndpointAddr> + Send + Unpin),
         i: usize,
     ) -> bool {
         self.metrics.actor_tick_main.inc();
@@ -387,8 +387,8 @@ impl Actor {
                         return false;
                     },
                     Some(LocalActorMessage::HandleConnection(conn)) => {
-                        if let Ok(remote_node_id) = conn.remote_node_id() {
-                            self.handle_connection(remote_node_id, ConnOrigin::Accept, conn);
+                        if let Ok(remote_endpoint_id) = conn.remote_id() {
+                            self.handle_connection(remote_endpoint_id, ConnOrigin::Accept, conn);
                         }
                     }
                     None => {
@@ -477,9 +477,9 @@ impl Actor {
         true
     }
 
-    async fn handle_addr_update(&mut self, node_addr: NodeAddr) {
+    async fn handle_addr_update(&mut self, endpoint_addr: EndpointAddr) {
         // let peer_data = our_peer_data(&self.endpoint, current_addresses);
-        let peer_data = encode_peer_data(&node_addr.into());
+        let peer_data = encode_peer_data(&endpoint_addr.into());
         self.handle_in_event(InEvent::UpdatePeerData(peer_data), Instant::now())
             .await
     }
@@ -518,7 +518,7 @@ impl Actor {
         }
     }
 
-    fn handle_connection(&mut self, peer_id: NodeId, origin: ConnOrigin, conn: Connection) {
+    fn handle_connection(&mut self, peer_id: EndpointId, origin: ConnOrigin, conn: Connection) {
         let (send_tx, send_rx) = mpsc::channel(SEND_QUEUE_CAP);
         let conn_id = conn.stable_id();
 
@@ -559,7 +559,7 @@ impl Actor {
     #[tracing::instrument(name = "conn", skip_all, fields(peer = %peer_id.fmt_short()))]
     async fn handle_connection_task_finished(
         &mut self,
-        peer_id: NodeId,
+        peer_id: EndpointId,
         conn: Connection,
         task_result: Result<(), ConnectionLoopError>,
     ) {
@@ -727,16 +727,16 @@ impl Actor {
                     debug!(peer=%peer_id.fmt_short(), "gossip state indicates disconnect: drop peer");
                     self.peers.remove(&peer_id);
                 }
-                OutEvent::PeerData(node_id, data) => match decode_peer_data(&data) {
-                    Err(err) => warn!("Failed to decode {data:?} from {node_id}: {err}"),
+                OutEvent::PeerData(endpoint_id, data) => match decode_peer_data(&data) {
+                    Err(err) => warn!("Failed to decode {data:?} from {endpoint_id}: {err}"),
                     Ok(info) => {
-                        debug!(peer = ?node_id, "add known addrs: {info:?}");
-                        let node_addr = NodeAddr {
-                            node_id,
+                        debug!(peer = ?endpoint_id, "add known addrs: {info:?}");
+                        let endpoint_addr = EndpointAddr {
+                            endpoint_id,
                             relay_url: info.relay_url,
                             direct_addresses: info.direct_addresses,
                         };
-                        self.discovery.add(node_addr);
+                        self.discovery.add(endpoint_addr);
                     }
                 },
             }
@@ -801,7 +801,7 @@ impl Default for PeerState {
 
 #[derive(Debug)]
 struct TopicState {
-    neighbors: BTreeSet<NodeId>,
+    neighbors: BTreeSet<EndpointId>,
     event_sender: broadcast::Sender<ProtoEvent>,
     /// Keys identifying command receivers in [`Actor::command_rx`].
     ///
@@ -897,13 +897,13 @@ struct AddrInfo {
     direct_addresses: BTreeSet<SocketAddr>,
 }
 
-impl From<NodeAddr> for AddrInfo {
+impl From<EndpointAddr> for AddrInfo {
     fn from(
-        NodeAddr {
+        EndpointAddr {
             relay_url,
             direct_addresses,
             ..
-        }: NodeAddr,
+        }: EndpointAddr,
     ) -> Self {
         Self {
             relay_url,
@@ -991,10 +991,10 @@ impl Stream for TopicCommandStream {
 struct Dialer {
     endpoint: Endpoint,
     pending: JoinSet<(
-        NodeId,
+        EndpointId,
         Option<Result<Connection, iroh::endpoint::ConnectError>>,
     )>,
-    pending_dials: HashMap<NodeId, CancellationToken>,
+    pending_dials: HashMap<EndpointId, CancellationToken>,
 }
 
 impl Dialer {
@@ -1007,30 +1007,30 @@ impl Dialer {
         }
     }
 
-    /// Starts to dial a node by [`NodeId`].
-    fn queue_dial(&mut self, node_id: NodeId, alpn: Bytes) {
-        if self.is_pending(node_id) {
+    /// Starts to dial a endpoint by [`EndpointId`].
+    fn queue_dial(&mut self, endpoint_id: EndpointId, alpn: Bytes) {
+        if self.is_pending(endpoint_id) {
             return;
         }
         let cancel = CancellationToken::new();
-        self.pending_dials.insert(node_id, cancel.clone());
+        self.pending_dials.insert(endpoint_id, cancel.clone());
         let endpoint = self.endpoint.clone();
         self.pending.spawn(
             async move {
                 let res = tokio::select! {
                     biased;
                     _ = cancel.cancelled() => None,
-                    res = endpoint.connect(node_id, &alpn) => Some(res),
+                    res = endpoint.connect(endpoint_id, &alpn) => Some(res),
                 };
-                (node_id, res)
+                (endpoint_id, res)
             }
             .instrument(tracing::Span::current()),
         );
     }
 
-    /// Checks if a node is currently being dialed.
-    fn is_pending(&self, node: NodeId) -> bool {
-        self.pending_dials.contains_key(&node)
+    /// Checks if a endpoint is currently being dialed.
+    fn is_pending(&self, endpoint: EndpointId) -> bool {
+        self.pending_dials.contains_key(&endpoint)
     }
 
     /// Waits for the next dial operation to complete.
@@ -1038,16 +1038,16 @@ impl Dialer {
     async fn next_conn(
         &mut self,
     ) -> (
-        NodeId,
+        EndpointId,
         Option<Result<Connection, iroh::endpoint::ConnectError>>,
     ) {
         match self.pending_dials.is_empty() {
             false => {
-                let (node_id, res) = loop {
+                let (endpoint_id, res) = loop {
                     match self.pending.join_next().await {
-                        Some(Ok((node_id, res))) => {
-                            self.pending_dials.remove(&node_id);
-                            break (node_id, res);
+                        Some(Ok((endpoint_id, res))) => {
+                            self.pending_dials.remove(&endpoint_id);
+                            break (endpoint_id, res);
                         }
                         Some(Err(e)) => {
                             error!("next conn error: {:?}", e);
@@ -1059,7 +1059,7 @@ impl Dialer {
                     }
                 };
 
-                (node_id, res)
+                (endpoint_id, res)
             }
             true => std::future::pending().await,
         }
@@ -1108,13 +1108,13 @@ pub(crate) mod test {
     type EndpointHandle = tokio::task::JoinHandle<Result<()>>;
 
     impl ManualActorLoop {
-        #[instrument(skip_all, fields(me = %actor.endpoint.node_id().fmt_short()))]
+        #[instrument(skip_all, fields(me = %actor.endpoint.id().fmt_short()))]
         async fn new(mut actor: Actor) -> Self {
             let _ = actor.setup().await;
             Self { actor, step: 0 }
         }
 
-        #[instrument(skip_all, fields(me = %self.endpoint.node_id().fmt_short()))]
+        #[instrument(skip_all, fields(me = %self.endpoint.id().fmt_short()))]
         async fn step(&mut self) -> bool {
             let ManualActorLoop { actor, step } = self;
             *step += 1;
@@ -1189,7 +1189,7 @@ pub(crate) mod test {
             let (g, actor, ep_handle) =
                 Gossip::t_new_with_actor(rng, config, relay_map, cancel).await?;
             let ep = actor.endpoint.clone();
-            let me = ep.node_id().fmt_short();
+            let me = ep.id().fmt_short();
             let actor_handle =
                 task::spawn(actor.run().instrument(tracing::error_span!("gossip", %me)));
             Ok((g, ep, ep_handle, AbortOnDropHandle::new(actor_handle)))
@@ -1266,11 +1266,11 @@ pub(crate) mod test {
         let go1 = Gossip::builder().spawn(ep1.clone());
         let go2 = Gossip::builder().spawn(ep2.clone());
         let go3 = Gossip::builder().spawn(ep3.clone());
-        debug!("peer1 {:?}", ep1.node_id());
-        debug!("peer2 {:?}", ep2.node_id());
-        debug!("peer3 {:?}", ep3.node_id());
-        let pi1 = ep1.node_id();
-        let pi2 = ep2.node_id();
+        debug!("peer1 {:?}", ep1.id());
+        debug!("peer2 {:?}", ep2.id());
+        debug!("peer3 {:?}", ep3.id());
+        let pi1 = ep1.id();
+        let pi2 = ep2.id();
 
         let cancel = CancellationToken::new();
         let tasks = [
@@ -1282,10 +1282,10 @@ pub(crate) mod test {
         debug!("----- adding peers  ----- ");
         let topic: TopicId = blake3::hash(b"foobar").into();
 
-        let addr1 = NodeAddr::new(pi1).with_relay_url(relay_url.clone());
-        let addr2 = NodeAddr::new(pi2).with_relay_url(relay_url);
-        static_provider.add_node_info(addr1.clone());
-        static_provider.add_node_info(addr2.clone());
+        let addr1 = EndpointAddr::new(pi1).with_relay_url(relay_url.clone());
+        let addr2 = EndpointAddr::new(pi2).with_relay_url(relay_url);
+        static_provider.add_endpoint_info(addr1.clone());
+        static_provider.add_endpoint_info(addr2.clone());
 
         debug!("----- joining  ----- ");
         // join the topics and wait for the connection to succeed
@@ -1302,7 +1302,7 @@ pub(crate) mod test {
 
         let len = 2;
 
-        // publish messages on node1
+        // publish messages on endpoint1
         let pub1 = spawn(async move {
             for i in 0..len {
                 let message = format!("hi{i}");
@@ -1312,7 +1312,7 @@ pub(crate) mod test {
             }
         });
 
-        // wait for messages on node2
+        // wait for messages on endpoint2
         let sub2 = spawn(async move {
             let mut recv = vec![];
             loop {
@@ -1327,7 +1327,7 @@ pub(crate) mod test {
             }
         });
 
-        // wait for messages on node3
+        // wait for messages on endpoint3
         let sub3 = spawn(async move {
             let mut recv = vec![];
             loop {
@@ -1375,9 +1375,9 @@ pub(crate) mod test {
     ///
     /// This test will:
     /// - Create two endpoints, the first using manual event loop.
-    /// - Subscribe both nodes to the same topic. The first node will subscribe twice and connect
-    ///   to the second node. The second node will subscribe without bootstrap.
-    /// - Ensure that the first node removes the subscription iff all topic handles have been
+    /// - Subscribe both endpoints to the same topic. The first endpoint will subscribe twice and connect
+    ///   to the second endpoint. The second endpoint will subscribe without bootstrap.
+    /// - Ensure that the first endpoint removes the subscription iff all topic handles have been
     ///   dropped
     // NOTE: this is a regression test.
     #[tokio::test]
@@ -1387,32 +1387,32 @@ pub(crate) mod test {
         let ct = CancellationToken::new();
         let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
 
-        // create the first node with a manual actor loop
+        // create the first endpoint with a manual actor loop
         let (go1, actor, ep1_handle) =
             Gossip::t_new_with_actor(rng, Default::default(), relay_map.clone(), &ct).await?;
         let mut actor = ManualActorLoop::new(actor).await;
 
-        // create the second node with the usual actor loop
+        // create the second endpoint with the usual actor loop
         let (go2, ep2, ep2_handle, _test_actor_handle) =
             Gossip::t_new(rng, Default::default(), relay_map, &ct).await?;
 
-        let node_id1 = actor.endpoint.node_id();
-        let node_id2 = ep2.node_id();
+        let endpoint_id1 = actor.endpoint.id();
+        let endpoint_id2 = ep2.id();
         tracing::info!(
-            node_1 = %node_id1.fmt_short(),
-            node_2 = %node_id2.fmt_short(),
-            "nodes ready"
+            endpoint_1 = %endpoint_id1.fmt_short(),
+            endpoint_2 = %endpoint_id2.fmt_short(),
+            "endpoints ready"
         );
 
         let topic: TopicId = blake3::hash(b"subscription_cleanup").into();
         tracing::info!(%topic, "joining");
 
         // create the tasks for each gossip instance:
-        // - second node subscribes once without bootstrap and listens to events
-        // - first node subscribes twice with the second node as bootstrap. This is done on command
+        // - second endpoint subscribes once without bootstrap and listens to events
+        // - first endpoint subscribes twice with the second endpoint as bootstrap. This is done on command
         //   from the main task (this)
 
-        // second node
+        // second endpoint
         let ct2 = ct.clone();
         let go2_task = async move {
             let (_pub_tx, mut sub_rx) = go2.subscribe_and_join(topic, vec![]).await?.split();
@@ -1435,13 +1435,13 @@ pub(crate) mod test {
                 res = subscribe_fut => res,
             }
         }
-        .instrument(tracing::debug_span!("node_2", %node_id2));
+        .instrument(tracing::debug_span!("endpoint_2", %endpoint_id2));
         let go2_handle = task::spawn(go2_task);
 
-        // first node
-        let addr2 = NodeAddr::new(node_id2).with_relay_url(relay_url);
+        // first endpoint
+        let addr2 = EndpointAddr::new(endpoint_id2).with_relay_url(relay_url);
         let static_provider = StaticProvider::new();
-        static_provider.add_node_info(addr2);
+        static_provider.add_endpoint_info(addr2);
         actor.endpoint.discovery().add(static_provider);
         // we use a channel to signal advancing steps to the task
         let (tx, mut rx) = mpsc::channel::<()>(1);
@@ -1449,12 +1449,12 @@ pub(crate) mod test {
         let go1_task = async move {
             // first subscribe is done immediately
             tracing::info!("subscribing the first time");
-            let sub_1a = go1.subscribe_and_join(topic, vec![node_id2]).await?;
+            let sub_1a = go1.subscribe_and_join(topic, vec![endpoint_id2]).await?;
 
             // wait for signal to subscribe a second time
             rx.recv().await.expect("signal for second subscribe");
             tracing::info!("subscribing a second time");
-            let sub_1b = go1.subscribe_and_join(topic, vec![node_id2]).await?;
+            let sub_1b = go1.subscribe_and_join(topic, vec![endpoint_id2]).await?;
             drop(sub_1a);
 
             // wait for signal to drop the second handle as well
@@ -1468,7 +1468,7 @@ pub(crate) mod test {
 
             Result::<_, n0_snafu::Error>::Ok(())
         }
-        .instrument(tracing::debug_span!("node_1", %node_id1));
+        .instrument(tracing::debug_span!("endpoint_1", %endpoint_id1));
         let go1_handle = task::spawn(go1_task);
 
         // advance and check that the topic is now subscribed
@@ -1501,10 +1501,10 @@ pub(crate) mod test {
         Ok(())
     }
 
-    /// Test that nodes can reconnect to each other.
+    /// Test that endpoints can reconnect to each other.
     ///
-    /// This test will create two nodes subscribed to the same topic. The second node will
-    /// unsubscribe and then resubscribe and connection between the nodes should succeed both
+    /// This test will create two endpoints subscribed to the same topic. The second endpoint will
+    /// unsubscribe and then resubscribe and connection between the endpoints should succeed both
     /// times.
     // NOTE: This is a regression test
     #[tokio::test]
@@ -1520,12 +1520,12 @@ pub(crate) mod test {
         let (go2, ep2, ep2_handle, _test_actor_handle2) =
             Gossip::t_new(rng, Default::default(), relay_map, &ct).await?;
 
-        let node_id1 = ep1.node_id();
-        let node_id2 = ep2.node_id();
+        let endpoint_id1 = ep1.id();
+        let endpoint_id2 = ep2.id();
         tracing::info!(
-            node_1 = %node_id1.fmt_short(),
-            node_2 = %node_id2.fmt_short(),
-            "nodes ready"
+            endpoint_1 = %endpoint_id1.fmt_short(),
+            endpoint_2 = %endpoint_id2.fmt_short(),
+            "endpoints ready"
         );
 
         let topic: TopicId = blake3::hash(b"can_reconnect").into();
@@ -1534,9 +1534,9 @@ pub(crate) mod test {
         let ct2 = ct.child_token();
         // channel used to signal the second gossip instance to advance the test
         let (tx, mut rx) = mpsc::channel::<()>(1);
-        let addr1 = NodeAddr::new(node_id1).with_relay_url(relay_url.clone());
+        let addr1 = EndpointAddr::new(endpoint_id1).with_relay_url(relay_url.clone());
         let static_provider = StaticProvider::new();
-        static_provider.add_node_info(addr1);
+        static_provider.add_endpoint_info(addr1);
         ep2.discovery().add(static_provider.clone());
         let go2_task = async move {
             let mut sub = go2.subscribe(topic, Vec::new()).await?;
@@ -1548,7 +1548,7 @@ pub(crate) mod test {
 
             rx.recv().await.expect("signal to subscribe again");
             tracing::info!("resubscribing");
-            let mut sub = go2.subscribe(topic, vec![node_id1]).await?;
+            let mut sub = go2.subscribe(topic, vec![endpoint_id1]).await?;
 
             sub.joined().await?;
             tracing::info!("subscription successful!");
@@ -1557,33 +1557,33 @@ pub(crate) mod test {
 
             Result::<_, ApiError>::Ok(())
         }
-        .instrument(tracing::debug_span!("node_2", %node_id2));
+        .instrument(tracing::debug_span!("endpoint_2", %endpoint_id2));
         let go2_handle = task::spawn(go2_task);
 
-        let addr2 = NodeAddr::new(node_id2).with_relay_url(relay_url);
-        static_provider.add_node_info(addr2);
+        let addr2 = EndpointAddr::new(endpoint_id2).with_relay_url(relay_url);
+        static_provider.add_endpoint_info(addr2);
         ep1.discovery().add(static_provider);
 
-        let mut sub = go1.subscribe(topic, vec![node_id2]).await?;
+        let mut sub = go1.subscribe(topic, vec![endpoint_id2]).await?;
         // wait for subscribed notification
         sub.joined().await?;
 
-        // signal node_2 to unsubscribe
+        // signal endpoint_2 to unsubscribe
         tx.send(()).await.e()?;
 
         // we should receive a Neighbor down event
         let conn_timeout = Duration::from_millis(500);
         let ev = timeout(conn_timeout, sub.try_next()).await.e()??;
-        assert_eq!(ev, Some(Event::NeighborDown(node_id2)));
-        tracing::info!("node 2 left");
+        assert_eq!(ev, Some(Event::NeighborDown(endpoint_id2)));
+        tracing::info!("endpoint 2 left");
 
-        // signal node_2 to subscribe again
+        // signal endpoint_2 to subscribe again
         tx.send(()).await.e()?;
 
         let conn_timeout = Duration::from_millis(500);
         let ev = timeout(conn_timeout, sub.try_next()).await.e()??;
-        assert_eq!(ev, Some(Event::NeighborUp(node_id2)));
-        tracing::info!("node 2 rejoined!");
+        assert_eq!(ev, Some(Event::NeighborUp(endpoint_id2)));
+        tracing::info!("endpoint 2 rejoined!");
 
         // cleanup and ensure everything went as expected
         ct.cancel();
@@ -1631,19 +1631,19 @@ pub(crate) mod test {
             Ok((router, gossip))
         }
 
-        /// Spawns a gossip node, and broadcasts a single message, then sleep until cancelled externally.
+        /// Spawns a gossip endpoint, and broadcasts a single message, then sleep until cancelled externally.
         async fn broadcast_once(
             secret_key: SecretKey,
             relay_map: RelayMap,
-            bootstrap_addr: NodeAddr,
+            bootstrap_addr: EndpointAddr,
             topic_id: TopicId,
             message: String,
         ) -> Result {
             let (router, gossip) = spawn_gossip(secret_key, relay_map).await?;
-            info!(node_id = %router.endpoint().node_id().fmt_short(), "broadcast node spawned");
-            let bootstrap = vec![bootstrap_addr.node_id];
+            info!(endpoint_id = %router.endpoint().id().fmt_short(), "broadcast endpoint spawned");
+            let bootstrap = vec![bootstrap_addr.endpoint_id];
             let static_provider = StaticProvider::new();
-            static_provider.add_node_info(bootstrap_addr);
+            static_provider.add_endpoint_info(bootstrap_addr);
             router.endpoint().discovery().add(static_provider);
             let mut topic = gossip.subscribe_and_join(topic_id, bootstrap).await?;
             topic.broadcast(message.as_bytes().to_vec().into()).await?;
@@ -1655,7 +1655,7 @@ pub(crate) mod test {
         let mut rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
         let topic_id = TopicId::from_bytes(rng.random());
 
-        // spawn a gossip node, send the node's address on addr_tx,
+        // spawn a gossip endpoint, send the endpoint's address on addr_tx,
         // then wait to receive `count` messages, and terminate.
         let (addr_tx, addr_rx) = tokio::sync::oneshot::channel();
         let (msgs_recv_tx, mut msgs_recv_rx) = tokio::sync::mpsc::channel(3);
@@ -1669,8 +1669,8 @@ pub(crate) mod test {
                 // relay path is available it works.
                 // See https://github.com/n0-computer/iroh/pull/3372
                 router.endpoint().online().await;
-                let addr = router.endpoint().node_addr();
-                info!(node_id = %addr.node_id.fmt_short(), "recv node spawned");
+                let addr = router.endpoint().addr();
+                info!(endpoint_id = %addr.endpoint_id.fmt_short(), "recv endpoint spawned");
                 addr_tx.send(addr).unwrap();
                 let mut topic = gossip.subscribe_and_join(topic_id, vec![]).await?;
                 while let Some(event) = topic.try_next().await.unwrap() {
@@ -1683,11 +1683,11 @@ pub(crate) mod test {
             }
         });
 
-        let node0_addr = addr_rx.await.e()?;
+        let endpoint0_addr = addr_rx.await.e()?;
         let max_wait = Duration::from_secs(5);
 
-        // spawn a node, send a message, and then abruptly terminate the node ungracefully
-        // after the message was received on our receiver node.
+        // spawn a endpoint, send a message, and then abruptly terminate the endpoint ungracefully
+        // after the message was received on our receiver endpoint.
         let cancel = CancellationToken::new();
         let secret = SecretKey::generate(&mut rng);
         let join_handle_1 = run_in_thread(
@@ -1695,37 +1695,37 @@ pub(crate) mod test {
             broadcast_once(
                 secret.clone(),
                 relay_map.clone(),
-                node0_addr.clone(),
+                endpoint0_addr.clone(),
                 topic_id,
                 "msg1".to_string(),
             ),
         );
-        // assert that we received the message on the receiver node.
+        // assert that we received the message on the receiver endpoint.
         let msg = timeout(max_wait, msgs_recv_rx.recv()).await.e()?.unwrap();
         assert_eq!(&msg, "msg1");
-        info!("kill broadcast node");
+        info!("kill broadcast endpoint");
         cancel.cancel();
 
-        // spawns the node again with the same node id, and send another message
+        // spawns the endpoint again with the same endpoint id, and send another message
         let cancel = CancellationToken::new();
         let join_handle_2 = run_in_thread(
             cancel.clone(),
             broadcast_once(
                 secret.clone(),
                 relay_map.clone(),
-                node0_addr.clone(),
+                endpoint0_addr.clone(),
                 topic_id,
                 "msg2".to_string(),
             ),
         );
-        // assert that we received the message on the receiver node.
-        // this means that the reconnect with the same node id worked.
+        // assert that we received the message on the receiver endpoint.
+        // this means that the reconnect with the same endpoint id worked.
         let msg = timeout(max_wait, msgs_recv_rx.recv()).await.e()?.unwrap();
         assert_eq!(&msg, "msg2");
-        info!("kill broadcast node");
+        info!("kill broadcast endpoint");
         cancel.cancel();
 
-        info!("kill recv node");
+        info!("kill recv endpoint");
         recv_task.abort();
         assert!(join_handle_1.join().unwrap().is_none());
         assert!(join_handle_2.join().unwrap().is_none());
@@ -1746,10 +1746,10 @@ pub(crate) mod test {
         let router1 = Router::builder(ep1).accept(alpn, gossip1.clone()).spawn();
         let router2 = Router::builder(ep2).accept(alpn, gossip2.clone()).spawn();
 
-        let addr1 = router1.endpoint().node_addr();
-        let id1 = addr1.node_id;
+        let addr1 = router1.endpoint().addr();
+        let id1 = addr1.endpoint_id;
         let static_provider = StaticProvider::new();
-        static_provider.add_node_info(addr1);
+        static_provider.add_endpoint_info(addr1);
         router2.endpoint().discovery().add(static_provider);
 
         let mut topic1 = gossip1.subscribe(topic_id, vec![]).await?;
@@ -1773,48 +1773,48 @@ pub(crate) mod test {
 
         async fn spawn(
             rng: &mut impl CryptoRng,
-        ) -> n0_snafu::Result<(NodeId, Router, Gossip, GossipSender, GossipReceiver)> {
+        ) -> n0_snafu::Result<(EndpointId, Router, Gossip, GossipSender, GossipReceiver)> {
             let topic_id = TopicId::from([0u8; 32]);
             let ep = Endpoint::builder()
                 .secret_key(SecretKey::generate(rng))
                 .relay_mode(RelayMode::Disabled)
                 .bind()
                 .await?;
-            let node_id = ep.node_id();
+            let endpoint_id = ep.id();
             let gossip = Gossip::builder().spawn(ep.clone());
             let router = Router::builder(ep)
                 .accept(GOSSIP_ALPN, gossip.clone())
                 .spawn();
             let topic = gossip.subscribe(topic_id, vec![]).await?;
             let (sender, receiver) = topic.split();
-            Ok((node_id, router, gossip, sender, receiver))
+            Ok((endpoint_id, router, gossip, sender, receiver))
         }
 
-        // spawn 3 nodes without relay or discovery
+        // spawn 3 endpoints without relay or discovery
         let (n1, r1, _g1, _tx1, mut rx1) = spawn(rng).await?;
         let (n2, r2, _g2, tx2, mut rx2) = spawn(rng).await?;
         let (n3, r3, _g3, tx3, mut rx3) = spawn(rng).await?;
 
-        println!("nodes {:?}", [n1, n2, n3]);
+        println!("endpoints {:?}", [n1, n2, n3]);
 
-        // create a static discovery that has only node 1 addr info set
-        let addr1 = r1.endpoint().node_addr();
+        // create a static discovery that has only endpoint 1 addr info set
+        let addr1 = r1.endpoint().addr();
         let disco = StaticProvider::new();
-        disco.add_node_info(addr1);
+        disco.add_endpoint_info(addr1);
 
-        // add addr info of node1 to node2 and join node1
+        // add addr info of endpoint1 to endpoint2 and join endpoint1
         r2.endpoint().discovery().add(disco.clone());
         tx2.join_peers(vec![n1]).await?;
 
-        // await join node2 -> nodde1
+        // await join endpoint2 -> nodde1
         timeout(Duration::from_secs(3), rx1.joined()).await.e()??;
         timeout(Duration::from_secs(3), rx2.joined()).await.e()??;
 
-        // add addr info of node1 to node3 and join node1
+        // add addr info of endpoint1 to endpoint3 and join endpoint1
         r3.endpoint().discovery().add(disco.clone());
         tx3.join_peers(vec![n1]).await?;
 
-        // await join at node3: n1 and n2
+        // await join at endpoint3: n1 and n2
         // n2 only works because because we use gossip discovery!
         let ev = timeout(Duration::from_secs(3), rx3.next()).await.e()?;
         assert!(matches!(ev, Some(Ok(Event::NeighborUp(_)))));
