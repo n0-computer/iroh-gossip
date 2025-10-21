@@ -30,13 +30,17 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, error_span, trace, warn, Instrument};
 
-use self::util::{RecvLoop, SendLoop, Timers};
+use self::{
+    discovery::GossipDiscovery,
+    util::{RecvLoop, SendLoop, Timers},
+};
 use crate::{
     api::{self, Command, Event, GossipApi, RpcMessage},
     metrics::Metrics,
     proto::{self, HyparviewConfig, PeerData, PlumtreeConfig, Scope, TopicId},
 };
 
+mod discovery;
 mod util;
 
 /// ALPN protocol name
@@ -50,8 +54,6 @@ const TO_ACTOR_CAP: usize = 64;
 const IN_EVENT_CAP: usize = 1024;
 /// Channel capacity for broadcast subscriber event queue (one per topic)
 const TOPIC_EVENT_CAP: usize = 256;
-/// Name used for logging when new node addresses are added from gossip.
-const SOURCE_NAME: &str = "gossip";
 
 /// Events emitted from the gossip protocol
 pub type ProtoEvent = proto::Event<PublicKey>;
@@ -188,8 +190,10 @@ impl Builder {
     /// Spawn a gossip actor and get a handle for it
     pub fn spawn(self, endpoint: Endpoint) -> Gossip {
         let metrics = Arc::new(Metrics::default());
+        let discovery = GossipDiscovery::default();
+        endpoint.discovery().add(discovery.clone());
         let (actor, rpc_tx, local_tx) =
-            Actor::new(endpoint, self.config, metrics.clone(), self.alpn);
+            Actor::new(endpoint, self.config, metrics.clone(), self.alpn, discovery);
         let me = actor.endpoint.node_id().fmt_short();
         let max_message_size = actor.state.max_message_size();
 
@@ -291,6 +295,7 @@ struct Actor {
     connection_tasks: JoinSet<(NodeId, Connection, Result<(), ConnectionLoopError>)>,
     metrics: Arc<Metrics>,
     topic_event_forwarders: JoinSet<TopicId>,
+    discovery: GossipDiscovery,
 }
 
 impl Actor {
@@ -299,6 +304,7 @@ impl Actor {
         config: proto::Config,
         metrics: Arc<Metrics>,
         alpn: Option<Bytes>,
+        discovery: GossipDiscovery,
     ) -> (
         Self,
         mpsc::Sender<RpcMessage>,
@@ -333,6 +339,7 @@ impl Actor {
             metrics,
             local_rx,
             topic_event_forwarders: Default::default(),
+            discovery,
         };
 
         (actor, rpc_tx, local_tx)
@@ -353,7 +360,6 @@ impl Actor {
     /// direct addr stream.
     async fn setup(&mut self) -> impl Stream<Item = NodeAddr> + Send + Unpin + use<> {
         let addr_update_stream = self.endpoint.watch_node_addr().stream();
-        // TODO(Frando): Fail if endpoint disconnected?
         let initial_addr = self.endpoint.node_addr();
         self.handle_addr_update(initial_addr).await;
         addr_update_stream
@@ -730,12 +736,7 @@ impl Actor {
                             relay_url: info.relay_url,
                             direct_addresses: info.direct_addresses,
                         };
-                        if let Err(err) = self
-                            .endpoint
-                            .add_node_addr_with_source(node_addr, SOURCE_NAME)
-                        {
-                            debug!(peer = ?node_id, "add known failed: {err:?}");
-                        }
+                        self.discovery.add(node_addr);
                     }
                 },
             }
@@ -1076,14 +1077,14 @@ pub(crate) mod test {
         RelayMap, RelayMode, SecretKey,
     };
     use n0_snafu::{Result, ResultExt};
-    use rand::Rng;
+    use rand::{CryptoRng, Rng};
     use tokio::{spawn, time::timeout};
     use tokio_util::sync::CancellationToken;
     use tracing::{info, instrument};
     use tracing_test::traced_test;
 
     use super::*;
-    use crate::api::ApiError;
+    use crate::api::{ApiError, GossipReceiver, GossipSender};
 
     struct ManualActorLoop {
         actor: Actor,
@@ -1149,8 +1150,11 @@ pub(crate) mod test {
         ) -> Result<(Self, Actor, EndpointHandle), BindError> {
             let endpoint = create_endpoint(rng, relay_map, None).await?;
             let metrics = Arc::new(Metrics::default());
+            let discovery = GossipDiscovery::default();
+            endpoint.discovery().add(discovery.clone());
 
-            let (actor, to_actor_tx, conn_tx) = Actor::new(endpoint, config, metrics.clone(), None);
+            let (actor, to_actor_tx, conn_tx) =
+                Actor::new(endpoint, config, metrics.clone(), None, discovery);
             let max_message_size = actor.state.max_message_size();
 
             let _actor_handle =
@@ -1760,5 +1764,78 @@ pub(crate) mod test {
         router1.shutdown().await.e()?;
         router2.shutdown().await.e()?;
         Ok(())
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn gossip_rely_on_gossip_discovery() -> n0_snafu::Result<()> {
+        let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
+
+        async fn spawn(
+            rng: &mut impl CryptoRng,
+        ) -> n0_snafu::Result<(NodeId, Router, Gossip, GossipSender, GossipReceiver)> {
+            let topic_id = TopicId::from([0u8; 32]);
+            let ep = Endpoint::builder()
+                .secret_key(SecretKey::generate(rng))
+                .relay_mode(RelayMode::Disabled)
+                .bind()
+                .await?;
+            let node_id = ep.node_id();
+            let gossip = Gossip::builder().spawn(ep.clone());
+            let router = Router::builder(ep)
+                .accept(GOSSIP_ALPN, gossip.clone())
+                .spawn();
+            let topic = gossip.subscribe(topic_id, vec![]).await?;
+            let (sender, receiver) = topic.split();
+            Ok((node_id, router, gossip, sender, receiver))
+        }
+
+        // spawn 3 nodes without relay or discovery
+        let (n1, r1, _g1, _tx1, mut rx1) = spawn(rng).await?;
+        let (n2, r2, _g2, tx2, mut rx2) = spawn(rng).await?;
+        let (n3, r3, _g3, tx3, mut rx3) = spawn(rng).await?;
+
+        println!("nodes {:?}", [n1, n2, n3]);
+
+        // create a static discovery that has only node 1 addr info set
+        let addr1 = r1.endpoint().node_addr();
+        let disco = StaticProvider::new();
+        disco.add_node_info(addr1);
+
+        // add addr info of node1 to node2 and join node1
+        r2.endpoint().discovery().add(disco.clone());
+        tx2.join_peers(vec![n1]).await?;
+
+        // await join node2 -> nodde1
+        timeout(Duration::from_secs(3), rx1.joined()).await.e()??;
+        timeout(Duration::from_secs(3), rx2.joined()).await.e()??;
+
+        // add addr info of node1 to node3 and join node1
+        r3.endpoint().discovery().add(disco.clone());
+        tx3.join_peers(vec![n1]).await?;
+
+        // await join at node3: n1 and n2
+        // n2 only works because because we use gossip discovery!
+        let ev = timeout(Duration::from_secs(3), rx3.next()).await.e()?;
+        assert!(matches!(ev, Some(Ok(Event::NeighborUp(_)))));
+        let ev = timeout(Duration::from_secs(3), rx3.next()).await.e()?;
+        assert!(matches!(ev, Some(Ok(Event::NeighborUp(_)))));
+
+        assert_eq!(sorted(rx3.neighbors()), sorted([n1, n2]));
+
+        let ev = timeout(Duration::from_secs(3), rx2.next()).await.e()?;
+        assert!(matches!(ev, Some(Ok(Event::NeighborUp(n))) if n == n3));
+
+        let ev = timeout(Duration::from_secs(3), rx1.next()).await.e()?;
+        assert!(matches!(ev, Some(Ok(Event::NeighborUp(n))) if n == n3));
+
+        tokio::try_join!(r1.shutdown(), r2.shutdown(), r3.shutdown()).e()?;
+        Ok(())
+    }
+
+    fn sorted<T: Ord>(input: impl IntoIterator<Item = T>) -> Vec<T> {
+        let mut out: Vec<_> = input.into_iter().collect();
+        out.sort();
+        out
     }
 }
