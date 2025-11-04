@@ -37,7 +37,7 @@ pub(crate) struct JoinRequest {
 }
 
 #[allow(missing_docs)]
-#[stack_error(derive, add_meta, std_sources)]
+#[stack_error(derive, add_meta, from_sources)]
 #[non_exhaustive]
 pub enum ApiError {
     #[error(transparent)]
@@ -47,7 +47,7 @@ pub enum ApiError {
     },
     /// The gossip topic was closed.
     #[error("topic closed")]
-    Closed {},
+    Closed,
 }
 
 impl From<irpc::channel::SendError> for ApiError {
@@ -415,7 +415,7 @@ mod tests {
     #[tracing_test::traced_test]
     async fn test_rpc() -> n0_error::Result<()> {
         use iroh::{discovery::static_provider::StaticProvider, protocol::Router, RelayMap};
-        use n0_error::{AnyError, Result, StdResultExt};
+        use n0_error::{AnyError, Result, StackResultExt, StdResultExt};
         use n0_future::{time::Duration, StreamExt};
         use rand_chacha::rand_core::SeedableRng;
 
@@ -468,7 +468,7 @@ mod tests {
         // expose the gossip endpoint over RPC
         let (rpc_server_endpoint, rpc_server_cert) =
             irpc::util::make_server_endpoint("127.0.0.1:0".parse().unwrap())
-                .std_context("make server endpoint")?;
+                .context("make server endpoint")?;
         let rpc_server_addr = rpc_server_endpoint
             .local_addr()
             .std_context("resolve server addr")?;
@@ -479,7 +479,7 @@ mod tests {
         // connect to the RPC endpoint with a new client
         let rpc_client_endpoint =
             irpc::util::make_client_endpoint("127.0.0.1:0".parse().unwrap(), &[&rpc_server_cert])
-                .std_context("make client endpoint")?;
+                .context("make client endpoint")?;
         let rpc_client = GossipApi::connect(rpc_client_endpoint, rpc_server_addr);
 
         // join via RPC

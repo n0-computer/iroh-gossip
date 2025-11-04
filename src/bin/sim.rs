@@ -104,7 +104,7 @@ fn main() -> Result<()> {
             filter,
         } => {
             let config_text = std::fs::read_to_string(&config_path)
-                .with_std_context(|| format!("read config {}", config_path.display()))?;
+                .with_std_context(|_| format!("read config {}", config_path.display()))?;
             let config: SimConfig = toml::from_str(&config_text).std_context("parse config")?;
 
             let base_config = config.config.unwrap_or_default();
@@ -117,7 +117,7 @@ fn main() -> Result<()> {
 
             if let Some(out_dir) = out_dir.as_ref() {
                 std::fs::create_dir_all(out_dir)
-                    .with_std_context(|| format!("create output dir {}", out_dir.display()))?;
+                    .with_std_context(|_| format!("create output dir {}", out_dir.display()))?;
             }
 
             let filter_fn = |s: &ScenarioDescription| {
@@ -173,8 +173,8 @@ fn run_and_save_simulation(
     if let Some(out_dir) = out_dir.as_ref() {
         let path = out_dir.as_ref().join(format!("{label}.config.toml"));
         let encoded = toml::to_string(&scenario).std_context("encode scenario")?;
-        std::fs::write(path, encoded)
-            .with_std_context(|| format!("write scenario {}", path.display()))?;
+        std::fs::write(&path, encoded)
+            .with_std_context(|_| format!("write scenario {}", &path.display()))?;
     }
 
     let result = run_simulation(seeds, scenario);
@@ -182,8 +182,8 @@ fn run_and_save_simulation(
     if let Some(out_dir) = out_dir.as_ref() {
         let path = out_dir.as_ref().join(format!("{label}.results.json"));
         let encoded = serde_json::to_string(&result).std_context("encode results")?;
-        std::fs::write(path, encoded)
-            .with_std_context(|| format!("write results {}", path.display()))?;
+        std::fs::write(&path, encoded)
+            .with_std_context(|_| format!("write results {}", path.display()))?;
     }
 
     Ok(result)
@@ -200,7 +200,7 @@ struct SimulationResults {
 impl SimulationResults {
     fn load_from_file(path: impl AsRef<Path>) -> Result<Self> {
         let s = std::fs::read_to_string(path.as_ref())
-            .with_std_context(|| format!("read results {}", path.as_ref().display()))?;
+            .with_std_context(|_| format!("read results {}", path.as_ref().display()))?;
         let out = serde_json::from_str(&s).std_context("decode results")?;
         Ok(out)
     }
@@ -326,7 +326,7 @@ impl Scenario for BigAll {
 fn compare_dirs(baseline_dir: PathBuf, current_path: PathBuf, filter: Vec<String>) -> Result<()> {
     let mut paths = vec![];
     for entry in std::fs::read_dir(&current_path)
-        .with_std_context(|| format!("read directory {}", current_path.display()))?
+        .with_std_context(|_| format!("read directory {}", current_path.display()))?
         .filter_map(Result::ok)
         .filter(|x| x.path().is_file())
     {

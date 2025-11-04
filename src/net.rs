@@ -17,7 +17,7 @@ use iroh::{
     Endpoint, EndpointAddr, EndpointId, PublicKey, RelayUrl, Watcher,
 };
 use irpc::WithChannels;
-use n0_error::{anyerr, e, stack_error};
+use n0_error::{e, stack_error};
 use n0_future::{
     task::{self, AbortOnDropHandle, JoinSet},
     time::Instant,
@@ -1727,7 +1727,7 @@ pub(crate) mod test {
         let msg = timeout(max_wait, msgs_recv_rx.recv())
             .await
             .std_context("wait for first broadcast")?
-            .ok_or_else(|| n0_error::anyerr("receiver dropped channel"))?;
+            .std_context("receiver dropped channel")?;
         assert_eq!(&msg, "msg1");
         info!("kill broadcast endpoint");
         cancel.cancel();
@@ -1749,7 +1749,7 @@ pub(crate) mod test {
         let msg = timeout(max_wait, msgs_recv_rx.recv())
             .await
             .std_context("wait for second broadcast")?
-            .ok_or_else(|| n0_error::anyerr("receiver dropped channel"))?;
+            .std_context("receiver dropped channel")?;
         assert_eq!(&msg, "msg2");
         info!("kill broadcast endpoint");
         cancel.cancel();

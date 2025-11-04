@@ -29,23 +29,23 @@ use crate::proto::{util::TimerMap, TopicId};
 
 /// Errors related to message writing
 #[allow(missing_docs)]
-#[stack_error(derive, add_meta, std_sources)]
+#[stack_error(derive, add_meta, from_sources)]
 #[non_exhaustive]
 pub(crate) enum WriteError {
     /// Connection error
-    #[error(transparent)]
+    #[error("Connection error")]
     Connection {
         #[error(std_err)]
         source: iroh::endpoint::ConnectionError,
     },
     /// Serialization failed
-    #[error(transparent)]
+    #[error("Serialization failed")]
     Ser {
         #[error(std_err)]
         source: postcard::Error,
     },
     /// IO error
-    #[error(transparent)]
+    #[error("IO error")]
     Io {
         #[error(std_err)]
         source: std::io::Error,
@@ -312,17 +312,17 @@ impl SendLoop {
 
 /// Errors related to message reading
 #[allow(missing_docs)]
-#[stack_error(derive, add_meta, std_sources)]
+#[stack_error(derive, add_meta, from_sources)]
 #[non_exhaustive]
 pub(crate) enum ReadError {
     /// Deserialization failed
-    #[error(transparent)]
+    #[error("Deserialization failed")]
     De {
         #[error(std_err)]
         source: postcard::Error,
     },
     /// IO error
-    #[error(transparent)]
+    #[error("IO error")]
     Io {
         #[error(std_err)]
         source: std::io::Error,
