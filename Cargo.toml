@@ -47,7 +47,7 @@ derive_more = { version = "2.0.1", features = [
 ed25519-dalek = { version = "3.0.0-pre.1", features = ["serde", "rand_core"] }
 hex = "0.4.3"
 indexmap = "2.0"
-iroh-metrics = { version = "0.36", default-features = false }
+iroh-metrics = { version = "0.37", default-features = false }
 iroh-base = { version = "0.94", default-features = false, features = ["key"] }
 n0-future = "0.3"
 postcard = { version = "1", default-features = false, features = [
