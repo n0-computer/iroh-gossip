@@ -83,7 +83,7 @@ humantime-serde = { version = "1.1.1", optional = true }
 
 # simulator dependencies (optional)
 clap = { version = "4", features = ["derive"], optional = true }
-toml = { version = "0.8.20", optional = true }
+toml = { version = "0.9.8", optional = true }
 tracing-subscriber = { version = "0.3", features = [
     "env-filter",
 ], optional = true }
@@ -178,4 +178,3 @@ debug = true
 iroh = { git = "https://github.com/n0-computer/iroh.git", branch = "main" }
 iroh-base = { git = "https://github.com/n0-computer/iroh.git", branch = "main" }
 irpc = { git = "https://github.com/n0-computer/irpc.git", branch = "matheus23/irpc-n0-error" }
-n0-error = { git = "https://github.com/n0-computer/n0-error.git", branch = "Frando/anyhow-ext" }
