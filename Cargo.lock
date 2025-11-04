@@ -1879,7 +1879,7 @@ dependencies = [
 [[package]]
 name = "irpc"
 version = "0.10.0"
-source = "git+https://github.com/n0-computer/irpc.git?branch=matheus23%2Firpc-n0-error#1ffd363bb592d08a03ec526c0d4086891d8f801a"
+source = "git+https://github.com/n0-computer/irpc.git?branch=matheus23%2Firpc-n0-error#d3df5515741f14aa68191bccbb4b5f614dfc6aa9"
 dependencies = [
  "futures-buffered",
  "futures-util",
@@ -1900,7 +1900,7 @@ dependencies = [
 [[package]]
 name = "irpc-derive"
 version = "0.8.0"
-source = "git+https://github.com/n0-computer/irpc.git?branch=matheus23%2Firpc-n0-error#1ffd363bb592d08a03ec526c0d4086891d8f801a"
+source = "git+https://github.com/n0-computer/irpc.git?branch=matheus23%2Firpc-n0-error#d3df5515741f14aa68191bccbb4b5f614dfc6aa9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4226,7 +4226,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
