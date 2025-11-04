@@ -181,7 +181,7 @@ async fn main() -> Result<()> {
     }
 
     // shutdown
-    router.shutdown().await.std_context("shutdown router")?;
+    router.shutdown().await.anyerr()?;
 
     Ok(())
 }
@@ -213,12 +213,8 @@ fn input_loop(line_tx: tokio::sync::mpsc::Sender<String>) -> Result<()> {
     let mut buffer = String::new();
     let stdin = std::io::stdin(); // We get `Stdin` here.
     loop {
-        stdin
-            .read_line(&mut buffer)
-            .std_context("read stdin line")?;
-        line_tx
-            .blocking_send(buffer.clone())
-            .std_context("send stdin line")?;
+        stdin.read_line(&mut buffer).anyerr()?;
+        line_tx.blocking_send(buffer.clone()).anyerr()?;
         buffer.clear();
     }
 }
