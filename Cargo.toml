@@ -71,9 +71,8 @@ irpc = { version = "0.10.0", optional = true, default-features = false, features
     "stream",
     "spans",
 ] }
-n0-snafu = { version = "0.2.2", optional = true }
+n0-error = "0.2"
 nested_enum_utils = { version = "0.2.2", optional = true }
-snafu = { version = "0.8.5", features = ["rust_1_81"], optional = true }
 
 # rpc dependencies (optional)
 quinn = { package = "iroh-quinn", version = "0.14.0", optional = true }
@@ -126,16 +125,12 @@ net = [
     "dep:futures-util",
     "dep:futures-concurrency",
     "dep:nested_enum_utils",
-    "dep:n0-snafu",
-    "dep:snafu",
 ]
 rpc = [
     "dep:irpc",
     "dep:tokio",
     "dep:quinn",
     "dep:nested_enum_utils",
-    "dep:n0-snafu",
-    "dep:snafu",
     "irpc/rpc",
     "irpc/quinn_endpoint_setup",
 ]
