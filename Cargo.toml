@@ -177,5 +177,5 @@ debug = true
 [patch.crates-io]
 iroh = { git = "https://github.com/n0-computer/iroh.git", branch = "main" }
 iroh-base = { git = "https://github.com/n0-computer/iroh.git", branch = "main" }
-irpc = { git = "https://github.com/n0-computer/irpc.git", branch = "main" }
+irpc = { git = "https://github.com/n0-computer/irpc.git", branch = "matheus23/irpc-n0-error" }
 n0-error = { git = "https://github.com/n0-computer/n0-error.git", branch = "Frando/anyhow-ext" }

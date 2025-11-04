@@ -41,10 +41,7 @@ pub(crate) struct JoinRequest {
 #[non_exhaustive]
 pub enum ApiError {
     #[error(transparent)]
-    Rpc {
-        #[error(std_err)]
-        source: irpc::Error,
-    },
+    Rpc { source: irpc::Error },
     /// The gossip topic was closed.
     #[error("topic closed")]
     Closed,

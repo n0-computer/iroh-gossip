@@ -1879,20 +1879,19 @@ dependencies = [
 [[package]]
 name = "irpc"
 version = "0.10.0"
-source = "git+https://github.com/n0-computer/irpc.git?branch=main#83c9dcbfe000f016e9a77419472a8b717036d5c8"
+source = "git+https://github.com/n0-computer/irpc.git?branch=matheus23%2Firpc-n0-error#1ffd363bb592d08a03ec526c0d4086891d8f801a"
 dependencies = [
- "anyhow",
  "futures-buffered",
  "futures-util",
  "iroh-quinn",
  "irpc-derive",
+ "n0-error",
  "n0-future",
  "postcard",
  "rcgen",
  "rustls",
  "serde",
  "smallvec",
- "thiserror 2.0.17",
  "tokio",
  "tokio-util",
  "tracing",
@@ -1901,7 +1900,7 @@ dependencies = [
 [[package]]
 name = "irpc-derive"
 version = "0.8.0"
-source = "git+https://github.com/n0-computer/irpc.git?branch=main#83c9dcbfe000f016e9a77419472a8b717036d5c8"
+source = "git+https://github.com/n0-computer/irpc.git?branch=matheus23%2Firpc-n0-error#1ffd363bb592d08a03ec526c0d4086891d8f801a"
 dependencies = [
  "proc-macro2",
  "quote",
