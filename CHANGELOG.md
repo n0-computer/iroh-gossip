@@ -2,6 +2,12 @@
 
 All notable changes to iroh-gossip will be documented in this file.
 
+## [0.95.0](https://github.com/n0-computer/iroh-gossip/compare/v0.94.0..0.95.0) - 2025-11-06
+
+### Deps/refactor
+
+- [**breaking**] Update to iroh main, port to n0-error ([#113](https://github.com/n0-computer/iroh-gossip/issues/113)) - ([4d2cb2f](https://github.com/n0-computer/iroh-gossip/commit/4d2cb2f3891e8dadd89a985fb6b5ad55d92e4c59))
+
 ## [0.94.0](https://github.com/n0-computer/iroh-gossip/compare/v0.93.1..0.94.0) - 2025-10-21
 
 ### 🚜 Refactor
