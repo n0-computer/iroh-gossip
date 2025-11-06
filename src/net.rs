@@ -17,15 +17,14 @@ use iroh::{
     Endpoint, EndpointAddr, EndpointId, PublicKey, RelayUrl, Watcher,
 };
 use irpc::WithChannels;
+use n0_error::{e, stack_error};
 use n0_future::{
     task::{self, AbortOnDropHandle, JoinSet},
     time::Instant,
     Stream, StreamExt as _,
 };
-use nested_enum_utils::common_fields;
 use rand::{rngs::StdRng, SeedableRng};
 use serde::{Deserialize, Serialize};
-use snafu::Snafu;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, error_span, trace, warn, Instrument};
@@ -102,12 +101,7 @@ enum LocalActorMessage {
 }
 
 #[allow(missing_docs)]
-#[common_fields({
-    backtrace: Option<snafu::Backtrace>,
-    #[snafu(implicit)]
-    span_trace: n0_snafu::SpanTrace,
-})]
-#[derive(Debug, Snafu)]
+#[stack_error(derive, add_meta)]
 #[non_exhaustive]
 pub enum Error {
     ActorDropped {},
@@ -115,12 +109,12 @@ pub enum Error {
 
 impl<T> From<mpsc::error::SendError<T>> for Error {
     fn from(_value: mpsc::error::SendError<T>) -> Self {
-        ActorDroppedSnafu.build()
+        e!(Error::ActorDropped)
     }
 }
 impl From<oneshot::error::RecvError> for Error {
     fn from(_value: oneshot::error::RecvError) -> Self {
-        ActorDroppedSnafu.build()
+        e!(Error::ActorDropped)
     }
 }
 
@@ -387,9 +381,7 @@ impl Actor {
                         return false;
                     },
                     Some(LocalActorMessage::HandleConnection(conn)) => {
-                        if let Ok(remote_endpoint_id) = conn.remote_id() {
-                            self.handle_connection(remote_endpoint_id, ConnOrigin::Accept, conn);
-                        }
+                        self.handle_connection(conn.remote_id(), ConnOrigin::Accept, conn);
                     }
                     None => {
                         debug!("all gossip handles dropped, stop gossip actor");
@@ -843,23 +835,20 @@ enum ConnOrigin {
 }
 
 #[allow(missing_docs)]
-#[common_fields({
-    backtrace: Option<snafu::Backtrace>,
-})]
-#[derive(Debug, Snafu)]
-#[snafu(module)]
+#[stack_error(derive, add_meta, from_sources, std_sources)]
 #[non_exhaustive]
 enum ConnectionLoopError {
-    #[snafu(transparent)]
+    #[error(transparent)]
     Write {
         source: self::util::WriteError,
     },
-    #[snafu(transparent)]
+    #[error(transparent)]
     Read {
         source: self::util::ReadError,
     },
-    #[snafu(transparent)]
+    #[error(transparent)]
     Connection {
+        #[error(std_err)]
         source: iroh::endpoint::ConnectionError,
     },
     ActorDropped {},
@@ -867,7 +856,7 @@ enum ConnectionLoopError {
 
 impl<T> From<mpsc::error::SendError<T>> for ConnectionLoopError {
     fn from(_value: mpsc::error::SendError<T>) -> Self {
-        self::connection_loop_error::ActorDroppedSnafu.build()
+        e!(ConnectionLoopError::ActorDropped)
     }
 }
 
@@ -1073,7 +1062,7 @@ pub(crate) mod test {
         discovery::static_provider::StaticProvider, endpoint::BindError, protocol::Router,
         RelayMap, RelayMode, SecretKey,
     };
-    use n0_snafu::{Result, ResultExt};
+    use n0_error::{AnyError, Result, StdResultExt};
     use rand::{CryptoRng, Rng};
     use tokio::{spawn, time::timeout};
     use tokio_util::sync::CancellationToken;
@@ -1233,7 +1222,10 @@ pub(crate) mod test {
                                 continue;
                             }
                         };
-                        gossip.handle_connection(connecting.await.e()?).await?
+                        let connection = connecting
+                            .await
+                            .std_context("await incoming connection")?;
+                        gossip.handle_connection(connection).await?
                     }
                 }
             }
@@ -1423,7 +1415,7 @@ pub(crate) mod test {
                 }
 
                 tracing::debug!("subscribe stream ended");
-                Result::<_, n0_snafu::Error>::Ok(())
+                Ok::<_, AnyError>(())
             };
 
             tokio::select! {
@@ -1462,7 +1454,7 @@ pub(crate) mod test {
             ct1.cancelled().await;
             drop(go1);
 
-            Result::<_, n0_snafu::Error>::Ok(())
+            Ok::<_, AnyError>(())
         }
         .instrument(tracing::debug_span!("endpoint_1", %endpoint_id1));
         let go1_handle = task::spawn(go1_task);
@@ -1475,24 +1467,40 @@ pub(crate) mod test {
         assert!(state.joined());
 
         // signal the second subscribe, we should remain subscribed
-        tx.send(()).await.e()?;
+        tx.send(())
+            .await
+            .std_context("signal additional subscribe")?;
         actor.steps(3).await; // subscribe; first receiver gone; first sender gone
         let state = actor.topics.get(&topic).expect("get registered topic");
         assert!(state.joined());
 
         // signal to drop the second handle, the topic should no longer be subscribed
-        tx.send(()).await.e()?;
+        tx.send(()).await.std_context("signal drop handles")?;
         actor.steps(2).await; // second receiver gone; second sender gone
         assert!(!actor.topics.contains_key(&topic));
 
         // cleanup and ensure everything went as expected
         ct.cancel();
         let wait = Duration::from_secs(2);
-        timeout(wait, ep1_handle).await.e()?.e()??;
-        timeout(wait, ep2_handle).await.e()?.e()??;
-        timeout(wait, go1_handle).await.e()?.e()??;
-        timeout(wait, go2_handle).await.e()?.e()??;
-        timeout(wait, actor.finish()).await.e()?;
+        timeout(wait, ep1_handle)
+            .await
+            .std_context("wait endpoint1 task")?
+            .std_context("join endpoint1 task")??;
+        timeout(wait, ep2_handle)
+            .await
+            .std_context("wait endpoint2 task")?
+            .std_context("join endpoint2 task")??;
+        timeout(wait, go1_handle)
+            .await
+            .std_context("wait gossip1 task")?
+            .std_context("join gossip1 task")??;
+        timeout(wait, go2_handle)
+            .await
+            .std_context("wait gossip2 task")?
+            .std_context("join gossip2 task")??;
+        timeout(wait, actor.finish())
+            .await
+            .std_context("wait actor finish")?;
 
         Ok(())
     }
@@ -1551,7 +1559,7 @@ pub(crate) mod test {
 
             ct2.cancelled().await;
 
-            Result::<_, ApiError>::Ok(())
+            Ok::<_, ApiError>(())
         }
         .instrument(tracing::debug_span!("endpoint_2", %endpoint_id2));
         let go2_handle = task::spawn(go2_task);
@@ -1565,28 +1573,41 @@ pub(crate) mod test {
         sub.joined().await?;
 
         // signal endpoint_2 to unsubscribe
-        tx.send(()).await.e()?;
+        tx.send(()).await.std_context("signal unsubscribe")?;
 
         // we should receive a Neighbor down event
         let conn_timeout = Duration::from_millis(500);
-        let ev = timeout(conn_timeout, sub.try_next()).await.e()??;
+        let ev = timeout(conn_timeout, sub.try_next())
+            .await
+            .std_context("wait neighbor down")??;
         assert_eq!(ev, Some(Event::NeighborDown(endpoint_id2)));
         tracing::info!("endpoint 2 left");
 
         // signal endpoint_2 to subscribe again
-        tx.send(()).await.e()?;
+        tx.send(()).await.std_context("signal resubscribe")?;
 
         let conn_timeout = Duration::from_millis(500);
-        let ev = timeout(conn_timeout, sub.try_next()).await.e()??;
+        let ev = timeout(conn_timeout, sub.try_next())
+            .await
+            .std_context("wait neighbor up")??;
         assert_eq!(ev, Some(Event::NeighborUp(endpoint_id2)));
         tracing::info!("endpoint 2 rejoined!");
 
         // cleanup and ensure everything went as expected
         ct.cancel();
         let wait = Duration::from_secs(2);
-        timeout(wait, ep1_handle).await.e()?.e()??;
-        timeout(wait, ep2_handle).await.e()?.e()??;
-        timeout(wait, go2_handle).await.e()?.e()??;
+        timeout(wait, ep1_handle)
+            .await
+            .std_context("wait endpoint1 task")?
+            .std_context("join endpoint1 task")??;
+        timeout(wait, ep2_handle)
+            .await
+            .std_context("wait endpoint2 task")?
+            .std_context("join endpoint2 task")??;
+        timeout(wait, go2_handle)
+            .await
+            .std_context("wait gossip2 task")?
+            .std_context("join gossip2 task")??;
 
         Result::Ok(())
     }
@@ -1670,15 +1691,20 @@ pub(crate) mod test {
                 let mut topic = gossip.subscribe_and_join(topic_id, vec![]).await?;
                 while let Some(event) = topic.try_next().await.unwrap() {
                     if let Event::Received(message) = event {
-                        let message = std::str::from_utf8(&message.content).e()?.to_string();
-                        msgs_recv_tx.send(message).await.e()?;
+                        let message = std::str::from_utf8(&message.content)
+                            .std_context("decode broadcast message")?
+                            .to_string();
+                        msgs_recv_tx
+                            .send(message)
+                            .await
+                            .std_context("forward received message")?;
                     }
                 }
-                Result::<_, n0_snafu::Error>::Ok(())
+                Ok::<_, AnyError>(())
             }
         });
 
-        let endpoint0_addr = addr_rx.await.e()?;
+        let endpoint0_addr = addr_rx.await.std_context("receive endpoint address")?;
         let max_wait = Duration::from_secs(5);
 
         // spawn a endpoint, send a message, and then abruptly terminate the endpoint ungracefully
@@ -1696,7 +1722,10 @@ pub(crate) mod test {
             ),
         );
         // assert that we received the message on the receiver endpoint.
-        let msg = timeout(max_wait, msgs_recv_rx.recv()).await.e()?.unwrap();
+        let msg = timeout(max_wait, msgs_recv_rx.recv())
+            .await
+            .std_context("wait for first broadcast")?
+            .std_context("receiver dropped channel")?;
         assert_eq!(&msg, "msg1");
         info!("kill broadcast endpoint");
         cancel.cancel();
@@ -1715,7 +1744,10 @@ pub(crate) mod test {
         );
         // assert that we received the message on the receiver endpoint.
         // this means that the reconnect with the same endpoint id worked.
-        let msg = timeout(max_wait, msgs_recv_rx.recv()).await.e()?.unwrap();
+        let msg = timeout(max_wait, msgs_recv_rx.recv())
+            .await
+            .std_context("wait for second broadcast")?
+            .std_context("receiver dropped channel")?;
         assert_eq!(&msg, "msg2");
         info!("kill broadcast endpoint");
         cancel.cancel();
@@ -1730,7 +1762,7 @@ pub(crate) mod test {
 
     #[tokio::test]
     #[traced_test]
-    async fn gossip_change_alpn() -> n0_snafu::Result<()> {
+    async fn gossip_change_alpn() -> n0_error::Result<()> {
         let alpn = b"my-gossip-alpn";
         let topic_id = TopicId::from([0u8; 32]);
 
@@ -1752,23 +1784,23 @@ pub(crate) mod test {
 
         timeout(Duration::from_secs(3), topic1.joined())
             .await
-            .e()??;
+            .std_context("wait topic1 join")??;
         timeout(Duration::from_secs(3), topic2.joined())
             .await
-            .e()??;
-        router1.shutdown().await.e()?;
-        router2.shutdown().await.e()?;
+            .std_context("wait topic2 join")??;
+        router1.shutdown().await.std_context("shutdown router1")?;
+        router2.shutdown().await.std_context("shutdown router2")?;
         Ok(())
     }
 
     #[tokio::test]
     #[traced_test]
-    async fn gossip_rely_on_gossip_discovery() -> n0_snafu::Result<()> {
+    async fn gossip_rely_on_gossip_discovery() -> n0_error::Result<()> {
         let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
 
         async fn spawn(
             rng: &mut impl CryptoRng,
-        ) -> n0_snafu::Result<(EndpointId, Router, Gossip, GossipSender, GossipReceiver)> {
+        ) -> n0_error::Result<(EndpointId, Router, Gossip, GossipSender, GossipReceiver)> {
             let topic_id = TopicId::from([0u8; 32]);
             let ep = Endpoint::empty_builder(RelayMode::Disabled)
                 .secret_key(SecretKey::generate(rng))
@@ -1801,8 +1833,12 @@ pub(crate) mod test {
         tx2.join_peers(vec![n1]).await?;
 
         // await join endpoint2 -> nodde1
-        timeout(Duration::from_secs(3), rx1.joined()).await.e()??;
-        timeout(Duration::from_secs(3), rx2.joined()).await.e()??;
+        timeout(Duration::from_secs(3), rx1.joined())
+            .await
+            .std_context("wait rx1 join")??;
+        timeout(Duration::from_secs(3), rx2.joined())
+            .await
+            .std_context("wait rx2 join")??;
 
         // add addr info of endpoint1 to endpoint3 and join endpoint1
         r3.endpoint().discovery().add(disco.clone());
@@ -1810,20 +1846,29 @@ pub(crate) mod test {
 
         // await join at endpoint3: n1 and n2
         // n2 only works because because we use gossip discovery!
-        let ev = timeout(Duration::from_secs(3), rx3.next()).await.e()?;
+        let ev = timeout(Duration::from_secs(3), rx3.next())
+            .await
+            .std_context("wait rx3 first neighbor")?;
         assert!(matches!(ev, Some(Ok(Event::NeighborUp(_)))));
-        let ev = timeout(Duration::from_secs(3), rx3.next()).await.e()?;
+        let ev = timeout(Duration::from_secs(3), rx3.next())
+            .await
+            .std_context("wait rx3 second neighbor")?;
         assert!(matches!(ev, Some(Ok(Event::NeighborUp(_)))));
 
         assert_eq!(sorted(rx3.neighbors()), sorted([n1, n2]));
 
-        let ev = timeout(Duration::from_secs(3), rx2.next()).await.e()?;
+        let ev = timeout(Duration::from_secs(3), rx2.next())
+            .await
+            .std_context("wait rx2 neighbor")?;
         assert!(matches!(ev, Some(Ok(Event::NeighborUp(n))) if n == n3));
 
-        let ev = timeout(Duration::from_secs(3), rx1.next()).await.e()?;
+        let ev = timeout(Duration::from_secs(3), rx1.next())
+            .await
+            .std_context("wait rx1 neighbor")?;
         assert!(matches!(ev, Some(Ok(Event::NeighborUp(n))) if n == n3));
 
-        tokio::try_join!(r1.shutdown(), r2.shutdown(), r3.shutdown()).e()?;
+        tokio::try_join!(r1.shutdown(), r2.shutdown(), r3.shutdown())
+            .std_context("shutdown routers")?;
         Ok(())
     }
 

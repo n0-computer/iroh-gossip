@@ -20,11 +20,11 @@ Here is a basic example of how to set up `iroh-gossip` with `iroh`:
 ```rust,no_run
 use iroh::{protocol::Router, Endpoint, EndpointId};
 use iroh_gossip::{api::Event, Gossip, TopicId};
+use n0_error::{Result, StdResultExt};
 use n0_future::StreamExt;
-use n0_snafu::ResultExt;
 
 #[tokio::main]
-async fn main() -> n0_snafu::Result<()> {
+async fn main() -> Result<()> {
     // create an iroh endpoint that includes the standard discovery mechanisms
     // we've built at number0
     let endpoint = Endpoint::bind().await?;
@@ -65,7 +65,7 @@ async fn main() -> n0_snafu::Result<()> {
     }
 
     // clean shutdown makes sure that other peers are notified that you went offline
-    router.shutdown().await.e()?;
+    router.shutdown().await.std_context("shutdown router")?;
     Ok(())
 }
 

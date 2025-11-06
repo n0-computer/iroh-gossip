@@ -11,13 +11,12 @@ use iroh::{
     endpoint::{Connection, RecvStream, SendStream},
     EndpointId,
 };
+use n0_error::{e, stack_error};
 use n0_future::{
     time::{sleep_until, Instant},
     FuturesUnordered, StreamExt,
 };
-use nested_enum_utils::common_fields;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use snafu::Snafu;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::mpsc,
@@ -30,26 +29,29 @@ use crate::proto::{util::TimerMap, TopicId};
 
 /// Errors related to message writing
 #[allow(missing_docs)]
-#[common_fields({
-    backtrace: Option<snafu::Backtrace>,
-})]
-#[derive(Debug, Snafu)]
-#[snafu(module)]
+#[stack_error(derive, add_meta, from_sources)]
 #[non_exhaustive]
 pub(crate) enum WriteError {
     /// Connection error
-    #[snafu(transparent)]
+    #[error("Connection error")]
     Connection {
+        #[error(std_err)]
         source: iroh::endpoint::ConnectionError,
     },
     /// Serialization failed
-    #[snafu(transparent)]
-    Ser { source: postcard::Error },
+    #[error("Serialization failed")]
+    Ser {
+        #[error(std_err)]
+        source: postcard::Error,
+    },
     /// IO error
-    #[snafu(transparent)]
-    Io { source: std::io::Error },
+    #[error("IO error")]
+    Io {
+        #[error(std_err)]
+        source: std::io::Error,
+    },
     /// Message was larger than the configured maximum message size
-    #[snafu(display("message too large"))]
+    #[error("message too large")]
     TooLarge {},
 }
 
@@ -310,21 +312,23 @@ impl SendLoop {
 
 /// Errors related to message reading
 #[allow(missing_docs)]
-#[common_fields({
-    backtrace: Option<snafu::Backtrace>,
-})]
-#[derive(Debug, Snafu)]
-#[snafu(module)]
+#[stack_error(derive, add_meta, from_sources)]
 #[non_exhaustive]
 pub(crate) enum ReadError {
     /// Deserialization failed
-    #[snafu(transparent)]
-    De { source: postcard::Error },
+    #[error("Deserialization failed")]
+    De {
+        #[error(std_err)]
+        source: postcard::Error,
+    },
     /// IO error
-    #[snafu(transparent)]
-    Io { source: std::io::Error },
+    #[error("IO error")]
+    Io {
+        #[error(std_err)]
+        source: std::io::Error,
+    },
     /// Message was larger than the configured maximum message size
-    #[snafu(display("message too large"))]
+    #[error("message too large")]
     TooLarge {},
 }
 
@@ -357,9 +361,9 @@ pub async fn read_lp(
         Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(err) => return Err(err.into()),
     };
-    let size = usize::try_from(size).map_err(|_| read_error::TooLargeSnafu.build())?;
+    let size = usize::try_from(size).map_err(|_| e!(ReadError::TooLarge))?;
     if size > max_message_size {
-        return Err(read_error::TooLargeSnafu.build());
+        return Err(e!(ReadError::TooLarge));
     }
     buffer.resize(size, 0u8);
     reader
@@ -378,7 +382,7 @@ pub async fn write_frame<T: Serialize>(
 ) -> Result<(), WriteError> {
     let len = postcard::experimental::serialized_size(&message)?;
     if len >= max_message_size {
-        return Err(write_error::TooLargeSnafu.build());
+        return Err(e!(WriteError::TooLarge));
     }
     buffer.clear();
     buffer.resize(len, 0u8);

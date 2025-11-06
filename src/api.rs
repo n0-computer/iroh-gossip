@@ -11,10 +11,9 @@ use std::{
 use bytes::Bytes;
 use iroh_base::EndpointId;
 use irpc::{channel::mpsc, rpc_requests, Client};
+use n0_error::{e, stack_error};
 use n0_future::{Stream, StreamExt, TryStreamExt};
-use nested_enum_utils::common_fields;
 use serde::{Deserialize, Serialize};
-use snafu::Snafu;
 
 use crate::proto::{DeliveryScope, TopicId};
 
@@ -38,19 +37,14 @@ pub(crate) struct JoinRequest {
 }
 
 #[allow(missing_docs)]
-#[common_fields({
-    backtrace: Option<snafu::Backtrace>,
-    #[snafu(implicit)]
-    span_trace: n0_snafu::SpanTrace,
-})]
-#[derive(Debug, Snafu)]
+#[stack_error(derive, add_meta, from_sources)]
 #[non_exhaustive]
 pub enum ApiError {
-    #[snafu(transparent)]
+    #[error(transparent)]
     Rpc { source: irpc::Error },
     /// The gossip topic was closed.
-    #[snafu(display("topic closed"))]
-    Closed {},
+    #[error("topic closed")]
+    Closed,
 }
 
 impl From<irpc::channel::SendError> for ApiError {
@@ -299,7 +293,7 @@ impl GossipReceiver {
     /// continue to track `NeighborUp` events on the event stream.
     pub async fn joined(&mut self) -> Result<(), ApiError> {
         while !self.is_joined() {
-            let _event = self.next().await.ok_or(ClosedSnafu.build())??;
+            let _event = self.next().await.ok_or(e!(ApiError::Closed))??;
         }
         Ok(())
     }
@@ -416,10 +410,10 @@ mod tests {
     #[cfg(all(feature = "rpc", feature = "net"))]
     #[tokio::test]
     #[tracing_test::traced_test]
-    async fn test_rpc() -> n0_snafu::Result {
+    async fn test_rpc() -> n0_error::Result<()> {
         use iroh::{discovery::static_provider::StaticProvider, protocol::Router, RelayMap};
+        use n0_error::{AnyError, Result, StackResultExt, StdResultExt};
         use n0_future::{time::Duration, StreamExt};
-        use n0_snafu::{Error, Result, ResultExt};
         use rand_chacha::rand_core::SeedableRng;
 
         use crate::{
@@ -457,7 +451,7 @@ mod tests {
             let task = tokio::task::spawn(async move {
                 let mut topic = gossip.subscribe_and_join(topic_id, vec![]).await?;
                 topic.broadcast(b"hello".to_vec().into()).await?;
-                Result::<_, Error>::Ok(router)
+                Ok::<_, AnyError>(router)
             });
             (endpoint_id, endpoint_addr, task)
         };
@@ -471,8 +465,10 @@ mod tests {
         // expose the gossip endpoint over RPC
         let (rpc_server_endpoint, rpc_server_cert) =
             irpc::util::make_server_endpoint("127.0.0.1:0".parse().unwrap())
-                .map_err(Error::anyhow)?;
-        let rpc_server_addr = rpc_server_endpoint.local_addr().e()?;
+                .context("make server endpoint")?;
+        let rpc_server_addr = rpc_server_endpoint
+            .local_addr()
+            .std_context("resolve server addr")?;
         let rpc_server_task = tokio::task::spawn(async move {
             gossip.listen(rpc_server_endpoint).await;
         });
@@ -480,7 +476,7 @@ mod tests {
         // connect to the RPC endpoint with a new client
         let rpc_client_endpoint =
             irpc::util::make_client_endpoint("127.0.0.1:0".parse().unwrap(), &[&rpc_server_cert])
-                .map_err(Error::anyhow)?;
+                .context("make client endpoint")?;
         let rpc_client = GossipApi::connect(rpc_client_endpoint, rpc_server_addr);
 
         // join via RPC
@@ -499,19 +495,22 @@ mod tests {
                     _ => {}
                 }
             }
-            Result::<_, Error>::Ok(())
+            Ok::<_, AnyError>(())
         };
 
         // timeout to not hang in case of failure
         tokio::time::timeout(Duration::from_secs(10), recv)
             .await
-            .e()??;
+            .std_context("rpc recv timeout")??;
 
         // shutdown
         rpc_server_task.abort();
-        router.shutdown().await.e()?;
-        let router2 = endpoint2_task.await.e()??;
-        router2.shutdown().await.e()?;
+        router.shutdown().await.std_context("shutdown router")?;
+        let router2 = endpoint2_task.await.std_context("join endpoint task")??;
+        router2
+            .shutdown()
+            .await
+            .std_context("shutdown second router")?;
         Ok(())
     }
 

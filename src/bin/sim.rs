@@ -9,10 +9,9 @@ use iroh_gossip::proto::sim::{
     BootstrapMode, NetworkConfig, RoundStats, RoundStatsAvg, RoundStatsDiff, Simulator,
     SimulatorConfig,
 };
-use n0_snafu::{Result, ResultExt};
+use n0_error::{Result, StackResultExt, StdResultExt};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
-use snafu::Snafu;
 use tracing::{error_span, info, warn};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -29,7 +28,7 @@ enum Simulation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ScenarioDescription {
     sim: Simulation,
-    endpoints: u32,
+    nodes: u32,
     #[serde(default)]
     bootstrap: BootstrapMode,
     #[serde(default = "defaults::rounds")]
@@ -41,12 +40,12 @@ impl ScenarioDescription {
     pub fn label(&self) -> String {
         let &ScenarioDescription {
             sim,
-            endpoints,
+            nodes,
             rounds,
             config: _,
             bootstrap: _,
         } = &self;
-        format!("{sim:?}-n{endpoints}-r{rounds}")
+        format!("{sim:?}-n{nodes}-r{rounds}")
     }
 }
 
@@ -104,8 +103,9 @@ fn main() -> Result<()> {
             single_threaded,
             filter,
         } => {
-            let config_text = std::fs::read_to_string(&config_path).e()?;
-            let config: SimConfig = toml::from_str(&config_text).e()?;
+            let config_text = std::fs::read_to_string(&config_path)
+                .with_std_context(|_| format!("read config {}", config_path.display()))?;
+            let config: SimConfig = toml::from_str(&config_text).std_context("parse config")?;
 
             let base_config = config.config.unwrap_or_default();
             info!("base config: {base_config:?}");
@@ -116,7 +116,8 @@ fn main() -> Result<()> {
             }
 
             if let Some(out_dir) = out_dir.as_ref() {
-                std::fs::create_dir_all(out_dir).e()?;
+                std::fs::create_dir_all(out_dir)
+                    .with_std_context(|_| format!("create output dir {}", out_dir.display()))?;
             }
 
             let filter_fn = |s: &ScenarioDescription| {
@@ -171,16 +172,18 @@ fn run_and_save_simulation(
 
     if let Some(out_dir) = out_dir.as_ref() {
         let path = out_dir.as_ref().join(format!("{label}.config.toml"));
-        let encoded = toml::to_string(&scenario).e()?;
-        std::fs::write(path, encoded).e()?;
+        let encoded = toml::to_string(&scenario).std_context("encode scenario")?;
+        std::fs::write(&path, encoded)
+            .with_std_context(|_| format!("write scenario {}", &path.display()))?;
     }
 
     let result = run_simulation(seeds, scenario);
 
     if let Some(out_dir) = out_dir.as_ref() {
         let path = out_dir.as_ref().join(format!("{label}.results.json"));
-        let encoded = serde_json::to_string(&result).e()?;
-        std::fs::write(path, encoded).e()?;
+        let encoded = serde_json::to_string(&result).std_context("encode results")?;
+        std::fs::write(&path, encoded)
+            .with_std_context(|_| format!("write results {}", path.display()))?;
     }
 
     Ok(result)
@@ -196,16 +199,11 @@ struct SimulationResults {
 
 impl SimulationResults {
     fn load_from_file(path: impl AsRef<Path>) -> Result<Self> {
-        let s = std::fs::read_to_string(path.as_ref()).e()?;
-        let out = serde_json::from_str(&s).e()?;
+        let s = std::fs::read_to_string(path.as_ref())
+            .with_std_context(|_| format!("read results {}", path.as_ref().display()))?;
+        let out = serde_json::from_str(&s).std_context("decode results")?;
         Ok(out)
     }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, Snafu)]
-enum SimulationError {
-    #[snafu(display("failed to bootstrap"))]
-    FailedToBootstrap {},
 }
 
 fn run_simulation(seeds: &[u64], scenario: ScenarioDescription) -> SimulationResults {
@@ -217,7 +215,7 @@ fn run_simulation(seeds: &[u64], scenario: ScenarioDescription) -> SimulationRes
 
         let sim_config = SimulatorConfig {
             rng_seed: seed,
-            peers: scenario.endpoints as usize,
+            peers: scenario.nodes as usize,
             ..Default::default()
         };
         let bootstrap = scenario.bootstrap.clone();
@@ -226,9 +224,9 @@ fn run_simulation(seeds: &[u64], scenario: ScenarioDescription) -> SimulationRes
         let outcome = simulator.bootstrap(bootstrap);
 
         if outcome.has_peers_with_no_neighbors() {
-            warn!("not all endpoints active after bootstrap: {outcome:?}");
+            warn!("not all nodes active after bootstrap: {outcome:?}");
         } else {
-            info!("bootstrapped, all endpoints active");
+            info!("bootstrapped, all nodes active");
         }
         let result = match scenario.sim {
             Simulation::GossipSingle => BigSingle.run(simulator, scenario.rounds as usize),
@@ -328,7 +326,7 @@ impl Scenario for BigAll {
 fn compare_dirs(baseline_dir: PathBuf, current_path: PathBuf, filter: Vec<String>) -> Result<()> {
     let mut paths = vec![];
     for entry in std::fs::read_dir(&current_path)
-        .e()?
+        .with_std_context(|_| format!("read directory {}", current_path.display()))?
         .filter_map(Result::ok)
         .filter(|x| x.path().is_file())
     {

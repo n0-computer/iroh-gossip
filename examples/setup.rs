@@ -1,9 +1,9 @@
 use iroh::{protocol::Router, Endpoint};
 use iroh_gossip::{net::Gossip, ALPN};
-use n0_snafu::ResultExt;
+use n0_error::{Result, StdResultExt};
 
 #[tokio::main]
-async fn main() -> n0_snafu::Result<()> {
+async fn main() -> Result<()> {
     // create an iroh endpoint that includes the standard discovery mechanisms
     // we've built at number0
     let endpoint = Endpoint::bind().await?;
@@ -16,6 +16,6 @@ async fn main() -> n0_snafu::Result<()> {
         .accept(ALPN, gossip.clone())
         .spawn();
     // do fun stuff with the gossip protocol
-    router.shutdown().await.e()?;
+    router.shutdown().await.std_context("shutdown router")?;
     Ok(())
 }
