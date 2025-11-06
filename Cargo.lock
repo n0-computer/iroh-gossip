@@ -1608,9 +1608,9 @@ checksum = "469fb0b9cefa57e3ef31275ee7cacb78f2fdca44e4765491884a2b119d4eb130"
 
 [[package]]
 name = "iri-string"
-version = "0.7.8"
+version = "0.7.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbc5ebe9c3a1a7a5127f920a418f7585e9e758e911d0466ed004f393b0e380b2"
+checksum = "4f867b9d1d896b67beb18518eda36fdb77a32ea590de864f1325b294a6d14397"
 dependencies = [
  "memchr",
  "serde",
@@ -1618,8 +1618,9 @@ dependencies = [
 
 [[package]]
 name = "iroh"
-version = "0.94.0"
-source = "git+https://github.com/n0-computer/iroh.git?branch=main#30c23e8dbaa02d17ab57ba41f0aa5271b0a411dc"
+version = "0.95.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2374ba3cdaac152dc6ada92d971f7328e6408286faab3b7350842b2ebbed4789"
 dependencies = [
  "aead",
  "axum",
@@ -1673,8 +1674,9 @@ dependencies = [
 
 [[package]]
 name = "iroh-base"
-version = "0.94.1"
-source = "git+https://github.com/n0-computer/iroh.git?branch=main#30c23e8dbaa02d17ab57ba41f0aa5271b0a411dc"
+version = "0.95.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25a8c5fb1cc65589f0d7ab44269a76f615a8c4458356952c9b0ef1c93ea45ff8"
 dependencies = [
  "curve25519-dalek",
  "data-encoding",
@@ -1712,7 +1714,6 @@ dependencies = [
  "irpc",
  "n0-error",
  "n0-future",
- "nested_enum_utils",
  "postcard",
  "rand 0.9.2",
  "rand_chacha 0.9.0",
@@ -1819,8 +1820,9 @@ dependencies = [
 
 [[package]]
 name = "iroh-relay"
-version = "0.94.0"
-source = "git+https://github.com/n0-computer/iroh.git?branch=main#30c23e8dbaa02d17ab57ba41f0aa5271b0a411dc"
+version = "0.95.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43fbdf2aeffa7d6ede1a31f6570866c2199b1cee96a0b563994623795d1bac2c"
 dependencies = [
  "ahash",
  "blake3",
@@ -1878,8 +1880,9 @@ dependencies = [
 
 [[package]]
 name = "irpc"
-version = "0.10.0"
-source = "git+https://github.com/n0-computer/irpc.git?branch=matheus23%2Firpc-n0-error#d3df5515741f14aa68191bccbb4b5f614dfc6aa9"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0bee97aaa18387c4f0aae61058195dc9f9dea3e41c0e272973fe3e9bf611563d"
 dependencies = [
  "futures-buffered",
  "futures-util",
@@ -1899,8 +1902,9 @@ dependencies = [
 
 [[package]]
 name = "irpc-derive"
-version = "0.8.0"
-source = "git+https://github.com/n0-computer/irpc.git?branch=matheus23%2Firpc-n0-error#d3df5515741f14aa68191bccbb4b5f614dfc6aa9"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "58148196d2230183c9679431ac99b57e172000326d664e8456fa2cd27af6505a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2146,18 +2150,6 @@ dependencies = [
  "derive_more 2.0.1",
  "n0-error",
  "n0-future",
-]
-
-[[package]]
-name = "nested_enum_utils"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1d5475271bdd36a4a2769eac1ef88df0f99428ea43e52dfd8b0ee5cb674695f"
-dependencies = [
- "proc-macro-crate",
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]
@@ -2942,9 +2934,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.34"
+version = "0.23.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a9586e9ee2b4f8fab52a0048ca7334d7024eef48e2cb9407e3497bb7cab7fa7"
+checksum = "533f54bc6a7d4f647e46ad909549eda97bf5afc1585190ef692b4286b198bd8f"
 dependencies = [
  "log",
  "once_cell",
@@ -3310,9 +3302,9 @@ dependencies = [
 
 [[package]]
 name = "signature"
-version = "3.0.0-rc.4"
+version = "3.0.0-rc.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc280a6ff65c79fbd6622f64d7127f32b85563bca8c53cd2e9141d6744a9056d"
+checksum = "2a0251c9d6468f4ba853b6352b190fb7c1e405087779917c238445eb03993826"
 
 [[package]]
 name = "simdutf8"
@@ -3438,9 +3430,9 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "syn"
-version = "2.0.108"
+version = "2.0.109"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da58917d35242480a05c2897064da0a80589a2a0476c9a3f2fdc83b53502e917"
+checksum = "2f17c7e013e88258aa9543dcbe81aca68a667a9ac37cd69c9fbc07858bfe0e2f"
 dependencies = [
  "proc-macro2",
  "quote",

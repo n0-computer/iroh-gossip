@@ -381,9 +381,7 @@ impl Actor {
                         return false;
                     },
                     Some(LocalActorMessage::HandleConnection(conn)) => {
-                        if let Ok(remote_endpoint_id) = conn.remote_id() {
-                            self.handle_connection(remote_endpoint_id, ConnOrigin::Accept, conn);
-                        }
+                        self.handle_connection(conn.remote_id(), ConnOrigin::Accept, conn);
                     }
                     None => {
                         debug!("all gossip handles dropped, stop gossip actor");

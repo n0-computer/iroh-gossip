@@ -40,7 +40,3 @@ hash = 3171872035
 path = "LICENSE"
 
 [sources]
-allow-git = [
-    "https://github.com/n0-computer/iroh.git",
-    "https://github.com/n0-computer/irpc.git",
-]
