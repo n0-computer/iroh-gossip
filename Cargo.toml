@@ -170,3 +170,10 @@ debug = true
 
 [profile.release]
 debug = true
+
+[patch.crates-io]
+iroh = { git = "https://github.com/n0-computer/iroh", branch = "feat-multipath" }
+iroh-base = { git = "https://github.com/n0-computer/iroh", branch = "feat-multipath" }
+irpc = { git = "https://github.com/n0-computer/irpc", branch = "feat-multipath" }
+iroh-quinn = { git = "https://github.com/n0-computer/quinn", branch = "main-iroh" }
+iroh-quinn-udp = { git = "https://github.com/n0-computer/quinn", branch = "main-iroh" }
