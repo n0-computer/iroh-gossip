@@ -679,13 +679,20 @@ impl Actor {
                     let state = self.peers.entry(peer_id).or_default();
                     match state {
                         PeerState::Active { active_send_tx, .. } => {
-                            if let Err(_err) = active_send_tx.send(message).await {
-                                // Removing the peer is handled by the in_event PeerDisconnected sent
-                                // in [`Self::handle_connection_task_finished`].
-                                warn!(
-                                    peer = %peer_id.fmt_short(),
-                                    "failed to send: connection task send loop terminated",
-                                );
+                            use tokio::sync::mpsc::error::TrySendError;
+                            match active_send_tx.try_send(message) {
+                                Ok(()) => {}
+                                Err(TrySendError::Full(_)) => {
+                                    debug!(peer = %peer_id.fmt_short(), "send queue full, dropping message");
+                                }
+                                Err(TrySendError::Closed(_)) => {
+                                    // Removing the peer is handled by the in_event PeerDisconnected sent
+                                    // in [`Self::handle_connection_task_finished`].
+                                    warn!(
+                                        peer = %peer_id.fmt_short(),
+                                        "failed to send: connection task send loop terminated",
+                                    );
+                                }
                             }
                         }
                         PeerState::Pending { queue } => {
@@ -1099,7 +1106,7 @@ pub(crate) mod test {
     use tracing_test::traced_test;
 
     use super::*;
-    use crate::api::{ApiError, GossipReceiver, GossipSender};
+    use crate::api::{ApiError, GossipReceiver, GossipSender, GossipTopic};
 
     struct ManualActorLoop {
         actor: Actor,
@@ -1235,10 +1242,24 @@ pub(crate) mod test {
         gossip: Gossip,
         cancel: CancellationToken,
     ) -> Result<()> {
+        let mut pending_conns = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => break,
+                // Handle completed connection handshakes
+                Some(res) = pending_conns.join_next(), if !pending_conns.is_empty() => {
+                    match res {
+                        Ok(Ok(conn)) => {
+                            if let Err(e) = gossip.handle_connection(conn).await {
+                                debug!("handle_connection error: {e:#}");
+                            }
+                        }
+                        Ok(Err(e)) => debug!("connection handshake failed: {e:#}"),
+                        Err(e) => debug!("connection task panicked: {e:#}"),
+                    }
+                }
+                // Accept new incoming connections
                 incoming = endpoint.accept() => match incoming {
                     None => break,
                     Some(incoming) => {
@@ -1251,10 +1272,10 @@ pub(crate) mod test {
                                 continue;
                             }
                         };
-                        let connection = connecting
-                            .await
-                            .std_context("await incoming connection")?;
-                        gossip.handle_connection(connection).await?
+                        // Spawn handshake so we can continue accepting
+                        pending_conns.spawn(async move {
+                            connecting.await.std_context("await incoming connection")
+                        });
                     }
                 }
             }
@@ -1905,5 +1926,325 @@ pub(crate) mod test {
         let mut out: Vec<_> = input.into_iter().collect();
         out.sort();
         out
+    }
+    struct TestMesh {
+        endpoints: Vec<Endpoint>,
+        subs: Vec<GossipTopic>,
+        cancel: CancellationToken,
+        topic: TopicId,
+        tasks: Vec<n0_future::task::JoinHandle<Result<(), AnyError>>>,
+        rng: rand_chacha::ChaCha12Rng,
+        relay_map: iroh::RelayMap,
+        relay_url: iroh::RelayUrl,
+        static_provider: StaticProvider,
+    }
+
+    impl TestMesh {
+        async fn new(nodes: usize, topic_byte: u8) -> Result<Self> {
+            let mut rng = rand_chacha::ChaCha12Rng::seed_from_u64(1);
+            let (relay_map, relay_url, _relay_guard) =
+                iroh::test_utils::run_relay_server().await.unwrap();
+            let static_provider = StaticProvider::new();
+            let cancel = CancellationToken::new();
+
+            let mut endpoints = Vec::new();
+            for _ in 0..nodes {
+                let ep =
+                    create_endpoint(&mut rng, relay_map.clone(), Some(static_provider.clone()))
+                        .await?;
+                endpoints.push(ep);
+            }
+
+            for ep in &endpoints {
+                let addr = EndpointAddr::new(ep.id()).with_relay_url(relay_url.clone());
+                static_provider.add_endpoint_info(addr);
+            }
+
+            let mut gossips = Vec::new();
+            let mut tasks = Vec::new();
+            for ep in &endpoints {
+                let go = Gossip::builder().spawn(ep.clone());
+                tasks.push(spawn(endpoint_loop(ep.clone(), go.clone(), cancel.clone())));
+                gossips.push(go);
+            }
+
+            let topic = TopicId::from_bytes([topic_byte; 32]);
+
+            let mut sub_futures = Vec::new();
+            for (i, go) in gossips.iter().enumerate() {
+                let bootstrap = if i == 0 {
+                    vec![]
+                } else {
+                    vec![endpoints[0].id()]
+                };
+                sub_futures.push(go.subscribe_and_join(topic, bootstrap));
+            }
+            let subs: Vec<_> = futures_concurrency::future::TryJoin::try_join(sub_futures).await?;
+
+            // Allow mesh to stabilize - nodes need time for HyParView/PlumTree formation
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            std::mem::forget(_relay_guard);
+
+            Ok(Self {
+                endpoints,
+                subs,
+                cancel,
+                topic,
+                tasks,
+                rng,
+                relay_map,
+                relay_url,
+                static_provider,
+            })
+        }
+
+        async fn add_node(&mut self) -> Result<GossipTopic> {
+            let ep = create_endpoint(
+                &mut self.rng,
+                self.relay_map.clone(),
+                Some(self.static_provider.clone()),
+            )
+            .await?;
+            let addr = EndpointAddr::new(ep.id()).with_relay_url(self.relay_url.clone());
+            self.static_provider.add_endpoint_info(addr);
+
+            let go = Gossip::builder().spawn(ep.clone());
+            self.tasks.push(spawn(endpoint_loop(
+                ep.clone(),
+                go.clone(),
+                self.cancel.clone(),
+            )));
+
+            let sub = go
+                .subscribe_and_join(self.topic, vec![self.endpoints[0].id()])
+                .await?;
+            self.endpoints.push(ep);
+            info!("New node joined mesh");
+            Ok(sub)
+        }
+
+        fn start_connection_flood(&self, sleep_interval: Duration) {
+            let n = self.endpoints.len();
+            for (i, j) in (0..n).flat_map(|i| (0..n).filter(move |&j| j != i).map(move |j| (i, j)))
+            {
+                let ep = self.endpoints[i].clone();
+                let target = self.endpoints[j].id();
+                let cancel = self.cancel.clone();
+                spawn(async move {
+                    while !cancel.is_cancelled() {
+                        let _ = ep.connect(target, b"flood").await;
+                        tokio::time::sleep(sleep_interval).await;
+                    }
+                });
+            }
+            info!("Started {} connection stress tasks", n * (n - 1));
+        }
+
+        async fn shutdown(self) {
+            self.cancel.cancel();
+            for task in self.tasks {
+                task.await.ok();
+            }
+        }
+
+        fn drain_as_senders(
+            &mut self,
+        ) -> (Vec<GossipSender>, Vec<n0_future::task::JoinHandle<()>>) {
+            self.subs
+                .drain(..)
+                .map(|s| {
+                    let (tx, mut rx) = s.split();
+                    let drain = spawn(async move { while rx.next().await.is_some() {} });
+                    (tx, drain)
+                })
+                .unzip()
+        }
+
+        async fn run_delivery_test(
+            &self,
+            senders: Vec<GossipSender>,
+            mut receivers: Vec<GossipReceiver>,
+            cfg: DeliveryTestConfig,
+        ) -> Result<()> {
+            let num_receivers = receivers.len();
+            let expected_per_receiver = cfg.expected_per_receiver;
+            let msg_delay = cfg.msg_delay;
+            let msgs_per_node = cfg.msgs_per_node;
+
+            let send_handles: Vec<_> = senders
+                .iter()
+                .enumerate()
+                .map(|(idx, tx)| {
+                    let tx = tx.clone();
+                    spawn(async move {
+                        for i in 0..msgs_per_node {
+                            let content = format!("n{idx}m{i}");
+                            let _ = tx.broadcast(content.into_bytes().into()).await;
+                            tokio::time::sleep(msg_delay).await;
+                        }
+                    })
+                })
+                .collect();
+
+            let recv_deadline = cfg.recv_deadline;
+            let recv_handles: Vec<_> = receivers
+                .drain(..)
+                .map(|mut rx| {
+                    spawn(async move {
+                        let mut count = 0usize;
+                        let deadline = n0_future::time::Instant::now() + recv_deadline;
+                        while n0_future::time::Instant::now() < deadline {
+                            match timeout(Duration::from_millis(100), rx.next()).await {
+                                Ok(Some(Ok(Event::Received(_)))) => {
+                                    count += 1;
+                                    if count >= expected_per_receiver {
+                                        break;
+                                    }
+                                }
+                                Ok(Some(Ok(_))) => {}
+                                Ok(Some(Err(_))) | Ok(None) => break,
+                                Err(_) => {}
+                            }
+                        }
+                        count
+                    })
+                })
+                .collect();
+
+            for h in send_handles {
+                let _ = h.await;
+            }
+            tokio::time::sleep(cfg.delivery_wait).await;
+            drop(senders);
+
+            let mut received_counts = Vec::new();
+            for h in recv_handles {
+                received_counts.push(h.await.std_context("recv task")?);
+            }
+
+            self.cancel.cancel();
+
+            let total_received: usize = received_counts.iter().sum();
+            let total_expected = num_receivers * expected_per_receiver;
+            let threshold = (total_expected * cfg.threshold_percent) / 100;
+
+            info!(
+                total_received,
+                total_expected, threshold, "Delivery results"
+            );
+
+            assert!(
+                total_received >= threshold,
+                "Delivery failed: {total_received}/{threshold} (expected {total_expected})"
+            );
+
+            Ok(())
+        }
+    }
+
+    struct DeliveryTestConfig {
+        msgs_per_node: usize,
+        expected_per_receiver: usize,
+        msg_delay: Duration,
+        recv_deadline: Duration,
+        delivery_wait: Duration,
+        threshold_percent: usize,
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_broadcast_4_nodes() -> Result {
+        let mut mesh = TestMesh::new(4, 2).await?;
+
+        let (senders, receivers): (Vec<_>, Vec<_>) = mesh.subs.drain(..).map(|s| s.split()).unzip();
+
+        let cfg = DeliveryTestConfig {
+            msgs_per_node: 50,
+            expected_per_receiver: 3 * 50,
+            msg_delay: Duration::from_millis(5),
+            recv_deadline: Duration::from_secs(10),
+            delivery_wait: Duration::from_millis(200),
+            threshold_percent: 95,
+        };
+
+        mesh.run_delivery_test(senders, receivers, cfg).await?;
+        mesh.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_broadcast_10_nodes() -> Result {
+        let mut mesh = TestMesh::new(10, 47).await?;
+
+        let (senders, receivers): (Vec<_>, Vec<_>) = mesh.subs.drain(..).map(|s| s.split()).unzip();
+
+        let cfg = DeliveryTestConfig {
+            msgs_per_node: 20,
+            expected_per_receiver: 9 * 20,
+            msg_delay: Duration::from_millis(5),
+            recv_deadline: Duration::from_secs(30),
+            delivery_wait: Duration::from_millis(200),
+            threshold_percent: 95,
+        };
+
+        mesh.run_delivery_test(senders, receivers, cfg).await?;
+        mesh.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_late_joiner_with_connection_stress() -> Result {
+        let mut mesh = TestMesh::new(20, 9).await?;
+        mesh.start_connection_flood(Duration::from_millis(50));
+        let sub_late = mesh.add_node().await?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let (senders, drains) = mesh.drain_as_senders();
+        let (tx_late, rx_late) = sub_late.split();
+
+        let cfg = DeliveryTestConfig {
+            msgs_per_node: 50,
+            expected_per_receiver: senders.len() * 50,
+            msg_delay: Duration::from_millis(1),
+            // reduce to 20s to get flakiness due to the late joiner having a hard time catching up
+            recv_deadline: Duration::from_secs(60),
+            delivery_wait: Duration::from_millis(200),
+            threshold_percent: 95,
+        };
+
+        mesh.run_delivery_test(senders, vec![rx_late], cfg).await?;
+        drop(tx_late);
+        drop(drains);
+        mesh.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_late_joiner() -> Result {
+        let mut mesh = TestMesh::new(20, 10).await?;
+        let sub_late = mesh.add_node().await?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let (senders, drains) = mesh.drain_as_senders();
+        let (tx_late, rx_late) = sub_late.split();
+
+        let cfg = DeliveryTestConfig {
+            msgs_per_node: 50,
+            expected_per_receiver: senders.len() * 50,
+            msg_delay: Duration::from_millis(1),
+            recv_deadline: Duration::from_secs(30),
+            delivery_wait: Duration::from_millis(200),
+            threshold_percent: 95,
+        };
+
+        mesh.run_delivery_test(senders, vec![rx_late], cfg).await?;
+        drop(tx_late);
+        drop(drains);
+        mesh.shutdown().await;
+        Ok(())
     }
 }
