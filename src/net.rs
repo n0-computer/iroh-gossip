@@ -46,13 +46,14 @@ mod util;
 pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/1";
 
 /// Channel capacity for the send queue (one per connection)
-const SEND_QUEUE_CAP: usize = 64;
+const SEND_QUEUE_CAP: usize = 256;
 /// Channel capacity for the ToActor message queue (single)
 const TO_ACTOR_CAP: usize = 64;
 /// Channel capacity for the InEvent message queue (single)
 const IN_EVENT_CAP: usize = 1024;
-/// Channel capacity for broadcast subscriber event queue (one per topic)
-const TOPIC_EVENT_CAP: usize = 256;
+/// Channel capacity for broadcast subscriber event queue (one per topic).
+/// This should match or exceed TOPIC_EVENTS_DEFAULT_CAP in api.rs
+const TOPIC_EVENT_CAP: usize = 2048;
 
 /// Events emitted from the gossip protocol
 pub type ProtoEvent = proto::Event<PublicKey>;
@@ -375,7 +376,7 @@ impl Actor {
                     Some(LocalActorMessage::Shutdown { reply }) => {
                         debug!("received shutdown message, quit all topics");
                         self.quit_queue.extend(self.topics.keys().copied());
-                        self.process_quit_queue().await;
+                        self.process_quit_queue();
                         debug!("all topics quit, stop gossip actor");
                         reply.send(()).ok();
                         return false;
@@ -458,9 +459,13 @@ impl Actor {
             Some(res) = self.topic_event_forwarders.join_next(), if !self.topic_event_forwarders.is_empty() => {
                 let topic_id = res.expect("topic event forwarder panicked");
                 if let Some(state) = self.topics.get_mut(&topic_id) {
-                    if !state.still_needed() {
+                    let cmd_keys = state.command_rx_keys.len();
+                    let recv_count = state.event_sender.receiver_count();
+                    let needed = state.still_needed();
+                    debug!(%topic_id, %cmd_keys, %recv_count, %needed, "topic_event_forwarder finished");
+                    if !needed {
                         self.quit_queue.push_back(topic_id);
-                        self.process_quit_queue().await;
+                        self.process_quit_queue();
                     }
                 }
             }
@@ -502,9 +507,13 @@ impl Actor {
             }
             None => {
                 state.command_rx_keys.remove(&key);
-                if !state.still_needed() {
+                let cmd_keys = state.command_rx_keys.len();
+                let recv_count = state.event_sender.receiver_count();
+                let needed = state.still_needed();
+                debug!(%topic, %cmd_keys, %recv_count, %needed, "command stream ended");
+                if !needed {
                     self.quit_queue.push_back(topic);
-                    self.process_quit_queue().await;
+                    self.process_quit_queue();
                 }
             }
         }
@@ -599,6 +608,7 @@ impl Actor {
                     neighbors,
                     event_sender,
                     command_rx_keys,
+                    ..
                 } = self.topics.entry(topic_id).or_default();
                 let mut sender_dead = false;
                 if !neighbors.is_empty() {
@@ -611,8 +621,10 @@ impl Actor {
                 }
 
                 if !sender_dead {
-                    let fut =
-                        topic_subscriber_loop(tx, event_sender.subscribe()).map(move |_| topic_id);
+                    let receiver = event_sender.subscribe();
+                    let recv_count = event_sender.receiver_count();
+                    debug!(%topic_id, %recv_count, "created topic subscriber");
+                    let fut = topic_subscriber_loop(tx, receiver).map(move |_| topic_id);
                     self.topic_event_forwarders
                         .spawn(fut.instrument(tracing::Span::current()));
                 }
@@ -633,24 +645,23 @@ impl Actor {
     }
 
     async fn handle_in_event(&mut self, event: InEvent, now: Instant) {
-        self.handle_in_event_inner(event, now).await;
-        self.process_quit_queue().await;
+        self.handle_in_event_inner(event, now);
+        self.process_quit_queue();
     }
 
-    async fn process_quit_queue(&mut self) {
+    fn process_quit_queue(&mut self) {
         while let Some(topic_id) = self.quit_queue.pop_front() {
             self.handle_in_event_inner(
                 InEvent::Command(topic_id, ProtoCommand::Quit),
                 Instant::now(),
-            )
-            .await;
+            );
             if self.topics.remove(&topic_id).is_some() {
                 tracing::debug!(%topic_id, "publishers and subscribers gone; unsubscribing");
             }
         }
     }
 
-    async fn handle_in_event_inner(&mut self, event: InEvent, now: Instant) {
+    fn handle_in_event_inner(&mut self, event: InEvent, now: Instant) {
         if matches!(event, InEvent::TimerExpired(_)) {
             trace!(?event, "handle in_event");
         } else {
@@ -706,7 +717,16 @@ impl Actor {
                         }
                         _ => {}
                     }
-                    event_sender.send(event).ok();
+                    match event_sender.send(event) {
+                        Ok(0) => {
+                            debug!(%topic_id, "event sent but no receivers");
+                        }
+                        Ok(_n) => {}
+                        Err(err) => {
+                            debug!(%topic_id, ?err, "event dropped: send failed");
+                        }
+                    }
+
                     if !state.still_needed() {
                         self.quit_queue.push_back(topic_id);
                     }
@@ -918,18 +938,21 @@ async fn topic_subscriber_loop(
 ) {
     loop {
         tokio::select! {
-           biased;
-           msg = topic_events.recv() => {
-               let event = match msg {
-                   Err(broadcast::error::RecvError::Closed) => break,
-                   Err(broadcast::error::RecvError::Lagged(_)) => Event::Lagged,
-                   Ok(event) => event.into(),
-               };
-               if sender.send(event).await.is_err() {
-                   break;
-               }
-           }
-           _ = sender.closed() => break,
+            biased;
+            msg = topic_events.recv() => {
+                let event = match msg {
+                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        debug!(n, "topic_subscriber_loop: lagged, missed messages");
+                        Event::Lagged
+                    }
+                    Ok(event) => event.into(),
+                };
+                if sender.send(event).await.is_err() {
+                    break;
+                }
+            }
+            _ = sender.closed() => break,
         }
     }
 }
@@ -964,7 +987,13 @@ impl Stream for TopicCommandStream {
         }
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Ready(Some(Ok(item))) => Poll::Ready(Some((self.topic_id, Some(item)))),
-            Poll::Ready(None) | Poll::Ready(Some(Err(_))) => {
+            Poll::Ready(None) => {
+                debug!(topic_id = %self.topic_id, "command stream closed: sender dropped");
+                self.closed = true;
+                Poll::Ready(Some((self.topic_id, None)))
+            }
+            Poll::Ready(Some(Err(err))) => {
+                warn!(topic_id = %self.topic_id, ?err, "command stream error");
                 self.closed = true;
                 Poll::Ready(Some((self.topic_id, None)))
             }
@@ -1060,7 +1089,7 @@ pub(crate) mod test {
     use futures_concurrency::future::TryJoin;
     use iroh::{
         discovery::static_provider::StaticProvider, endpoint::BindError, protocol::Router,
-        RelayMap, RelayMode, SecretKey,
+        EndpointAddr, RelayMap, RelayMode, SecretKey,
     };
     use n0_error::{AnyError, Result, StdResultExt};
     use rand::{CryptoRng, Rng};
