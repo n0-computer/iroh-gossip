@@ -845,7 +845,10 @@ impl Default for TopicState {
 impl TopicState {
     /// Check if the topic still has any publisher or subscriber.
     fn still_needed(&self) -> bool {
-        !self.command_rx_keys.is_empty() && self.event_sender.receiver_count() > 0
+        // Keep subscription alive if either senders or receivers exist.
+        // Previously used &&, which caused subscriptions to close when senders
+        // were dropped even if receivers were still listening.
+        !self.command_rx_keys.is_empty() || self.event_sender.receiver_count() > 0
     }
 
     #[cfg(test)]
