@@ -49,8 +49,6 @@ pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/1";
 const SEND_QUEUE_CAP: usize = 256;
 /// Channel capacity for the ToActor message queue (single)
 const TO_ACTOR_CAP: usize = 64;
-/// Channel capacity for the InEvent message queue (single)
-const IN_EVENT_CAP: usize = 1024;
 /// Channel capacity for broadcast subscriber event queue (one per topic).
 /// This should match or exceed TOPIC_EVENTS_DEFAULT_CAP in api.rs
 const TOPIC_EVENT_CAP: usize = 2048;
@@ -260,22 +258,28 @@ impl Gossip {
     }
 }
 
+/// Channel capacity for received gossip messages
+const MSG_RX_CAP: usize = 2048;
+/// Max messages to drain per event loop tick (prevents starvation of other events)
+const MAX_MSGS_PER_TICK: usize = 64;
+
 /// Actor that sends and handles messages between the connection and main state loops
 struct Actor {
-    alpn: Bytes,
     /// Protocol state
     state: proto::State<PublicKey, StdRng>,
     /// The endpoint through which we dial peers
     endpoint: Endpoint,
-    /// Dial machine to connect to peers
-    dialer: Dialer,
+    /// Handle to send dial requests to the dialer task
+    dialer: DialerHandle,
+    /// Receiver for successful dial connections from dialer task
+    dial_success_rx: mpsc::Receiver<(EndpointId, Connection)>,
     /// Input messages to the actor
     rpc_rx: mpsc::Receiver<RpcMessage>,
     local_rx: mpsc::Receiver<LocalActorMessage>,
     /// Sender for the state input (cloned into the connection loops)
-    in_event_tx: mpsc::Sender<InEvent>,
+    msg_tx: mpsc::Sender<(EndpointId, ProtoMessage)>,
     /// Input events to the state (emitted from the connection loops)
-    in_event_rx: mpsc::Receiver<InEvent>,
+    msg_rx: mpsc::Receiver<(EndpointId, ProtoMessage)>,
     /// Queued timers
     timers: Timers<Timer>,
     /// Map of topics to their state.
@@ -291,6 +295,8 @@ struct Actor {
     metrics: Arc<Metrics>,
     topic_event_forwarders: JoinSet<TopicId>,
     discovery: GossipDiscovery,
+    /// Cancellation token for graceful shutdown of background tasks
+    cancel: CancellationToken,
 }
 
 impl Actor {
@@ -306,7 +312,11 @@ impl Actor {
         mpsc::Sender<LocalActorMessage>,
     ) {
         let peer_id = endpoint.id();
-        let dialer = Dialer::new(endpoint.clone());
+        let alpn = alpn.unwrap_or_else(|| GOSSIP_ALPN.to_vec().into());
+        let cancel = CancellationToken::new();
+
+        let (dialer, dial_success_rx) = DialerTask::spawn(endpoint.clone(), alpn, cancel.clone());
+
         let state = proto::State::new(
             peer_id,
             Default::default(),
@@ -315,16 +325,16 @@ impl Actor {
         );
         let (rpc_tx, rpc_rx) = mpsc::channel(TO_ACTOR_CAP);
         let (local_tx, local_rx) = mpsc::channel(16);
-        let (in_event_tx, in_event_rx) = mpsc::channel(IN_EVENT_CAP);
+        let (msg_tx, msg_rx) = mpsc::channel(MSG_RX_CAP);
 
         let actor = Actor {
-            alpn: alpn.unwrap_or_else(|| GOSSIP_ALPN.to_vec().into()),
             endpoint,
             state,
             dialer,
+            dial_success_rx,
             rpc_rx,
-            in_event_rx,
-            in_event_tx,
+            msg_tx,
+            msg_rx,
             timers: Timers::new(),
             command_rx: StreamGroup::new().keyed(),
             peers: Default::default(),
@@ -335,6 +345,7 @@ impl Actor {
             local_rx,
             topic_event_forwarders: Default::default(),
             discovery,
+            cancel,
         };
 
         (actor, rpc_tx, local_tx)
@@ -375,6 +386,7 @@ impl Actor {
                 match conn {
                     Some(LocalActorMessage::Shutdown { reply }) => {
                         debug!("received shutdown message, quit all topics");
+                        self.cancel.cancel();
                         self.quit_queue.extend(self.topics.keys().copied());
                         self.process_quit_queue();
                         debug!("all topics quit, stop gossip actor");
@@ -386,7 +398,23 @@ impl Actor {
                     }
                     None => {
                         debug!("all gossip handles dropped, stop gossip actor");
+                        self.cancel.cancel();
                         return false;
+                    }
+                }
+            }
+            Some((peer_id, msg)) = self.msg_rx.recv() => {
+                trace!(?i, "tick: msg_rx");
+                self.metrics.actor_tick_in_event_rx.inc();
+                let now = Instant::now();
+                self.handle_in_event(InEvent::RecvMessage(peer_id, msg), now);
+                // Drain additional messages up to limit to reduce context switches
+                for _ in 1..MAX_MSGS_PER_TICK {
+                    match self.msg_rx.try_recv() {
+                        Ok((peer_id, msg)) => {
+                            self.handle_in_event(InEvent::RecvMessage(peer_id, msg), now);
+                        }
+                        Err(_) => break,
                     }
                 }
             }
@@ -399,10 +427,19 @@ impl Actor {
                     }
                     None => {
                         debug!("all gossip handles dropped, stop gossip actor");
+                        self.cancel.cancel();
                         return false;
                     }
                 }
             },
+            _ = self.timers.wait_next() => {
+                trace!(?i, "tick: timers");
+                self.metrics.actor_tick_timers.inc();
+                let now = Instant::now();
+                while let Some((_instant, timer)) = self.timers.pop_before(now) {
+                    self.handle_in_event(InEvent::TimerExpired(timer), now);
+                }
+            }
             Some((key, (topic, command))) = self.command_rx.next(), if !self.command_rx.is_empty() => {
                 trace!(?i, "tick: command_rx");
                 self.handle_command(topic, key, command).await;
@@ -412,43 +449,11 @@ impl Actor {
                 self.metrics.actor_tick_endpoint.inc();
                 self.handle_addr_update(new_address).await;
             }
-            (peer_id, res) = self.dialer.next_conn() => {
-                trace!(?i, "tick: dialer");
+            Some((peer_id, conn)) = self.dial_success_rx.recv() => {
+                debug!(peer = %peer_id.fmt_short(), "dial successful");
                 self.metrics.actor_tick_dialer.inc();
-                match res {
-                    Some(Ok(conn)) => {
-                        debug!(peer = %peer_id.fmt_short(), "dial successful");
-                        self.metrics.actor_tick_dialer_success.inc();
-                        self.handle_connection(peer_id, ConnOrigin::Dial, conn);
-                    }
-                    Some(Err(err)) => {
-                        warn!(peer = %peer_id.fmt_short(), "dial failed: {err}");
-                        self.metrics.actor_tick_dialer_failure.inc();
-                        let peer_state = self.peers.get(&peer_id);
-                        let is_active = matches!(peer_state, Some(PeerState::Active { .. }));
-                        if !is_active {
-                            self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now());
-                        }
-                    }
-                    None => {
-                        warn!(peer = %peer_id.fmt_short(), "dial disconnected");
-                        self.metrics.actor_tick_dialer_failure.inc();
-                    }
-                }
-            }
-            event = self.in_event_rx.recv() => {
-                trace!(?i, "tick: in_event_rx");
-                self.metrics.actor_tick_in_event_rx.inc();
-                let event = event.expect("unreachable: in_event_tx is never dropped before receiver");
-                self.handle_in_event(event, Instant::now());
-            }
-            _ = self.timers.wait_next() => {
-                trace!(?i, "tick: timers");
-                self.metrics.actor_tick_timers.inc();
-                let now = Instant::now();
-                while let Some((_instant, timer)) = self.timers.pop_before(now) {
-                    self.handle_in_event(InEvent::TimerExpired(timer), now);
-                }
+                self.metrics.actor_tick_dialer_success.inc();
+                self.handle_connection(peer_id, ConnOrigin::Dial, conn);
             }
             Some(res) = self.connection_tasks.join_next(), if !self.connection_tasks.is_empty() => {
                 trace!(?i, "tick: connection_tasks");
@@ -533,7 +538,7 @@ impl Actor {
         };
 
         let max_message_size = self.state.max_message_size();
-        let in_event_tx = self.in_event_tx.clone();
+        let msg_tx = self.msg_tx.clone();
 
         // Spawn a task for this connection
         self.connection_tasks.spawn(
@@ -543,7 +548,7 @@ impl Actor {
                     conn.clone(),
                     origin,
                     send_rx,
-                    in_event_tx,
+                    msg_tx,
                     max_message_size,
                     queue,
                 )
@@ -693,7 +698,7 @@ impl Actor {
                         PeerState::Pending { queue } => {
                             if queue.is_empty() {
                                 debug!(peer = %peer_id.fmt_short(), "start to dial");
-                                self.dialer.queue_dial(peer_id, self.alpn.clone());
+                                self.dialer.queue_dial(peer_id);
                             }
                             queue.push(message);
                         }
@@ -890,14 +895,14 @@ async fn connection_loop(
     conn: Connection,
     origin: ConnOrigin,
     send_rx: mpsc::Receiver<ProtoMessage>,
-    in_event_tx: mpsc::Sender<InEvent>,
+    msg_tx: mpsc::Sender<(EndpointId, ProtoMessage)>,
     max_message_size: usize,
     queue: Vec<ProtoMessage>,
 ) -> Result<(), ConnectionLoopError> {
     debug!(?origin, "connection established");
 
     let mut send_loop = SendLoop::new(conn.clone(), send_rx, max_message_size);
-    let mut recv_loop = RecvLoop::new(from, conn, in_event_tx, max_message_size);
+    let mut recv_loop = RecvLoop::new(from, conn, msg_tx, max_message_size);
 
     let send_fut = send_loop.run(queue).instrument(error_span!("send"));
     let recv_fut = recv_loop.run().instrument(error_span!("recv"));
@@ -946,7 +951,10 @@ async fn topic_subscriber_loop(
             biased;
             msg = topic_events.recv() => {
                 let event = match msg {
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Closed) => {
+                        debug!("topic_subscriber_loop: broadcast closed");
+                        break;
+                    }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         debug!(n, "topic_subscriber_loop: lagged, missed messages");
                         Event::Lagged
@@ -954,10 +962,14 @@ async fn topic_subscriber_loop(
                     Ok(event) => event.into(),
                 };
                 if sender.send(event).await.is_err() {
+                    debug!("topic_subscriber_loop: send failed, receiver closed");
                     break;
                 }
             }
-            _ = sender.closed() => break,
+            _ = sender.closed() => {
+                debug!("topic_subscriber_loop: receiver closed");
+                break;
+            }
         }
     }
 }
@@ -1007,82 +1019,159 @@ impl Stream for TopicCommandStream {
     }
 }
 
-#[derive(Debug)]
-struct Dialer {
-    endpoint: Endpoint,
-    pending: JoinSet<(
-        EndpointId,
-        Option<Result<Connection, iroh::endpoint::ConnectError>>,
-    )>,
-    pending_dials: HashMap<EndpointId, CancellationToken>,
+/// Maximum concurrent dial attempts - needs to be high enough to establish mesh quickly
+const MAX_CONCURRENT_DIALS: usize = 8;
+/// Maximum retry attempts for failed dials
+const MAX_DIAL_RETRIES: usize = 2;
+/// Delay between dial retries
+const DIAL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+/// Dial timeout
+const DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// Channel capacity for dial requests
+const DIAL_REQUEST_CAP: usize = 64;
+
+#[derive(Debug, Clone)]
+struct DialerHandle {
+    request_tx: mpsc::Sender<EndpointId>,
 }
 
-impl Dialer {
+impl DialerHandle {
+    fn queue_dial(&self, endpoint_id: EndpointId) {
+        // Non-blocking send - if channel is full, dial request is dropped
+        if self.request_tx.try_send(endpoint_id).is_err() {
+            trace!(peer = %endpoint_id.fmt_short(), "dial request dropped (queue full)");
+        }
+    }
+}
+
+/// Dialer runs as a separate task, completely isolated from main actor
+struct DialerTask {
+    endpoint: Endpoint,
+    alpn: Bytes,
+    request_rx: mpsc::Receiver<EndpointId>,
+    success_tx: mpsc::Sender<(EndpointId, Connection)>,
+    pending: JoinSet<(EndpointId, Option<Connection>)>,
+    pending_dials: HashMap<EndpointId, CancellationToken>,
+    cancel: CancellationToken,
+}
+
+impl DialerTask {
     /// Create a new dialer for a [`Endpoint`]
-    fn new(endpoint: Endpoint) -> Self {
-        Self {
+    fn spawn(
+        endpoint: Endpoint,
+        alpn: Bytes,
+        cancel: CancellationToken,
+    ) -> (DialerHandle, mpsc::Receiver<(EndpointId, Connection)>) {
+        let (request_tx, request_rx) = mpsc::channel(DIAL_REQUEST_CAP);
+        let (success_tx, success_rx) = mpsc::channel(32);
+
+        let task = Self {
             endpoint,
+            alpn,
+            request_rx,
+            success_tx,
             pending: Default::default(),
             pending_dials: Default::default(),
+            cancel,
+        };
+
+        tokio::spawn(task.run().instrument(error_span!("dialer")));
+
+        (DialerHandle { request_tx }, success_rx)
+    }
+
+    async fn run(mut self) {
+        loop {
+            tokio::select! {
+                biased;
+                _ = self.cancel.cancelled() => {
+                    debug!("dialer shutting down");
+                    break;
+                }
+                Some(endpoint_id) = self.request_rx.recv() => {
+                    self.start_dial(endpoint_id);
+                }
+                Some(result) = self.pending.join_next(), if !self.pending.is_empty() => {
+                    match result {
+                        Ok((endpoint_id, Some(conn))) => {
+                            self.pending_dials.remove(&endpoint_id);
+                            if self.success_tx.send((endpoint_id, conn)).await.is_err() {
+                                debug!("dialer success channel closed");
+                                break;
+                            }
+                        }
+                        Ok((endpoint_id, None)) => {
+                            self.pending_dials.remove(&endpoint_id);
+                        }
+                        Err(e) => {
+                            error!("dial task panicked: {:?}", e);
+                        }
+                    }
+                }
+            }
         }
     }
 
     /// Starts to dial a endpoint by [`EndpointId`].
-    fn queue_dial(&mut self, endpoint_id: EndpointId, alpn: Bytes) {
-        if self.is_pending(endpoint_id) {
+    fn start_dial(&mut self, endpoint_id: EndpointId) {
+        if self.pending_dials.contains_key(&endpoint_id) {
             return;
         }
+
+        let delay = if self.pending_dials.len() >= MAX_CONCURRENT_DIALS {
+            std::time::Duration::from_secs(1)
+        } else {
+            std::time::Duration::ZERO
+        };
+
         let cancel = CancellationToken::new();
         self.pending_dials.insert(endpoint_id, cancel.clone());
         let endpoint = self.endpoint.clone();
-        self.pending.spawn(
-            async move {
+        let alpn = self.alpn.clone();
+        let parent_cancel = self.cancel.clone();
+
+        self.pending.spawn(async move {
+            if !delay.is_zero() {
+                n0_future::time::sleep(delay).await;
+            }
+
+            for attempt in 0..MAX_DIAL_RETRIES {
+                if cancel.is_cancelled() || parent_cancel.is_cancelled() {
+                    return (endpoint_id, None);
+                }
+
                 let res = tokio::select! {
                     biased;
-                    _ = cancel.cancelled() => None,
-                    res = endpoint.connect(endpoint_id, &alpn) => Some(res),
+                    _ = cancel.cancelled() => return (endpoint_id, None),
+                    _ = parent_cancel.cancelled() => return (endpoint_id, None),
+                    res = n0_future::time::timeout(DIAL_TIMEOUT, endpoint.connect(endpoint_id, &alpn)) => res,
                 };
-                (endpoint_id, res)
-            }
-            .instrument(tracing::Span::current()),
-        );
-    }
 
-    /// Checks if a endpoint is currently being dialed.
-    fn is_pending(&self, endpoint: EndpointId) -> bool {
-        self.pending_dials.contains_key(&endpoint)
-    }
-
-    /// Waits for the next dial operation to complete.
-    /// `None` means disconnected
-    async fn next_conn(
-        &mut self,
-    ) -> (
-        EndpointId,
-        Option<Result<Connection, iroh::endpoint::ConnectError>>,
-    ) {
-        match self.pending_dials.is_empty() {
-            false => {
-                let (endpoint_id, res) = loop {
-                    match self.pending.join_next().await {
-                        Some(Ok((endpoint_id, res))) => {
-                            self.pending_dials.remove(&endpoint_id);
-                            break (endpoint_id, res);
-                        }
-                        Some(Err(e)) => {
-                            error!("next conn error: {:?}", e);
-                        }
-                        None => {
-                            error!("no more pending conns available");
-                            std::future::pending().await
+                match res {
+                    Ok(Ok(conn)) => {
+                        debug!(peer = %endpoint_id.fmt_short(), "dial successful");
+                        return (endpoint_id, Some(conn));
+                    }
+                    Ok(Err(err)) => {
+                        if attempt < MAX_DIAL_RETRIES - 1 {
+                            trace!(peer = %endpoint_id.fmt_short(), attempt, "dial failed, retrying: {err}");
+                            n0_future::time::sleep(DIAL_RETRY_DELAY).await;
+                        } else {
+                            debug!(peer = %endpoint_id.fmt_short(), "dial failed after retries: {err}");
                         }
                     }
-                };
-
-                (endpoint_id, res)
+                    Err(_elapsed) => {
+                        if attempt < MAX_DIAL_RETRIES - 1 {
+                            trace!(peer = %endpoint_id.fmt_short(), attempt, "dial timeout, retrying");
+                            n0_future::time::sleep(DIAL_RETRY_DELAY).await;
+                        } else {
+                            debug!(peer = %endpoint_id.fmt_short(), "dial timeout after retries");
+                        }
+                    }
+                }
             }
-            true => std::future::pending().await,
-        }
+            (endpoint_id, None)
+        });
     }
 }
 
