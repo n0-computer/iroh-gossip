@@ -352,7 +352,7 @@ impl Actor {
     }
 
     pub async fn run(mut self) {
-        let mut addr_update_stream = self.setup().await;
+        let mut addr_update_stream = self.setup();
 
         let mut i = 0;
         while self.event_loop(&mut addr_update_stream, i).await {
@@ -364,10 +364,10 @@ impl Actor {
     ///
     /// This updates our current address and return it. It also returns the home relay stream and
     /// direct addr stream.
-    async fn setup(&mut self) -> impl Stream<Item = EndpointAddr> + Send + Unpin + use<> {
+    fn setup(&mut self) -> impl Stream<Item = EndpointAddr> + Send + Unpin + use<> {
         let addr_update_stream = self.endpoint.watch_addr().stream();
         let initial_addr = self.endpoint.addr();
-        self.handle_addr_update(initial_addr).await;
+        self.handle_addr_update(initial_addr);
         addr_update_stream
     }
 
@@ -442,12 +442,12 @@ impl Actor {
             }
             Some((key, (topic, command))) = self.command_rx.next(), if !self.command_rx.is_empty() => {
                 trace!(?i, "tick: command_rx");
-                self.handle_command(topic, key, command).await;
+                self.handle_command(topic, key, command);
             },
             Some(new_address) = addr_updates.next() => {
                 trace!(?i, "tick: new_address");
                 self.metrics.actor_tick_endpoint.inc();
-                self.handle_addr_update(new_address).await;
+                self.handle_addr_update(new_address);
             }
             Some((peer_id, conn)) = self.dial_success_rx.recv() => {
                 debug!(peer = %peer_id.fmt_short(), "dial successful");
@@ -478,18 +478,13 @@ impl Actor {
         true
     }
 
-    async fn handle_addr_update(&mut self, endpoint_addr: EndpointAddr) {
+    fn handle_addr_update(&mut self, endpoint_addr: EndpointAddr) {
         // let peer_data = our_peer_data(&self.endpoint, current_addresses);
         let peer_data = encode_peer_data(&endpoint_addr.into());
         self.handle_in_event(InEvent::UpdatePeerData(peer_data), Instant::now());
     }
 
-    async fn handle_command(
-        &mut self,
-        topic: TopicId,
-        key: stream_group::Key,
-        command: Option<Command>,
-    ) {
+    fn handle_command(&mut self, topic: TopicId, key: stream_group::Key, command: Option<Command>) {
         debug!(?topic, ?key, ?command, "handle command");
         let Some(state) = self.topics.get_mut(&topic) else {
             // TODO: unreachable?
@@ -1218,8 +1213,9 @@ pub(crate) mod test {
 
     impl ManualActorLoop {
         #[instrument(skip_all, fields(me = %actor.endpoint.id().fmt_short()))]
-        async fn new(mut actor: Actor) -> Self {
-            let _ = actor.setup().await;
+        fn new(mut actor: Actor) -> Self {
+            // Discard addr stream - step() uses pending() for deterministic test control
+            let _ = actor.setup();
             Self { actor, step: 0 }
         }
 
@@ -1515,7 +1511,7 @@ pub(crate) mod test {
         // create the first endpoint with a manual actor loop
         let (go1, actor, ep1_handle) =
             Gossip::t_new_with_actor(rng, Default::default(), relay_map.clone(), &ct).await?;
-        let mut actor = ManualActorLoop::new(actor).await;
+        let mut actor = ManualActorLoop::new(actor);
 
         // create the second endpoint with the usual actor loop
         let (go2, ep2, ep2_handle, _test_actor_handle) =

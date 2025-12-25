@@ -236,6 +236,31 @@ pub struct Graft {
     round: Round,
 }
 
+/// Controls when to prune peers from eager to lazy push sets.
+///
+/// The plumtree protocol optimizes bandwidth by moving peers that send duplicate messages
+/// from eager (full payload) to lazy (message IDs only). In small swarms or burst
+/// scenarios, this can hurt performance.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PruneMode {
+    /// Prune immediately on first duplicate message (default).
+    /// Best for large swarms with stable topology.
+    Immediate,
+    /// Prune after receiving N duplicate messages from same peer.
+    /// Best for burst scenarios or small swarms. Recommended: 3-10.
+    AfterDuplicates(usize),
+    /// Never prune, keep all peers in eager set.
+    /// Use for very small swarms (2-3 nodes) or when reliability > bandwidth.
+    Disabled,
+}
+
+impl Default for PruneMode {
+    fn default() -> Self {
+        // Default to pruning after 3 duplicates for better handling of burst scenarios.
+        Self::AfterDuplicates(3)
+    }
+}
+
 /// Configuration for the gossip broadcast layer.
 ///
 /// Currently, the expectation is that the configuration is the same for all peers in the
@@ -286,6 +311,25 @@ pub struct Config {
 
     /// How often the internal caches will be checked for expired items.
     pub cache_evict_interval: Duration,
+
+    /// Controls when peers are pruned from eager to lazy push sets.
+    ///
+    /// - [`PruneMode::Immediate`]: Current behavior, prune on first duplicate
+    /// - [`PruneMode::AfterDuplicates`]: More tolerant, prune after n duplicates
+    /// - [`PruneMode::Disabled`]: Never prune, useful for 2-3 node swarms
+    pub prune_mode: PruneMode,
+
+    /// Cooldown period after promoting a peer to eager set.
+    ///
+    /// During this period, the peer will not be pruned on duplicate receipt.
+    /// Prevents aggressive pruning during rapid message bursts.
+    pub prune_cooldown: Duration,
+
+    /// Minimum number of eager peers to maintain.
+    ///
+    /// Pruning will be skipped if it would reduce eager peers below this threshold.
+    /// Provides a safety floor to prevent mesh fragmentation.
+    pub min_eager_peers: usize,
 }
 
 impl Default for Config {
@@ -296,19 +340,12 @@ impl Default for Config {
     // numbers.
     fn default() -> Self {
         Self {
-            // Paper: "The timeout value is a protocol parameter that should be configured considering
-            // the diameter of the overlay and a target maximum recovery latency, defined by the
-            // application requirements. This is a parameter that should be statically configured
-            // at deployment time." (p. 8)
-            //
-            // Earthstar has 5ms it seems, see https://github.com/earthstar-project/earthstar/blob/1523c640fedf106f598bf79b184fb0ada64b1cc0/src/syncer/plum_tree.ts#L75
-            // However in the paper it is more like a few roundtrips if I read things correctly.
+            // Graft timeout: when we receive IHave, wait for this duration before sending Graft.
+            // Higher value provides more tolerance for unstable connections under load. Lower
+            // value provides faster recovery of missing messages.
             graft_timeout_1: Duration::from_millis(80),
 
-            // Paper: "This second timeout value should be smaller that the first, in the order of an
-            // average round trip time to a neighbor." (p. 9)
-            //
-            // Earthstar doesn't have this step from my reading.
+            // Second graft timeout for retry.
             graft_timeout_2: Duration::from_millis(40),
 
             // Again, paper does not tell a recommended number here. Likely should be quite small,
@@ -325,6 +362,13 @@ impl Default for Config {
             message_cache_retention: Duration::from_secs(30),
             message_id_retention: Duration::from_secs(90),
             cache_evict_interval: Duration::from_secs(1),
+
+            // Default to pruning after 3 duplicates for better handling of burst scenarios.
+            prune_mode: PruneMode::default(),
+            // 1s cooldown prevents cascade pruning under load
+            prune_cooldown: Duration::from_secs(1),
+            // Keep at least 2 eager peers to prevent mesh fragmentation
+            min_eager_peers: 2,
         }
     }
 }
@@ -367,6 +411,8 @@ pub struct State<PI> {
     received_messages: TimeBoundCache<MessageId, ()>,
     /// Payloads of received messages.
     cache: TimeBoundCache<MessageId, Gossip>,
+    /// Messages that we originated via broadcast() - don't prune peers for relaying these back.
+    originated_messages: TimeBoundCache<MessageId, ()>,
 
     /// Message ids for which a [`Timer::SendGraft`] has been scheduled.
     graft_timer_scheduled: HashSet<MessageId>,
@@ -380,6 +426,11 @@ pub struct State<PI> {
     pub(crate) stats: Stats,
 
     max_message_size: usize,
+
+    /// Tracks duplicate message counts per peer for AfterDuplicates prune mode.
+    duplicate_counts: HashMap<PI, usize>,
+    /// Track when peers were last promoted to eager set for prune cooldown.
+    eager_promotion_times: HashMap<PI, Instant>,
 }
 
 impl<PI: PeerIdentity> State<PI> {
@@ -396,9 +447,12 @@ impl<PI: PeerIdentity> State<PI> {
             graft_timer_scheduled: Default::default(),
             dispatch_timer_scheduled: false,
             cache: Default::default(),
+            originated_messages: Default::default(),
             init: false,
             stats: Default::default(),
             max_message_size,
+            duplicate_counts: Default::default(),
+            eager_promotion_times: Default::default(),
         }
     }
 
@@ -411,12 +465,12 @@ impl<PI: PeerIdentity> State<PI> {
         match event {
             InEvent::RecvMessage(from, message) => self.handle_message(from, message, now, io),
             InEvent::Broadcast(data, scope) => self.broadcast(data, scope, now, io),
-            InEvent::NeighborUp(peer) => self.on_neighbor_up(peer),
+            InEvent::NeighborUp(peer) => self.on_neighbor_up(peer, now),
             InEvent::NeighborDown(peer) => self.on_neighbor_down(peer),
             InEvent::TimerExpired(timer) => match timer {
                 Timer::DispatchLazyPush => self.on_dispatch_timer(io),
                 Timer::SendGraft(id) => {
-                    self.on_send_graft_timer(id, io);
+                    self.on_send_graft_timer(id, now, io);
                 }
                 Timer::EvictCache => self.on_evict_cache_timer(now, io),
             },
@@ -439,7 +493,7 @@ impl<PI: PeerIdentity> State<PI> {
             Message::Gossip(details) => self.on_gossip(sender, details, now, io),
             Message::Prune => self.on_prune(sender),
             Message::IHave(details) => self.on_ihave(sender, details, io),
-            Message::Graft(details) => self.on_graft(sender, details, io),
+            Message::Graft(details) => self.on_graft(sender, details, now, io),
         }
     }
 
@@ -475,6 +529,9 @@ impl<PI: PeerIdentity> State<PI> {
         if let DeliveryScope::Swarm(_) = scope {
             self.received_messages
                 .insert(id, (), now + self.config.message_id_retention);
+            // Track that we originated this message - don't prune peers for relaying it back
+            self.originated_messages
+                .insert(id, (), now + self.config.message_id_retention);
             self.cache.insert(
                 id,
                 message.clone(),
@@ -499,13 +556,18 @@ impl<PI: PeerIdentity> State<PI> {
             return;
         }
 
-        // if we already received this message: move peer to lazy set
-        // and notify peer about this.
+        // if we already received this message: consider pruning based on config
         if self.received_messages.contains_key(&message.id) {
-            self.add_lazy(sender);
-            io.push(OutEvent::SendMessage(sender, Message::Prune));
+            debug!("duplicate from {:?}, msg={}", sender, message.id);
+            self.maybe_prune_on_duplicate(sender, &message.id, now, io);
         // otherwise store the message, emit to application and forward to peers
         } else {
+            // Reset duplicate count on successful message delivery
+            self.duplicate_counts.remove(&sender);
+            // Refresh cooldown for active eager peers - prevents timing-sensitive pruning
+            if self.eager_push_peers.contains(&sender) {
+                self.eager_promotion_times.insert(sender, now);
+            }
             if let DeliveryScope::Swarm(prev_round) = message.scope {
                 // insert the message in the list of received messages
                 self.received_messages.insert(
@@ -531,7 +593,7 @@ impl<PI: PeerIdentity> State<PI> {
                 let previous_ihaves = self.missing_messages.remove(&message.id);
                 // do the optimization step from the paper
                 if let Some(previous_ihaves) = previous_ihaves {
-                    self.optimize_tree(&sender, &message, previous_ihaves, io);
+                    self.optimize_tree(&sender, &message, previous_ihaves, now, io);
                 }
                 self.stats.max_last_delivery_hop =
                     self.stats.max_last_delivery_hop.max(prev_round.0);
@@ -554,6 +616,7 @@ impl<PI: PeerIdentity> State<PI> {
         gossip_sender: &PI,
         message: &Gossip,
         previous_ihaves: VecDeque<(PI, Round)>,
+        now: Instant,
         io: &mut impl IO<PI>,
     ) {
         let round = message.round().expect("only called for swarm messages");
@@ -571,12 +634,18 @@ impl<PI: PeerIdentity> State<PI> {
                         id: None,
                         round: ihave_round,
                     });
-                    self.add_eager(ihave_peer);
+                    self.add_eager_at(ihave_peer, now);
                     io.push(OutEvent::SendMessage(ihave_peer, message));
                 }
                 // Prune the sender of the Gossip.
-                self.add_lazy(*gossip_sender);
-                io.push(OutEvent::SendMessage(*gossip_sender, Message::Prune));
+                // Only prune immediately in Immediate mode; AfterDuplicates uses duplicate path.
+                if matches!(self.config.prune_mode, PruneMode::Immediate)
+                    && !self.is_in_prune_cooldown(gossip_sender, now)
+                    && self.eager_push_peers.len() > self.config.min_eager_peers
+                {
+                    self.add_lazy(*gossip_sender);
+                    io.push(OutEvent::SendMessage(*gossip_sender, Message::Prune));
+                }
             }
         }
     }
@@ -614,7 +683,7 @@ impl<PI: PeerIdentity> State<PI> {
     }
 
     /// A scheduled [`Timer::SendGraft`] has reached it's deadline.
-    fn on_send_graft_timer(&mut self, id: MessageId, io: &mut impl IO<PI>) {
+    fn on_send_graft_timer(&mut self, id: MessageId, now: Instant, io: &mut impl IO<PI>) {
         self.graft_timer_scheduled.remove(&id);
         // if the message was received before the timer ran out, there is no need to request it
         // again
@@ -627,7 +696,7 @@ impl<PI: PeerIdentity> State<PI> {
             .get_mut(&id)
             .and_then(|entries| entries.pop_front());
         if let Some((peer, round)) = entry {
-            self.add_eager(peer);
+            self.add_eager_at(peer, now);
             let message = Message::Graft(Graft {
                 id: Some(id),
                 round,
@@ -646,8 +715,8 @@ impl<PI: PeerIdentity> State<PI> {
     }
 
     /// Handle receiving a [`Message::Graft`].
-    fn on_graft(&mut self, sender: PI, details: Graft, io: &mut impl IO<PI>) {
-        self.add_eager(sender);
+    fn on_graft(&mut self, sender: PI, details: Graft, now: Instant, io: &mut impl IO<PI>) {
+        self.add_eager_at(sender, now);
         if let Some(id) = details.id {
             if let Some(message) = self.cache.get(&id) {
                 io.push(OutEvent::SendMessage(
@@ -661,8 +730,8 @@ impl<PI: PeerIdentity> State<PI> {
     }
 
     /// Handle a [`InEvent::NeighborUp`] when a peer joins the topic.
-    fn on_neighbor_up(&mut self, peer: PI) {
-        self.add_eager(peer);
+    fn on_neighbor_up(&mut self, peer: PI, now: Instant) {
+        self.add_eager_at(peer, now);
     }
 
     /// Handle a [`InEvent::NeighborDown`] when a peer leaves the topic.
@@ -676,26 +745,102 @@ impl<PI: PeerIdentity> State<PI> {
         });
         self.eager_push_peers.remove(&peer);
         self.lazy_push_peers.remove(&peer);
+        self.duplicate_counts.remove(&peer);
+        self.eager_promotion_times.remove(&peer);
     }
 
     fn on_evict_cache_timer(&mut self, now: Instant, io: &mut impl IO<PI>) {
         self.cache.expire_until(now);
+        self.originated_messages.expire_until(now);
+        self.expire_promotion_times(now);
         io.push(OutEvent::ScheduleTimer(
             self.config.cache_evict_interval,
             Timer::EvictCache,
         ));
     }
 
-    /// Moves peer into eager set.
-    fn add_eager(&mut self, peer: PI) {
+    /// Moves peer into eager set with timestamp for cooldown tracking.
+    fn add_eager_at(&mut self, peer: PI, now: Instant) {
         self.lazy_push_peers.remove(&peer);
-        self.eager_push_peers.insert(peer);
+        if self.eager_push_peers.insert(peer) {
+            self.eager_promotion_times.insert(peer, now);
+        }
     }
 
-    /// Moves peer into lazy set.
+    /// Moves peer into lazy set and cleans up tracking state.
     fn add_lazy(&mut self, peer: PI) {
         self.eager_push_peers.remove(&peer);
         self.lazy_push_peers.insert(peer);
+        self.duplicate_counts.remove(&peer);
+        self.eager_promotion_times.remove(&peer);
+    }
+
+    /// Check if peer is within prune cooldown period.
+    fn is_in_prune_cooldown(&self, peer: &PI, now: Instant) -> bool {
+        self.eager_promotion_times
+            .get(peer)
+            .map(|promotion_time| {
+                let elapsed = now.saturating_duration_since(*promotion_time);
+                elapsed < self.config.prune_cooldown
+            })
+            .unwrap_or(false)
+    }
+
+    /// Remove expired promotion time entries.
+    fn expire_promotion_times(&mut self, now: Instant) {
+        self.eager_promotion_times.retain(|_peer, promotion_time| {
+            let elapsed = now.saturating_duration_since(*promotion_time);
+            elapsed < self.config.prune_cooldown
+        });
+    }
+
+    /// Handle duplicate message receipt - decide whether to prune based on config.
+    fn maybe_prune_on_duplicate(
+        &mut self,
+        sender: PI,
+        message_id: &MessageId,
+        now: Instant,
+        io: &mut impl IO<PI>,
+    ) {
+        // Never prune for relays of our own messages
+        if self.originated_messages.contains_key(message_id) {
+            debug!("skip prune: originated message");
+            return;
+        }
+
+        // Don't prune during cooldown period
+        if self.is_in_prune_cooldown(&sender, now) {
+            debug!("skip prune: cooldown");
+            return;
+        }
+
+        // Don't prune below minimum eager peers
+        if self.eager_push_peers.len() <= self.config.min_eager_peers {
+            debug!("skip prune: min_eager_peers");
+            return;
+        }
+
+        // Check prune mode
+        match self.config.prune_mode {
+            PruneMode::Immediate => {
+                debug!("PRUNE: immediate mode");
+                self.add_lazy(sender);
+                io.push(OutEvent::SendMessage(sender, Message::Prune));
+            }
+            PruneMode::AfterDuplicates(threshold) => {
+                let count = self.duplicate_counts.entry(sender).or_insert(0);
+                *count += 1;
+                debug!("duplicate count: {}/{}", count, threshold);
+                if *count >= threshold {
+                    debug!("PRUNE: after {} duplicates", count);
+                    self.add_lazy(sender);
+                    io.push(OutEvent::SendMessage(sender, Message::Prune));
+                }
+            }
+            PruneMode::Disabled => {
+                // Don't prune
+            }
+        }
     }
 
     /// Immediately sends message to eager peers.
@@ -737,10 +882,32 @@ impl<PI: PeerIdentity> State<PI> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::proto::topic;
+
+    fn has_prune_to<PI: PartialEq>(io: &VecDeque<topic::OutEvent<PI>>, peer: PI) -> bool {
+        io.iter().any(|e| {
+            matches!(e, topic::OutEvent::SendMessage(to, topic::Message::Gossip(Message::Prune)) if *to == peer)
+        })
+    }
+
+    fn has_any_prune<PI>(io: &VecDeque<topic::OutEvent<PI>>) -> bool {
+        io.iter().any(|e| {
+            matches!(
+                e,
+                topic::OutEvent::SendMessage(_, topic::Message::Gossip(Message::Prune))
+            )
+        })
+    }
+
     #[test]
     fn optimize_tree() {
         let mut io = VecDeque::new();
-        let config: Config = Default::default();
+        // Use Immediate mode and disable min_eager_peers for this unit test
+        let config = Config {
+            prune_mode: PruneMode::Immediate,
+            min_eager_peers: 0,
+            ..Default::default()
+        };
         let mut state = State::new(1, config.clone(), 1024);
         let now = Instant::now();
 
@@ -905,5 +1072,263 @@ mod test {
         let now = now + config.message_cache_retention;
         state.handle(InEvent::TimerExpired(Timer::EvictCache), now, &mut io);
         assert_eq!(state.cache.len(), 0);
+    }
+
+    #[test]
+    fn no_prune_for_own_message_relay() {
+        let config = Config::default();
+        let mut state = State::new(1u32, config.clone(), 1024);
+        let mut io = VecDeque::new();
+        let now = Instant::now();
+
+        state.handle(InEvent::NeighborUp(2), now, &mut io);
+        io.clear();
+
+        // Broadcast a message (this adds it to originated_messages)
+        let content: Bytes = b"my_message".to_vec().into();
+        state.handle(
+            InEvent::Broadcast(content.clone(), Scope::Swarm),
+            now,
+            &mut io,
+        );
+        io.clear();
+
+        // Simulate peer 2 relaying our message back to us (duplicate)
+        let id = MessageId::from_content(&content);
+        let message = Message::Gossip(Gossip {
+            id,
+            content: content.clone(),
+            scope: DeliveryScope::Swarm(Round(1)),
+        });
+        state.handle(InEvent::RecvMessage(2, message), now, &mut io);
+
+        assert!(
+            !has_any_prune(&io),
+            "Should not prune peer for relaying our own message"
+        );
+
+        // Peer 2 should still be in eager set
+        assert!(state.eager_push_peers.contains(&2));
+    }
+
+    #[test]
+    fn prune_cooldown_prevents_immediate_prune() {
+        let config = Config {
+            prune_mode: PruneMode::Immediate,
+            prune_cooldown: Duration::from_millis(100),
+            min_eager_peers: 0,
+            ..Default::default()
+        };
+        let mut state = State::new(1u32, config.clone(), 1024);
+        let mut io = VecDeque::new();
+        let now = Instant::now();
+
+        // Add peer 2 as eager neighbor
+        state.handle(InEvent::NeighborUp(2), now, &mut io);
+        io.clear();
+
+        // Receive a message from peer 3 (not 2)
+        let content: Bytes = b"msg1".to_vec().into();
+        let id = MessageId::from_content(&content);
+        state.handle(
+            InEvent::RecvMessage(
+                3,
+                Message::Gossip(Gossip {
+                    id,
+                    content: content.clone(),
+                    scope: DeliveryScope::Swarm(Round(1)),
+                }),
+            ),
+            now,
+            &mut io,
+        );
+        io.clear();
+
+        // Now receive same message from peer 2 (duplicate) immediately
+        state.handle(
+            InEvent::RecvMessage(
+                2,
+                Message::Gossip(Gossip {
+                    id,
+                    content: content.clone(),
+                    scope: DeliveryScope::Swarm(Round(2)),
+                }),
+            ),
+            now,
+            &mut io,
+        );
+
+        // Should NOT prune peer 2 because of cooldown (just added as neighbor)
+        assert!(
+            !has_prune_to(&io, 2),
+            "Should not prune peer during cooldown period"
+        );
+
+        // After cooldown expires, should prune
+        io.clear();
+        let later = now + Duration::from_millis(150);
+
+        // Receive another message from peer 3
+        let content2: Bytes = b"msg2".to_vec().into();
+        let id2 = MessageId::from_content(&content2);
+        state.handle(
+            InEvent::RecvMessage(
+                3,
+                Message::Gossip(Gossip {
+                    id: id2,
+                    content: content2.clone(),
+                    scope: DeliveryScope::Swarm(Round(1)),
+                }),
+            ),
+            later,
+            &mut io,
+        );
+        io.clear();
+
+        // Receive duplicate from peer 2 after cooldown
+        state.handle(
+            InEvent::RecvMessage(
+                2,
+                Message::Gossip(Gossip {
+                    id: id2,
+                    content: content2.clone(),
+                    scope: DeliveryScope::Swarm(Round(2)),
+                }),
+            ),
+            later,
+            &mut io,
+        );
+
+        // Now should prune
+        assert!(
+            has_prune_to(&io, 2),
+            "Should prune peer after cooldown expires"
+        );
+    }
+
+    #[test]
+    fn prune_mode_disabled() {
+        let config = Config {
+            prune_mode: PruneMode::Disabled,
+            prune_cooldown: Duration::ZERO,
+            ..Default::default()
+        };
+        let mut state = State::new(1u32, config.clone(), 1024);
+        let mut io = VecDeque::new();
+        let now = Instant::now();
+
+        // Add peer 2 as eager neighbor
+        let old_time = now - Duration::from_secs(10);
+        state.handle(InEvent::NeighborUp(2), old_time, &mut io);
+        io.clear();
+
+        // Receive a message from peer 3
+        let content: Bytes = b"test".to_vec().into();
+        let id = MessageId::from_content(&content);
+        state.handle(
+            InEvent::RecvMessage(
+                3,
+                Message::Gossip(Gossip {
+                    id,
+                    content: content.clone(),
+                    scope: DeliveryScope::Swarm(Round(1)),
+                }),
+            ),
+            now,
+            &mut io,
+        );
+        io.clear();
+
+        // Receive duplicate from peer 2
+        state.handle(
+            InEvent::RecvMessage(
+                2,
+                Message::Gossip(Gossip {
+                    id,
+                    content: content.clone(),
+                    scope: DeliveryScope::Swarm(Round(2)),
+                }),
+            ),
+            now,
+            &mut io,
+        );
+
+        // Should NOT prune because mode is Disabled
+        assert!(
+            !has_any_prune(&io),
+            "PruneMode::Disabled should prevent pruning"
+        );
+        assert!(
+            state.eager_push_peers.contains(&2),
+            "Peer should remain eager"
+        );
+    }
+
+    #[test]
+    fn prune_mode_after_duplicates() {
+        let config = Config {
+            prune_mode: PruneMode::AfterDuplicates(3),
+            prune_cooldown: Duration::ZERO,
+            min_eager_peers: 0,
+            ..Default::default()
+        };
+        let mut state = State::new(1u32, config.clone(), 1024);
+        let mut io = VecDeque::new();
+        let now = Instant::now();
+
+        // Add peer 2 as eager neighbor
+        let old_time = now - Duration::from_secs(10);
+        state.handle(InEvent::NeighborUp(2), old_time, &mut io);
+        io.clear();
+
+        // Send 3 different messages, each will trigger a duplicate from peer 2
+        for i in 0..3 {
+            let content: Bytes = format!("msg{i}").into_bytes().into();
+            let id = MessageId::from_content(&content);
+
+            // First, receive from peer 3 (original)
+            state.handle(
+                InEvent::RecvMessage(
+                    3,
+                    Message::Gossip(Gossip {
+                        id,
+                        content: content.clone(),
+                        scope: DeliveryScope::Swarm(Round(1)),
+                    }),
+                ),
+                now,
+                &mut io,
+            );
+            io.clear();
+
+            // Then receive duplicate from peer 2
+            state.handle(
+                InEvent::RecvMessage(
+                    2,
+                    Message::Gossip(Gossip {
+                        id,
+                        content: content.clone(),
+                        scope: DeliveryScope::Swarm(Round(2)),
+                    }),
+                ),
+                now,
+                &mut io,
+            );
+
+            if i < 2 {
+                assert!(
+                    !has_prune_to(&io, 2),
+                    "Should not prune before threshold (dup {})",
+                    i + 1
+                );
+            } else {
+                assert!(
+                    has_prune_to(&io, 2),
+                    "Should prune on reaching threshold (dup {})",
+                    i + 1
+                );
+            }
+            io.clear();
+        }
     }
 }
