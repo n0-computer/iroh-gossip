@@ -330,6 +330,13 @@ pub struct Config {
     /// Pruning will be skipped if it would reduce eager peers below this threshold.
     /// Provides a safety floor to prevent mesh fragmentation.
     pub min_eager_peers: usize,
+
+    /// Retention period for disconnected lazy peers.
+    ///
+    /// When a neighbor disconnects (HyParView shuffle), they stay in lazy_push_peers
+    /// for this duration. If they don't reconnect within this time, they're removed.
+    /// Set to 2x HyParView shuffle_interval (120s) by default.
+    pub lazy_peer_retention: Duration,
 }
 
 impl Default for Config {
@@ -369,6 +376,8 @@ impl Default for Config {
             prune_cooldown: Duration::from_secs(1),
             // Keep at least 2 eager peers to prevent mesh fragmentation
             min_eager_peers: 2,
+            // 2x HyParView shuffle_interval (60s) for stale lazy peer cleanup
+            lazy_peer_retention: Duration::from_secs(120),
         }
     }
 }
@@ -431,6 +440,9 @@ pub struct State<PI> {
     duplicate_counts: HashMap<PI, usize>,
     /// Track when peers were last promoted to eager set for prune cooldown.
     eager_promotion_times: HashMap<PI, Instant>,
+    /// Track when peers were disconnected (removed from eager, kept in lazy).
+    /// Used to cleanup stale lazy peers after lazy_peer_retention.
+    disconnected_lazy_times: HashMap<PI, Instant>,
 }
 
 impl<PI: PeerIdentity> State<PI> {
@@ -453,6 +465,7 @@ impl<PI: PeerIdentity> State<PI> {
             max_message_size,
             duplicate_counts: Default::default(),
             eager_promotion_times: Default::default(),
+            disconnected_lazy_times: Default::default(),
         }
     }
 
@@ -466,7 +479,7 @@ impl<PI: PeerIdentity> State<PI> {
             InEvent::RecvMessage(from, message) => self.handle_message(from, message, now, io),
             InEvent::Broadcast(data, scope) => self.broadcast(data, scope, now, io),
             InEvent::NeighborUp(peer) => self.on_neighbor_up(peer, now),
-            InEvent::NeighborDown(peer) => self.on_neighbor_down(peer),
+            InEvent::NeighborDown(peer) => self.on_neighbor_down(peer, now),
             InEvent::TimerExpired(timer) => match timer {
                 Timer::DispatchLazyPush => self.on_dispatch_timer(io),
                 Timer::SendGraft(id) => {
@@ -738,13 +751,17 @@ impl<PI: PeerIdentity> State<PI> {
     /// > When a neighbor is detected to leave the overlay, it is simple removed from the
     /// > membership. Furthermore, the record of IHAVE messages sent from failed members is deleted
     /// > from the missing history. (p9)
-    fn on_neighbor_down(&mut self, peer: PI) {
+    fn on_neighbor_down(&mut self, peer: PI, now: Instant) {
         self.missing_messages.retain(|_message_id, ihaves| {
             ihaves.retain(|(ihave_peer, _round)| *ihave_peer != peer);
             !ihaves.is_empty()
         });
         self.eager_push_peers.remove(&peer);
-        self.lazy_push_peers.remove(&peer);
+        // Keep peer in lazy_push_peers for recovery after HyParView shuffle.
+        // Track disconnect time for stale peer cleanup.
+        if self.lazy_push_peers.contains(&peer) {
+            self.disconnected_lazy_times.insert(peer, now);
+        }
         self.duplicate_counts.remove(&peer);
         self.eager_promotion_times.remove(&peer);
     }
@@ -753,15 +770,30 @@ impl<PI: PeerIdentity> State<PI> {
         self.cache.expire_until(now);
         self.originated_messages.expire_until(now);
         self.expire_promotion_times(now);
+        self.expire_disconnected_lazy_peers(now);
         io.push(OutEvent::ScheduleTimer(
             self.config.cache_evict_interval,
             Timer::EvictCache,
         ));
     }
 
+    fn expire_disconnected_lazy_peers(&mut self, now: Instant) {
+        let retention = self.config.lazy_peer_retention;
+        self.disconnected_lazy_times
+            .retain(|peer, disconnected_at| {
+                if now.duration_since(*disconnected_at) > retention {
+                    self.lazy_push_peers.remove(peer);
+                    false
+                } else {
+                    true
+                }
+            });
+    }
+
     /// Moves peer into eager set with timestamp for cooldown tracking.
     fn add_eager_at(&mut self, peer: PI, now: Instant) {
         self.lazy_push_peers.remove(&peer);
+        self.disconnected_lazy_times.remove(&peer);
         if self.eager_push_peers.insert(peer) {
             self.eager_promotion_times.insert(peer, now);
         }
