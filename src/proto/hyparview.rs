@@ -62,6 +62,7 @@ pub enum Event<PI> {
 pub enum Timer<PI> {
     DoShuffle,
     PendingNeighborRequest(PI),
+    ClearReconnectCooldown(PI),
 }
 
 /// Messages that we can send and receive from peers within the topic.
@@ -193,6 +194,9 @@ pub struct Config {
     pub shuffle_interval: Duration,
     /// Timeout after which a `Neighbor` request is considered failed
     pub neighbor_request_timeout: Duration,
+    /// After disconnecting a peer, refuse their reconnection for this duration.
+    /// Prevents rapid churn cycles under high connection stress.
+    pub reconnect_cooldown: Duration,
 }
 impl Default for Config {
     /// Default values for the HyParView layer
@@ -216,6 +220,9 @@ impl Default for Config {
             shuffle_interval: Duration::from_secs(60),
             // Wild guess
             neighbor_request_timeout: Duration::from_millis(500),
+            // Cooldown period after we disconnect a peer before accepting their reconnection.
+            // Helps prevent rapid churn cycles under high connection stress.
+            reconnect_cooldown: Duration::from_millis(200),
         }
     }
 }
@@ -250,6 +257,8 @@ pub struct State<PI, RG = ThreadRng> {
     peer_data: HashMap<PI, PeerData>,
     /// List of peers that are disconnecting, but which we want to keep in the passive set once the connection closes
     alive_disconnect_peers: HashSet<PI>,
+    /// Peers we recently disconnected - refuse their reconnection attempts to prevent churn cycles
+    reconnect_cooldown_peers: HashSet<PI>,
 }
 
 impl<PI, RG> State<PI, RG>
@@ -270,6 +279,7 @@ where
             pending_neighbor_requests: Default::default(),
             peer_data: Default::default(),
             alive_disconnect_peers: Default::default(),
+            reconnect_cooldown_peers: Default::default(),
         }
     }
 
@@ -279,6 +289,9 @@ where
             InEvent::TimerExpired(timer) => match timer {
                 Timer::DoShuffle => self.handle_shuffle_timer(io),
                 Timer::PendingNeighborRequest(peer) => self.handle_pending_neighbor_timer(peer, io),
+                Timer::ClearReconnectCooldown(peer) => {
+                    self.reconnect_cooldown_peers.remove(&peer);
+                }
             },
             InEvent::PeerDisconnected(peer) => self.handle_connection_closed(peer, io),
             InEvent::RequestJoin(peer) => self.handle_join(peer, io),
@@ -365,6 +378,15 @@ where
         // are treated as new requests (not replies), ensuring we send a proper reply
         // to establish symmetric neighbor relationships.
         self.pending_neighbor_requests.remove(&peer);
+
+        // Add peer to reconnect cooldown to prevent rapid churn cycles.
+        // If this peer immediately tries to reconnect, we'll refuse them temporarily.
+        if self.reconnect_cooldown_peers.insert(peer) {
+            io.push(OutEvent::ScheduleTimer(
+                self.config.reconnect_cooldown,
+                Timer::ClearReconnectCooldown(peer),
+            ));
+        }
 
         // Before disconnecting, send a `ShuffleReply` with some of our nodes to
         // prevent the other node from running out of connections. This is especially
@@ -453,6 +475,15 @@ where
     }
 
     fn on_neighbor(&mut self, from: PI, details: Neighbor, io: &mut impl IO<PI>) {
+        // If this peer is in reconnect cooldown (we recently disconnected them),
+        // refuse the request to prevent rapid churn cycles.
+        if self.reconnect_cooldown_peers.contains(&from) {
+            debug!(peer = ?from, "refusing neighbor request: peer in reconnect cooldown");
+            // Don't add to cooldown again, just disconnect
+            io.push(OutEvent::DisconnectPeer(from));
+            return;
+        }
+
         let is_reply = self.pending_neighbor_requests.remove(&from);
         let do_reply = !is_reply;
         // "A node q that receives a high priority neighbor request will always accept the request, even
@@ -804,6 +835,8 @@ where
 
     fn send_neighbor(&mut self, peer: PI, priority: Priority, io: &mut impl IO<PI>) {
         if self.pending_neighbor_requests.insert(peer) {
+            // Clear cooldown when we initiate contact - we're intentionally reconnecting
+            self.reconnect_cooldown_peers.remove(&peer);
             let message = Message::Neighbor(Neighbor {
                 priority,
                 data: self.me_data.clone(),
