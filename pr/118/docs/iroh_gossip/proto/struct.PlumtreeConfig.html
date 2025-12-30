@@ -6,7 +6,7 @@
     pub message_cache_retention: <a class="struct" href="https://doc.rust-lang.org/nightly/core/time/struct.Duration.html" title="struct core::time::Duration">Duration</a>,
     pub message_id_retention: <a class="struct" href="https://doc.rust-lang.org/nightly/core/time/struct.Duration.html" title="struct core::time::Duration">Duration</a>,
     pub cache_evict_interval: <a class="struct" href="https://doc.rust-lang.org/nightly/core/time/struct.Duration.html" title="struct core::time::Duration">Duration</a>,
-    pub prune_mode: PruneMode,
+    pub prune_mode: <a class="enum" href="enum.PruneMode.html" title="enum iroh_gossip::proto::PruneMode">PruneMode</a>,
     pub prune_cooldown: <a class="struct" href="https://doc.rust-lang.org/nightly/core/time/struct.Duration.html" title="struct core::time::Duration">Duration</a>,
     pub min_eager_peers: <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
     pub lazy_peer_retention: <a class="struct" href="https://doc.rust-lang.org/nightly/core/time/struct.Duration.html" title="struct core::time::Duration">Duration</a>,
@@ -45,11 +45,11 @@ able to retrieve messages once they need them. If this is high, the cache will g
 <p>Should be at least as long as <a href="struct.PlumtreeConfig.html#structfield.message_cache_retention" title="field iroh_gossip::proto::PlumtreeConfig::message_cache_retention"><code>Self::message_cache_retention</code></a>, usually will be longer to
 not accidentally receive messages multiple times.</p>
 </div><span id="structfield.cache_evict_interval" class="structfield section-header"><a href="#structfield.cache_evict_interval" class="anchor field">§</a><code>cache_evict_interval: <a class="struct" href="https://doc.rust-lang.org/nightly/core/time/struct.Duration.html" title="struct core::time::Duration">Duration</a></code></span><div class="docblock"><p>How often the internal caches will be checked for expired items.</p>
-</div><span id="structfield.prune_mode" class="structfield section-header"><a href="#structfield.prune_mode" class="anchor field">§</a><code>prune_mode: PruneMode</code></span><div class="docblock"><p>Controls when peers are pruned from eager to lazy push sets.</p>
+</div><span id="structfield.prune_mode" class="structfield section-header"><a href="#structfield.prune_mode" class="anchor field">§</a><code>prune_mode: <a class="enum" href="enum.PruneMode.html" title="enum iroh_gossip::proto::PruneMode">PruneMode</a></code></span><div class="docblock"><p>Controls when peers are pruned from eager to lazy push sets.</p>
 <ul>
-<li>[<code>PruneMode::Immediate</code>]: Current behavior, prune on first duplicate</li>
-<li>[<code>PruneMode::AfterDuplicates</code>]: More tolerant, prune after n duplicates</li>
-<li>[<code>PruneMode::Disabled</code>]: Never prune, useful for 2-3 node swarms</li>
+<li><code>Immediate</code>: Prune on first duplicate</li>
+<li><code>AfterDuplicates(n)</code>: More tolerant, prune after n duplicates</li>
+<li><code>Disabled</code>: Never prune, useful for 2-3 node swarms</li>
 </ul>
 </div><span id="structfield.prune_cooldown" class="structfield section-header"><a href="#structfield.prune_cooldown" class="anchor field">§</a><code>prune_cooldown: <a class="struct" href="https://doc.rust-lang.org/nightly/core/time/struct.Duration.html" title="struct core::time::Duration">Duration</a></code></span><div class="docblock"><p>Cooldown period after promoting a peer to eager set.</p>
 <p>During this period, the peer will not be pruned on duplicate receipt.

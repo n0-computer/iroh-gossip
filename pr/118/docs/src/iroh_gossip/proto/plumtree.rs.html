@@ -314,9 +314,9 @@
 <a href=#314 id=314 data-nosnippet>314</a>
 <a href=#315 id=315 data-nosnippet>315</a>    <span class="doccomment">/// Controls when peers are pruned from eager to lazy push sets.
 <a href=#316 id=316 data-nosnippet>316</a>    ///
-<a href=#317 id=317 data-nosnippet>317</a>    /// - [`PruneMode::Immediate`]: Current behavior, prune on first duplicate
-<a href=#318 id=318 data-nosnippet>318</a>    /// - [`PruneMode::AfterDuplicates`]: More tolerant, prune after n duplicates
-<a href=#319 id=319 data-nosnippet>319</a>    /// - [`PruneMode::Disabled`]: Never prune, useful for 2-3 node swarms
+<a href=#317 id=317 data-nosnippet>317</a>    /// - `Immediate`: Prune on first duplicate
+<a href=#318 id=318 data-nosnippet>318</a>    /// - `AfterDuplicates(n)`: More tolerant, prune after n duplicates
+<a href=#319 id=319 data-nosnippet>319</a>    /// - `Disabled`: Never prune, useful for 2-3 node swarms
 <a href=#320 id=320 data-nosnippet>320</a>    </span><span class="kw">pub </span>prune_mode: PruneMode,
 <a href=#321 id=321 data-nosnippet>321</a>
 <a href=#322 id=322 data-nosnippet>322</a>    <span class="doccomment">/// Cooldown period after promoting a peer to eager set.
