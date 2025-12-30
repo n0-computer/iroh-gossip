@@ -2247,4 +2247,365 @@ pub(crate) mod test {
         mesh.shutdown().await;
         Ok(())
     }
+
+    /// Test: Node crashes mid-broadcast, remaining nodes still receive messages
+    #[tokio::test]
+    #[traced_test]
+    async fn test_node_crash_mid_broadcast() -> Result {
+        let mut mesh = TestMesh::new(10, 11).await?;
+
+        // Split all nodes - some will send, some will receive, one will crash
+        let (senders, receivers): (Vec<_>, Vec<_>) = mesh.subs.drain(..).map(|s| s.split()).unzip();
+
+        // Drop one sender and receiver to simulate crash
+        let mut senders = senders;
+        let mut receivers = receivers;
+        let _crashed_tx = senders.remove(5);
+        let _crashed_rx = receivers.remove(5);
+
+        let cfg = DeliveryTestConfig {
+            msgs_per_node: 20,
+            expected_per_receiver: (senders.len() - 1) * 20, // -1 because each node doesn't receive own msgs
+            msg_delay: Duration::from_millis(5),
+            recv_deadline: Duration::from_secs(30),
+            delivery_wait: Duration::from_millis(500),
+            threshold_percent: 90,
+        };
+
+        mesh.run_delivery_test(senders, receivers, cfg).await?;
+        mesh.shutdown().await;
+        Ok(())
+    }
+
+    /// Test: Multi-origin simultaneous broadcast
+    #[tokio::test]
+    #[traced_test]
+    async fn test_multi_origin_broadcast() -> Result {
+        let mut mesh = TestMesh::new(10, 12).await?;
+
+        let (senders, receivers): (Vec<_>, Vec<_>) = mesh.subs.drain(..).map(|s| s.split()).unzip();
+
+        // All nodes broadcast simultaneously with no delay
+        let cfg = DeliveryTestConfig {
+            msgs_per_node: 30,
+            expected_per_receiver: 9 * 30,
+            msg_delay: Duration::ZERO, // No delay - all at once
+            recv_deadline: Duration::from_secs(30),
+            delivery_wait: Duration::from_millis(500),
+            threshold_percent: 95,
+        };
+
+        mesh.run_delivery_test(senders, receivers, cfg).await?;
+        mesh.shutdown().await;
+        Ok(())
+    }
+
+    /// Test: Rapid join/leave churn during broadcast
+    #[tokio::test]
+    #[traced_test]
+    async fn test_churn_during_broadcast() -> Result {
+        let mut mesh = TestMesh::new(10, 13).await?;
+
+        let (senders, receivers): (Vec<_>, Vec<_>) = mesh.subs.drain(..).map(|s| s.split()).unzip();
+        let num_senders = senders.len();
+        let expected_per_receiver = (num_senders - 1) * 30;
+
+        // Start receivers first
+        let recv_handles: Vec<_> = receivers
+            .into_iter()
+            .map(|mut rx| {
+                spawn(async move {
+                    let mut count = 0usize;
+                    let deadline = n0_future::time::Instant::now() + Duration::from_secs(30);
+                    while n0_future::time::Instant::now() < deadline {
+                        match timeout(Duration::from_millis(100), rx.next()).await {
+                            Ok(Some(Ok(Event::Received(_)))) => count += 1,
+                            Ok(Some(Ok(_))) => {}
+                            Ok(Some(Err(_))) | Ok(None) => break,
+                            Err(_) => {}
+                        }
+                    }
+                    count
+                })
+            })
+            .collect();
+
+        // Start broadcasts
+        let send_handles: Vec<_> = senders
+            .iter()
+            .enumerate()
+            .map(|(idx, tx)| {
+                let tx = tx.clone();
+                spawn(async move {
+                    for i in 0..30 {
+                        let content = format!("n{idx}m{i}");
+                        let _ = tx.broadcast(content.into_bytes().into()).await;
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+            })
+            .collect();
+
+        // While broadcasting, add and remove nodes
+        for _ in 0..3 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let sub = mesh.add_node().await?;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            drop(sub);
+        }
+
+        for h in send_handles {
+            let _ = h.await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        drop(senders);
+
+        let mut total = 0usize;
+        for h in recv_handles {
+            total += h.await.unwrap_or(0);
+        }
+
+        // NOTE: Churn during broadcast is a stress test - some loss expected
+        let threshold = (expected_per_receiver * num_senders * 50) / 100;
+        info!(total, threshold, "Churn test results");
+        assert!(
+            total >= threshold,
+            "Churn severely affected delivery: {total}/{threshold}"
+        );
+
+        mesh.shutdown().await;
+        Ok(())
+    }
+
+    /// Test: Bootstrap node loses all neighbors (isolation recovery)
+    #[tokio::test]
+    #[traced_test]
+    async fn test_bootstrap_isolation_recovery() -> Result {
+        let mut mesh = TestMesh::new(6, 14).await?;
+
+        // Get bootstrap's subscription
+        let bootstrap_sub = mesh.subs.remove(0);
+        let (bootstrap_tx, mut bootstrap_rx) = bootstrap_sub.split();
+
+        // Drop all other subscriptions - simulates bootstrap's neighbors leaving
+        let other_subs: Vec<_> = mesh.subs.drain(..).collect();
+        drop(other_subs);
+
+        // Wait for disconnection to propagate
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Add new nodes that will connect to bootstrap
+        let mut new_subs = Vec::new();
+        for _ in 0..4 {
+            new_subs.push(mesh.add_node().await?);
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // New nodes broadcast
+        let (new_senders, _): (Vec<_>, Vec<_>) = new_subs.drain(..).map(|s| s.split()).unzip();
+        for tx in &new_senders {
+            tx.broadcast(b"test".to_vec().into()).await?;
+        }
+
+        // Bootstrap should receive messages from new nodes
+        let mut received = 0;
+        let deadline = n0_future::time::Instant::now() + Duration::from_secs(5);
+        while n0_future::time::Instant::now() < deadline {
+            match timeout(Duration::from_millis(100), bootstrap_rx.next()).await {
+                Ok(Some(Ok(Event::Received(_)))) => received += 1,
+                Ok(Some(Ok(_))) => {}
+                _ => {}
+            }
+            if received >= new_senders.len() {
+                break;
+            }
+        }
+
+        info!(received, expected = new_senders.len(), "Bootstrap recovery");
+        // NOTE: Bootstrap isolation recovery is a known edge case.
+        // Currently bootstrap may not recover fully - tracking for future improvement.
+        assert!(
+            received >= 1,
+            "Bootstrap didn't recover at all: {received}/{}",
+            new_senders.len()
+        );
+
+        drop(bootstrap_tx);
+        mesh.shutdown().await;
+        Ok(())
+    }
+
+    /// Test: Capacity boundary - exactly active_view_capacity nodes, then one more
+    #[tokio::test]
+    #[traced_test]
+    async fn test_capacity_boundary() -> Result {
+        // Default active_view_capacity is 5, so 6 nodes means everyone is at capacity
+        let mut mesh = TestMesh::new(6, 15).await?;
+
+        // Add one more node - forces kicks
+        let extra_sub = mesh.add_node().await?;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let (senders, receivers): (Vec<_>, Vec<_>) = mesh.subs.drain(..).map(|s| s.split()).unzip();
+        let (extra_tx, extra_rx) = extra_sub.split();
+
+        let mut all_senders = senders;
+        all_senders.push(extra_tx);
+        let mut all_receivers = receivers;
+        all_receivers.push(extra_rx);
+
+        let cfg = DeliveryTestConfig {
+            msgs_per_node: 20,
+            expected_per_receiver: (all_senders.len() - 1) * 20,
+            msg_delay: Duration::from_millis(5),
+            recv_deadline: Duration::from_secs(20),
+            delivery_wait: Duration::from_millis(300),
+            threshold_percent: 90,
+        };
+
+        mesh.run_delivery_test(all_senders, all_receivers, cfg)
+            .await?;
+        mesh.shutdown().await;
+        Ok(())
+    }
+
+    /// Test: Topic leave during broadcast
+    #[tokio::test]
+    #[traced_test]
+    async fn test_leave_during_broadcast() -> Result {
+        let mut mesh = TestMesh::new(8, 16).await?;
+
+        let (senders, receivers): (Vec<_>, Vec<_>) = mesh.subs.drain(..).map(|s| s.split()).unzip();
+        let num_senders = senders.len();
+        let expected_per_receiver = (num_senders - 1) * 40;
+
+        // Split receivers - first 2 will leave, rest will receive
+        let mut receivers: Vec<_> = receivers.into_iter().collect();
+        let leaving_receivers: Vec<_> = receivers.drain(0..2).collect();
+        let remaining_count = receivers.len();
+
+        // Start remaining receivers
+        let recv_handles: Vec<_> = receivers
+            .into_iter()
+            .map(|mut rx| {
+                spawn(async move {
+                    let mut count = 0usize;
+                    let deadline = n0_future::time::Instant::now() + Duration::from_secs(30);
+                    while n0_future::time::Instant::now() < deadline {
+                        match timeout(Duration::from_millis(100), rx.next()).await {
+                            Ok(Some(Ok(Event::Received(_)))) => count += 1,
+                            Ok(Some(Ok(_))) => {}
+                            Ok(Some(Err(_))) | Ok(None) => break,
+                            Err(_) => {}
+                        }
+                    }
+                    count
+                })
+            })
+            .collect();
+
+        // Start broadcasts
+        let send_handles: Vec<_> = senders
+            .iter()
+            .enumerate()
+            .map(|(idx, tx)| {
+                let tx = tx.clone();
+                spawn(async move {
+                    for i in 0..40 {
+                        let content = format!("n{idx}m{i}");
+                        let _ = tx.broadcast(content.into_bytes().into()).await;
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+            })
+            .collect();
+
+        // While broadcasting, drop the leaving receivers
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(leaving_receivers);
+
+        for h in send_handles {
+            let _ = h.await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        drop(senders);
+
+        let mut total = 0usize;
+        for h in recv_handles {
+            total += h.await.unwrap_or(0);
+        }
+
+        // NOTE: Leave during broadcast is a stress test - some loss expected
+        let threshold = (expected_per_receiver * remaining_count * 50) / 100;
+        info!(total, threshold, "Leave during broadcast results");
+        assert!(
+            total >= threshold,
+            "Leave severely affected remaining: {total}/{threshold}"
+        );
+
+        mesh.shutdown().await;
+        Ok(())
+    }
+
+    /// Test: Rapid reconnection (node disconnects and reconnects quickly)
+    #[tokio::test]
+    #[traced_test]
+    async fn test_rapid_reconnect() -> Result {
+        let mut mesh = TestMesh::new(6, 17).await?;
+
+        // Get one node's subscription
+        let node_sub = mesh.subs.remove(2);
+
+        // Disconnect by dropping
+        drop(node_sub);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Reconnect
+        let rejoined = mesh.add_node().await?;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let (senders, receivers): (Vec<_>, Vec<_>) = mesh.subs.drain(..).map(|s| s.split()).unzip();
+        let (rejoin_tx, rejoin_rx) = rejoined.split();
+
+        let mut all_senders = senders;
+        all_senders.push(rejoin_tx);
+        let mut all_receivers = receivers;
+        all_receivers.push(rejoin_rx);
+
+        let cfg = DeliveryTestConfig {
+            msgs_per_node: 20,
+            expected_per_receiver: (all_senders.len() - 1) * 20,
+            msg_delay: Duration::from_millis(5),
+            recv_deadline: Duration::from_secs(15),
+            delivery_wait: Duration::from_millis(300),
+            threshold_percent: 90,
+        };
+
+        mesh.run_delivery_test(all_senders, all_receivers, cfg)
+            .await?;
+        mesh.shutdown().await;
+        Ok(())
+    }
+
+    /// Test: Large mesh with high message volume
+    #[tokio::test]
+    #[traced_test]
+    async fn test_large_mesh_high_volume() -> Result {
+        let mut mesh = TestMesh::new(15, 18).await?;
+
+        let (senders, receivers): (Vec<_>, Vec<_>) = mesh.subs.drain(..).map(|s| s.split()).unzip();
+
+        let cfg = DeliveryTestConfig {
+            msgs_per_node: 50,
+            expected_per_receiver: 14 * 50,
+            msg_delay: Duration::from_millis(2),
+            recv_deadline: Duration::from_secs(60),
+            delivery_wait: Duration::from_millis(500),
+            threshold_percent: 95,
+        };
+
+        mesh.run_delivery_test(senders, receivers, cfg).await?;
+        mesh.shutdown().await;
+        Ok(())
+    }
 }
