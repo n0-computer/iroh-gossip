@@ -3,7 +3,7 @@
 //! The API is usable both locally and over RPC.
 
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeSet, HashSet, VecDeque},
     pin::Pin,
     task::{Context, Poll},
 };
@@ -245,6 +245,18 @@ impl GossipTopic {
         self.receiver.joined().await
     }
 
+    /// Waits until we are connected to at least `min` neighbors or timeout expires.
+    ///
+    /// For reliable message delivery, wait for at least 2 neighbors before broadcasting.
+    /// This ensures redundant paths exist in the gossip mesh.
+    ///
+    /// Returns the actual neighbor count (may be less than `min` if timeout expired).
+    ///
+    /// See [`GossipReceiver::wait_for_neighbors`] for details.
+    pub async fn wait_for_neighbors(&mut self, min: usize) -> usize {
+        self.receiver.wait_for_neighbors(min).await
+    }
+
     /// Returns `true` if we are connected to at least one endpoint.
     pub fn is_joined(&self) -> bool {
         self.receiver.is_joined()
@@ -267,6 +279,7 @@ pub struct GossipReceiver {
     #[debug("BoxStream")]
     stream: Pin<Box<dyn Stream<Item = Result<Event, ApiError>> + Send + Sync + 'static>>,
     neighbors: HashSet<EndpointId>,
+    buffered: VecDeque<Result<Event, ApiError>>,
 }
 
 impl GossipReceiver {
@@ -276,6 +289,7 @@ impl GossipReceiver {
         Self {
             stream,
             neighbors: Default::default(),
+            buffered: Default::default(),
         }
     }
 
@@ -284,18 +298,45 @@ impl GossipReceiver {
         self.neighbors.iter().copied()
     }
 
-    /// Waits until we are connected to at least one endpoint.
+    /// Waits until we are connected to at least one endpoint (5 second timeout).
     ///
-    /// Progresses the event stream to the first [`Event::NeighborUp`] event.
-    ///
-    /// Note that this consumes this initial `NeighborUp` event. If you want to track
-    /// neighbors, use [`Self::neighbors`] after awaiting [`Self::joined`], and then
-    /// continue to track `NeighborUp` events on the event stream.
+    /// Non-neighbor events are buffered and will be returned by subsequent calls to `next()`.
     pub async fn joined(&mut self) -> Result<(), ApiError> {
-        while !self.is_joined() {
-            let _event = self.next().await.ok_or(e!(ApiError::Closed))??;
+        if self.wait_for_neighbors(1).await == 0 {
+            return Err(e!(ApiError::Closed));
         }
         Ok(())
+    }
+
+    /// Waits until we are connected to at least `min` neighbors or 5 second timeout expires.
+    ///
+    /// For reliable message delivery, wait for at least 2 neighbors before broadcasting.
+    /// This ensures redundant paths exist in the gossip mesh for message recovery via
+    /// the IHave/Graft protocol.
+    ///
+    /// Returns the actual neighbor count (may be less than `min` if timeout expired or closed).
+    ///
+    /// Non-neighbor events (like `Received`) are buffered and will be returned by
+    /// subsequent calls to `next()`.
+    pub async fn wait_for_neighbors(&mut self, min: usize) -> usize {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while self.neighbors.len() < min {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, self.next()).await {
+                Ok(Some(Ok(Event::NeighborUp(_) | Event::NeighborDown(_)))) => {
+                    // Already tracked by poll_next
+                }
+                Ok(Some(Ok(event))) => {
+                    self.buffered.push_back(Ok(event));
+                }
+                Ok(Some(Err(_))) | Ok(None) => break,
+                Err(_) => break, // timeout
+            }
+        }
+        self.neighbors.len()
     }
 
     /// Returns `true` if we are connected to at least one endpoint.
@@ -308,6 +349,10 @@ impl Stream for GossipReceiver {
     type Item = Result<Event, ApiError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // Return buffered events first
+        if let Some(item) = self.buffered.pop_front() {
+            return Poll::Ready(Some(item));
+        }
         let item = std::task::ready!(Pin::new(&mut self.stream).poll_next(cx));
         if let Some(Ok(item)) = &item {
             match item {

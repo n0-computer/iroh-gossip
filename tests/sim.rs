@@ -4,7 +4,7 @@ use std::{env, fmt, str::FromStr, time::Duration};
 
 use iroh_gossip::proto::{
     sim::{BootstrapMode, LatencyConfig, NetworkConfig, Simulator, SimulatorConfig},
-    Config,
+    Config, PruneMode,
 };
 
 #[test]
@@ -31,7 +31,14 @@ fn big_hyparview() {
 fn big_multiple_sender() {
     tracing_subscriber::fmt::try_init().ok();
 
-    let network_config = NetworkConfig::default();
+    let mut proto = Config::default();
+    proto.broadcast.prune_mode = PruneMode::Immediate;
+    proto.broadcast.prune_cooldown = Duration::ZERO;
+    proto.broadcast.min_eager_peers = 0;
+    let network_config = NetworkConfig {
+        proto,
+        latency: LatencyConfig::default(),
+    };
     let config = SimulatorConfig::from_env();
     let bootstrap = BootstrapMode::default();
     let mut simulator = Simulator::new(config, network_config);
@@ -63,8 +70,14 @@ fn big_multiple_sender() {
 fn big_single_sender() {
     tracing_subscriber::fmt::try_init().ok();
 
-    let network_config = NetworkConfig::default();
-
+    let mut proto = Config::default();
+    proto.broadcast.prune_mode = PruneMode::Immediate;
+    proto.broadcast.prune_cooldown = Duration::ZERO;
+    proto.broadcast.min_eager_peers = 0;
+    let network_config = NetworkConfig {
+        proto,
+        latency: LatencyConfig::default(),
+    };
     let config = SimulatorConfig::from_env();
     let bootstrap = BootstrapMode::default();
     let rounds = read_var("ROUNDS", 30);
@@ -93,7 +106,14 @@ fn big_single_sender() {
 // #[traced_test]
 fn big_burst() {
     tracing_subscriber::fmt::try_init().ok();
-    let network_config = NetworkConfig::default();
+    let mut proto = Config::default();
+    proto.broadcast.prune_mode = PruneMode::Immediate;
+    proto.broadcast.prune_cooldown = Duration::ZERO;
+    proto.broadcast.min_eager_peers = 0;
+    let network_config = NetworkConfig {
+        proto,
+        latency: LatencyConfig::default(),
+    };
     let config = SimulatorConfig::from_env();
     let bootstrap = BootstrapMode::default();
     let rounds = read_var("ROUNDS", 5);

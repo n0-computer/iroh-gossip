@@ -24,7 +24,7 @@ use tokio::{
 };
 use tracing::{debug, trace, Instrument};
 
-use super::{InEvent, ProtoMessage};
+use super::ProtoMessage;
 use crate::proto::{util::TimerMap, TopicId};
 
 /// Errors related to message writing
@@ -92,21 +92,21 @@ pub(crate) struct RecvLoop {
     remote_endpoint_id: EndpointId,
     conn: Connection,
     max_message_size: usize,
-    in_event_tx: mpsc::Sender<InEvent>,
+    msg_tx: mpsc::Sender<(EndpointId, ProtoMessage)>,
 }
 
 impl RecvLoop {
     pub(crate) fn new(
         remote_endpoint_id: EndpointId,
         conn: Connection,
-        in_event_tx: mpsc::Sender<InEvent>,
+        msg_tx: mpsc::Sender<(EndpointId, ProtoMessage)>,
         max_message_size: usize,
     ) -> Self {
         Self {
             remote_endpoint_id,
             conn,
             max_message_size,
-            in_event_tx,
+            msg_tx,
         }
     }
 
@@ -143,9 +143,17 @@ impl RecvLoop {
                     match msg {
                         None => debug!(topic=%state.header.topic_id.fmt_short(), "stream closed"),
                         Some(msg) => {
-                            if self.in_event_tx.send(InEvent::RecvMessage(self.remote_endpoint_id, msg)).await.is_err() {
-                                debug!("stop recv loop: actor closed");
-                                break;
+                            // Use try_send to avoid blocking - if channel is full, drop message
+                            // This prevents one slow connection from blocking all others
+                            match self.msg_tx.try_send((self.remote_endpoint_id, msg)) {
+                                Ok(()) => {}
+                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                    debug!("msg_rx full, dropping message");
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => {
+                                    debug!("stop recv loop: actor closed");
+                                    break;
+                                }
                             }
                             read_futures.push(state.next());
                         }
@@ -279,7 +287,11 @@ impl SendLoop {
         let mut entry = match self.streams.entry(topic_id) {
             hash_map::Entry::Occupied(entry) => entry,
             hash_map::Entry::Vacant(entry) => {
-                let mut stream = self.conn.open_uni().await?;
+                let stream = self.conn.open_uni().await?;
+                // Set high priority for gossip streams to ensure they're not starved
+                // by other traffic on the same connection
+                stream.set_priority(100).ok();
+                let mut stream = stream;
                 let header = StreamHeader { topic_id };
                 header
                     .write(&mut stream, &mut self.buffer, self.max_message_size)
