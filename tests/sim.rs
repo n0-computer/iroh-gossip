@@ -35,7 +35,10 @@ fn big_multiple_sender() {
     proto.broadcast.prune_mode = PruneMode::Immediate;
     proto.broadcast.prune_cooldown = Duration::ZERO;
     proto.broadcast.min_eager_peers = 0;
-    let network_config = NetworkConfig { proto, latency: LatencyConfig::default() };
+    let network_config = NetworkConfig {
+        proto,
+        latency: LatencyConfig::default(),
+    };
     let config = SimulatorConfig::from_env();
     let bootstrap = BootstrapMode::default();
     let mut simulator = Simulator::new(config, network_config);
@@ -71,7 +74,10 @@ fn big_single_sender() {
     proto.broadcast.prune_mode = PruneMode::Immediate;
     proto.broadcast.prune_cooldown = Duration::ZERO;
     proto.broadcast.min_eager_peers = 0;
-    let network_config = NetworkConfig { proto, latency: LatencyConfig::default() };
+    let network_config = NetworkConfig {
+        proto,
+        latency: LatencyConfig::default(),
+    };
     let config = SimulatorConfig::from_env();
     let bootstrap = BootstrapMode::default();
     let rounds = read_var("ROUNDS", 30);
@@ -104,7 +110,10 @@ fn big_burst() {
     proto.broadcast.prune_mode = PruneMode::Immediate;
     proto.broadcast.prune_cooldown = Duration::ZERO;
     proto.broadcast.min_eager_peers = 0;
-    let network_config = NetworkConfig { proto, latency: LatencyConfig::default() };
+    let network_config = NetworkConfig {
+        proto,
+        latency: LatencyConfig::default(),
+    };
     let config = SimulatorConfig::from_env();
     let bootstrap = BootstrapMode::default();
     let rounds = read_var("ROUNDS", 5);

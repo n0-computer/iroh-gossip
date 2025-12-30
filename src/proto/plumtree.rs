@@ -314,9 +314,9 @@ pub struct Config {
 
     /// Controls when peers are pruned from eager to lazy push sets.
     ///
-    /// - [`PruneMode::Immediate`]: Current behavior, prune on first duplicate
-    /// - [`PruneMode::AfterDuplicates`]: More tolerant, prune after n duplicates
-    /// - [`PruneMode::Disabled`]: Never prune, useful for 2-3 node swarms
+    /// - `Immediate`: Prune on first duplicate
+    /// - `AfterDuplicates(n)`: More tolerant, prune after n duplicates
+    /// - `Disabled`: Never prune, useful for 2-3 node swarms
     pub prune_mode: PruneMode,
 
     /// Cooldown period after promoting a peer to eager set.
