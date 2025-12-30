@@ -216,9 +216,9 @@ impl Default for Config {
             shuffle_active_view_count: 3,
             // From the paper (p9)
             shuffle_passive_view_count: 4,
-            // Wild guess
-            shuffle_interval: Duration::from_secs(60),
-            // Wild guess
+            // Reduced from 60s for faster mesh healing under stress
+            shuffle_interval: Duration::from_secs(30),
+            // Wild guess - Dials take 2-5s under connection stress
             neighbor_request_timeout: Duration::from_millis(500),
             // Cooldown period after we disconnect a peer before accepting their reconnection.
             // Helps prevent rapid churn cycles under high connection stress.

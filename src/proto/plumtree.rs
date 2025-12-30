@@ -335,7 +335,7 @@ pub struct Config {
     ///
     /// When a neighbor disconnects (HyParView shuffle), they stay in lazy_push_peers
     /// for this duration. If they don't reconnect within this time, they're removed.
-    /// Set to 2x HyParView shuffle_interval (120s) by default.
+    /// Set to 2x HyParView shuffle_interval (60s) by default.
     pub lazy_peer_retention: Duration,
 }
 
@@ -376,8 +376,8 @@ impl Default for Config {
             prune_cooldown: Duration::from_secs(1),
             // Keep at least 2 eager peers to prevent mesh fragmentation
             min_eager_peers: 2,
-            // 2x HyParView shuffle_interval (60s) for stale lazy peer cleanup
-            lazy_peer_retention: Duration::from_secs(120),
+            // 2x HyParView shuffle_interval (30s) for stale lazy peer cleanup
+            lazy_peer_retention: Duration::from_secs(60),
         }
     }
 }

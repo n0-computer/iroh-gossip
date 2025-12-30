@@ -48,7 +48,7 @@ pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/1";
 /// Channel capacity for the send queue (one per connection)
 const SEND_QUEUE_CAP: usize = 256;
 /// Channel capacity for the ToActor message queue (single)
-const TO_ACTOR_CAP: usize = 64;
+const TO_ACTOR_CAP: usize = 128;
 /// Channel capacity for broadcast subscriber event queue (one per topic).
 /// This should match or exceed TOPIC_EVENTS_DEFAULT_CAP in api.rs
 const TOPIC_EVENT_CAP: usize = 2048;
@@ -261,7 +261,7 @@ impl Gossip {
 /// Channel capacity for received gossip messages
 const MSG_RX_CAP: usize = 2048;
 /// Max messages to drain per event loop tick (prevents starvation of other events)
-const MAX_MSGS_PER_TICK: usize = 64;
+const MAX_MSGS_PER_TICK: usize = 256;
 
 /// Actor that sends and handles messages between the connection and main state loops
 struct Actor {
@@ -1021,7 +1021,7 @@ const MAX_DIAL_RETRIES: usize = 2;
 /// Delay between dial retries
 const DIAL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
 /// Dial timeout
-const DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Channel capacity for dial requests
 const DIAL_REQUEST_CAP: usize = 64;
 
