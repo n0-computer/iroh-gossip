@@ -2236,7 +2236,6 @@ pub(crate) mod test {
     }
 
     #[tokio::test]
-    #[traced_test]
     async fn test_broadcast_4_nodes() -> Result {
         let mut mesh = TestMesh::new(4, 2).await?;
 
@@ -2257,7 +2256,6 @@ pub(crate) mod test {
     }
 
     #[tokio::test]
-    #[traced_test]
     async fn test_broadcast_10_nodes() -> Result {
         let mut mesh = TestMesh::new(10, 47).await?;
 
@@ -2279,7 +2277,6 @@ pub(crate) mod test {
 
     #[tokio::test]
     #[ignore = "often runs >60s and is flaky due to adverse test conditions"]
-    #[traced_test]
     async fn test_late_joiner_with_connection_stress() -> Result {
         let mut mesh = TestMesh::new(20, 9).await?;
         mesh.start_connection_flood(Duration::from_millis(50));
@@ -2307,7 +2304,6 @@ pub(crate) mod test {
     }
 
     #[tokio::test]
-    #[traced_test]
     async fn test_late_joiner() -> Result {
         let mut mesh = TestMesh::new(20, 10).await?;
         let sub_late = mesh.add_node().await?;
@@ -2334,7 +2330,6 @@ pub(crate) mod test {
 
     /// Test: Node crashes mid-broadcast, remaining nodes still receive messages
     #[tokio::test]
-    #[traced_test]
     async fn test_node_crash_mid_broadcast() -> Result {
         let mut mesh = TestMesh::new(10, 11).await?;
 
@@ -2363,7 +2358,6 @@ pub(crate) mod test {
 
     /// Test: Multi-origin simultaneous broadcast
     #[tokio::test]
-    #[traced_test]
     async fn test_multi_origin_broadcast() -> Result {
         let mut mesh = TestMesh::new(10, 12).await?;
 
@@ -2386,7 +2380,6 @@ pub(crate) mod test {
 
     /// Test: Rapid join/leave churn during broadcast
     #[tokio::test]
-    #[traced_test]
     async fn test_churn_during_broadcast() -> Result {
         let mut mesh = TestMesh::new(10, 13).await?;
 
@@ -2463,7 +2456,6 @@ pub(crate) mod test {
 
     /// Test: Bootstrap node loses all neighbors (isolation recovery)
     #[tokio::test]
-    #[traced_test]
     async fn test_bootstrap_isolation_recovery() -> Result {
         let mut mesh = TestMesh::new(6, 14).await?;
 
@@ -2521,7 +2513,6 @@ pub(crate) mod test {
 
     /// Test: Capacity boundary - exactly active_view_capacity nodes, then one more
     #[tokio::test]
-    #[traced_test]
     async fn test_capacity_boundary() -> Result {
         // Default active_view_capacity is 5, so 6 nodes means everyone is at capacity
         let mut mesh = TestMesh::new(6, 15).await?;
@@ -2555,7 +2546,6 @@ pub(crate) mod test {
 
     /// Test: Topic leave during broadcast
     #[tokio::test]
-    #[traced_test]
     async fn test_leave_during_broadcast() -> Result {
         let mut mesh = TestMesh::new(8, 16).await?;
 
@@ -2633,7 +2623,6 @@ pub(crate) mod test {
 
     /// Test: Rapid reconnection (node disconnects and reconnects quickly)
     #[tokio::test]
-    #[traced_test]
     async fn test_rapid_reconnect() -> Result {
         let mut mesh = TestMesh::new(6, 17).await?;
 
@@ -2673,7 +2662,6 @@ pub(crate) mod test {
 
     /// Test: Large mesh with high message volume
     #[tokio::test]
-    #[traced_test]
     async fn test_large_mesh_high_volume() -> Result {
         let mut mesh = TestMesh::new(15, 18).await?;
 
