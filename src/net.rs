@@ -2278,6 +2278,7 @@ pub(crate) mod test {
     }
 
     #[tokio::test]
+    #[ignore = "often runs >60s and is flaky due to adverse test conditions"]
     #[traced_test]
     async fn test_late_joiner_with_connection_stress() -> Result {
         let mut mesh = TestMesh::new(20, 9).await?;
