@@ -2150,6 +2150,14 @@ pub(crate) mod test {
             mut receivers: Vec<GossipReceiver>,
             cfg: DeliveryTestConfig,
         ) -> Result<()> {
+            // Wait for mesh stability - all receivers should have at least 2 neighbors
+            for rx in &mut receivers {
+                rx.wait_for_neighbors(2).await;
+            }
+            let neighbor_counts: Vec<_> =
+                receivers.iter().map(|rx| rx.neighbors().count()).collect();
+            info!(?neighbor_counts, "Mesh stabilized");
+
             let num_receivers = receivers.len();
             let expected_per_receiver = cfg.expected_per_receiver;
             let msg_delay = cfg.msg_delay;
@@ -2171,23 +2179,45 @@ pub(crate) mod test {
                 .collect();
 
             let recv_deadline = cfg.recv_deadline;
+            let global_threshold =
+                (num_receivers * expected_per_receiver * cfg.threshold_percent) / 100;
+            let global_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let early_exit = CancellationToken::new();
             let recv_handles: Vec<_> = receivers
                 .drain(..)
                 .map(|mut rx| {
+                    let global_count = global_count.clone();
+                    let early_exit = early_exit.clone();
                     spawn(async move {
                         let mut count = 0usize;
+                        let mut stall_count = 0usize;
                         let deadline = n0_future::time::Instant::now() + recv_deadline;
-                        while n0_future::time::Instant::now() < deadline {
+                        while n0_future::time::Instant::now() < deadline
+                            && !early_exit.is_cancelled()
+                        {
                             match timeout(Duration::from_millis(100), rx.next()).await {
                                 Ok(Some(Ok(Event::Received(_)))) => {
                                     count += 1;
+                                    stall_count = 0;
+                                    let total = global_count
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                                        + 1;
+                                    if total >= global_threshold {
+                                        early_exit.cancel();
+                                    }
                                     if count >= expected_per_receiver {
                                         break;
                                     }
                                 }
                                 Ok(Some(Ok(_))) => {}
                                 Ok(Some(Err(_))) | Ok(None) => break,
-                                Err(_) => {}
+                                Err(_) => {
+                                    stall_count += 1;
+                                    // Exit if stalled for 2s after global threshold met
+                                    if early_exit.is_cancelled() && stall_count >= 20 {
+                                        break;
+                                    }
+                                }
                             }
                         }
                         count
@@ -2212,9 +2242,11 @@ pub(crate) mod test {
             let total_expected = num_receivers * expected_per_receiver;
             let threshold = (total_expected * cfg.threshold_percent) / 100;
 
+            let min_recv = received_counts.iter().min().copied().unwrap_or(0);
+            let max_recv = received_counts.iter().max().copied().unwrap_or(0);
             info!(
                 total_received,
-                total_expected, threshold, "Delivery results"
+                total_expected, threshold, min_recv, max_recv, "Delivery results"
             );
 
             assert!(
@@ -2307,10 +2339,16 @@ pub(crate) mod test {
     async fn test_late_joiner() -> Result {
         let mut mesh = TestMesh::new(20, 10).await?;
         let sub_late = mesh.add_node().await?;
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        let (tx_late, mut rx_late) = sub_late.split();
+
+        // Wait for late joiner to have minimum mesh connectivity
+        rx_late.wait_for_neighbors(2).await;
+        info!(
+            neighbors = rx_late.neighbors().count(),
+            "Late joiner mesh stabilized"
+        );
 
         let (senders, drains) = mesh.drain_as_senders();
-        let (tx_late, rx_late) = sub_late.split();
 
         let cfg = DeliveryTestConfig {
             msgs_per_node: 50,
