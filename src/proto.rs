@@ -60,7 +60,7 @@ pub mod util;
 pub mod sim;
 
 pub use hyparview::Config as HyparviewConfig;
-pub use plumtree::{Config as PlumtreeConfig, DeliveryScope, Scope};
+pub use plumtree::{Config as PlumtreeConfig, DeliveryScope, PruneMode, Scope};
 pub use state::{InEvent, Message, OutEvent, State, Timer, TopicId};
 pub use topic::{Command, Config, Event, IO};
 
