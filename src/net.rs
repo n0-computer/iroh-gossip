@@ -1877,4 +1877,71 @@ pub(crate) mod test {
         out.sort();
         out
     }
+
+    /// Test that dropping sender doesn't close topic while receiver is still listening.
+    ///
+    /// This is a common footgun: users split a GossipTopic, drop the sender early,
+    /// and expect the receiver to keep working. With the bug (using && in still_needed),
+    /// the topic closes immediately when sender is dropped.
+    #[tokio::test]
+    #[traced_test]
+    async fn topic_stays_alive_after_sender_drop() -> n0_error::Result<()> {
+        let topic_id = TopicId::from([99u8; 32]);
+
+        let ep1 = Endpoint::empty_builder(RelayMode::Disabled).bind().await?;
+        let ep2 = Endpoint::empty_builder(RelayMode::Disabled).bind().await?;
+        let gossip1 = Gossip::builder().spawn(ep1.clone());
+        let gossip2 = Gossip::builder().spawn(ep2.clone());
+        let router1 = Router::builder(ep1)
+            .accept(crate::ALPN, gossip1.clone())
+            .spawn();
+        let router2 = Router::builder(ep2)
+            .accept(crate::ALPN, gossip2.clone())
+            .spawn();
+
+        let addr1 = router1.endpoint().addr();
+        let id1 = addr1.id;
+        let static_provider = StaticProvider::new();
+        static_provider.add_endpoint_info(addr1);
+        router2.endpoint().discovery().add(static_provider);
+
+        let topic1 = gossip1.subscribe(topic_id, vec![]).await?;
+        let topic2 = gossip2.subscribe(topic_id, vec![id1]).await?;
+
+        let (tx1, mut rx1) = topic1.split();
+        let (tx2, mut rx2) = topic2.split();
+
+        // Wait for mesh to form
+        timeout(Duration::from_secs(3), rx1.joined())
+            .await
+            .std_context("wait rx1 join")??;
+        timeout(Duration::from_secs(3), rx2.joined())
+            .await
+            .std_context("wait rx2 join")??;
+
+        // Node 1 drops its sender - simulating the footgun where user drops sender early
+        drop(tx1);
+
+        // Node 2 sends a message - receiver on node 1 should still get it
+        tx2.broadcast(b"hello from node2".to_vec().into()).await?;
+
+        // Node 1's receiver should still work and receive the message
+        let event = timeout(Duration::from_secs(3), rx1.next())
+            .await
+            .std_context("wait for message on rx1")?;
+
+        match event {
+            Some(Ok(Event::Received(msg))) => {
+                assert_eq!(&msg.content[..], b"hello from node2");
+            }
+            other => panic!("expected Received event, got {:?}", other),
+        }
+
+        drop(tx2);
+        drop(rx1);
+        drop(rx2);
+        router1.shutdown().await.std_context("shutdown router1")?;
+        router2.shutdown().await.std_context("shutdown router2")?;
+        Ok(())
+    }
 }
