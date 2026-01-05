@@ -763,3 +763,72 @@ enum RemovalReason {
     /// A peer is removed after random selection to make room for a newly joined peer.
     Random,
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use rand::SeedableRng;
+
+    use super::*;
+    use crate::proto::topic::{Message as TopicMessage, OutEvent as TopicOutEvent};
+
+    type TestIO = VecDeque<TopicOutEvent<u32>>;
+
+    fn is_neighbor_message(e: &TopicOutEvent<u32>) -> bool {
+        matches!(e, TopicOutEvent::SendMessage(_, TopicMessage::Swarm(Message::Neighbor(_))))
+    }
+
+    fn test_state() -> State<u32, rand::rngs::StdRng> {
+        let config = Config::default();
+        let rng = rand::rngs::StdRng::seed_from_u64(42);
+        State::new(1, None, config, rng)
+    }
+
+    #[test]
+    fn test_pending_cleared_on_disconnect() {
+        let mut state = test_state();
+        let mut io: TestIO = VecDeque::new();
+
+        // Manually add peer 2 to pending_neighbor_requests (simulating we sent them a Neighbor)
+        state.pending_neighbor_requests.insert(2);
+        assert!(state.pending_neighbor_requests.contains(&2));
+
+        // Also add to active view so send_disconnect path is exercised
+        state.active_view.insert(2);
+
+        // Remove from active view which calls send_disconnect
+        state.remove_active(&2, RemovalReason::Random, &mut io);
+
+        // Pending should be cleared - this ensures future Neighbor messages from
+        // this peer are treated as new requests, not replies
+        assert!(
+            !state.pending_neighbor_requests.contains(&2),
+            "pending_neighbor_requests should be cleared on disconnect"
+        );
+    }
+
+    #[test]
+    fn test_aggressive_refill_when_isolated() {
+        let mut state = test_state();
+        let mut io: TestIO = VecDeque::new();
+
+        // Active view is empty (isolated)
+        assert!(state.active_view.is_empty());
+
+        // Add 5 peers to passive view
+        for i in 10..15 {
+            state.passive_view.insert(i);
+        }
+
+        // Trigger refill
+        state.refill_active_from_passive(&[], &mut io);
+
+        // When isolated, should send multiple Neighbor requests to recover faster
+        let neighbor_count = io.iter().filter(|e| is_neighbor_message(e)).count();
+        assert!(
+            neighbor_count >= 2,
+            "should send multiple Neighbor requests when isolated, got {neighbor_count}"
+        );
+    }
+}
