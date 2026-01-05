@@ -818,7 +818,9 @@ impl Default for TopicState {
 impl TopicState {
     /// Check if the topic still has any publisher or subscriber.
     fn still_needed(&self) -> bool {
-        !self.command_rx_keys.is_empty() && self.event_sender.receiver_count() > 0
+        // Keep topic alive if either senders or receivers exist.
+        // Using || prevents topic closure when senders are dropped while receivers listen.
+        !self.command_rx_keys.is_empty() || self.event_sender.receiver_count() > 0
     }
 
     #[cfg(test)]
