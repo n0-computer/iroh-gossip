@@ -46,13 +46,12 @@ mod util;
 pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/1";
 
 /// Channel capacity for the send queue (one per connection)
-const SEND_QUEUE_CAP: usize = 64;
+const SEND_QUEUE_CAP: usize = 256;
 /// Channel capacity for the ToActor message queue (single)
 const TO_ACTOR_CAP: usize = 64;
-/// Channel capacity for the InEvent message queue (single)
-const IN_EVENT_CAP: usize = 1024;
-/// Channel capacity for broadcast subscriber event queue (one per topic)
-const TOPIC_EVENT_CAP: usize = 256;
+/// Channel capacity for broadcast subscriber event queue (one per topic).
+/// This should match or exceed TOPIC_EVENTS_DEFAULT_CAP in api.rs
+const TOPIC_EVENT_CAP: usize = 2048;
 
 /// Events emitted from the gossip protocol
 pub type ProtoEvent = proto::Event<PublicKey>;
@@ -259,22 +258,28 @@ impl Gossip {
     }
 }
 
+/// Channel capacity for received gossip messages
+const MSG_RX_CAP: usize = 2048;
+/// Max messages to drain per event loop tick (prevents starvation of other events)
+const MAX_MSGS_PER_TICK: usize = 64;
+
 /// Actor that sends and handles messages between the connection and main state loops
 struct Actor {
-    alpn: Bytes,
     /// Protocol state
     state: proto::State<PublicKey, StdRng>,
     /// The endpoint through which we dial peers
     endpoint: Endpoint,
-    /// Dial machine to connect to peers
-    dialer: Dialer,
+    /// Handle to send dial requests to the dialer task
+    dialer: DialerHandle,
+    /// Receiver for successful dial connections from dialer task
+    dial_success_rx: mpsc::Receiver<(EndpointId, Connection)>,
     /// Input messages to the actor
     rpc_rx: mpsc::Receiver<RpcMessage>,
     local_rx: mpsc::Receiver<LocalActorMessage>,
     /// Sender for the state input (cloned into the connection loops)
-    in_event_tx: mpsc::Sender<InEvent>,
+    msg_tx: mpsc::Sender<(EndpointId, ProtoMessage)>,
     /// Input events to the state (emitted from the connection loops)
-    in_event_rx: mpsc::Receiver<InEvent>,
+    msg_rx: mpsc::Receiver<(EndpointId, ProtoMessage)>,
     /// Queued timers
     timers: Timers<Timer>,
     /// Map of topics to their state.
@@ -290,6 +295,8 @@ struct Actor {
     metrics: Arc<Metrics>,
     topic_event_forwarders: JoinSet<TopicId>,
     discovery: GossipDiscovery,
+    /// Cancellation token for graceful shutdown of background tasks
+    cancel: CancellationToken,
 }
 
 impl Actor {
@@ -305,7 +312,11 @@ impl Actor {
         mpsc::Sender<LocalActorMessage>,
     ) {
         let peer_id = endpoint.id();
-        let dialer = Dialer::new(endpoint.clone());
+        let alpn = alpn.unwrap_or_else(|| GOSSIP_ALPN.to_vec().into());
+        let cancel = CancellationToken::new();
+
+        let (dialer, dial_success_rx) = DialerTask::spawn(endpoint.clone(), alpn, cancel.clone());
+
         let state = proto::State::new(
             peer_id,
             Default::default(),
@@ -314,16 +325,16 @@ impl Actor {
         );
         let (rpc_tx, rpc_rx) = mpsc::channel(TO_ACTOR_CAP);
         let (local_tx, local_rx) = mpsc::channel(16);
-        let (in_event_tx, in_event_rx) = mpsc::channel(IN_EVENT_CAP);
+        let (msg_tx, msg_rx) = mpsc::channel(MSG_RX_CAP);
 
         let actor = Actor {
-            alpn: alpn.unwrap_or_else(|| GOSSIP_ALPN.to_vec().into()),
             endpoint,
             state,
             dialer,
+            dial_success_rx,
             rpc_rx,
-            in_event_rx,
-            in_event_tx,
+            msg_tx,
+            msg_rx,
             timers: Timers::new(),
             command_rx: StreamGroup::new().keyed(),
             peers: Default::default(),
@@ -334,13 +345,14 @@ impl Actor {
             local_rx,
             topic_event_forwarders: Default::default(),
             discovery,
+            cancel,
         };
 
         (actor, rpc_tx, local_tx)
     }
 
     pub async fn run(mut self) {
-        let mut addr_update_stream = self.setup().await;
+        let mut addr_update_stream = self.setup();
 
         let mut i = 0;
         while self.event_loop(&mut addr_update_stream, i).await {
@@ -352,10 +364,10 @@ impl Actor {
     ///
     /// This updates our current address and return it. It also returns the home relay stream and
     /// direct addr stream.
-    async fn setup(&mut self) -> impl Stream<Item = EndpointAddr> + Send + Unpin + use<> {
+    fn setup(&mut self) -> impl Stream<Item = EndpointAddr> + Send + Unpin + use<> {
         let addr_update_stream = self.endpoint.watch_addr().stream();
         let initial_addr = self.endpoint.addr();
-        self.handle_addr_update(initial_addr).await;
+        self.handle_addr_update(initial_addr);
         addr_update_stream
     }
 
@@ -374,8 +386,9 @@ impl Actor {
                 match conn {
                     Some(LocalActorMessage::Shutdown { reply }) => {
                         debug!("received shutdown message, quit all topics");
+                        self.cancel.cancel();
                         self.quit_queue.extend(self.topics.keys().copied());
-                        self.process_quit_queue().await;
+                        self.process_quit_queue();
                         debug!("all topics quit, stop gossip actor");
                         reply.send(()).ok();
                         return false;
@@ -385,7 +398,23 @@ impl Actor {
                     }
                     None => {
                         debug!("all gossip handles dropped, stop gossip actor");
+                        self.cancel.cancel();
                         return false;
+                    }
+                }
+            }
+            Some((peer_id, msg)) = self.msg_rx.recv() => {
+                trace!(?i, "tick: msg_rx");
+                self.metrics.actor_tick_in_event_rx.inc();
+                let now = Instant::now();
+                self.handle_in_event(InEvent::RecvMessage(peer_id, msg), now);
+                // Drain additional messages up to limit to reduce context switches
+                for _ in 1..MAX_MSGS_PER_TICK {
+                    match self.msg_rx.try_recv() {
+                        Ok((peer_id, msg)) => {
+                            self.handle_in_event(InEvent::RecvMessage(peer_id, msg), now);
+                        }
+                        Err(_) => break,
                     }
                 }
             }
@@ -398,57 +427,33 @@ impl Actor {
                     }
                     None => {
                         debug!("all gossip handles dropped, stop gossip actor");
+                        self.cancel.cancel();
                         return false;
                     }
                 }
             },
-            Some((key, (topic, command))) = self.command_rx.next(), if !self.command_rx.is_empty() => {
-                trace!(?i, "tick: command_rx");
-                self.handle_command(topic, key, command).await;
-            },
-            Some(new_address) = addr_updates.next() => {
-                trace!(?i, "tick: new_address");
-                self.metrics.actor_tick_endpoint.inc();
-                self.handle_addr_update(new_address).await;
-            }
-            (peer_id, res) = self.dialer.next_conn() => {
-                trace!(?i, "tick: dialer");
-                self.metrics.actor_tick_dialer.inc();
-                match res {
-                    Some(Ok(conn)) => {
-                        debug!(peer = %peer_id.fmt_short(), "dial successful");
-                        self.metrics.actor_tick_dialer_success.inc();
-                        self.handle_connection(peer_id, ConnOrigin::Dial, conn);
-                    }
-                    Some(Err(err)) => {
-                        warn!(peer = %peer_id.fmt_short(), "dial failed: {err}");
-                        self.metrics.actor_tick_dialer_failure.inc();
-                        let peer_state = self.peers.get(&peer_id);
-                        let is_active = matches!(peer_state, Some(PeerState::Active { .. }));
-                        if !is_active {
-                            self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
-                                .await;
-                        }
-                    }
-                    None => {
-                        warn!(peer = %peer_id.fmt_short(), "dial disconnected");
-                        self.metrics.actor_tick_dialer_failure.inc();
-                    }
-                }
-            }
-            event = self.in_event_rx.recv() => {
-                trace!(?i, "tick: in_event_rx");
-                self.metrics.actor_tick_in_event_rx.inc();
-                let event = event.expect("unreachable: in_event_tx is never dropped before receiver");
-                self.handle_in_event(event, Instant::now()).await;
-            }
             _ = self.timers.wait_next() => {
                 trace!(?i, "tick: timers");
                 self.metrics.actor_tick_timers.inc();
                 let now = Instant::now();
                 while let Some((_instant, timer)) = self.timers.pop_before(now) {
-                    self.handle_in_event(InEvent::TimerExpired(timer), now).await;
+                    self.handle_in_event(InEvent::TimerExpired(timer), now);
                 }
+            }
+            Some((key, (topic, command))) = self.command_rx.next(), if !self.command_rx.is_empty() => {
+                trace!(?i, "tick: command_rx");
+                self.handle_command(topic, key, command);
+            },
+            Some(new_address) = addr_updates.next() => {
+                trace!(?i, "tick: new_address");
+                self.metrics.actor_tick_endpoint.inc();
+                self.handle_addr_update(new_address);
+            }
+            Some((peer_id, conn)) = self.dial_success_rx.recv() => {
+                debug!(peer = %peer_id.fmt_short(), "dial successful");
+                self.metrics.actor_tick_dialer.inc();
+                self.metrics.actor_tick_dialer_success.inc();
+                self.handle_connection(peer_id, ConnOrigin::Dial, conn);
             }
             Some(res) = self.connection_tasks.join_next(), if !self.connection_tasks.is_empty() => {
                 trace!(?i, "tick: connection_tasks");
@@ -458,9 +463,13 @@ impl Actor {
             Some(res) = self.topic_event_forwarders.join_next(), if !self.topic_event_forwarders.is_empty() => {
                 let topic_id = res.expect("topic event forwarder panicked");
                 if let Some(state) = self.topics.get_mut(&topic_id) {
-                    if !state.still_needed() {
+                    let cmd_keys = state.command_rx_keys.len();
+                    let recv_count = state.event_sender.receiver_count();
+                    let needed = state.still_needed();
+                    debug!(%topic_id, %cmd_keys, %recv_count, %needed, "topic_event_forwarder finished");
+                    if !needed {
                         self.quit_queue.push_back(topic_id);
-                        self.process_quit_queue().await;
+                        self.process_quit_queue();
                     }
                 }
             }
@@ -469,19 +478,12 @@ impl Actor {
         true
     }
 
-    async fn handle_addr_update(&mut self, endpoint_addr: EndpointAddr) {
-        // let peer_data = our_peer_data(&self.endpoint, current_addresses);
+    fn handle_addr_update(&mut self, endpoint_addr: EndpointAddr) {
         let peer_data = encode_peer_data(&endpoint_addr.into());
-        self.handle_in_event(InEvent::UpdatePeerData(peer_data), Instant::now())
-            .await
+        self.handle_in_event(InEvent::UpdatePeerData(peer_data), Instant::now());
     }
 
-    async fn handle_command(
-        &mut self,
-        topic: TopicId,
-        key: stream_group::Key,
-        command: Option<Command>,
-    ) {
+    fn handle_command(&mut self, topic: TopicId, key: stream_group::Key, command: Option<Command>) {
         debug!(?topic, ?key, ?command, "handle command");
         let Some(state) = self.topics.get_mut(&topic) else {
             // TODO: unreachable?
@@ -497,14 +499,17 @@ impl Actor {
                     }
                     Command::JoinPeers(peers) => ProtoCommand::Join(peers),
                 };
-                self.handle_in_event(proto::InEvent::Command(topic, command), Instant::now())
-                    .await;
+                self.handle_in_event(proto::InEvent::Command(topic, command), Instant::now());
             }
             None => {
                 state.command_rx_keys.remove(&key);
-                if !state.still_needed() {
+                let cmd_keys = state.command_rx_keys.len();
+                let recv_count = state.event_sender.receiver_count();
+                let needed = state.still_needed();
+                debug!(%topic, %cmd_keys, %recv_count, %needed, "command stream ended");
+                if !needed {
                     self.quit_queue.push_back(topic);
-                    self.process_quit_queue().await;
+                    self.process_quit_queue();
                 }
             }
         }
@@ -527,7 +532,7 @@ impl Actor {
         };
 
         let max_message_size = self.state.max_message_size();
-        let in_event_tx = self.in_event_tx.clone();
+        let msg_tx = self.msg_tx.clone();
 
         // Spawn a task for this connection
         self.connection_tasks.spawn(
@@ -537,7 +542,7 @@ impl Actor {
                     conn.clone(),
                     origin,
                     send_rx,
-                    in_event_tx,
+                    msg_tx,
                     max_message_size,
                     queue,
                 )
@@ -569,8 +574,7 @@ impl Actor {
         {
             if conn.stable_id() == *active_conn_id {
                 debug!("active send connection closed, mark peer as disconnected");
-                self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
-                    .await;
+                self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now());
             } else {
                 other_conns.retain(|x| *x != conn.stable_id());
                 debug!("remaining {} other connections", other_conns.len() + 1);
@@ -599,6 +603,7 @@ impl Actor {
                     neighbors,
                     event_sender,
                     command_rx_keys,
+                    ..
                 } = self.topics.entry(topic_id).or_default();
                 let mut sender_dead = false;
                 if !neighbors.is_empty() {
@@ -611,8 +616,10 @@ impl Actor {
                 }
 
                 if !sender_dead {
-                    let fut =
-                        topic_subscriber_loop(tx, event_sender.subscribe()).map(move |_| topic_id);
+                    let receiver = event_sender.subscribe();
+                    let recv_count = event_sender.receiver_count();
+                    debug!(%topic_id, %recv_count, "created topic subscriber");
+                    let fut = topic_subscriber_loop(tx, receiver).map(move |_| topic_id);
                     self.topic_event_forwarders
                         .spawn(fut.instrument(tracing::Span::current()));
                 }
@@ -626,31 +633,29 @@ impl Actor {
                         ProtoCommand::Join(bootstrap.into_iter().collect()),
                     ),
                     now,
-                )
-                .await;
+                );
             }
         }
     }
 
-    async fn handle_in_event(&mut self, event: InEvent, now: Instant) {
-        self.handle_in_event_inner(event, now).await;
-        self.process_quit_queue().await;
+    fn handle_in_event(&mut self, event: InEvent, now: Instant) {
+        self.handle_in_event_inner(event, now);
+        self.process_quit_queue();
     }
 
-    async fn process_quit_queue(&mut self) {
+    fn process_quit_queue(&mut self) {
         while let Some(topic_id) = self.quit_queue.pop_front() {
             self.handle_in_event_inner(
                 InEvent::Command(topic_id, ProtoCommand::Quit),
                 Instant::now(),
-            )
-            .await;
+            );
             if self.topics.remove(&topic_id).is_some() {
                 tracing::debug!(%topic_id, "publishers and subscribers gone; unsubscribing");
             }
         }
     }
 
-    async fn handle_in_event_inner(&mut self, event: InEvent, now: Instant) {
+    fn handle_in_event_inner(&mut self, event: InEvent, now: Instant) {
         if matches!(event, InEvent::TimerExpired(_)) {
             trace!(?event, "handle in_event");
         } else {
@@ -668,19 +673,26 @@ impl Actor {
                     let state = self.peers.entry(peer_id).or_default();
                     match state {
                         PeerState::Active { active_send_tx, .. } => {
-                            if let Err(_err) = active_send_tx.send(message).await {
-                                // Removing the peer is handled by the in_event PeerDisconnected sent
-                                // in [`Self::handle_connection_task_finished`].
-                                warn!(
-                                    peer = %peer_id.fmt_short(),
-                                    "failed to send: connection task send loop terminated",
-                                );
+                            use tokio::sync::mpsc::error::TrySendError;
+                            match active_send_tx.try_send(message) {
+                                Ok(()) => {}
+                                Err(TrySendError::Full(_)) => {
+                                    debug!(peer = %peer_id.fmt_short(), "send queue full, dropping message");
+                                }
+                                Err(TrySendError::Closed(_)) => {
+                                    // Removing the peer is handled by the in_event PeerDisconnected sent
+                                    // in [`Self::handle_connection_task_finished`].
+                                    warn!(
+                                        peer = %peer_id.fmt_short(),
+                                        "failed to send: connection task send loop terminated",
+                                    );
+                                }
                             }
                         }
                         PeerState::Pending { queue } => {
                             if queue.is_empty() {
                                 debug!(peer = %peer_id.fmt_short(), "start to dial");
-                                self.dialer.queue_dial(peer_id, self.alpn.clone());
+                                self.dialer.queue_dial(peer_id);
                             }
                             queue.push(message);
                         }
@@ -706,7 +718,16 @@ impl Actor {
                         }
                         _ => {}
                     }
-                    event_sender.send(event).ok();
+                    match event_sender.send(event) {
+                        Ok(0) => {
+                            debug!(%topic_id, "event sent but no receivers");
+                        }
+                        Ok(_n) => {}
+                        Err(err) => {
+                            debug!(%topic_id, ?err, "event dropped: send failed");
+                        }
+                    }
+
                     if !state.still_needed() {
                         self.quit_queue.push_back(topic_id);
                     }
@@ -819,7 +840,6 @@ impl TopicState {
     /// Check if the topic still has any publisher or subscriber.
     fn still_needed(&self) -> bool {
         // Keep topic alive if either senders or receivers exist.
-        // Using || prevents topic closure when senders are dropped while receivers listen.
         !self.command_rx_keys.is_empty() || self.event_sender.receiver_count() > 0
     }
 
@@ -867,14 +887,14 @@ async fn connection_loop(
     conn: Connection,
     origin: ConnOrigin,
     send_rx: mpsc::Receiver<ProtoMessage>,
-    in_event_tx: mpsc::Sender<InEvent>,
+    msg_tx: mpsc::Sender<(EndpointId, ProtoMessage)>,
     max_message_size: usize,
     queue: Vec<ProtoMessage>,
 ) -> Result<(), ConnectionLoopError> {
     debug!(?origin, "connection established");
 
     let mut send_loop = SendLoop::new(conn.clone(), send_rx, max_message_size);
-    let mut recv_loop = RecvLoop::new(from, conn, in_event_tx, max_message_size);
+    let mut recv_loop = RecvLoop::new(from, conn, msg_tx, max_message_size);
 
     let send_fut = send_loop.run(queue).instrument(error_span!("send"));
     let recv_fut = recv_loop.run().instrument(error_span!("recv"));
@@ -920,18 +940,28 @@ async fn topic_subscriber_loop(
 ) {
     loop {
         tokio::select! {
-           biased;
-           msg = topic_events.recv() => {
-               let event = match msg {
-                   Err(broadcast::error::RecvError::Closed) => break,
-                   Err(broadcast::error::RecvError::Lagged(_)) => Event::Lagged,
-                   Ok(event) => event.into(),
-               };
-               if sender.send(event).await.is_err() {
-                   break;
-               }
-           }
-           _ = sender.closed() => break,
+            biased;
+            msg = topic_events.recv() => {
+                let event = match msg {
+                    Err(broadcast::error::RecvError::Closed) => {
+                        debug!("topic_subscriber_loop: broadcast closed");
+                        break;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        debug!(n, "topic_subscriber_loop: lagged, missed messages");
+                        Event::Lagged
+                    }
+                    Ok(event) => event.into(),
+                };
+                if sender.send(event).await.is_err() {
+                    debug!("topic_subscriber_loop: send failed, receiver closed");
+                    break;
+                }
+            }
+            _ = sender.closed() => {
+                debug!("topic_subscriber_loop: receiver closed");
+                break;
+            }
         }
     }
 }
@@ -966,7 +996,13 @@ impl Stream for TopicCommandStream {
         }
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Ready(Some(Ok(item))) => Poll::Ready(Some((self.topic_id, Some(item)))),
-            Poll::Ready(None) | Poll::Ready(Some(Err(_))) => {
+            Poll::Ready(None) => {
+                debug!(topic_id = %self.topic_id, "command stream closed: sender dropped");
+                self.closed = true;
+                Poll::Ready(Some((self.topic_id, None)))
+            }
+            Poll::Ready(Some(Err(err))) => {
+                warn!(topic_id = %self.topic_id, ?err, "command stream error");
                 self.closed = true;
                 Poll::Ready(Some((self.topic_id, None)))
             }
@@ -975,82 +1011,159 @@ impl Stream for TopicCommandStream {
     }
 }
 
-#[derive(Debug)]
-struct Dialer {
-    endpoint: Endpoint,
-    pending: JoinSet<(
-        EndpointId,
-        Option<Result<Connection, iroh::endpoint::ConnectError>>,
-    )>,
-    pending_dials: HashMap<EndpointId, CancellationToken>,
+/// Maximum concurrent dial attempts - needs to be high enough to establish mesh quickly
+const MAX_CONCURRENT_DIALS: usize = 8;
+/// Maximum retry attempts for failed dials
+const MAX_DIAL_RETRIES: usize = 2;
+/// Delay between dial retries
+const DIAL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+/// Dial timeout
+const DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// Channel capacity for dial requests
+const DIAL_REQUEST_CAP: usize = 64;
+
+#[derive(Debug, Clone)]
+struct DialerHandle {
+    request_tx: mpsc::Sender<EndpointId>,
 }
 
-impl Dialer {
+impl DialerHandle {
+    fn queue_dial(&self, endpoint_id: EndpointId) {
+        // Non-blocking send - if channel is full, dial request is dropped
+        if self.request_tx.try_send(endpoint_id).is_err() {
+            trace!(peer = %endpoint_id.fmt_short(), "dial request dropped (queue full)");
+        }
+    }
+}
+
+/// Dialer runs as a separate task, completely isolated from main actor
+struct DialerTask {
+    endpoint: Endpoint,
+    alpn: Bytes,
+    request_rx: mpsc::Receiver<EndpointId>,
+    success_tx: mpsc::Sender<(EndpointId, Connection)>,
+    pending: JoinSet<(EndpointId, Option<Connection>)>,
+    pending_dials: HashMap<EndpointId, CancellationToken>,
+    cancel: CancellationToken,
+}
+
+impl DialerTask {
     /// Create a new dialer for a [`Endpoint`]
-    fn new(endpoint: Endpoint) -> Self {
-        Self {
+    fn spawn(
+        endpoint: Endpoint,
+        alpn: Bytes,
+        cancel: CancellationToken,
+    ) -> (DialerHandle, mpsc::Receiver<(EndpointId, Connection)>) {
+        let (request_tx, request_rx) = mpsc::channel(DIAL_REQUEST_CAP);
+        let (success_tx, success_rx) = mpsc::channel(32);
+
+        let task = Self {
             endpoint,
+            alpn,
+            request_rx,
+            success_tx,
             pending: Default::default(),
             pending_dials: Default::default(),
+            cancel,
+        };
+
+        tokio::spawn(task.run().instrument(error_span!("dialer")));
+
+        (DialerHandle { request_tx }, success_rx)
+    }
+
+    async fn run(mut self) {
+        loop {
+            tokio::select! {
+                biased;
+                _ = self.cancel.cancelled() => {
+                    debug!("dialer shutting down");
+                    break;
+                }
+                Some(endpoint_id) = self.request_rx.recv() => {
+                    self.start_dial(endpoint_id);
+                }
+                Some(result) = self.pending.join_next(), if !self.pending.is_empty() => {
+                    match result {
+                        Ok((endpoint_id, Some(conn))) => {
+                            self.pending_dials.remove(&endpoint_id);
+                            if self.success_tx.send((endpoint_id, conn)).await.is_err() {
+                                debug!("dialer success channel closed");
+                                break;
+                            }
+                        }
+                        Ok((endpoint_id, None)) => {
+                            self.pending_dials.remove(&endpoint_id);
+                        }
+                        Err(e) => {
+                            error!("dial task panicked: {:?}", e);
+                        }
+                    }
+                }
+            }
         }
     }
 
     /// Starts to dial a endpoint by [`EndpointId`].
-    fn queue_dial(&mut self, endpoint_id: EndpointId, alpn: Bytes) {
-        if self.is_pending(endpoint_id) {
+    fn start_dial(&mut self, endpoint_id: EndpointId) {
+        if self.pending_dials.contains_key(&endpoint_id) {
             return;
         }
+
+        let delay = if self.pending_dials.len() >= MAX_CONCURRENT_DIALS {
+            std::time::Duration::from_secs(1)
+        } else {
+            std::time::Duration::ZERO
+        };
+
         let cancel = CancellationToken::new();
         self.pending_dials.insert(endpoint_id, cancel.clone());
         let endpoint = self.endpoint.clone();
-        self.pending.spawn(
-            async move {
+        let alpn = self.alpn.clone();
+        let parent_cancel = self.cancel.clone();
+
+        self.pending.spawn(async move {
+            if !delay.is_zero() {
+                n0_future::time::sleep(delay).await;
+            }
+
+            for attempt in 0..MAX_DIAL_RETRIES {
+                if cancel.is_cancelled() || parent_cancel.is_cancelled() {
+                    return (endpoint_id, None);
+                }
+
                 let res = tokio::select! {
                     biased;
-                    _ = cancel.cancelled() => None,
-                    res = endpoint.connect(endpoint_id, &alpn) => Some(res),
+                    _ = cancel.cancelled() => return (endpoint_id, None),
+                    _ = parent_cancel.cancelled() => return (endpoint_id, None),
+                    res = n0_future::time::timeout(DIAL_TIMEOUT, endpoint.connect(endpoint_id, &alpn)) => res,
                 };
-                (endpoint_id, res)
-            }
-            .instrument(tracing::Span::current()),
-        );
-    }
 
-    /// Checks if a endpoint is currently being dialed.
-    fn is_pending(&self, endpoint: EndpointId) -> bool {
-        self.pending_dials.contains_key(&endpoint)
-    }
-
-    /// Waits for the next dial operation to complete.
-    /// `None` means disconnected
-    async fn next_conn(
-        &mut self,
-    ) -> (
-        EndpointId,
-        Option<Result<Connection, iroh::endpoint::ConnectError>>,
-    ) {
-        match self.pending_dials.is_empty() {
-            false => {
-                let (endpoint_id, res) = loop {
-                    match self.pending.join_next().await {
-                        Some(Ok((endpoint_id, res))) => {
-                            self.pending_dials.remove(&endpoint_id);
-                            break (endpoint_id, res);
-                        }
-                        Some(Err(e)) => {
-                            error!("next conn error: {:?}", e);
-                        }
-                        None => {
-                            error!("no more pending conns available");
-                            std::future::pending().await
+                match res {
+                    Ok(Ok(conn)) => {
+                        debug!(peer = %endpoint_id.fmt_short(), "dial successful");
+                        return (endpoint_id, Some(conn));
+                    }
+                    Ok(Err(err)) => {
+                        if attempt < MAX_DIAL_RETRIES - 1 {
+                            trace!(peer = %endpoint_id.fmt_short(), attempt, "dial failed, retrying: {err}");
+                            n0_future::time::sleep(DIAL_RETRY_DELAY).await;
+                        } else {
+                            debug!(peer = %endpoint_id.fmt_short(), "dial failed after retries: {err}");
                         }
                     }
-                };
-
-                (endpoint_id, res)
+                    Err(_elapsed) => {
+                        if attempt < MAX_DIAL_RETRIES - 1 {
+                            trace!(peer = %endpoint_id.fmt_short(), attempt, "dial timeout, retrying");
+                            n0_future::time::sleep(DIAL_RETRY_DELAY).await;
+                        } else {
+                            debug!(peer = %endpoint_id.fmt_short(), "dial timeout after retries");
+                        }
+                    }
+                }
             }
-            true => std::future::pending().await,
-        }
+            (endpoint_id, None)
+        });
     }
 }
 
@@ -1062,7 +1175,7 @@ pub(crate) mod test {
     use futures_concurrency::future::TryJoin;
     use iroh::{
         discovery::static_provider::StaticProvider, endpoint::BindError, protocol::Router,
-        RelayMap, RelayMode, SecretKey,
+        EndpointAddr, RelayMap, RelayMode, SecretKey,
     };
     use n0_error::{AnyError, Result, StdResultExt};
     use rand::{CryptoRng, Rng};
@@ -1098,7 +1211,7 @@ pub(crate) mod test {
     impl ManualActorLoop {
         #[instrument(skip_all, fields(me = %actor.endpoint.id().fmt_short()))]
         async fn new(mut actor: Actor) -> Self {
-            let _ = actor.setup().await;
+            let _ = actor.setup();
             Self { actor, step: 0 }
         }
 
@@ -1208,10 +1321,24 @@ pub(crate) mod test {
         gossip: Gossip,
         cancel: CancellationToken,
     ) -> Result<()> {
+        let mut pending_conns = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => break,
+                // Handle completed connection handshakes
+                Some(res) = pending_conns.join_next(), if !pending_conns.is_empty() => {
+                    match res {
+                        Ok(Ok(conn)) => {
+                            if let Err(e) = gossip.handle_connection(conn).await {
+                                debug!("handle_connection error: {e:#}");
+                            }
+                        }
+                        Ok(Err(e)) => debug!("connection handshake failed: {e:#}"),
+                        Err(e) => debug!("connection task panicked: {e:#}"),
+                    }
+                }
+                // Accept new incoming connections
                 incoming = endpoint.accept() => match incoming {
                     None => break,
                     Some(incoming) => {
@@ -1224,10 +1351,10 @@ pub(crate) mod test {
                                 continue;
                             }
                         };
-                        let connection = connecting
-                            .await
-                            .std_context("await incoming connection")?;
-                        gossip.handle_connection(connection).await?
+                        // Spawn handshake so we can continue accepting
+                        pending_conns.spawn(async move {
+                            connecting.await.std_context("await incoming connection")
+                        });
                     }
                 }
             }
@@ -1879,7 +2006,6 @@ pub(crate) mod test {
         out.sort();
         out
     }
-
     /// Test that dropping sender doesn't close topic while receiver is still listening.
     #[tokio::test]
     #[traced_test]
@@ -1917,7 +2043,7 @@ pub(crate) mod test {
             .await
             .std_context("wait rx2 join")??;
 
-        // Node 1 drops its sender - simulating the footgun where user drops sender early
+        // Node 1 drops its sender
         drop(tx1);
 
         // Node 2 sends a message - receiver on node 1 should still get it
@@ -1980,11 +2106,7 @@ pub(crate) mod test {
             let mut tasks = Vec::new();
             for ep in &endpoints {
                 let go = Gossip::builder().spawn(ep.clone());
-                tasks.push(n0_future::task::spawn(endpoint_loop(
-                    ep.clone(),
-                    go.clone(),
-                    cancel.clone(),
-                )));
+                tasks.push(spawn(endpoint_loop(ep.clone(), go.clone(), cancel.clone())));
                 gossips.push(go);
             }
 
@@ -2001,7 +2123,7 @@ pub(crate) mod test {
             }
             let subs: Vec<_> = futures_concurrency::future::TryJoin::try_join(sub_futures).await?;
 
-            // Allow mesh to stabilize
+            // Allow mesh to stabilize - nodes need time for HyParView/PlumTree formation
             tokio::time::sleep(Duration::from_millis(500)).await;
 
             std::mem::forget(_relay_guard);
@@ -2030,7 +2152,7 @@ pub(crate) mod test {
             self.static_provider.add_endpoint_info(addr);
 
             let go = Gossip::builder().spawn(ep.clone());
-            self.tasks.push(n0_future::task::spawn(endpoint_loop(
+            self.tasks.push(spawn(endpoint_loop(
                 ep.clone(),
                 go.clone(),
                 self.cancel.clone(),
@@ -2051,7 +2173,7 @@ pub(crate) mod test {
                 let ep = self.endpoints[i].clone();
                 let target = self.endpoints[j].id();
                 let cancel = self.cancel.clone();
-                n0_future::task::spawn(async move {
+                spawn(async move {
                     while !cancel.is_cancelled() {
                         let _ = ep.connect(target, b"flood").await;
                         tokio::time::sleep(sleep_interval).await;
@@ -2075,8 +2197,7 @@ pub(crate) mod test {
                 .drain(..)
                 .map(|s| {
                     let (tx, mut rx) = s.split();
-                    let drain =
-                        n0_future::task::spawn(async move { while rx.next().await.is_some() {} });
+                    let drain = spawn(async move { while rx.next().await.is_some() {} });
                     (tx, drain)
                 })
                 .unzip()
@@ -2088,12 +2209,6 @@ pub(crate) mod test {
             mut receivers: Vec<GossipReceiver>,
             cfg: DeliveryTestConfig,
         ) -> Result<()> {
-            // Wait for mesh stability with simple sleep (no wait_for_neighbors yet)
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            let neighbor_counts: Vec<_> =
-                receivers.iter().map(|rx| rx.neighbors().count()).collect();
-            info!(?neighbor_counts, "Mesh stabilized");
-
             let num_receivers = receivers.len();
             let expected_per_receiver = cfg.expected_per_receiver;
             let msg_delay = cfg.msg_delay;
@@ -2104,7 +2219,7 @@ pub(crate) mod test {
                 .enumerate()
                 .map(|(idx, tx)| {
                     let tx = tx.clone();
-                    n0_future::task::spawn(async move {
+                    spawn(async move {
                         for i in 0..msgs_per_node {
                             let content = format!("n{idx}m{i}");
                             let _ = tx.broadcast(content.into_bytes().into()).await;
@@ -2115,44 +2230,23 @@ pub(crate) mod test {
                 .collect();
 
             let recv_deadline = cfg.recv_deadline;
-            let global_threshold =
-                (num_receivers * expected_per_receiver * cfg.threshold_percent) / 100;
-            let global_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let early_exit = CancellationToken::new();
             let recv_handles: Vec<_> = receivers
                 .drain(..)
                 .map(|mut rx| {
-                    let global_count = global_count.clone();
-                    let early_exit = early_exit.clone();
-                    n0_future::task::spawn(async move {
+                    spawn(async move {
                         let mut count = 0usize;
-                        let mut stall_count = 0usize;
                         let deadline = n0_future::time::Instant::now() + recv_deadline;
-                        while n0_future::time::Instant::now() < deadline
-                            && !early_exit.is_cancelled()
-                        {
+                        while n0_future::time::Instant::now() < deadline {
                             match timeout(Duration::from_millis(100), rx.next()).await {
                                 Ok(Some(Ok(Event::Received(_)))) => {
                                     count += 1;
-                                    stall_count = 0;
-                                    let total = global_count
-                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                                        + 1;
-                                    if total >= global_threshold {
-                                        early_exit.cancel();
-                                    }
                                     if count >= expected_per_receiver {
                                         break;
                                     }
                                 }
                                 Ok(Some(Ok(_))) => {}
                                 Ok(Some(Err(_))) | Ok(None) => break,
-                                Err(_) => {
-                                    stall_count += 1;
-                                    if early_exit.is_cancelled() && stall_count >= 20 {
-                                        break;
-                                    }
-                                }
+                                Err(_) => {}
                             }
                         }
                         count
@@ -2177,11 +2271,9 @@ pub(crate) mod test {
             let total_expected = num_receivers * expected_per_receiver;
             let threshold = (total_expected * cfg.threshold_percent) / 100;
 
-            let min_recv = received_counts.iter().min().copied().unwrap_or(0);
-            let max_recv = received_counts.iter().max().copied().unwrap_or(0);
             info!(
                 total_received,
-                total_expected, threshold, min_recv, max_recv, "Delivery results"
+                total_expected, threshold, "Delivery results"
             );
 
             assert!(
@@ -2203,6 +2295,7 @@ pub(crate) mod test {
     }
 
     #[tokio::test]
+    #[traced_test]
     async fn test_broadcast_4_nodes() -> Result {
         let mut mesh = TestMesh::new(4, 2).await?;
 
@@ -2223,7 +2316,7 @@ pub(crate) mod test {
     }
 
     #[tokio::test]
-    #[ignore = "flaky without dialer optimizations - delivery degrades under load"]
+    #[traced_test]
     async fn test_broadcast_10_nodes() -> Result {
         let mut mesh = TestMesh::new(10, 47).await?;
 
@@ -2244,7 +2337,7 @@ pub(crate) mod test {
     }
 
     #[tokio::test]
-    #[ignore = "flaky under connection stress - demonstrates dialer blocking issue"]
+    #[traced_test]
     async fn test_late_joiner_with_connection_stress() -> Result {
         let mut mesh = TestMesh::new(20, 9).await?;
         mesh.start_connection_flood(Duration::from_millis(50));
@@ -2258,6 +2351,7 @@ pub(crate) mod test {
             msgs_per_node: 50,
             expected_per_receiver: senders.len() * 50,
             msg_delay: Duration::from_millis(1),
+            // reduce to 20s to get flakiness due to the late joiner having a hard time catching up
             recv_deadline: Duration::from_secs(60),
             delivery_wait: Duration::from_millis(200),
             threshold_percent: 95,
@@ -2271,20 +2365,14 @@ pub(crate) mod test {
     }
 
     #[tokio::test]
-    #[ignore = "flaky without dialer optimizations - late joiner struggles under load"]
+    #[traced_test]
     async fn test_late_joiner() -> Result {
         let mut mesh = TestMesh::new(20, 10).await?;
         let sub_late = mesh.add_node().await?;
-        let (tx_late, rx_late) = sub_late.split();
-
-        // Allow late joiner to establish connections
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        info!(
-            neighbors = rx_late.neighbors().count(),
-            "Late joiner mesh stabilized"
-        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
 
         let (senders, drains) = mesh.drain_as_senders();
+        let (tx_late, rx_late) = sub_late.split();
 
         let cfg = DeliveryTestConfig {
             msgs_per_node: 50,
