@@ -1072,7 +1072,7 @@ pub(crate) mod test {
     use tracing_test::traced_test;
 
     use super::*;
-    use crate::api::{ApiError, GossipReceiver, GossipSender};
+    use crate::api::{ApiError, GossipReceiver, GossipSender, GossipTopic};
 
     struct ManualActorLoop {
         actor: Actor,
@@ -1881,10 +1881,6 @@ pub(crate) mod test {
     }
 
     /// Test that dropping sender doesn't close topic while receiver is still listening.
-    ///
-    /// This is a common footgun: users split a GossipTopic, drop the sender early,
-    /// and expect the receiver to keep working. With the bug (using && in still_needed),
-    /// the topic closes immediately when sender is dropped.
     #[tokio::test]
     #[traced_test]
     async fn topic_stays_alive_after_sender_drop() -> n0_error::Result<()> {
@@ -1944,6 +1940,365 @@ pub(crate) mod test {
         drop(rx2);
         router1.shutdown().await.std_context("shutdown router1")?;
         router2.shutdown().await.std_context("shutdown router2")?;
+        Ok(())
+    }
+
+    struct TestMesh {
+        endpoints: Vec<Endpoint>,
+        subs: Vec<GossipTopic>,
+        cancel: CancellationToken,
+        topic: TopicId,
+        tasks: Vec<n0_future::task::JoinHandle<Result<(), AnyError>>>,
+        rng: rand_chacha::ChaCha12Rng,
+        relay_map: iroh::RelayMap,
+        relay_url: iroh::RelayUrl,
+        static_provider: StaticProvider,
+    }
+
+    impl TestMesh {
+        async fn new(nodes: usize, topic_byte: u8) -> Result<Self> {
+            let mut rng = rand_chacha::ChaCha12Rng::seed_from_u64(1);
+            let (relay_map, relay_url, _relay_guard) =
+                iroh::test_utils::run_relay_server().await.unwrap();
+            let static_provider = StaticProvider::new();
+            let cancel = CancellationToken::new();
+
+            let mut endpoints = Vec::new();
+            for _ in 0..nodes {
+                let ep =
+                    create_endpoint(&mut rng, relay_map.clone(), Some(static_provider.clone()))
+                        .await?;
+                endpoints.push(ep);
+            }
+
+            for ep in &endpoints {
+                let addr = EndpointAddr::new(ep.id()).with_relay_url(relay_url.clone());
+                static_provider.add_endpoint_info(addr);
+            }
+
+            let mut gossips = Vec::new();
+            let mut tasks = Vec::new();
+            for ep in &endpoints {
+                let go = Gossip::builder().spawn(ep.clone());
+                tasks.push(n0_future::task::spawn(endpoint_loop(
+                    ep.clone(),
+                    go.clone(),
+                    cancel.clone(),
+                )));
+                gossips.push(go);
+            }
+
+            let topic = TopicId::from_bytes([topic_byte; 32]);
+
+            let mut sub_futures = Vec::new();
+            for (i, go) in gossips.iter().enumerate() {
+                let bootstrap = if i == 0 {
+                    vec![]
+                } else {
+                    vec![endpoints[0].id()]
+                };
+                sub_futures.push(go.subscribe_and_join(topic, bootstrap));
+            }
+            let subs: Vec<_> = futures_concurrency::future::TryJoin::try_join(sub_futures).await?;
+
+            // Allow mesh to stabilize
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            std::mem::forget(_relay_guard);
+
+            Ok(Self {
+                endpoints,
+                subs,
+                cancel,
+                topic,
+                tasks,
+                rng,
+                relay_map,
+                relay_url,
+                static_provider,
+            })
+        }
+
+        async fn add_node(&mut self) -> Result<GossipTopic> {
+            let ep = create_endpoint(
+                &mut self.rng,
+                self.relay_map.clone(),
+                Some(self.static_provider.clone()),
+            )
+            .await?;
+            let addr = EndpointAddr::new(ep.id()).with_relay_url(self.relay_url.clone());
+            self.static_provider.add_endpoint_info(addr);
+
+            let go = Gossip::builder().spawn(ep.clone());
+            self.tasks.push(n0_future::task::spawn(endpoint_loop(
+                ep.clone(),
+                go.clone(),
+                self.cancel.clone(),
+            )));
+
+            let sub = go
+                .subscribe_and_join(self.topic, vec![self.endpoints[0].id()])
+                .await?;
+            self.endpoints.push(ep);
+            info!("New node joined mesh");
+            Ok(sub)
+        }
+
+        fn start_connection_flood(&self, sleep_interval: Duration) {
+            let n = self.endpoints.len();
+            for (i, j) in (0..n).flat_map(|i| (0..n).filter(move |&j| j != i).map(move |j| (i, j)))
+            {
+                let ep = self.endpoints[i].clone();
+                let target = self.endpoints[j].id();
+                let cancel = self.cancel.clone();
+                n0_future::task::spawn(async move {
+                    while !cancel.is_cancelled() {
+                        let _ = ep.connect(target, b"flood").await;
+                        tokio::time::sleep(sleep_interval).await;
+                    }
+                });
+            }
+            info!("Started {} connection stress tasks", n * (n - 1));
+        }
+
+        async fn shutdown(self) {
+            self.cancel.cancel();
+            for task in self.tasks {
+                task.await.ok();
+            }
+        }
+
+        fn drain_as_senders(
+            &mut self,
+        ) -> (Vec<GossipSender>, Vec<n0_future::task::JoinHandle<()>>) {
+            self.subs
+                .drain(..)
+                .map(|s| {
+                    let (tx, mut rx) = s.split();
+                    let drain =
+                        n0_future::task::spawn(async move { while rx.next().await.is_some() {} });
+                    (tx, drain)
+                })
+                .unzip()
+        }
+
+        async fn run_delivery_test(
+            &self,
+            senders: Vec<GossipSender>,
+            mut receivers: Vec<GossipReceiver>,
+            cfg: DeliveryTestConfig,
+        ) -> Result<()> {
+            // Wait for mesh stability with simple sleep (no wait_for_neighbors yet)
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let neighbor_counts: Vec<_> =
+                receivers.iter().map(|rx| rx.neighbors().count()).collect();
+            info!(?neighbor_counts, "Mesh stabilized");
+
+            let num_receivers = receivers.len();
+            let expected_per_receiver = cfg.expected_per_receiver;
+            let msg_delay = cfg.msg_delay;
+            let msgs_per_node = cfg.msgs_per_node;
+
+            let send_handles: Vec<_> = senders
+                .iter()
+                .enumerate()
+                .map(|(idx, tx)| {
+                    let tx = tx.clone();
+                    n0_future::task::spawn(async move {
+                        for i in 0..msgs_per_node {
+                            let content = format!("n{idx}m{i}");
+                            let _ = tx.broadcast(content.into_bytes().into()).await;
+                            tokio::time::sleep(msg_delay).await;
+                        }
+                    })
+                })
+                .collect();
+
+            let recv_deadline = cfg.recv_deadline;
+            let global_threshold =
+                (num_receivers * expected_per_receiver * cfg.threshold_percent) / 100;
+            let global_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let early_exit = CancellationToken::new();
+            let recv_handles: Vec<_> = receivers
+                .drain(..)
+                .map(|mut rx| {
+                    let global_count = global_count.clone();
+                    let early_exit = early_exit.clone();
+                    n0_future::task::spawn(async move {
+                        let mut count = 0usize;
+                        let mut stall_count = 0usize;
+                        let deadline = n0_future::time::Instant::now() + recv_deadline;
+                        while n0_future::time::Instant::now() < deadline
+                            && !early_exit.is_cancelled()
+                        {
+                            match timeout(Duration::from_millis(100), rx.next()).await {
+                                Ok(Some(Ok(Event::Received(_)))) => {
+                                    count += 1;
+                                    stall_count = 0;
+                                    let total = global_count
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                                        + 1;
+                                    if total >= global_threshold {
+                                        early_exit.cancel();
+                                    }
+                                    if count >= expected_per_receiver {
+                                        break;
+                                    }
+                                }
+                                Ok(Some(Ok(_))) => {}
+                                Ok(Some(Err(_))) | Ok(None) => break,
+                                Err(_) => {
+                                    stall_count += 1;
+                                    if early_exit.is_cancelled() && stall_count >= 20 {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        count
+                    })
+                })
+                .collect();
+
+            for h in send_handles {
+                let _ = h.await;
+            }
+            tokio::time::sleep(cfg.delivery_wait).await;
+            drop(senders);
+
+            let mut received_counts = Vec::new();
+            for h in recv_handles {
+                received_counts.push(h.await.std_context("recv task")?);
+            }
+
+            self.cancel.cancel();
+
+            let total_received: usize = received_counts.iter().sum();
+            let total_expected = num_receivers * expected_per_receiver;
+            let threshold = (total_expected * cfg.threshold_percent) / 100;
+
+            let min_recv = received_counts.iter().min().copied().unwrap_or(0);
+            let max_recv = received_counts.iter().max().copied().unwrap_or(0);
+            info!(
+                total_received,
+                total_expected, threshold, min_recv, max_recv, "Delivery results"
+            );
+
+            assert!(
+                total_received >= threshold,
+                "Delivery failed: {total_received}/{threshold} (expected {total_expected})"
+            );
+
+            Ok(())
+        }
+    }
+
+    struct DeliveryTestConfig {
+        msgs_per_node: usize,
+        expected_per_receiver: usize,
+        msg_delay: Duration,
+        recv_deadline: Duration,
+        delivery_wait: Duration,
+        threshold_percent: usize,
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_4_nodes() -> Result {
+        let mut mesh = TestMesh::new(4, 2).await?;
+
+        let (senders, receivers): (Vec<_>, Vec<_>) = mesh.subs.drain(..).map(|s| s.split()).unzip();
+
+        let cfg = DeliveryTestConfig {
+            msgs_per_node: 50,
+            expected_per_receiver: 3 * 50,
+            msg_delay: Duration::from_millis(5),
+            recv_deadline: Duration::from_secs(10),
+            delivery_wait: Duration::from_millis(200),
+            threshold_percent: 95,
+        };
+
+        mesh.run_delivery_test(senders, receivers, cfg).await?;
+        mesh.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "flaky without dialer optimizations - delivery degrades under load"]
+    async fn test_broadcast_10_nodes() -> Result {
+        let mut mesh = TestMesh::new(10, 47).await?;
+
+        let (senders, receivers): (Vec<_>, Vec<_>) = mesh.subs.drain(..).map(|s| s.split()).unzip();
+
+        let cfg = DeliveryTestConfig {
+            msgs_per_node: 20,
+            expected_per_receiver: 9 * 20,
+            msg_delay: Duration::from_millis(5),
+            recv_deadline: Duration::from_secs(30),
+            delivery_wait: Duration::from_millis(200),
+            threshold_percent: 95,
+        };
+
+        mesh.run_delivery_test(senders, receivers, cfg).await?;
+        mesh.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "flaky under connection stress - demonstrates dialer blocking issue"]
+    async fn test_late_joiner_with_connection_stress() -> Result {
+        let mut mesh = TestMesh::new(20, 9).await?;
+        mesh.start_connection_flood(Duration::from_millis(50));
+        let sub_late = mesh.add_node().await?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let (senders, drains) = mesh.drain_as_senders();
+        let (tx_late, rx_late) = sub_late.split();
+
+        let cfg = DeliveryTestConfig {
+            msgs_per_node: 50,
+            expected_per_receiver: senders.len() * 50,
+            msg_delay: Duration::from_millis(1),
+            recv_deadline: Duration::from_secs(60),
+            delivery_wait: Duration::from_millis(200),
+            threshold_percent: 95,
+        };
+
+        mesh.run_delivery_test(senders, vec![rx_late], cfg).await?;
+        drop(tx_late);
+        drop(drains);
+        mesh.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "flaky without dialer optimizations - late joiner struggles under load"]
+    async fn test_late_joiner() -> Result {
+        let mut mesh = TestMesh::new(20, 10).await?;
+        let sub_late = mesh.add_node().await?;
+        let (tx_late, rx_late) = sub_late.split();
+
+        // Allow late joiner to establish connections
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        info!(
+            neighbors = rx_late.neighbors().count(),
+            "Late joiner mesh stabilized"
+        );
+
+        let (senders, drains) = mesh.drain_as_senders();
+
+        let cfg = DeliveryTestConfig {
+            msgs_per_node: 50,
+            expected_per_receiver: senders.len() * 50,
+            msg_delay: Duration::from_millis(1),
+            recv_deadline: Duration::from_secs(30),
+            delivery_wait: Duration::from_millis(200),
+            threshold_percent: 95,
+        };
+
+        mesh.run_delivery_test(senders, vec![rx_late], cfg).await?;
+        drop(tx_late);
+        drop(drains);
+        mesh.shutdown().await;
         Ok(())
     }
 }
