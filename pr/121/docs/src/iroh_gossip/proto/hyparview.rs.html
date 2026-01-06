@@ -924,57 +924,60 @@
 <a href=#924 id=924 data-nosnippet>924</a>        }
 <a href=#925 id=925 data-nosnippet>925</a>        s.refill_active_from_passive(<span class="kw-2">&amp;</span>[], <span class="kw-2">&amp;mut </span>io);
 <a href=#926 id=926 data-nosnippet>926</a>        <span class="kw">let </span>n = count_neighbor_msgs(<span class="kw-2">&amp;</span>io);
-<a href=#927 id=927 data-nosnippet>927</a>        <span class="macro">assert!</span>((<span class="number">2</span>..=<span class="number">3</span>).contains(<span class="kw-2">&amp;</span>n), <span class="string">"isolated: expected 2-3 peers, got {n}"</span>);
-<a href=#928 id=928 data-nosnippet>928</a>
-<a href=#929 id=929 data-nosnippet>929</a>        <span class="comment">// With active peer, only try 1
-<a href=#930 id=930 data-nosnippet>930</a>        </span>s.active_view.insert(<span class="number">2</span>);
-<a href=#931 id=931 data-nosnippet>931</a>        io.clear();
-<a href=#932 id=932 data-nosnippet>932</a>        s.refill_active_from_passive(<span class="kw-2">&amp;</span>[], <span class="kw-2">&amp;mut </span>io);
-<a href=#933 id=933 data-nosnippet>933</a>        <span class="macro">assert_eq!</span>(count_neighbor_msgs(<span class="kw-2">&amp;</span>io), <span class="number">1</span>);
-<a href=#934 id=934 data-nosnippet>934</a>    }
-<a href=#935 id=935 data-nosnippet>935</a>
-<a href=#936 id=936 data-nosnippet>936</a>    <span class="attr">#[test]
-<a href=#937 id=937 data-nosnippet>937</a>    </span><span class="kw">fn </span>cooldown_clears_on_timer_or_initiation() {
-<a href=#938 id=938 data-nosnippet>938</a>        <span class="kw">let </span><span class="kw-2">mut </span>s = state();
-<a href=#939 id=939 data-nosnippet>939</a>        <span class="kw">let </span><span class="kw-2">mut </span>io = IO::new();
-<a href=#940 id=940 data-nosnippet>940</a>
-<a href=#941 id=941 data-nosnippet>941</a>        <span class="comment">// Timer clears cooldown
-<a href=#942 id=942 data-nosnippet>942</a>        </span>s.reconnect_cooldown_peers.insert(<span class="number">2</span>);
-<a href=#943 id=943 data-nosnippet>943</a>        s.handle(
-<a href=#944 id=944 data-nosnippet>944</a>            InEvent::TimerExpired(Timer::ClearReconnectCooldown(<span class="number">2</span>)),
-<a href=#945 id=945 data-nosnippet>945</a>            <span class="kw-2">&amp;mut </span>io,
-<a href=#946 id=946 data-nosnippet>946</a>        );
-<a href=#947 id=947 data-nosnippet>947</a>        <span class="macro">assert!</span>(!s.reconnect_cooldown_peers.contains(<span class="kw-2">&amp;</span><span class="number">2</span>));
-<a href=#948 id=948 data-nosnippet>948</a>
-<a href=#949 id=949 data-nosnippet>949</a>        <span class="comment">// Our own initiation clears cooldown
-<a href=#950 id=950 data-nosnippet>950</a>        </span>s.reconnect_cooldown_peers.insert(<span class="number">3</span>);
-<a href=#951 id=951 data-nosnippet>951</a>        s.passive_view.insert(<span class="number">3</span>);
-<a href=#952 id=952 data-nosnippet>952</a>        s.send_neighbor(<span class="number">3</span>, Priority::Low, <span class="kw-2">&amp;mut </span>io);
-<a href=#953 id=953 data-nosnippet>953</a>        <span class="macro">assert!</span>(!s.reconnect_cooldown_peers.contains(<span class="kw-2">&amp;</span><span class="number">3</span>));
-<a href=#954 id=954 data-nosnippet>954</a>    }
-<a href=#955 id=955 data-nosnippet>955</a>
-<a href=#956 id=956 data-nosnippet>956</a>    <span class="attr">#[test]
-<a href=#957 id=957 data-nosnippet>957</a>    </span><span class="kw">fn </span>overcapacity_tolerance_for_high_priority() {
-<a href=#958 id=958 data-nosnippet>958</a>        <span class="kw">let </span><span class="kw-2">mut </span>s = state();
-<a href=#959 id=959 data-nosnippet>959</a>        <span class="kw">let </span><span class="kw-2">mut </span>io = IO::new();
-<a href=#960 id=960 data-nosnippet>960</a>
-<a href=#961 id=961 data-nosnippet>961</a>        <span class="kw">for </span>i <span class="kw">in </span><span class="number">10</span>..<span class="number">15 </span>{
-<a href=#962 id=962 data-nosnippet>962</a>            s.active_view.insert(i);
-<a href=#963 id=963 data-nosnippet>963</a>        }
-<a href=#964 id=964 data-nosnippet>964</a>        s.handle_message(
-<a href=#965 id=965 data-nosnippet>965</a>            <span class="number">20</span>,
-<a href=#966 id=966 data-nosnippet>966</a>            Message::Neighbor(Neighbor {
-<a href=#967 id=967 data-nosnippet>967</a>                priority: Priority::High,
-<a href=#968 id=968 data-nosnippet>968</a>                data: <span class="prelude-val">None</span>,
-<a href=#969 id=969 data-nosnippet>969</a>            }),
-<a href=#970 id=970 data-nosnippet>970</a>            <span class="kw-2">&amp;mut </span>io,
-<a href=#971 id=971 data-nosnippet>971</a>        );
-<a href=#972 id=972 data-nosnippet>972</a>
-<a href=#973 id=973 data-nosnippet>973</a>        <span class="macro">assert_eq!</span>(s.active_view.len(), s.config.active_view_capacity + <span class="number">1</span>);
-<a href=#974 id=974 data-nosnippet>974</a>        <span class="macro">assert!</span>(s.active_view.contains(<span class="kw-2">&amp;</span><span class="number">20</span>));
-<a href=#975 id=975 data-nosnippet>975</a>        <span class="kw">let </span>kicked = io.iter().any(|e| {
-<a href=#976 id=976 data-nosnippet>976</a>            <span class="macro">matches!</span>(e, TopicOutEvent::SendMessage(p, TopicMessage::Swarm(Message::Disconnect(<span class="kw">_</span>))) <span class="kw">if </span>(<span class="number">10</span>..<span class="number">15</span>).contains(p))
-<a href=#977 id=977 data-nosnippet>977</a>        });
-<a href=#978 id=978 data-nosnippet>978</a>        <span class="macro">assert!</span>(!kicked, <span class="string">"first over-capacity should not kick"</span>);
-<a href=#979 id=979 data-nosnippet>979</a>    }
-<a href=#980 id=980 data-nosnippet>980</a>}</code></pre></div></section></main></body></html>
+<a href=#927 id=927 data-nosnippet>927</a>        <span class="macro">assert!</span>(
+<a href=#928 id=928 data-nosnippet>928</a>            (<span class="number">2</span>..=<span class="number">3</span>).contains(<span class="kw-2">&amp;</span>n),
+<a href=#929 id=929 data-nosnippet>929</a>            <span class="string">"isolated: expected 2-3 peers, got {n}"
+<a href=#930 id=930 data-nosnippet>930</a>        </span>);
+<a href=#931 id=931 data-nosnippet>931</a>
+<a href=#932 id=932 data-nosnippet>932</a>        <span class="comment">// With active peer, only try 1
+<a href=#933 id=933 data-nosnippet>933</a>        </span>s.active_view.insert(<span class="number">2</span>);
+<a href=#934 id=934 data-nosnippet>934</a>        io.clear();
+<a href=#935 id=935 data-nosnippet>935</a>        s.refill_active_from_passive(<span class="kw-2">&amp;</span>[], <span class="kw-2">&amp;mut </span>io);
+<a href=#936 id=936 data-nosnippet>936</a>        <span class="macro">assert_eq!</span>(count_neighbor_msgs(<span class="kw-2">&amp;</span>io), <span class="number">1</span>);
+<a href=#937 id=937 data-nosnippet>937</a>    }
+<a href=#938 id=938 data-nosnippet>938</a>
+<a href=#939 id=939 data-nosnippet>939</a>    <span class="attr">#[test]
+<a href=#940 id=940 data-nosnippet>940</a>    </span><span class="kw">fn </span>cooldown_clears_on_timer_or_initiation() {
+<a href=#941 id=941 data-nosnippet>941</a>        <span class="kw">let </span><span class="kw-2">mut </span>s = state();
+<a href=#942 id=942 data-nosnippet>942</a>        <span class="kw">let </span><span class="kw-2">mut </span>io = IO::new();
+<a href=#943 id=943 data-nosnippet>943</a>
+<a href=#944 id=944 data-nosnippet>944</a>        <span class="comment">// Timer clears cooldown
+<a href=#945 id=945 data-nosnippet>945</a>        </span>s.reconnect_cooldown_peers.insert(<span class="number">2</span>);
+<a href=#946 id=946 data-nosnippet>946</a>        s.handle(
+<a href=#947 id=947 data-nosnippet>947</a>            InEvent::TimerExpired(Timer::ClearReconnectCooldown(<span class="number">2</span>)),
+<a href=#948 id=948 data-nosnippet>948</a>            <span class="kw-2">&amp;mut </span>io,
+<a href=#949 id=949 data-nosnippet>949</a>        );
+<a href=#950 id=950 data-nosnippet>950</a>        <span class="macro">assert!</span>(!s.reconnect_cooldown_peers.contains(<span class="kw-2">&amp;</span><span class="number">2</span>));
+<a href=#951 id=951 data-nosnippet>951</a>
+<a href=#952 id=952 data-nosnippet>952</a>        <span class="comment">// Our own initiation clears cooldown
+<a href=#953 id=953 data-nosnippet>953</a>        </span>s.reconnect_cooldown_peers.insert(<span class="number">3</span>);
+<a href=#954 id=954 data-nosnippet>954</a>        s.passive_view.insert(<span class="number">3</span>);
+<a href=#955 id=955 data-nosnippet>955</a>        s.send_neighbor(<span class="number">3</span>, Priority::Low, <span class="kw-2">&amp;mut </span>io);
+<a href=#956 id=956 data-nosnippet>956</a>        <span class="macro">assert!</span>(!s.reconnect_cooldown_peers.contains(<span class="kw-2">&amp;</span><span class="number">3</span>));
+<a href=#957 id=957 data-nosnippet>957</a>    }
+<a href=#958 id=958 data-nosnippet>958</a>
+<a href=#959 id=959 data-nosnippet>959</a>    <span class="attr">#[test]
+<a href=#960 id=960 data-nosnippet>960</a>    </span><span class="kw">fn </span>overcapacity_tolerance_for_high_priority() {
+<a href=#961 id=961 data-nosnippet>961</a>        <span class="kw">let </span><span class="kw-2">mut </span>s = state();
+<a href=#962 id=962 data-nosnippet>962</a>        <span class="kw">let </span><span class="kw-2">mut </span>io = IO::new();
+<a href=#963 id=963 data-nosnippet>963</a>
+<a href=#964 id=964 data-nosnippet>964</a>        <span class="kw">for </span>i <span class="kw">in </span><span class="number">10</span>..<span class="number">15 </span>{
+<a href=#965 id=965 data-nosnippet>965</a>            s.active_view.insert(i);
+<a href=#966 id=966 data-nosnippet>966</a>        }
+<a href=#967 id=967 data-nosnippet>967</a>        s.handle_message(
+<a href=#968 id=968 data-nosnippet>968</a>            <span class="number">20</span>,
+<a href=#969 id=969 data-nosnippet>969</a>            Message::Neighbor(Neighbor {
+<a href=#970 id=970 data-nosnippet>970</a>                priority: Priority::High,
+<a href=#971 id=971 data-nosnippet>971</a>                data: <span class="prelude-val">None</span>,
+<a href=#972 id=972 data-nosnippet>972</a>            }),
+<a href=#973 id=973 data-nosnippet>973</a>            <span class="kw-2">&amp;mut </span>io,
+<a href=#974 id=974 data-nosnippet>974</a>        );
+<a href=#975 id=975 data-nosnippet>975</a>
+<a href=#976 id=976 data-nosnippet>976</a>        <span class="macro">assert_eq!</span>(s.active_view.len(), s.config.active_view_capacity + <span class="number">1</span>);
+<a href=#977 id=977 data-nosnippet>977</a>        <span class="macro">assert!</span>(s.active_view.contains(<span class="kw-2">&amp;</span><span class="number">20</span>));
+<a href=#978 id=978 data-nosnippet>978</a>        <span class="kw">let </span>kicked = io.iter().any(|e| {
+<a href=#979 id=979 data-nosnippet>979</a>            <span class="macro">matches!</span>(e, TopicOutEvent::SendMessage(p, TopicMessage::Swarm(Message::Disconnect(<span class="kw">_</span>))) <span class="kw">if </span>(<span class="number">10</span>..<span class="number">15</span>).contains(p))
+<a href=#980 id=980 data-nosnippet>980</a>        });
+<a href=#981 id=981 data-nosnippet>981</a>        <span class="macro">assert!</span>(!kicked, <span class="string">"first over-capacity should not kick"</span>);
+<a href=#982 id=982 data-nosnippet>982</a>    }
+<a href=#983 id=983 data-nosnippet>983</a>}</code></pre></div></section></main></body></html>
