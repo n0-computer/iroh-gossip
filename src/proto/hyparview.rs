@@ -865,215 +865,116 @@ mod tests {
     use super::*;
     use crate::proto::topic::{Message as TopicMessage, OutEvent as TopicOutEvent};
 
-    type TestIO = VecDeque<TopicOutEvent<u32>>;
+    type IO = VecDeque<TopicOutEvent<u32>>;
 
-    fn is_neighbor_message(e: &TopicOutEvent<u32>) -> bool {
-        matches!(
-            e,
-            TopicOutEvent::SendMessage(_, TopicMessage::Swarm(Message::Neighbor(_)))
+    fn state() -> State<u32, rand::rngs::StdRng> {
+        State::new(
+            1,
+            None,
+            Config::default(),
+            rand::rngs::StdRng::seed_from_u64(42),
         )
     }
 
-    fn test_state() -> State<u32, rand::rngs::StdRng> {
-        let config = Config::default();
-        let rng = rand::rngs::StdRng::seed_from_u64(42);
-        State::new(1, None, config, rng)
+    fn count_neighbor_msgs(io: &IO) -> usize {
+        io.iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    TopicOutEvent::SendMessage(_, TopicMessage::Swarm(Message::Neighbor(_)))
+                )
+            })
+            .count()
     }
 
     #[test]
-    fn test_pending_cleared_on_disconnect() {
-        let mut state = test_state();
-        let mut io: TestIO = VecDeque::new();
+    fn disconnect_clears_pending_and_adds_cooldown() {
+        let mut s = state();
+        let mut io = IO::new();
 
-        // Manually add peer 2 to pending_neighbor_requests (simulating we sent them a Neighbor)
-        state.pending_neighbor_requests.insert(2);
-        assert!(state.pending_neighbor_requests.contains(&2));
+        s.pending_neighbor_requests.insert(2);
+        s.active_view.insert(2);
+        s.remove_active(&2, RemovalReason::Random, &mut io);
 
-        // Also add to active view so send_disconnect path is exercised
-        state.active_view.insert(2);
+        assert!(!s.pending_neighbor_requests.contains(&2));
+        assert!(s.reconnect_cooldown_peers.contains(&2));
 
-        // Remove from active view which calls send_disconnect
-        state.remove_active(&2, RemovalReason::Random, &mut io);
-
-        // Pending should be cleared - this ensures future Neighbor messages from
-        // this peer are treated as new requests, not replies
-        assert!(
-            !state.pending_neighbor_requests.contains(&2),
-            "pending_neighbor_requests should be cleared on disconnect"
-        );
-    }
-
-    #[test]
-    fn test_aggressive_refill_when_isolated() {
-        let mut state = test_state();
-        let mut io: TestIO = VecDeque::new();
-
-        // Active view is empty (isolated)
-        assert!(state.active_view.is_empty());
-
-        // Add 5 peers to passive view
-        for i in 10..15 {
-            state.passive_view.insert(i);
-        }
-
-        // Trigger refill
-        state.refill_active_from_passive(&[], &mut io);
-
-        // When isolated, should send multiple Neighbor requests to recover faster
-        let neighbor_count = io.iter().filter(|e| is_neighbor_message(e)).count();
-        assert!(
-            neighbor_count >= 2,
-            "should send multiple Neighbor requests when isolated, got {neighbor_count}"
-        );
-    }
-
-    fn is_disconnect_peer(e: &TopicOutEvent<u32>, peer: u32) -> bool {
-        matches!(e, TopicOutEvent::DisconnectPeer(p) if *p == peer)
-    }
-
-    fn is_disconnect_message(e: &TopicOutEvent<u32>, peer_range: std::ops::Range<u32>) -> bool {
-        if let TopicOutEvent::SendMessage(p, TopicMessage::Swarm(Message::Disconnect(_))) = e {
-            peer_range.contains(p)
-        } else {
-            false
-        }
-    }
-
-    #[test]
-    fn test_reconnect_cooldown() {
-        let mut state = test_state();
-        let mut io: TestIO = VecDeque::new();
-
-        // Add peer 2 to active view first
-        state.active_view.insert(2);
-
-        // Disconnect peer 2 - this should add them to cooldown
-        state.remove_active(&2, RemovalReason::Random, &mut io);
-        assert!(
-            state.reconnect_cooldown_peers.contains(&2),
-            "peer should be in cooldown after disconnect"
-        );
-
-        // Clear io to check new events
+        // Peer in cooldown gets rejected
         io.clear();
-
-        // Now peer 2 tries to reconnect with a Neighbor request
-        let neighbor = Message::Neighbor(Neighbor {
-            priority: Priority::High,
-            data: None,
-        });
-        state.handle_message(2, neighbor, &mut io);
-
-        // Should get DisconnectPeer event (refusing the reconnection)
-        let has_disconnect = io.iter().any(|e| is_disconnect_peer(e, 2));
-        assert!(
-            has_disconnect,
-            "should refuse neighbor request from peer in cooldown"
+        s.handle_message(
+            2,
+            Message::Neighbor(Neighbor {
+                priority: Priority::High,
+                data: None,
+            }),
+            &mut io,
         );
+        assert!(io
+            .iter()
+            .any(|e| matches!(e, TopicOutEvent::DisconnectPeer(2))));
     }
 
     #[test]
-    fn test_cooldown_cleared_on_timer() {
-        let mut state = test_state();
-        let mut io: TestIO = VecDeque::new();
+    fn refill_tries_multiple_peers_only_when_isolated() {
+        let mut s = state();
+        let mut io = IO::new();
 
-        // Add to cooldown
-        state.reconnect_cooldown_peers.insert(2);
+        for i in 10..15 {
+            s.passive_view.insert(i);
+        }
+        s.refill_active_from_passive(&[], &mut io);
+        let n = count_neighbor_msgs(&io);
+        assert!((2..=3).contains(&n), "isolated: expected 2-3 peers, got {n}");
 
-        // Fire the timer
-        state.handle(
+        // With active peer, only try 1
+        s.active_view.insert(2);
+        io.clear();
+        s.refill_active_from_passive(&[], &mut io);
+        assert_eq!(count_neighbor_msgs(&io), 1);
+    }
+
+    #[test]
+    fn cooldown_clears_on_timer_or_initiation() {
+        let mut s = state();
+        let mut io = IO::new();
+
+        // Timer clears cooldown
+        s.reconnect_cooldown_peers.insert(2);
+        s.handle(
             InEvent::TimerExpired(Timer::ClearReconnectCooldown(2)),
             &mut io,
         );
+        assert!(!s.reconnect_cooldown_peers.contains(&2));
 
-        // Should no longer be in cooldown
-        assert!(
-            !state.reconnect_cooldown_peers.contains(&2),
-            "peer should be removed from cooldown after timer"
-        );
+        // Our own initiation clears cooldown
+        s.reconnect_cooldown_peers.insert(3);
+        s.passive_view.insert(3);
+        s.send_neighbor(3, Priority::Low, &mut io);
+        assert!(!s.reconnect_cooldown_peers.contains(&3));
     }
 
     #[test]
-    fn test_cooldown_cleared_when_we_initiate() {
-        let mut state = test_state();
-        let mut io: TestIO = VecDeque::new();
+    fn overcapacity_tolerance_for_high_priority() {
+        let mut s = state();
+        let mut io = IO::new();
 
-        // Add peer 2 to cooldown
-        state.reconnect_cooldown_peers.insert(2);
-        // Add peer 2 to passive view
-        state.passive_view.insert(2);
-
-        // We initiate contact by sending neighbor
-        state.send_neighbor(2, Priority::Low, &mut io);
-
-        // Cooldown should be cleared since we initiated
-        assert!(
-            !state.reconnect_cooldown_peers.contains(&2),
-            "cooldown should be cleared when we initiate contact"
-        );
-    }
-
-    #[test]
-    fn test_overcapacity_tolerance_high_priority() {
-        let mut state = test_state();
-        let mut io: TestIO = VecDeque::new();
-
-        // Fill active view to exactly capacity (5)
         for i in 10..15 {
-            state.active_view.insert(i);
+            s.active_view.insert(i);
         }
-        assert_eq!(state.active_view.len(), state.config.active_view_capacity);
+        s.handle_message(
+            20,
+            Message::Neighbor(Neighbor {
+                priority: Priority::High,
+                data: None,
+            }),
+            &mut io,
+        );
 
-        // Clear io
-        io.clear();
-
-        // Peer 20 sends High priority Neighbor request
-        let neighbor = Message::Neighbor(Neighbor {
-            priority: Priority::High,
-            data: None,
+        assert_eq!(s.active_view.len(), s.config.active_view_capacity + 1);
+        assert!(s.active_view.contains(&20));
+        let kicked = io.iter().any(|e| {
+            matches!(e, TopicOutEvent::SendMessage(p, TopicMessage::Swarm(Message::Disconnect(_))) if (10..15).contains(p))
         });
-        state.handle_message(20, neighbor, &mut io);
-
-        // With overcapacity tolerance, we should now have 6 peers (capacity + 1)
-        assert_eq!(
-            state.active_view.len(),
-            state.config.active_view_capacity + 1,
-            "should allow 1 over capacity for High priority"
-        );
-        assert!(
-            state.active_view.contains(&20),
-            "new peer should be in active view"
-        );
-
-        // Check that no peer was kicked (no Disconnect sent to existing peers 10-14)
-        let kicked_existing = io.iter().any(|e| is_disconnect_message(e, 10..15));
-        assert!(
-            !kicked_existing,
-            "should not kick existing peer for first over-capacity"
-        );
-    }
-
-    #[test]
-    fn test_single_refill_when_not_isolated() {
-        let mut state = test_state();
-        let mut io: TestIO = VecDeque::new();
-
-        // Add one peer to active view (not isolated)
-        state.active_view.insert(2);
-
-        // Add 5 peers to passive view
-        for i in 10..15 {
-            state.passive_view.insert(i);
-        }
-
-        // Trigger refill
-        state.refill_active_from_passive(&[], &mut io);
-
-        // Should have sent only 1 Neighbor request
-        let neighbor_count = io.iter().filter(|e| is_neighbor_message(e)).count();
-        assert_eq!(
-            neighbor_count, 1,
-            "should send only 1 Neighbor request when not isolated"
-        );
+        assert!(!kicked, "first over-capacity should not kick");
     }
 }
