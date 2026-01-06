@@ -924,7 +924,10 @@ mod tests {
         }
         s.refill_active_from_passive(&[], &mut io);
         let n = count_neighbor_msgs(&io);
-        assert!((2..=3).contains(&n), "isolated: expected 2-3 peers, got {n}");
+        assert!(
+            (2..=3).contains(&n),
+            "isolated: expected 2-3 peers, got {n}"
+        );
 
         // With active peer, only try 1
         s.active_view.insert(2);
