@@ -116,7 +116,7 @@ async fn main() -> Result<()> {
         .secret_key(secret_key)
         .discovery(static_provider.clone())
         .relay_mode(relay_mode.clone())
-        .bind_addr_v4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))
+        .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))?
         .bind()
         .await?;
     println!("> our endpoint id: {}", endpoint.id());
