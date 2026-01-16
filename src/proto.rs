@@ -132,7 +132,7 @@ mod test {
 
     use rand::SeedableRng;
     use rand_chacha::ChaCha12Rng;
-    use tracing_test::traced_test;
+    use n0_tracing_test::traced_test;
 
     use super::{Command, Config, Event};
     use crate::proto::{

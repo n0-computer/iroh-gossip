@@ -14,6 +14,9 @@ use n0_future::{
     task::AbortOnDropHandle,
     time::SystemTime,
 };
+use tracing::{debug, warn};
+
+use crate::{net::util::AddrInfo, proto::PeerData};
 
 pub(crate) struct RetentionOpts {
     /// How long to keep received endpoint info records alive before pruning them
@@ -106,6 +109,19 @@ impl GossipDiscovery {
             }
             Entry::Vacant(entry) => {
                 entry.insert(StoredEndpointInfo { data, last_updated });
+            }
+        }
+    }
+
+    pub(crate) fn add_peer_data(&self, endpoint_id: EndpointId, peer_data: PeerData) {
+        match AddrInfo::decode(&peer_data) {
+            Err(err) => {
+                warn!(remote=%endpoint_id.fmt_short(), ?err, len=peer_data.inner().len(), "Failed to decode peer data")
+            }
+            Ok(info) => {
+                debug!(peer = ?endpoint_id, "add known addrs: {info:?}");
+                let endpoint_addr = info.into_endpoint_addr(endpoint_id);
+                self.add(endpoint_addr);
             }
         }
     }

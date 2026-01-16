@@ -10,23 +10,23 @@ use tracing::Instrument;
 
 #[derive(Debug, Default)]
 pub(crate) struct Dialer {
-    pending_tasks: JoinSet<(EndpointId, Result<Connection, ConnectError>)>,
-    pending_nodes: HashSet<EndpointId>,
+    tasks: JoinSet<(EndpointId, Result<Connection, ConnectError>)>,
+    pending_endpoint_ids: HashSet<EndpointId>,
 }
 
 impl Dialer {
     /// Starts to dial a node by [`EndpointId`].
     pub(crate) fn queue_dial(&mut self, endpoint: &Endpoint, endpoint_id: EndpointId, alpn: Bytes) {
-        if self.pending_nodes.insert(endpoint_id) {
+        if self.pending_endpoint_ids.insert(endpoint_id) {
             let endpoint = endpoint.clone();
             let fut = async move { (endpoint_id, endpoint.connect(endpoint_id, &alpn).await) }
                 .instrument(tracing::Span::current());
-            self.pending_tasks.spawn(fut);
+            self.tasks.spawn(fut);
         }
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.pending_tasks.is_empty()
+        self.tasks.is_empty()
     }
 
     /// Waits for the next dial operation to complete.
@@ -34,10 +34,10 @@ impl Dialer {
     ///
     /// Will be pending forever if no connections are in progress.
     pub(crate) async fn next(&mut self) -> Option<(EndpointId, Result<Connection, ConnectError>)> {
-        match self.pending_tasks.join_next().await {
+        match self.tasks.join_next().await {
             Some(res) => {
                 let (endpoint_id, res) = res.expect("connect task panicked");
-                self.pending_nodes.remove(&endpoint_id);
+                self.pending_endpoint_ids.remove(&endpoint_id);
                 Some((endpoint_id, res))
             }
             None => None,

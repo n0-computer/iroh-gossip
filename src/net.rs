@@ -4,7 +4,7 @@
 use std::sync::atomic::AtomicBool;
 use std::{
     collections::{hash_map, BTreeSet, HashMap, HashSet, VecDeque},
-    ops::DerefMut,
+    ops::{ControlFlow, DerefMut},
     sync::Arc,
     time::Duration,
 };
@@ -95,8 +95,6 @@ enum LocalActorMessage {
     HandleConnection(EndpointId, Connection),
     #[debug("Connect({}, {})", _0.fmt_short(), _1.fmt_short())]
     Connect(EndpointId, TopicId),
-    #[debug("SetPeerData({}, {})", _0.fmt_short(), _1.as_bytes().len())]
-    SetPeerData(EndpointId, PeerData),
 }
 
 #[derive(Debug)]
@@ -270,13 +268,13 @@ pub struct ActorStoppedError;
 
 #[derive(strum::Display)]
 enum ActorToTopic {
-    Api(ApiJoinRequest),
-    Connected {
+    ApiJoin(ApiJoinRequest),
+    RemoteConnected {
         remote: EndpointId,
         tx: Guarded<channel::mpsc::Sender<ProtoMessage>>,
         rx: Guarded<channel::mpsc::Receiver<ProtoMessage>>,
     },
-    ConnectionFailed(EndpointId),
+    RemoteConnectFailed(EndpointId),
 }
 
 type ApiJoinRequest = WithChannels<api::JoinRequest, api::Request>;
@@ -329,10 +327,6 @@ impl Actor {
         let discovery = GossipDiscovery::default();
         endpoint.discovery().add(discovery.clone());
         let initial_peer_data = AddrInfo::from(endpoint.addr()).encode();
-        // let peer_data = endpoint
-        //     .watch_endpoint_addr()
-        //     .map(|addr| AddrInfo::from(addr).encode())
-        //     .unwrap();
         (
             api_tx,
             local_tx.clone(),
@@ -360,7 +354,12 @@ impl Actor {
     }
 
     async fn run(mut self) {
-        while self.tick().await {}
+        loop {
+            match self.tick().await {
+                ControlFlow::Continue(()) => {}
+                ControlFlow::Break(()) => break,
+            }
+        }
     }
 
     #[cfg(test)]
@@ -373,14 +372,14 @@ impl Actor {
     #[instrument("gossip", skip_all, fields(me=%self.me.fmt_short()))]
     pub(crate) async fn steps(&mut self, n: usize) -> Result<(), ActorStoppedError> {
         for _ in 0..n {
-            if !self.tick().await {
+            if self.tick().await == ControlFlow::Break(()) {
                 return Err(ActorStoppedError);
             }
         }
         Ok(())
     }
 
-    async fn tick(&mut self) -> bool {
+    async fn tick(&mut self) -> ControlFlow<(), ()> {
         trace!("wait for tick");
         self.metrics.actor_tick_main.inc();
         tokio::select! {
@@ -389,12 +388,12 @@ impl Actor {
                 match addr {
                     None => {
                         warn!("address stream returned None - endpoint has shut down");
-                        false
+                        ControlFlow::Break(())
                     }
                     Some(addr) => {
                         let data = AddrInfo::from(addr).encode();
                         self.our_peer_data.set(data).ok();
-                        true
+                        ControlFlow::Continue(())
                     }
                 }
             }
@@ -407,23 +406,13 @@ impl Actor {
                     LocalActorMessage::Connect(endpoint_id, topic_id) => {
                         self.connect(endpoint_id, topic_id);
                     }
-                    LocalActorMessage::SetPeerData(endpoint_id, data) => {
-                        match AddrInfo::decode(&data) {
-                            Err(err) => warn!(remote=%endpoint_id.fmt_short(), ?err, len=data.inner().len(), "Failed to decode peer data"),
-                            Ok(info) => {
-                                debug!(peer = ?endpoint_id, "add known addrs: {info:?}");
-                                let endpoint_addr = info.into_endpoint_addr(endpoint_id);
-                                self.discovery.add(endpoint_addr);
-                            }
-                        }
-                    }
                 }
-                true
+                ControlFlow::Continue(())
             }
             Some((endpoint_id, res)) = self.dialer.next(), if !self.dialer.is_empty() => {
                 trace!(remote=%endpoint_id.fmt_short(), ok=res.is_ok(), "tick: dialed");
                 self.handle_remote_connection(endpoint_id, res, Direction::Dial).await;
-                true
+                ControlFlow::Continue(())
             }
             Some((endpoint_id, res)) = self.accepting.next(), if !self.accepting.is_empty() => {
                 trace!(remote=%endpoint_id.fmt_short(), res=?res.as_ref().map(|_| ()), "tick: accepting");
@@ -433,18 +422,18 @@ impl Actor {
                         debug!(remote=%endpoint_id.fmt_short(), ?reason, "accept loop for remote closed");
                     }
                 }
-                true
+                ControlFlow::Continue(())
             }
             msg = self.api_rx.recv() => {
                 trace!(some=msg.is_some(), "tick: api_rx");
                 match msg {
                     Some(msg) => {
                         self.handle_api_message(msg).await;
-                        true
+                        ControlFlow::Continue(())
                     }
                     None => {
                         trace!("all api senders dropped, stop actor");
-                        false
+                        ControlFlow::Break(())
                     }
                 }
             }
@@ -456,13 +445,13 @@ impl Actor {
                         self.remotes.remove(&endpoint_id);
                     }
                 }
-                true
+                ControlFlow::Continue(())
             }
             Some(actor) = self.topic_tasks.join_next(), if !self.topic_tasks.is_empty() => {
                 let actor = actor.expect("topic actor task panicked");
                 trace!(topic=%actor.topic_id.fmt_short(), "tick: topic actor finished");
                 self.topics.remove(&actor.topic_id);
-                true
+                ControlFlow::Continue(())
             }
             else => unreachable!("reached else arm, but all fallible cases should be handled"),
         }
@@ -524,7 +513,7 @@ impl Actor {
                 debug!(?err, "Connection failed");
                 for (_, handle) in self.drain_pending_dials(&remote) {
                     handle
-                        .send(ActorToTopic::ConnectionFailed(remote))
+                        .send(ActorToTopic::RemoteConnectFailed(remote))
                         .await
                         .ok();
                 }
@@ -585,7 +574,7 @@ impl Actor {
         };
         if let Some(topic) = self.topics.get(&topic_id) {
             if let Err(_err) = topic
-                .send(ActorToTopic::Connected {
+                .send(ActorToTopic::RemoteConnected {
                     remote,
                     tx: Guarded::new(request.tx, guard.clone()),
                     rx: Guarded::new(request.rx, guard.clone()),
@@ -611,6 +600,7 @@ impl Actor {
                 self.local_tx.clone(),
                 self.our_peer_data.watch(),
                 self.metrics.clone(),
+                self.discovery.clone(),
             );
             self.topic_tasks.spawn(
                 actor
@@ -619,7 +609,7 @@ impl Actor {
             );
             handle
         });
-        if topic.send(ActorToTopic::Api(msg)).await.is_err() {
+        if topic.send(ActorToTopic::ApiJoin(msg)).await.is_err() {
             warn!(topic=%topic_id.fmt_short(), "Topic actor dead");
         }
     }
@@ -658,14 +648,14 @@ impl RemoteState {
         let guard = self.counter.get_one();
         let req = net_proto::JoinRequest { topic_id };
         match self.client.bidi_streaming(req.clone(), 64, 64).await {
-            Ok((tx, rx)) => ActorToTopic::Connected {
+            Ok((tx, rx)) => ActorToTopic::RemoteConnected {
                 remote: self.endpoint_id,
                 tx: Guarded::new(tx, guard.clone()),
                 rx: Guarded::new(rx, guard),
             },
             Err(err) => {
                 warn!(?topic_id, ?err, "failed to open stream with remote");
-                ActorToTopic::ConnectionFailed(self.endpoint_id)
+                ActorToTopic::RemoteConnectFailed(self.endpoint_id)
             }
         }
     }
@@ -691,6 +681,7 @@ impl TopicHandle {
         to_actor_tx: mpsc::Sender<LocalActorMessage>,
         peer_data: Direct<PeerData>,
         metrics: Arc<Metrics>,
+        discovery: GossipDiscovery,
     ) -> (Self, TopicActor) {
         let (tx, rx) = mpsc::channel(16);
         // TODO: peer_data
@@ -704,9 +695,10 @@ impl TopicHandle {
             actor_rx: rx,
             to_actor_tx,
             peer_data,
-            forward_event_tx,
+            api_send_tx: forward_event_tx,
             metrics,
             init: false,
+            discovery,
             #[cfg(test)]
             joined: joined.clone(),
             timers: Default::default(),
@@ -716,7 +708,7 @@ impl TopicHandle {
             remote_senders: Default::default(),
             remote_receivers: Default::default(),
             drop_peers_queue: Default::default(),
-            forward_event_tasks: Default::default(),
+            api_send_tasks: Default::default(),
         };
         let handle = Self {
             tx,
@@ -738,23 +730,29 @@ impl TopicHandle {
 
 struct TopicActor {
     topic_id: TopicId,
-    to_actor_tx: mpsc::Sender<LocalActorMessage>,
+
+    // -- state
     state: State,
-    actor_rx: mpsc::Receiver<ActorToTopic>,
     timers: Timers<Timer>,
     neighbors: BTreeSet<EndpointId>,
-    peer_data: Direct<PeerData>,
     out_events: VecDeque<OutEvent>,
-    api_receivers: MergeUnbounded<ApiRecvStream>,
-    remote_senders: HashMap<EndpointId, MaybeSender>,
-    remote_receivers: MergeUnbounded<RemoteRecvStream>,
-    forward_event_tx: broadcast::Sender<ProtoEvent>,
-    forward_event_tasks: JoinSet<()>,
-    #[cfg(test)]
-    joined: Arc<AtomicBool>,
     init: bool,
     drop_peers_queue: HashSet<EndpointId>,
+    #[cfg(test)]
+    joined: Arc<AtomicBool>,
+
+    // -- senders and receivers
+    peer_data: Direct<PeerData>,
+    to_actor_tx: mpsc::Sender<LocalActorMessage>,
+    actor_rx: mpsc::Receiver<ActorToTopic>,
+    remote_senders: HashMap<EndpointId, MaybeSender>,
+    remote_receivers: MergeUnbounded<RemoteRecvStream>,
+    api_receivers: MergeUnbounded<ApiRecvStream>,
+    api_send_tx: broadcast::Sender<ProtoEvent>,
+    api_send_tasks: JoinSet<()>,
+
     metrics: Arc<Metrics>,
+    discovery: GossipDiscovery,
 }
 
 impl TopicActor {
@@ -768,8 +766,12 @@ impl TopicActor {
                     trace!("tick: actor_rx {msg}");
                     self.handle_actor_message(msg).await;
                 },
-                Some(cmd) = self.api_receivers.next(), if !self.api_receivers.is_empty() => {
-                    self.handle_api_command(cmd).await;
+                Some(message) = self.api_receivers.next(), if !self.api_receivers.is_empty() => {
+                    let Ok(message) = message else {
+                        continue;
+                    };
+                    trace!("tick: api mesage {message}");
+                    self.handle_in_event(InEvent::Command(message.into())).await;
                 }
                 Some((remote, message)) = self.remote_receivers.next(), if !self.remote_receivers.is_empty() => {
                     trace!(remote=%remote.fmt_short(), msg=?message, "tick: remote_rx");
@@ -784,7 +786,7 @@ impl TopicActor {
                         self.handle_in_event(InEvent::TimerExpired(timer)).await;
                     }
                 }
-                _ = self.forward_event_tasks.join_next(), if !self.forward_event_tasks.is_empty() => {}
+                _ = self.api_send_tasks.join_next(), if !self.api_send_tasks.is_empty() => {}
                 else => break,
             }
 
@@ -801,7 +803,7 @@ impl TopicActor {
                 warn!("Channel to main actor closed: abort topic loop");
                 break;
             }
-            if self.init && self.api_receivers.is_empty() && self.forward_event_tasks.is_empty() {
+            if self.init && self.api_receivers.is_empty() && self.api_send_tasks.is_empty() {
                 debug!("Closing topic: All API subscribers dropped");
                 break;
             }
@@ -812,7 +814,7 @@ impl TopicActor {
 
     async fn handle_actor_message(&mut self, msg: ActorToTopic) {
         match msg {
-            ActorToTopic::Connected { remote, rx, tx } => {
+            ActorToTopic::RemoteConnected { remote, rx, tx } => {
                 self.remote_receivers
                     .push(Box::pin(into_stream(rx).map(move |msg| (remote, msg))));
                 let sender = self.remote_senders.entry(remote).or_default();
@@ -820,12 +822,12 @@ impl TopicActor {
                     warn!("Remote failed while pushing queued messages: {err:?}");
                 }
             }
-            ActorToTopic::Api(req) => {
+            ActorToTopic::ApiJoin(req) => {
                 self.init = true;
                 let WithChannels { inner, tx, rx, .. } = req;
                 let initial_neighbors = self.neighbors.clone().into_iter();
-                self.forward_event_tasks.spawn(
-                    forward_events(tx, self.forward_event_tx.subscribe(), initial_neighbors)
+                self.api_send_tasks.spawn(
+                    forward_events(tx, self.api_send_tx.subscribe(), initial_neighbors)
                         .instrument(tracing::Span::current()),
                 );
                 self.api_receivers.push(Box::pin(into_stream2(rx)));
@@ -834,7 +836,7 @@ impl TopicActor {
                 )))
                 .await;
             }
-            ActorToTopic::ConnectionFailed(endpoint_id) => {
+            ActorToTopic::RemoteConnectFailed(endpoint_id) => {
                 self.handle_in_event(InEvent::PeerDisconnected(endpoint_id))
                     .await
             }
@@ -860,16 +862,8 @@ impl TopicActor {
         self.handle_in_event(event).await;
     }
 
-    async fn handle_api_command(&mut self, command: Result<api::Command, RecvError>) {
-        let Ok(command) = command else {
-            return;
-        };
-        trace!("tick: api command {command}");
-        self.handle_in_event(InEvent::Command(command.into())).await;
-    }
-
     async fn handle_in_event(&mut self, event: InEvent) {
-        trace!("tick: in event {event:?}");
+        trace!("in_event {event:?}");
         let now = Instant::now();
         self.metrics.track_in_event(&event);
         self.out_events.extend(self.state.handle(event, now));
@@ -878,7 +872,7 @@ impl TopicActor {
 
     async fn process_out_events(&mut self, now: Instant) {
         while let Some(event) = self.out_events.pop_front() {
-            trace!("tick: out event {event:?}");
+            trace!("out_event {event:?}");
             self.metrics.track_out_event(&event);
             match event {
                 OutEvent::SendMessage(endpoint_id, message) => {
@@ -894,10 +888,7 @@ impl TopicActor {
                     self.remote_senders.remove(&endpoint_id);
                 }
                 OutEvent::PeerData(endpoint_id, peer_data) => {
-                    self.to_actor_tx
-                        .send(LocalActorMessage::SetPeerData(endpoint_id, peer_data))
-                        .await
-                        .ok();
+                    self.discovery.add_peer_data(endpoint_id, peer_data);
                 }
             }
         }
@@ -935,7 +926,7 @@ impl TopicActor {
             }
             ProtoEvent::Received(_) => {}
         }
-        self.forward_event_tx.send(event).ok();
+        self.api_send_tx.send(event).ok();
     }
 }
 
@@ -1051,11 +1042,11 @@ pub(crate) mod tests {
         EndpointAddr, RelayMap, RelayMode, SecretKey,
     };
     use n0_error::{AnyError, Result, StdResultExt};
+    use n0_tracing_test::traced_test;
     use rand::{CryptoRng, Rng, SeedableRng};
     use tokio::{spawn, time::timeout};
     use tokio_util::sync::CancellationToken;
     use tracing::info;
-    use tracing_test::traced_test;
 
     use super::*;
     use crate::{
@@ -1360,21 +1351,30 @@ pub(crate) mod tests {
         static_provider.add_endpoint_info(addr2);
         actor.endpoint().discovery().add(static_provider);
         // we use a channel to signal advancing steps to the task
-        let (tx, mut rx) = mpsc::channel::<()>(1);
+        let (go1_resubscribe_tx, mut go1_resubscribe_rx) = mpsc::channel::<()>(1);
+        let (go1_joined_tx, mut go1_joined_rx) = mpsc::channel::<()>(1);
         let ct1 = ct.clone();
         let go1_task = async move {
             // first subscribe is done immediately
             tracing::info!("subscribing the first time");
             let sub_1a = go1.subscribe_and_join(topic, vec![endpoint_id2]).await?;
 
+            go1_joined_tx.send(()).await.unwrap();
+
             // wait for signal to subscribe a second time
-            rx.recv().await.expect("signal for second subscribe");
+            go1_resubscribe_rx
+                .recv()
+                .await
+                .expect("signal for second subscribe");
             tracing::info!("subscribing a second time");
             let sub_1b = go1.subscribe_and_join(topic, vec![endpoint_id2]).await?;
             drop(sub_1a);
 
             // wait for signal to drop the second handle as well
-            rx.recv().await.expect("signal for second subscribe");
+            go1_resubscribe_rx
+                .recv()
+                .await
+                .expect("signal for second subscribe");
             tracing::info!("dropping all handles");
             drop(sub_1b);
 
@@ -1388,16 +1388,17 @@ pub(crate) mod tests {
         let go1_handle = task::spawn(go1_task);
 
         // advance and check that the topic is now subscribed
-        actor.steps(4).await?; // api_rx subscribe;
-                               // internal_rx connection request (from topic actor);
+        actor.steps(3).await?; // api_rx subscribe;
+                               // local_rx connection request (from topic actor);
                                // dialer connected;
-                               // internal_rx update peer data (from topic actor);
+        go1_joined_rx.recv().await.unwrap();
         tracing::info!("subscribe and join done, should be joined");
         let state = actor.topics.get(&topic).expect("get registered topic");
         assert!(state.joined());
 
         // signal the second subscribe, we should remain subscribed
-        tx.send(())
+        go1_resubscribe_tx
+            .send(())
             .await
             .std_context("signal additional subscribe")?;
         actor.steps(1).await?; // api_rx subscribe;
@@ -1405,7 +1406,10 @@ pub(crate) mod tests {
         assert!(state.joined());
 
         // signal to drop the second handle, the topic should no longer be subscribed
-        tx.send(()).await.std_context("signal drop handles")?;
+        go1_resubscribe_tx
+            .send(())
+            .await
+            .std_context("signal drop handles")?;
         actor.steps(1).await?; // topic task finished
         assert!(!actor.topics.contains_key(&topic));
 
@@ -1482,7 +1486,7 @@ pub(crate) mod tests {
             let mut sub = go2.subscribe(topic, vec![endpoint_id1]).await?;
 
             sub.joined().await?;
-
+            tracing::info!("resubscribe ok");
             Ok::<_, ApiError>(())
         }
         .instrument(tracing::debug_span!("endpoint_2", id=%endpoint_id2.fmt_short()));
@@ -1521,17 +1525,18 @@ pub(crate) mod tests {
         tracing::info!("endpoint 2 rejoined!");
 
         // wait for go2 to also be rejoined, then the task terminates
-        let wait = Duration::from_secs(2);
+        let wait = Duration::from_secs(5);
+        timeout(wait, go2_handle)
+            .await
+            .std_context("wait gossip2 task")?
+            .std_context("join gossip2 task")??;
+        ct.cancel();
         timeout(wait, ep1_handle)
             .await
             .std_context("wait endpoint1 task")?;
         timeout(wait, ep2_handle)
             .await
             .std_context("wait endpoint2 task")?;
-        timeout(wait, go2_handle)
-            .await
-            .std_context("wait gossip2 task")?
-            .std_context("join gossip2 task")??;
 
         Ok(())
     }

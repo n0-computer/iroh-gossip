@@ -104,7 +104,7 @@ iroh = { version = "0.95", default-features = false, features = [
 rand_chacha = "0.9"
 testresult = "0.4.1"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
-tracing-test = "0.2.5"
+n0-tracing-test = "0.3"
 url = "2.4.0"
 serde-byte-array = "0.1.2"
 
