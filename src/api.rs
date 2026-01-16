@@ -238,6 +238,11 @@ impl GossipTopic {
         self.sender.broadcast_neighbors(message).await
     }
 
+    /// Lists our current direct neighbors.
+    pub fn neighbors(&self) -> impl Iterator<Item = EndpointId> + '_ {
+        self.receiver.neighbors()
+    }
+
     /// Waits until we are connected to at least one endpoint.
     ///
     /// See [`GossipReceiver::joined`] for details.
