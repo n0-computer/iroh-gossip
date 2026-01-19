@@ -652,8 +652,7 @@ where
                 RemovalReason::DisconnectReceived { is_alive: _ } => {
                     io.push(OutEvent::DisconnectPeer(peer))
                 }
-                // do nothing, connection already closed.
-                RemovalReason::ConnectionClosed => {}
+                RemovalReason::ConnectionClosed => io.push(OutEvent::DisconnectPeer(peer)),
             }
 
             let keep_as_passive = match reason {

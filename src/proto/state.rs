@@ -319,7 +319,7 @@ fn handle_out_event<PI: PeerIdentity>(
         topic::OutEvent::DisconnectPeer(peer) => {
             let empty = conns
                 .get_mut(&peer)
-                .map(|list| list.remove(&topic) && list.is_empty())
+                .map(|list| list.remove(&topic) || list.is_empty())
                 .unwrap_or(false);
             if empty {
                 conns.remove(&peer);
