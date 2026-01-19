@@ -130,9 +130,9 @@ impl<PI> From<(PI, Option<PeerData>)> for PeerInfo<PI> {
 mod test {
     use std::{collections::HashSet, env, fmt, str::FromStr};
 
+    use n0_tracing_test::traced_test;
     use rand::SeedableRng;
     use rand_chacha::ChaCha12Rng;
-    use tracing_test::traced_test;
 
     use super::{Command, Config, Event};
     use crate::proto::{

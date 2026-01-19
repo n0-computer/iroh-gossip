@@ -1065,11 +1065,11 @@ pub(crate) mod test {
         RelayMap, RelayMode, SecretKey,
     };
     use n0_error::{AnyError, Result, StdResultExt};
+    use n0_tracing_test::traced_test;
     use rand::{CryptoRng, Rng};
     use tokio::{spawn, time::timeout};
     use tokio_util::sync::CancellationToken;
     use tracing::{info, instrument};
-    use tracing_test::traced_test;
 
     use super::*;
     use crate::api::{ApiError, GossipReceiver, GossipSender};
