@@ -1056,7 +1056,7 @@ impl Dialer {
 
 #[cfg(test)]
 pub(crate) mod test {
-    use std::time::Duration;
+    use std::{future::Future, time::Duration};
 
     use bytes::Bytes;
     use futures_concurrency::future::TryJoin;
@@ -1945,5 +1945,155 @@ pub(crate) mod test {
         router1.shutdown().await.std_context("shutdown router1")?;
         router2.shutdown().await.std_context("shutdown router2")?;
         Ok(())
+    }
+
+    /// Test that peers can reconnect after one goes offline and comes back.
+    ///
+    /// This reproduces a scenario where:
+    /// 1. Peer A starts with a fixed secret key
+    /// 2. Peer B joins using A as bootstrap
+    /// 3. Peer A goes offline (connection is closed out from B's perspective)
+    /// 4. Peer A comes back online and attempts to rejoin using B as bootstrap
+    /// 5. Connectivity is restored.
+    #[tokio::test]
+    #[traced_test]
+    async fn peer_reconnect_after_offline() -> Result {
+        let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(42);
+        let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+        let topic_id = TopicId::from([42u8; 32]);
+        let disco = StaticProvider::new();
+
+        let secret_key_a = SecretKey::generate(rng);
+        let secret_key_b = SecretKey::generate(rng);
+
+        // Start peer A
+        let ep_a = Endpoint::empty_builder(RelayMode::Custom(relay_map.clone()))
+            .secret_key(secret_key_a.clone())
+            .insecure_skip_relay_cert_verify(true)
+            .discovery(disco.clone())
+            .bind()
+            .await?;
+        disco.set_endpoint_info(EndpointAddr::new(ep_a.id()).with_relay_url(relay_url.clone()));
+        let mut gossip_a = Gossip::builder().spawn(ep_a.clone());
+        let mut router_a = Router::builder(ep_a)
+            .accept(GOSSIP_ALPN, gossip_a.clone())
+            .spawn();
+        router_a.endpoint().online().await;
+        info!("Peer A started: {}", router_a.endpoint().id().fmt_short());
+
+        // Start peer B
+        let ep_b = Endpoint::empty_builder(RelayMode::Custom(relay_map.clone()))
+            .secret_key(secret_key_b.clone())
+            .insecure_skip_relay_cert_verify(true)
+            .discovery(disco.clone())
+            .bind()
+            .await?;
+        disco.set_endpoint_info(EndpointAddr::new(ep_b.id()).with_relay_url(relay_url.clone()));
+        let gossip_b = Gossip::builder().spawn(ep_b.clone());
+        let router_b = Router::builder(ep_b)
+            .accept(GOSSIP_ALPN, gossip_b.clone())
+            .spawn();
+        router_b.endpoint().online().await;
+        info!("Peer B started: {}", router_b.endpoint().id().fmt_short());
+
+        let id_b = router_b.endpoint().id();
+        let id_a = router_a.endpoint().id();
+
+        // A subscribes to topic without bootstrap peers
+        let topic_a = gossip_a.subscribe(topic_id, vec![]).await?;
+        let (_tx_a, mut rx_a) = topic_a.split();
+
+        // B subscribes and joins using A as bootstrap
+        let topic_b = gossip_b.subscribe(topic_id, vec![id_a]).await?;
+        let (tx_b, mut rx_b) = topic_b.split();
+
+        // Wait for both to join the mesh
+        timeout_2s(rx_a.joined()).await??;
+        timeout_2s(rx_b.joined()).await??;
+        info!("Both peers joined");
+
+        // Verify they can communicate
+        tx_b.broadcast(b"hello from B".to_vec().into()).await?;
+        match timeout_2s(rx_a.next()).await? {
+            Some(Ok(Event::Received(msg))) => assert_eq!(&msg.content[..], b"hello from B"),
+            other => panic!("expected Received event, got {:?}", other),
+        }
+        info!("Initial communication successful");
+
+        for i in 0..10 {
+            async {
+                info!("Shutting down Peer A to simulate going offline");
+                // We shutdown the *endpoint* directly. This force-closes all connections
+                // without gossip getting a chance to send explicit Disconnect messages.
+                router_a.endpoint().close().await;
+
+                // Peer B sees connection being closed
+                info!("Waiting for Peer B to detect Peer A going offline");
+                match timeout_2s(rx_b.next()).await? {
+                    Some(Ok(Event::NeighborDown(peer))) if peer == id_a => {}
+                    other => panic!("Peer B received unexpected event: {other:?}"),
+                }
+
+                // Peer A comes back online and rejoins using B as bootstrap
+                info!("Restarting Peer A");
+                let ep_a = Endpoint::empty_builder(RelayMode::Custom(relay_map.clone()))
+                    .secret_key(secret_key_a.clone())
+                    .discovery(disco.clone())
+                    .insecure_skip_relay_cert_verify(true)
+                    .bind()
+                    .await?;
+                gossip_a = Gossip::builder().spawn(ep_a.clone());
+                router_a = Router::builder(ep_a)
+                    .accept(GOSSIP_ALPN, gossip_a.clone())
+                    .spawn();
+                router_a.endpoint().online().await;
+                info!("Peer A restarted: {}", router_a.endpoint().id().fmt_short());
+
+                // A rejoins using B as bootstrap
+                let topic_a = gossip_a.subscribe(topic_id, vec![id_b]).await?;
+                let (_tx_a, mut rx_a) = topic_a.split();
+
+                // Both peers should successfully reconnect
+                info!("Waiting for Peer A to rejoin");
+                timeout_2s(rx_a.joined()).await??;
+                info!("Peer A successfully rejoined");
+
+                // Wait for B to see A as neighbor again
+                match timeout_2s(rx_b.next()).await? {
+                    Some(Ok(Event::NeighborUp(peer))) if peer == id_a => {}
+                    other => panic!("Peer B received unexpected event: {other:?}"),
+                }
+
+                // Verify they can communicate again
+                tx_b.broadcast(format!("hello from B after reconnect {i}").into())
+                    .await?;
+                let event = match timeout_2s(rx_a.next()).await? {
+                    Some(Ok(Event::Received(msg))) => msg,
+                    other => panic!("Peer A received unexpected event {other:?}"),
+                };
+                assert_eq!(
+                    &event.content[..],
+                    format!("hello from B after reconnect {i}").as_bytes()
+                );
+                info!("Communication restored after reconnection");
+                n0_error::Ok(())
+            }
+            .instrument(error_span!("round", %i))
+            .await?;
+        }
+
+        router_a
+            .shutdown()
+            .await
+            .std_context("shutdown router_a2")?;
+        router_b.shutdown().await.std_context("shutdown router_b")?;
+
+        Ok(())
+    }
+
+    async fn timeout_2s<T>(fut: impl Future<Output = T>) -> Result<T> {
+        tokio::time::timeout(Duration::from_secs(2), fut)
+            .await
+            .std_context("timeout")
     }
 }
