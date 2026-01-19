@@ -414,7 +414,7 @@ mod tests {
 
     #[cfg(all(feature = "rpc", feature = "net"))]
     #[tokio::test]
-    #[tracing_test::traced_test]
+    #[n0_tracing_test::traced_test]
     async fn test_rpc() -> n0_error::Result<()> {
         use iroh::{discovery::static_provider::StaticProvider, protocol::Router, RelayMap};
         use n0_error::{AnyError, Result, StackResultExt, StdResultExt};
