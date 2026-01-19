@@ -112,11 +112,11 @@ struct ConnectionCounterInner {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ConnectionCounter {
+pub(crate) struct CloseGuard {
     inner: Arc<ConnectionCounterInner>,
 }
 
-impl ConnectionCounter {
+impl CloseGuard {
     pub(crate) fn new() -> Self {
         Self {
             inner: Arc::new(ConnectionCounterInner {
@@ -127,9 +127,9 @@ impl ConnectionCounter {
     }
 
     /// Increase the connection count and return a guard for the new connection
-    pub(crate) fn get_one(&self) -> OneConnection {
+    pub(crate) fn get_one(&self) -> ConnDropGuard {
         self.inner.count.fetch_add(1, Ordering::SeqCst);
-        OneConnection {
+        ConnDropGuard {
             inner: self.inner.clone(),
         }
     }
@@ -162,11 +162,11 @@ impl ConnectionCounter {
 
 /// Guard for one connection
 #[derive(Debug)]
-pub(crate) struct OneConnection {
+pub(crate) struct ConnDropGuard {
     inner: Arc<ConnectionCounterInner>,
 }
 
-impl Clone for OneConnection {
+impl Clone for ConnDropGuard {
     fn clone(&self) -> Self {
         self.inner.count.fetch_add(1, Ordering::SeqCst);
         Self {
@@ -175,7 +175,7 @@ impl Clone for OneConnection {
     }
 }
 
-impl Drop for OneConnection {
+impl Drop for ConnDropGuard {
     fn drop(&mut self) {
         let prev = self.inner.count.fetch_sub(1, Ordering::SeqCst);
         if prev == 1 {
@@ -189,15 +189,15 @@ pub(crate) struct Guarded<T> {
     #[deref]
     #[deref_mut]
     inner: T,
-    guard: OneConnection,
+    guard: ConnDropGuard,
 }
 
 impl<T> Guarded<T> {
-    pub(crate) fn new(inner: T, guard: OneConnection) -> Self {
+    pub(crate) fn new(inner: T, guard: ConnDropGuard) -> Self {
         Self { inner, guard }
     }
 
-    pub(crate) fn split(self) -> (T, OneConnection) {
+    pub(crate) fn split(self) -> (T, ConnDropGuard) {
         (self.inner, self.guard)
     }
 }
