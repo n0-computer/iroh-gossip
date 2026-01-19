@@ -1056,7 +1056,7 @@
 <a href=#1056 id=1056 data-nosnippet>1056</a>
 <a href=#1057 id=1057 data-nosnippet>1057</a><span class="attr">#[cfg(test)]
 <a href=#1058 id=1058 data-nosnippet>1058</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">mod </span>test {
-<a href=#1059 id=1059 data-nosnippet>1059</a>    <span class="kw">use </span>std::time::Duration;
+<a href=#1059 id=1059 data-nosnippet>1059</a>    <span class="kw">use </span>std::{future::Future, time::Duration};
 <a href=#1060 id=1060 data-nosnippet>1060</a>
 <a href=#1061 id=1061 data-nosnippet>1061</a>    <span class="kw">use </span>bytes::Bytes;
 <a href=#1062 id=1062 data-nosnippet>1062</a>    <span class="kw">use </span>futures_concurrency::future::TryJoin;
@@ -1960,168 +1960,142 @@
 <a href=#1960 id=1960 data-nosnippet>1960</a>    </span><span class="kw">async fn </span>peer_reconnect_after_offline() -&gt; <span class="prelude-ty">Result</span> {
 <a href=#1961 id=1961 data-nosnippet>1961</a>        <span class="kw">let </span>rng = <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng::seed_from_u64(<span class="number">42</span>);
 <a href=#1962 id=1962 data-nosnippet>1962</a>        <span class="kw">let </span>(relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().<span class="kw">await</span>.unwrap();
-<a href=#1963 id=1963 data-nosnippet>1963</a>
-<a href=#1964 id=1964 data-nosnippet>1964</a>        <span class="kw">let </span>topic_id = TopicId::from([<span class="number">42u8</span>; <span class="number">32</span>]);
+<a href=#1963 id=1963 data-nosnippet>1963</a>        <span class="kw">let </span>topic_id = TopicId::from([<span class="number">42u8</span>; <span class="number">32</span>]);
+<a href=#1964 id=1964 data-nosnippet>1964</a>        <span class="kw">let </span>disco = StaticProvider::new();
 <a href=#1965 id=1965 data-nosnippet>1965</a>
 <a href=#1966 id=1966 data-nosnippet>1966</a>        <span class="kw">let </span>secret_key_a = SecretKey::generate(rng);
 <a href=#1967 id=1967 data-nosnippet>1967</a>        <span class="kw">let </span>secret_key_b = SecretKey::generate(rng);
 <a href=#1968 id=1968 data-nosnippet>1968</a>
-<a href=#1969 id=1969 data-nosnippet>1969</a>        <span class="kw">let </span>disco = StaticProvider::new();
-<a href=#1970 id=1970 data-nosnippet>1970</a>
-<a href=#1971 id=1971 data-nosnippet>1971</a>        <span class="comment">// --- Step 1: Start Peer A ---
-<a href=#1972 id=1972 data-nosnippet>1972</a>        </span><span class="kw">let </span>ep_a = Endpoint::empty_builder(RelayMode::Custom(relay_map.clone()))
-<a href=#1973 id=1973 data-nosnippet>1973</a>            .secret_key(secret_key_a.clone())
-<a href=#1974 id=1974 data-nosnippet>1974</a>            .insecure_skip_relay_cert_verify(<span class="bool-val">true</span>)
-<a href=#1975 id=1975 data-nosnippet>1975</a>            .bind()
-<a href=#1976 id=1976 data-nosnippet>1976</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1977 id=1977 data-nosnippet>1977</a>        ep_a.discovery().add(disco.clone());
-<a href=#1978 id=1978 data-nosnippet>1978</a>        disco.set_endpoint_info(EndpointAddr::new(ep_a.id()).with_relay_url(relay_url.clone()));
-<a href=#1979 id=1979 data-nosnippet>1979</a>        <span class="kw">let </span><span class="kw-2">mut </span>gossip_a = Gossip::builder().spawn(ep_a.clone());
-<a href=#1980 id=1980 data-nosnippet>1980</a>        <span class="kw">let </span><span class="kw-2">mut </span>router_a = Router::builder(ep_a)
-<a href=#1981 id=1981 data-nosnippet>1981</a>            .accept(GOSSIP_ALPN, gossip_a.clone())
-<a href=#1982 id=1982 data-nosnippet>1982</a>            .spawn();
-<a href=#1983 id=1983 data-nosnippet>1983</a>        router_a.endpoint().online().<span class="kw">await</span>;
-<a href=#1984 id=1984 data-nosnippet>1984</a>        <span class="macro">info!</span>(<span class="string">"Peer A started: {}"</span>, router_a.endpoint().id().fmt_short());
-<a href=#1985 id=1985 data-nosnippet>1985</a>
-<a href=#1986 id=1986 data-nosnippet>1986</a>        <span class="comment">// --- Step 2: Start Peer B and join using A as bootstrap ---
-<a href=#1987 id=1987 data-nosnippet>1987</a>        </span><span class="kw">let </span>ep_b = Endpoint::empty_builder(RelayMode::Custom(relay_map.clone()))
-<a href=#1988 id=1988 data-nosnippet>1988</a>            .secret_key(secret_key_b.clone())
-<a href=#1989 id=1989 data-nosnippet>1989</a>            .insecure_skip_relay_cert_verify(<span class="bool-val">true</span>)
-<a href=#1990 id=1990 data-nosnippet>1990</a>            .bind()
-<a href=#1991 id=1991 data-nosnippet>1991</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1992 id=1992 data-nosnippet>1992</a>
-<a href=#1993 id=1993 data-nosnippet>1993</a>        ep_b.discovery().add(disco.clone());
-<a href=#1994 id=1994 data-nosnippet>1994</a>        disco.set_endpoint_info(EndpointAddr::new(ep_b.id()).with_relay_url(relay_url.clone()));
-<a href=#1995 id=1995 data-nosnippet>1995</a>        <span class="kw">let </span>gossip_b = Gossip::builder().spawn(ep_b.clone());
-<a href=#1996 id=1996 data-nosnippet>1996</a>        <span class="kw">let </span>router_b = Router::builder(ep_b)
-<a href=#1997 id=1997 data-nosnippet>1997</a>            .accept(GOSSIP_ALPN, gossip_b.clone())
-<a href=#1998 id=1998 data-nosnippet>1998</a>            .spawn();
-<a href=#1999 id=1999 data-nosnippet>1999</a>        router_b.endpoint().online().<span class="kw">await</span>;
-<a href=#2000 id=2000 data-nosnippet>2000</a>        <span class="macro">info!</span>(<span class="string">"Peer B started: {}"</span>, router_b.endpoint().id().fmt_short());
+<a href=#1969 id=1969 data-nosnippet>1969</a>        <span class="comment">// Start peer A
+<a href=#1970 id=1970 data-nosnippet>1970</a>        </span><span class="kw">let </span>ep_a = Endpoint::empty_builder(RelayMode::Custom(relay_map.clone()))
+<a href=#1971 id=1971 data-nosnippet>1971</a>            .secret_key(secret_key_a.clone())
+<a href=#1972 id=1972 data-nosnippet>1972</a>            .insecure_skip_relay_cert_verify(<span class="bool-val">true</span>)
+<a href=#1973 id=1973 data-nosnippet>1973</a>            .discovery(disco.clone())
+<a href=#1974 id=1974 data-nosnippet>1974</a>            .bind()
+<a href=#1975 id=1975 data-nosnippet>1975</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1976 id=1976 data-nosnippet>1976</a>        disco.set_endpoint_info(EndpointAddr::new(ep_a.id()).with_relay_url(relay_url.clone()));
+<a href=#1977 id=1977 data-nosnippet>1977</a>        <span class="kw">let </span><span class="kw-2">mut </span>gossip_a = Gossip::builder().spawn(ep_a.clone());
+<a href=#1978 id=1978 data-nosnippet>1978</a>        <span class="kw">let </span><span class="kw-2">mut </span>router_a = Router::builder(ep_a)
+<a href=#1979 id=1979 data-nosnippet>1979</a>            .accept(GOSSIP_ALPN, gossip_a.clone())
+<a href=#1980 id=1980 data-nosnippet>1980</a>            .spawn();
+<a href=#1981 id=1981 data-nosnippet>1981</a>        router_a.endpoint().online().<span class="kw">await</span>;
+<a href=#1982 id=1982 data-nosnippet>1982</a>        <span class="macro">info!</span>(<span class="string">"Peer A started: {}"</span>, router_a.endpoint().id().fmt_short());
+<a href=#1983 id=1983 data-nosnippet>1983</a>
+<a href=#1984 id=1984 data-nosnippet>1984</a>        <span class="comment">// Start peer B
+<a href=#1985 id=1985 data-nosnippet>1985</a>        </span><span class="kw">let </span>ep_b = Endpoint::empty_builder(RelayMode::Custom(relay_map.clone()))
+<a href=#1986 id=1986 data-nosnippet>1986</a>            .secret_key(secret_key_b.clone())
+<a href=#1987 id=1987 data-nosnippet>1987</a>            .insecure_skip_relay_cert_verify(<span class="bool-val">true</span>)
+<a href=#1988 id=1988 data-nosnippet>1988</a>            .discovery(disco.clone())
+<a href=#1989 id=1989 data-nosnippet>1989</a>            .bind()
+<a href=#1990 id=1990 data-nosnippet>1990</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1991 id=1991 data-nosnippet>1991</a>        disco.set_endpoint_info(EndpointAddr::new(ep_b.id()).with_relay_url(relay_url.clone()));
+<a href=#1992 id=1992 data-nosnippet>1992</a>        <span class="kw">let </span>gossip_b = Gossip::builder().spawn(ep_b.clone());
+<a href=#1993 id=1993 data-nosnippet>1993</a>        <span class="kw">let </span>router_b = Router::builder(ep_b)
+<a href=#1994 id=1994 data-nosnippet>1994</a>            .accept(GOSSIP_ALPN, gossip_b.clone())
+<a href=#1995 id=1995 data-nosnippet>1995</a>            .spawn();
+<a href=#1996 id=1996 data-nosnippet>1996</a>        router_b.endpoint().online().<span class="kw">await</span>;
+<a href=#1997 id=1997 data-nosnippet>1997</a>        <span class="macro">info!</span>(<span class="string">"Peer B started: {}"</span>, router_b.endpoint().id().fmt_short());
+<a href=#1998 id=1998 data-nosnippet>1998</a>
+<a href=#1999 id=1999 data-nosnippet>1999</a>        <span class="kw">let </span>id_b = router_b.endpoint().id();
+<a href=#2000 id=2000 data-nosnippet>2000</a>        <span class="kw">let </span>id_a = router_a.endpoint().id();
 <a href=#2001 id=2001 data-nosnippet>2001</a>
-<a href=#2002 id=2002 data-nosnippet>2002</a>        <span class="kw">let </span>id_b = router_b.endpoint().id();
-<a href=#2003 id=2003 data-nosnippet>2003</a>        <span class="kw">let </span>id_a = router_a.endpoint().id();
-<a href=#2004 id=2004 data-nosnippet>2004</a>
-<a href=#2005 id=2005 data-nosnippet>2005</a>        <span class="comment">// A subscribes to topic without bootstrap peers
-<a href=#2006 id=2006 data-nosnippet>2006</a>        </span><span class="kw">let </span>topic_a = gossip_a.subscribe(topic_id, <span class="macro">vec!</span>[]).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#2007 id=2007 data-nosnippet>2007</a>        <span class="kw">let </span>(_tx_a, <span class="kw-2">mut </span>rx_a) = topic_a.split();
-<a href=#2008 id=2008 data-nosnippet>2008</a>
-<a href=#2009 id=2009 data-nosnippet>2009</a>        <span class="comment">// B subscribes and joins using A as bootstrap
-<a href=#2010 id=2010 data-nosnippet>2010</a>        </span><span class="kw">let </span>topic_b = gossip_b.subscribe(topic_id, <span class="macro">vec!</span>[id_a]).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#2011 id=2011 data-nosnippet>2011</a>        <span class="kw">let </span>(tx_b, <span class="kw-2">mut </span>rx_b) = topic_b.split();
-<a href=#2012 id=2012 data-nosnippet>2012</a>
-<a href=#2013 id=2013 data-nosnippet>2013</a>        <span class="comment">// Wait for both to join the mesh
-<a href=#2014 id=2014 data-nosnippet>2014</a>        </span>timeout(Duration::from_secs(<span class="number">5</span>), rx_a.joined())
-<a href=#2015 id=2015 data-nosnippet>2015</a>            .<span class="kw">await
-<a href=#2016 id=2016 data-nosnippet>2016</a>            </span>.std_context(<span class="string">"wait rx_a join"</span>)<span class="question-mark">??</span>;
-<a href=#2017 id=2017 data-nosnippet>2017</a>        timeout(Duration::from_secs(<span class="number">5</span>), rx_b.joined())
-<a href=#2018 id=2018 data-nosnippet>2018</a>            .<span class="kw">await
-<a href=#2019 id=2019 data-nosnippet>2019</a>            </span>.std_context(<span class="string">"wait rx_b join"</span>)<span class="question-mark">??</span>;
-<a href=#2020 id=2020 data-nosnippet>2020</a>        <span class="macro">info!</span>(<span class="string">"Both peers joined the mesh"</span>);
-<a href=#2021 id=2021 data-nosnippet>2021</a>
-<a href=#2022 id=2022 data-nosnippet>2022</a>        <span class="comment">// Verify they can communicate
-<a href=#2023 id=2023 data-nosnippet>2023</a>        </span>tx_b.broadcast(<span class="string">b"hello from B"</span>.to_vec().into()).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#2024 id=2024 data-nosnippet>2024</a>        <span class="kw">let </span>event = timeout(Duration::from_secs(<span class="number">3</span>), rx_a.next())
-<a href=#2025 id=2025 data-nosnippet>2025</a>            .<span class="kw">await
-<a href=#2026 id=2026 data-nosnippet>2026</a>            </span>.std_context(<span class="string">"wait for message on rx_a"</span>)<span class="question-mark">?</span>;
-<a href=#2027 id=2027 data-nosnippet>2027</a>        <span class="kw">match </span>event {
-<a href=#2028 id=2028 data-nosnippet>2028</a>            <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(Event::Received(msg))) =&gt; {
-<a href=#2029 id=2029 data-nosnippet>2029</a>                <span class="macro">assert_eq!</span>(<span class="kw-2">&amp;</span>msg.content[..], <span class="string">b"hello from B"</span>);
-<a href=#2030 id=2030 data-nosnippet>2030</a>            }
-<a href=#2031 id=2031 data-nosnippet>2031</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected Received event, got {:?}"</span>, other),
-<a href=#2032 id=2032 data-nosnippet>2032</a>        }
-<a href=#2033 id=2033 data-nosnippet>2033</a>        <span class="macro">info!</span>(<span class="string">"Initial communication successful"</span>);
-<a href=#2034 id=2034 data-nosnippet>2034</a>
-<a href=#2035 id=2035 data-nosnippet>2035</a>        <span class="comment">// --- Step 3: Peer A goes offline ---
-<a href=#2036 id=2036 data-nosnippet>2036</a>        </span><span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..<span class="number">10 </span>{
-<a href=#2037 id=2037 data-nosnippet>2037</a>            <span class="kw">async </span>{
-<a href=#2038 id=2038 data-nosnippet>2038</a>                <span class="macro">info!</span>(<span class="string">"Shutting down Peer A to simulate going offline"</span>);
-<a href=#2039 id=2039 data-nosnippet>2039</a>                <span class="comment">// We shutdown the *endpoint* directly. This force-closes all connections.
-<a href=#2040 id=2040 data-nosnippet>2040</a>                </span>router_a.endpoint().close().<span class="kw">await</span>;
-<a href=#2041 id=2041 data-nosnippet>2041</a>
-<a href=#2042 id=2042 data-nosnippet>2042</a>                <span class="comment">// --- Step 4: Peer B sees connection timeout (NeighborDown) ---
-<a href=#2043 id=2043 data-nosnippet>2043</a>                </span><span class="macro">info!</span>(<span class="string">"Waiting for Peer B to detect Peer A going offline"</span>);
-<a href=#2044 id=2044 data-nosnippet>2044</a>                timeout(Duration::from_secs(<span class="number">5</span>), <span class="kw">async </span>{
-<a href=#2045 id=2045 data-nosnippet>2045</a>                    <span class="kw">match </span>rx_b.next().<span class="kw">await </span>{
-<a href=#2046 id=2046 data-nosnippet>2046</a>                        <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(Event::NeighborDown(peer))) <span class="kw">if </span>peer == id_a =&gt; {}
-<a href=#2047 id=2047 data-nosnippet>2047</a>                        other =&gt; <span class="macro">panic!</span>(<span class="string">"Peer B received unexpected event: {other:?}"</span>),
-<a href=#2048 id=2048 data-nosnippet>2048</a>                    }
-<a href=#2049 id=2049 data-nosnippet>2049</a>                })
-<a href=#2050 id=2050 data-nosnippet>2050</a>                .<span class="kw">await
-<a href=#2051 id=2051 data-nosnippet>2051</a>                </span>.std_context(<span class="string">"wait for NeighborDown on rx_b"</span>)<span class="question-mark">?</span>;
+<a href=#2002 id=2002 data-nosnippet>2002</a>        <span class="comment">// A subscribes to topic without bootstrap peers
+<a href=#2003 id=2003 data-nosnippet>2003</a>        </span><span class="kw">let </span>topic_a = gossip_a.subscribe(topic_id, <span class="macro">vec!</span>[]).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#2004 id=2004 data-nosnippet>2004</a>        <span class="kw">let </span>(_tx_a, <span class="kw-2">mut </span>rx_a) = topic_a.split();
+<a href=#2005 id=2005 data-nosnippet>2005</a>
+<a href=#2006 id=2006 data-nosnippet>2006</a>        <span class="comment">// B subscribes and joins using A as bootstrap
+<a href=#2007 id=2007 data-nosnippet>2007</a>        </span><span class="kw">let </span>topic_b = gossip_b.subscribe(topic_id, <span class="macro">vec!</span>[id_a]).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#2008 id=2008 data-nosnippet>2008</a>        <span class="kw">let </span>(tx_b, <span class="kw-2">mut </span>rx_b) = topic_b.split();
+<a href=#2009 id=2009 data-nosnippet>2009</a>
+<a href=#2010 id=2010 data-nosnippet>2010</a>        <span class="comment">// Wait for both to join the mesh
+<a href=#2011 id=2011 data-nosnippet>2011</a>        </span>timeout_2s(rx_a.joined()).<span class="kw">await</span><span class="question-mark">??</span>;
+<a href=#2012 id=2012 data-nosnippet>2012</a>        timeout_2s(rx_b.joined()).<span class="kw">await</span><span class="question-mark">??</span>;
+<a href=#2013 id=2013 data-nosnippet>2013</a>        <span class="macro">info!</span>(<span class="string">"Both peers joined"</span>);
+<a href=#2014 id=2014 data-nosnippet>2014</a>
+<a href=#2015 id=2015 data-nosnippet>2015</a>        <span class="comment">// Verify they can communicate
+<a href=#2016 id=2016 data-nosnippet>2016</a>        </span>tx_b.broadcast(<span class="string">b"hello from B"</span>.to_vec().into()).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#2017 id=2017 data-nosnippet>2017</a>        <span class="kw">match </span>timeout_2s(rx_a.next()).<span class="kw">await</span><span class="question-mark">? </span>{
+<a href=#2018 id=2018 data-nosnippet>2018</a>            <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(Event::Received(msg))) =&gt; <span class="macro">assert_eq!</span>(<span class="kw-2">&amp;</span>msg.content[..], <span class="string">b"hello from B"</span>),
+<a href=#2019 id=2019 data-nosnippet>2019</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected Received event, got {:?}"</span>, other),
+<a href=#2020 id=2020 data-nosnippet>2020</a>        }
+<a href=#2021 id=2021 data-nosnippet>2021</a>        <span class="macro">info!</span>(<span class="string">"Initial communication successful"</span>);
+<a href=#2022 id=2022 data-nosnippet>2022</a>
+<a href=#2023 id=2023 data-nosnippet>2023</a>        <span class="comment">// --- Step 3: Peer A goes offline ---
+<a href=#2024 id=2024 data-nosnippet>2024</a>        </span><span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..<span class="number">10 </span>{
+<a href=#2025 id=2025 data-nosnippet>2025</a>            <span class="kw">async </span>{
+<a href=#2026 id=2026 data-nosnippet>2026</a>                <span class="macro">info!</span>(<span class="string">"Shutting down Peer A to simulate going offline"</span>);
+<a href=#2027 id=2027 data-nosnippet>2027</a>                <span class="comment">// We shutdown the *endpoint* directly. This force-closes all connections
+<a href=#2028 id=2028 data-nosnippet>2028</a>                // without gossip getting a chance to send explicit Disconnect messages.
+<a href=#2029 id=2029 data-nosnippet>2029</a>                </span>router_a.endpoint().close().<span class="kw">await</span>;
+<a href=#2030 id=2030 data-nosnippet>2030</a>
+<a href=#2031 id=2031 data-nosnippet>2031</a>                <span class="comment">// --- Step 4: Peer B sees connection timeout (NeighborDown) ---
+<a href=#2032 id=2032 data-nosnippet>2032</a>                </span><span class="macro">info!</span>(<span class="string">"Waiting for Peer B to detect Peer A going offline"</span>);
+<a href=#2033 id=2033 data-nosnippet>2033</a>                <span class="kw">match </span>timeout_2s(rx_b.next()).<span class="kw">await</span><span class="question-mark">? </span>{
+<a href=#2034 id=2034 data-nosnippet>2034</a>                    <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(Event::NeighborDown(peer))) <span class="kw">if </span>peer == id_a =&gt; {}
+<a href=#2035 id=2035 data-nosnippet>2035</a>                    other =&gt; <span class="macro">panic!</span>(<span class="string">"Peer B received unexpected event: {other:?}"</span>),
+<a href=#2036 id=2036 data-nosnippet>2036</a>                }
+<a href=#2037 id=2037 data-nosnippet>2037</a>
+<a href=#2038 id=2038 data-nosnippet>2038</a>                <span class="comment">// --- Step 5: Peer A comes back online and rejoins using B as bootstrap ---
+<a href=#2039 id=2039 data-nosnippet>2039</a>                </span><span class="macro">info!</span>(<span class="string">"Restarting Peer A"</span>);
+<a href=#2040 id=2040 data-nosnippet>2040</a>                <span class="kw">let </span>ep_a = Endpoint::empty_builder(RelayMode::Custom(relay_map.clone()))
+<a href=#2041 id=2041 data-nosnippet>2041</a>                    .secret_key(secret_key_a.clone())
+<a href=#2042 id=2042 data-nosnippet>2042</a>                    .discovery(disco.clone())
+<a href=#2043 id=2043 data-nosnippet>2043</a>                    .insecure_skip_relay_cert_verify(<span class="bool-val">true</span>)
+<a href=#2044 id=2044 data-nosnippet>2044</a>                    .bind()
+<a href=#2045 id=2045 data-nosnippet>2045</a>                    .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#2046 id=2046 data-nosnippet>2046</a>                gossip_a = Gossip::builder().spawn(ep_a.clone());
+<a href=#2047 id=2047 data-nosnippet>2047</a>                router_a = Router::builder(ep_a)
+<a href=#2048 id=2048 data-nosnippet>2048</a>                    .accept(GOSSIP_ALPN, gossip_a.clone())
+<a href=#2049 id=2049 data-nosnippet>2049</a>                    .spawn();
+<a href=#2050 id=2050 data-nosnippet>2050</a>                router_a.endpoint().online().<span class="kw">await</span>;
+<a href=#2051 id=2051 data-nosnippet>2051</a>                <span class="macro">info!</span>(<span class="string">"Peer A restarted: {}"</span>, router_a.endpoint().id().fmt_short());
 <a href=#2052 id=2052 data-nosnippet>2052</a>
-<a href=#2053 id=2053 data-nosnippet>2053</a>                <span class="comment">// --- Step 5: Peer A comes back online and rejoins using B as bootstrap ---
-<a href=#2054 id=2054 data-nosnippet>2054</a>                </span><span class="macro">info!</span>(<span class="string">"Restarting Peer A"</span>);
-<a href=#2055 id=2055 data-nosnippet>2055</a>                <span class="kw">let </span>ep_a = Endpoint::empty_builder(RelayMode::Custom(relay_map.clone()))
-<a href=#2056 id=2056 data-nosnippet>2056</a>                    .secret_key(secret_key_a.clone())
-<a href=#2057 id=2057 data-nosnippet>2057</a>                    .insecure_skip_relay_cert_verify(<span class="bool-val">true</span>)
-<a href=#2058 id=2058 data-nosnippet>2058</a>                    .bind()
-<a href=#2059 id=2059 data-nosnippet>2059</a>                    .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#2060 id=2060 data-nosnippet>2060</a>                ep_a.discovery().add(disco.clone());
-<a href=#2061 id=2061 data-nosnippet>2061</a>                gossip_a = Gossip::builder().spawn(ep_a.clone());
-<a href=#2062 id=2062 data-nosnippet>2062</a>                router_a = Router::builder(ep_a)
-<a href=#2063 id=2063 data-nosnippet>2063</a>                    .accept(GOSSIP_ALPN, gossip_a.clone())
-<a href=#2064 id=2064 data-nosnippet>2064</a>                    .spawn();
-<a href=#2065 id=2065 data-nosnippet>2065</a>                router_a.endpoint().online().<span class="kw">await</span>;
-<a href=#2066 id=2066 data-nosnippet>2066</a>                <span class="macro">info!</span>(<span class="string">"Peer A restarted: {}"</span>, router_a.endpoint().id().fmt_short());
+<a href=#2053 id=2053 data-nosnippet>2053</a>                <span class="comment">// A rejoins using B as bootstrap
+<a href=#2054 id=2054 data-nosnippet>2054</a>                </span><span class="kw">let </span>topic_a = gossip_a.subscribe(topic_id, <span class="macro">vec!</span>[id_b]).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#2055 id=2055 data-nosnippet>2055</a>                <span class="kw">let </span>(_tx_a, <span class="kw-2">mut </span>rx_a) = topic_a.split();
+<a href=#2056 id=2056 data-nosnippet>2056</a>
+<a href=#2057 id=2057 data-nosnippet>2057</a>                <span class="comment">// : Both peers should successfully reconnect ---
+<a href=#2058 id=2058 data-nosnippet>2058</a>                </span><span class="macro">info!</span>(<span class="string">"Waiting for Peer A to rejoin"</span>);
+<a href=#2059 id=2059 data-nosnippet>2059</a>                timeout_2s(rx_a.joined()).<span class="kw">await</span><span class="question-mark">??</span>;
+<a href=#2060 id=2060 data-nosnippet>2060</a>                <span class="macro">info!</span>(<span class="string">"Peer A successfully rejoined"</span>);
+<a href=#2061 id=2061 data-nosnippet>2061</a>
+<a href=#2062 id=2062 data-nosnippet>2062</a>                <span class="comment">// Wait for B to see A as neighbor again
+<a href=#2063 id=2063 data-nosnippet>2063</a>                </span><span class="kw">match </span>timeout_2s(rx_b.next()).<span class="kw">await</span><span class="question-mark">? </span>{
+<a href=#2064 id=2064 data-nosnippet>2064</a>                    <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(Event::NeighborUp(peer))) <span class="kw">if </span>peer == id_a =&gt; {}
+<a href=#2065 id=2065 data-nosnippet>2065</a>                    other =&gt; <span class="macro">panic!</span>(<span class="string">"Peer B received unexpected event: {other:?}"</span>),
+<a href=#2066 id=2066 data-nosnippet>2066</a>                }
 <a href=#2067 id=2067 data-nosnippet>2067</a>
-<a href=#2068 id=2068 data-nosnippet>2068</a>                <span class="comment">// A rejoins using B as bootstrap
-<a href=#2069 id=2069 data-nosnippet>2069</a>                </span><span class="kw">let </span>topic_a = gossip_a.subscribe(topic_id, <span class="macro">vec!</span>[id_b]).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#2070 id=2070 data-nosnippet>2070</a>                <span class="kw">let </span>(_tx_a, <span class="kw-2">mut </span>rx_a) = topic_a.split();
-<a href=#2071 id=2071 data-nosnippet>2071</a>
-<a href=#2072 id=2072 data-nosnippet>2072</a>                <span class="comment">// --- Step 6: Both peers should successfully reconnect ---
-<a href=#2073 id=2073 data-nosnippet>2073</a>                </span><span class="macro">info!</span>(<span class="string">"Waiting for Peer A to rejoin"</span>);
-<a href=#2074 id=2074 data-nosnippet>2074</a>                timeout(Duration::from_secs(<span class="number">5</span>), rx_a.joined())
-<a href=#2075 id=2075 data-nosnippet>2075</a>                    .<span class="kw">await
-<a href=#2076 id=2076 data-nosnippet>2076</a>                    </span>.std_context(
-<a href=#2077 id=2077 data-nosnippet>2077</a>                        <span class="string">"wait rx_a join - Peer A failed to rejoin using B as bootstrap"</span>,
-<a href=#2078 id=2078 data-nosnippet>2078</a>                    )<span class="question-mark">??</span>;
-<a href=#2079 id=2079 data-nosnippet>2079</a>                <span class="macro">info!</span>(<span class="string">"Peer A successfully rejoined the mesh"</span>);
-<a href=#2080 id=2080 data-nosnippet>2080</a>
-<a href=#2081 id=2081 data-nosnippet>2081</a>                <span class="comment">// Wait for B to see A as neighbor again
-<a href=#2082 id=2082 data-nosnippet>2082</a>                </span>timeout(Duration::from_secs(<span class="number">5</span>), <span class="kw">async </span>{
-<a href=#2083 id=2083 data-nosnippet>2083</a>                    <span class="kw">match </span>rx_b.next().<span class="kw">await </span>{
-<a href=#2084 id=2084 data-nosnippet>2084</a>                        <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(Event::NeighborUp(peer))) <span class="kw">if </span>peer == id_a =&gt; {}
-<a href=#2085 id=2085 data-nosnippet>2085</a>                        other =&gt; <span class="macro">panic!</span>(<span class="string">"Peer B received unexpected event: {other:?}"</span>),
-<a href=#2086 id=2086 data-nosnippet>2086</a>                    }
-<a href=#2087 id=2087 data-nosnippet>2087</a>                })
-<a href=#2088 id=2088 data-nosnippet>2088</a>                .<span class="kw">await
-<a href=#2089 id=2089 data-nosnippet>2089</a>                </span>.std_context(<span class="string">"wait for NeighborDown on rx_b"</span>)<span class="question-mark">?</span>;
-<a href=#2090 id=2090 data-nosnippet>2090</a>
-<a href=#2091 id=2091 data-nosnippet>2091</a>                <span class="comment">// Verify they can communicate again
-<a href=#2092 id=2092 data-nosnippet>2092</a>                </span>tx_b.broadcast(
-<a href=#2093 id=2093 data-nosnippet>2093</a>                    <span class="macro">format!</span>(<span class="string">"hello from B after reconnect {i}"</span>)
-<a href=#2094 id=2094 data-nosnippet>2094</a>                        .as_bytes()
-<a href=#2095 id=2095 data-nosnippet>2095</a>                        .to_vec()
-<a href=#2096 id=2096 data-nosnippet>2096</a>                        .into(),
-<a href=#2097 id=2097 data-nosnippet>2097</a>                )
-<a href=#2098 id=2098 data-nosnippet>2098</a>                .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#2099 id=2099 data-nosnippet>2099</a>                <span class="kw">let </span>event = timeout(Duration::from_secs(<span class="number">3</span>), <span class="kw">async </span>{
-<a href=#2100 id=2100 data-nosnippet>2100</a>                    <span class="kw">match </span>rx_a.next().<span class="kw">await </span>{
-<a href=#2101 id=2101 data-nosnippet>2101</a>                        <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(Event::Received(msg))) =&gt; msg,
-<a href=#2102 id=2102 data-nosnippet>2102</a>                        other =&gt; <span class="macro">panic!</span>(<span class="string">"Peer A received unexpected event {other:?}"</span>),
-<a href=#2103 id=2103 data-nosnippet>2103</a>                    }
-<a href=#2104 id=2104 data-nosnippet>2104</a>                })
-<a href=#2105 id=2105 data-nosnippet>2105</a>                .<span class="kw">await
-<a href=#2106 id=2106 data-nosnippet>2106</a>                </span>.std_context(<span class="string">"wait for message on rx_b after reconnect"</span>)<span class="question-mark">?</span>;
-<a href=#2107 id=2107 data-nosnippet>2107</a>                <span class="macro">assert_eq!</span>(
-<a href=#2108 id=2108 data-nosnippet>2108</a>                    <span class="kw-2">&amp;</span>event.content[..],
-<a href=#2109 id=2109 data-nosnippet>2109</a>                    <span class="macro">format!</span>(<span class="string">"hello from B after reconnect {i}"</span>).as_bytes()
-<a href=#2110 id=2110 data-nosnippet>2110</a>                );
-<a href=#2111 id=2111 data-nosnippet>2111</a>                <span class="macro">info!</span>(<span class="string">"Communication restored after reconnection"</span>);
-<a href=#2112 id=2112 data-nosnippet>2112</a>                n0_error::Ok(())
-<a href=#2113 id=2113 data-nosnippet>2113</a>            }
-<a href=#2114 id=2114 data-nosnippet>2114</a>            .instrument(<span class="macro">error_span!</span>(<span class="string">"round"</span>, %i))
-<a href=#2115 id=2115 data-nosnippet>2115</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#2116 id=2116 data-nosnippet>2116</a>        }
-<a href=#2117 id=2117 data-nosnippet>2117</a>
-<a href=#2118 id=2118 data-nosnippet>2118</a>        <span class="comment">// Cleanup
-<a href=#2119 id=2119 data-nosnippet>2119</a>        </span>router_a
-<a href=#2120 id=2120 data-nosnippet>2120</a>            .shutdown()
-<a href=#2121 id=2121 data-nosnippet>2121</a>            .<span class="kw">await
-<a href=#2122 id=2122 data-nosnippet>2122</a>            </span>.std_context(<span class="string">"shutdown router_a2"</span>)<span class="question-mark">?</span>;
-<a href=#2123 id=2123 data-nosnippet>2123</a>        router_b.shutdown().<span class="kw">await</span>.std_context(<span class="string">"shutdown router_b"</span>)<span class="question-mark">?</span>;
-<a href=#2124 id=2124 data-nosnippet>2124</a>
-<a href=#2125 id=2125 data-nosnippet>2125</a>        <span class="prelude-val">Ok</span>(())
-<a href=#2126 id=2126 data-nosnippet>2126</a>    }
-<a href=#2127 id=2127 data-nosnippet>2127</a>}</code></pre></div></section></main></body></html>
+<a href=#2068 id=2068 data-nosnippet>2068</a>                <span class="comment">// Verify they can communicate again
+<a href=#2069 id=2069 data-nosnippet>2069</a>                </span>tx_b.broadcast(<span class="macro">format!</span>(<span class="string">"hello from B after reconnect {i}"</span>).into())
+<a href=#2070 id=2070 data-nosnippet>2070</a>                    .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#2071 id=2071 data-nosnippet>2071</a>                <span class="kw">let </span>event = <span class="kw">match </span>timeout_2s(rx_a.next()).<span class="kw">await</span><span class="question-mark">? </span>{
+<a href=#2072 id=2072 data-nosnippet>2072</a>                    <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(Event::Received(msg))) =&gt; msg,
+<a href=#2073 id=2073 data-nosnippet>2073</a>                    other =&gt; <span class="macro">panic!</span>(<span class="string">"Peer A received unexpected event {other:?}"</span>),
+<a href=#2074 id=2074 data-nosnippet>2074</a>                };
+<a href=#2075 id=2075 data-nosnippet>2075</a>                <span class="macro">assert_eq!</span>(
+<a href=#2076 id=2076 data-nosnippet>2076</a>                    <span class="kw-2">&amp;</span>event.content[..],
+<a href=#2077 id=2077 data-nosnippet>2077</a>                    <span class="macro">format!</span>(<span class="string">"hello from B after reconnect {i}"</span>).as_bytes()
+<a href=#2078 id=2078 data-nosnippet>2078</a>                );
+<a href=#2079 id=2079 data-nosnippet>2079</a>                <span class="macro">info!</span>(<span class="string">"Communication restored after reconnection"</span>);
+<a href=#2080 id=2080 data-nosnippet>2080</a>                n0_error::Ok(())
+<a href=#2081 id=2081 data-nosnippet>2081</a>            }
+<a href=#2082 id=2082 data-nosnippet>2082</a>            .instrument(<span class="macro">error_span!</span>(<span class="string">"round"</span>, %i))
+<a href=#2083 id=2083 data-nosnippet>2083</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#2084 id=2084 data-nosnippet>2084</a>        }
+<a href=#2085 id=2085 data-nosnippet>2085</a>
+<a href=#2086 id=2086 data-nosnippet>2086</a>        <span class="comment">// Cleanup
+<a href=#2087 id=2087 data-nosnippet>2087</a>        </span>router_a
+<a href=#2088 id=2088 data-nosnippet>2088</a>            .shutdown()
+<a href=#2089 id=2089 data-nosnippet>2089</a>            .<span class="kw">await
+<a href=#2090 id=2090 data-nosnippet>2090</a>            </span>.std_context(<span class="string">"shutdown router_a2"</span>)<span class="question-mark">?</span>;
+<a href=#2091 id=2091 data-nosnippet>2091</a>        router_b.shutdown().<span class="kw">await</span>.std_context(<span class="string">"shutdown router_b"</span>)<span class="question-mark">?</span>;
+<a href=#2092 id=2092 data-nosnippet>2092</a>
+<a href=#2093 id=2093 data-nosnippet>2093</a>        <span class="prelude-val">Ok</span>(())
+<a href=#2094 id=2094 data-nosnippet>2094</a>    }
+<a href=#2095 id=2095 data-nosnippet>2095</a>
+<a href=#2096 id=2096 data-nosnippet>2096</a>    <span class="kw">async fn </span>timeout_2s&lt;T&gt;(fut: <span class="kw">impl </span>Future&lt;Output = T&gt;) -&gt; <span class="prelude-ty">Result</span>&lt;T&gt; {
+<a href=#2097 id=2097 data-nosnippet>2097</a>        tokio::time::timeout(Duration::from_secs(<span class="number">2</span>), fut)
+<a href=#2098 id=2098 data-nosnippet>2098</a>            .<span class="kw">await
+<a href=#2099 id=2099 data-nosnippet>2099</a>            </span>.std_context(<span class="string">"timeout"</span>)
+<a href=#2100 id=2100 data-nosnippet>2100</a>    }
+<a href=#2101 id=2101 data-nosnippet>2101</a>}</code></pre></div></section></main></body></html>
