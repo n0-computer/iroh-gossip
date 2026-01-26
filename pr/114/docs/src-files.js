@@ -1,2 +1,2 @@
-createSrcSidebar('[["iroh_gossip",["",[["net",[],["discovery.rs","util.rs"]],["proto",[],["hyparview.rs","plumtree.rs","sim.rs","state.rs","topic.rs","util.rs"]]],["api.rs","lib.rs","metrics.rs","net.rs","proto.rs"]]],["sim",["",[],["sim.rs"]]]]');
-//{"start":19,"fragment_lengths":[198,27]}
+createSrcSidebar('[["iroh_gossip",["",[["net",[],["address_lookup.rs","util.rs"]],["proto",[],["hyparview.rs","plumtree.rs","sim.rs","state.rs","topic.rs","util.rs"]]],["api.rs","lib.rs","metrics.rs","net.rs","proto.rs"]]],["sim",["",[],["sim.rs"]]]]');
+//{"start":19,"fragment_lengths":[203,27]}
