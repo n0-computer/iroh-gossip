@@ -30,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, error_span, trace, warn, Instrument};
 
 use self::{
-    discovery::GossipDiscovery,
+    address_lookup::GossipAddressLookup,
     util::{RecvLoop, SendLoop, Timers},
 };
 use crate::{
@@ -39,7 +39,7 @@ use crate::{
     proto::{self, HyparviewConfig, PeerData, PlumtreeConfig, Scope, TopicId},
 };
 
-mod discovery;
+mod address_lookup;
 mod util;
 
 /// ALPN protocol name
@@ -184,10 +184,10 @@ impl Builder {
     /// Spawn a gossip actor and get a handle for it
     pub fn spawn(self, endpoint: Endpoint) -> Gossip {
         let metrics = Arc::new(Metrics::default());
-        let discovery = GossipDiscovery::default();
-        endpoint.discovery().add(discovery.clone());
+        let address_lookup = GossipAddressLookup::default();
+        endpoint.address_lookup().add(address_lookup.clone());
         let (actor, rpc_tx, local_tx) =
-            Actor::new(endpoint, self.config, metrics.clone(), self.alpn, discovery);
+            Actor::new(endpoint, self.config, metrics.clone(), self.alpn, address_lookup);
         let me = actor.endpoint.id().fmt_short();
         let max_message_size = actor.state.max_message_size();
 
@@ -289,7 +289,7 @@ struct Actor {
     connection_tasks: JoinSet<(EndpointId, Connection, Result<(), ConnectionLoopError>)>,
     metrics: Arc<Metrics>,
     topic_event_forwarders: JoinSet<TopicId>,
-    discovery: GossipDiscovery,
+    address_lookup: GossipAddressLookup,
 }
 
 impl Actor {
@@ -298,7 +298,7 @@ impl Actor {
         config: proto::Config,
         metrics: Arc<Metrics>,
         alpn: Option<Bytes>,
-        discovery: GossipDiscovery,
+        address_lookup: GossipAddressLookup,
     ) -> (
         Self,
         mpsc::Sender<RpcMessage>,
@@ -333,7 +333,7 @@ impl Actor {
             metrics,
             local_rx,
             topic_event_forwarders: Default::default(),
-            discovery,
+            address_lookup,
         };
 
         (actor, rpc_tx, local_tx)
@@ -731,7 +731,7 @@ impl Actor {
                             endpoint_addr = endpoint_addr.with_relay_url(relay_url);
                         }
 
-                        self.discovery.add(endpoint_addr);
+                        self.address_lookup.add(endpoint_addr);
                     }
                 },
             }
@@ -1061,7 +1061,7 @@ pub(crate) mod test {
     use bytes::Bytes;
     use futures_concurrency::future::TryJoin;
     use iroh::{
-        discovery::static_provider::StaticProvider, endpoint::BindError, protocol::Router,
+        address_lookup::memory::MemoryLookup, endpoint::BindError, protocol::Router,
         RelayMap, RelayMode, SecretKey,
     };
     use n0_error::{AnyError, Result, StdResultExt};
@@ -1138,11 +1138,11 @@ pub(crate) mod test {
         ) -> Result<(Self, Actor, EndpointHandle), BindError> {
             let endpoint = create_endpoint(rng, relay_map, None).await?;
             let metrics = Arc::new(Metrics::default());
-            let discovery = GossipDiscovery::default();
-            endpoint.discovery().add(discovery.clone());
+            let address_lookup = GossipAddressLookup::default();
+            endpoint.address_lookup().add(address_lookup.clone());
 
             let (actor, to_actor_tx, conn_tx) =
-                Actor::new(endpoint, config, metrics.clone(), None, discovery);
+                Actor::new(endpoint, config, metrics.clone(), None, address_lookup);
             let max_message_size = actor.state.max_message_size();
 
             let _actor_handle =
@@ -1187,7 +1187,7 @@ pub(crate) mod test {
     pub(crate) async fn create_endpoint(
         rng: &mut rand_chacha::ChaCha12Rng,
         relay_map: RelayMap,
-        static_provider: Option<StaticProvider>,
+        memory_lookup: Option<MemoryLookup>,
     ) -> Result<Endpoint, BindError> {
         let ep = Endpoint::empty_builder(RelayMode::Custom(relay_map))
             .secret_key(SecretKey::generate(rng))
@@ -1196,8 +1196,8 @@ pub(crate) mod test {
             .bind()
             .await?;
 
-        if let Some(static_provider) = static_provider {
-            ep.discovery().add(static_provider);
+        if let Some(memory_lookup) = memory_lookup {
+            ep.address_lookup().add(memory_lookup);
         }
         ep.online().await;
         Ok(ep)
@@ -1241,15 +1241,15 @@ pub(crate) mod test {
         let mut rng = rand_chacha::ChaCha12Rng::seed_from_u64(1);
         let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
 
-        let static_provider = StaticProvider::new();
+        let memory_lookup = MemoryLookup::new();
 
-        let ep1 = create_endpoint(&mut rng, relay_map.clone(), Some(static_provider.clone()))
+        let ep1 = create_endpoint(&mut rng, relay_map.clone(), Some(memory_lookup.clone()))
             .await
             .unwrap();
-        let ep2 = create_endpoint(&mut rng, relay_map.clone(), Some(static_provider.clone()))
+        let ep2 = create_endpoint(&mut rng, relay_map.clone(), Some(memory_lookup.clone()))
             .await
             .unwrap();
-        let ep3 = create_endpoint(&mut rng, relay_map.clone(), Some(static_provider.clone()))
+        let ep3 = create_endpoint(&mut rng, relay_map.clone(), Some(memory_lookup.clone()))
             .await
             .unwrap();
 
@@ -1274,8 +1274,8 @@ pub(crate) mod test {
 
         let addr1 = EndpointAddr::new(pi1).with_relay_url(relay_url.clone());
         let addr2 = EndpointAddr::new(pi2).with_relay_url(relay_url);
-        static_provider.add_endpoint_info(addr1.clone());
-        static_provider.add_endpoint_info(addr2.clone());
+        memory_lookup.add_endpoint_info(addr1.clone());
+        memory_lookup.add_endpoint_info(addr2.clone());
 
         debug!("----- joining  ----- ");
         // join the topics and wait for the connection to succeed
@@ -1430,9 +1430,9 @@ pub(crate) mod test {
 
         // first endpoint
         let addr2 = EndpointAddr::new(endpoint_id2).with_relay_url(relay_url);
-        let static_provider = StaticProvider::new();
-        static_provider.add_endpoint_info(addr2);
-        actor.endpoint.discovery().add(static_provider);
+        let memory_lookup = MemoryLookup::new();
+        memory_lookup.add_endpoint_info(addr2);
+        actor.endpoint.address_lookup().add(memory_lookup);
         // we use a channel to signal advancing steps to the task
         let (tx, mut rx) = mpsc::channel::<()>(1);
         let ct1 = ct.clone();
@@ -1541,9 +1541,9 @@ pub(crate) mod test {
         // channel used to signal the second gossip instance to advance the test
         let (tx, mut rx) = mpsc::channel::<()>(1);
         let addr1 = EndpointAddr::new(endpoint_id1).with_relay_url(relay_url.clone());
-        let static_provider = StaticProvider::new();
-        static_provider.add_endpoint_info(addr1);
-        ep2.discovery().add(static_provider.clone());
+        let memory_lookup = MemoryLookup::new();
+        memory_lookup.add_endpoint_info(addr1);
+        ep2.address_lookup().add(memory_lookup.clone());
         let go2_task = async move {
             let mut sub = go2.subscribe(topic, Vec::new()).await?;
             sub.joined().await?;
@@ -1567,8 +1567,8 @@ pub(crate) mod test {
         let go2_handle = task::spawn(go2_task);
 
         let addr2 = EndpointAddr::new(endpoint_id2).with_relay_url(relay_url);
-        static_provider.add_endpoint_info(addr2);
-        ep1.discovery().add(static_provider);
+        memory_lookup.add_endpoint_info(addr2);
+        ep1.address_lookup().add(memory_lookup);
 
         let mut sub = go1.subscribe(topic, vec![endpoint_id2]).await?;
         // wait for subscribed notification
@@ -1660,9 +1660,9 @@ pub(crate) mod test {
             let (router, gossip) = spawn_gossip(secret_key, relay_map).await?;
             info!(endpoint_id = %router.endpoint().id().fmt_short(), "broadcast endpoint spawned");
             let bootstrap = vec![bootstrap_addr.id];
-            let static_provider = StaticProvider::new();
-            static_provider.add_endpoint_info(bootstrap_addr);
-            router.endpoint().discovery().add(static_provider);
+            let memory_lookup = MemoryLookup::new();
+            memory_lookup.add_endpoint_info(bootstrap_addr);
+            router.endpoint().address_lookup().add(memory_lookup);
             let mut topic = gossip.subscribe_and_join(topic_id, bootstrap).await?;
             topic.broadcast(message.as_bytes().to_vec().into()).await?;
             std::future::pending::<()>().await;
@@ -1777,9 +1777,9 @@ pub(crate) mod test {
 
         let addr1 = router1.endpoint().addr();
         let id1 = addr1.id;
-        let static_provider = StaticProvider::new();
-        static_provider.add_endpoint_info(addr1);
-        router2.endpoint().discovery().add(static_provider);
+        let memory_lookup = MemoryLookup::new();
+        memory_lookup.add_endpoint_info(addr1);
+        router2.endpoint().address_lookup().add(memory_lookup);
 
         let mut topic1 = gossip1.subscribe(topic_id, vec![]).await?;
         let mut topic2 = gossip2.subscribe(topic_id, vec![id1]).await?;
@@ -1797,7 +1797,7 @@ pub(crate) mod test {
 
     #[tokio::test]
     #[traced_test]
-    async fn gossip_rely_on_gossip_discovery() -> n0_error::Result<()> {
+    async fn gossip_rely_on_gossip_address_lookup() -> n0_error::Result<()> {
         let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
 
         async fn spawn(
@@ -1818,20 +1818,20 @@ pub(crate) mod test {
             Ok((endpoint_id, router, gossip, sender, receiver))
         }
 
-        // spawn 3 endpoints without relay or discovery
+        // spawn 3 endpoints without relay or address lookup
         let (n1, r1, _g1, _tx1, mut rx1) = spawn(rng).await?;
         let (n2, r2, _g2, tx2, mut rx2) = spawn(rng).await?;
         let (n3, r3, _g3, tx3, mut rx3) = spawn(rng).await?;
 
         println!("endpoints {:?}", [n1, n2, n3]);
 
-        // create a static discovery that has only endpoint 1 addr info set
+        // create a mem lookup that has only endpoint 1 addr info set
         let addr1 = r1.endpoint().addr();
-        let disco = StaticProvider::new();
-        disco.add_endpoint_info(addr1);
+        let lookup = MemoryLookup::new();
+        lookup.add_endpoint_info(addr1);
 
         // add addr info of endpoint1 to endpoint2 and join endpoint1
-        r2.endpoint().discovery().add(disco.clone());
+        r2.endpoint().address_lookup().add(lookup.clone());
         tx2.join_peers(vec![n1]).await?;
 
         // await join endpoint2 -> nodde1
@@ -1843,11 +1843,11 @@ pub(crate) mod test {
             .std_context("wait rx2 join")??;
 
         // add addr info of endpoint1 to endpoint3 and join endpoint1
-        r3.endpoint().discovery().add(disco.clone());
+        r3.endpoint().address_lookup().add(lookup.clone());
         tx3.join_peers(vec![n1]).await?;
 
         // await join at endpoint3: n1 and n2
-        // n2 only works because because we use gossip discovery!
+        // n2 only works because because we use gossip address lookup!
         let ev = timeout(Duration::from_secs(3), rx3.next())
             .await
             .std_context("wait rx3 first neighbor")?;

@@ -175,3 +175,7 @@ debug = true
 iroh = { git = "https://github.com/n0-computer/iroh", branch = "release-0-96" }
 iroh-base = { git = "https://github.com/n0-computer/iroh", branch = "release-0-96" }
 irpc = { git = "https://github.com/n0-computer/irpc", branch = "feat-multipath" }
+iroh-quinn = { git = "https://github.com/n0-computer/quinn", branch = "main" }
+iroh-quinn-udp = { git = "https://github.com/n0-computer/quinn", branch = "main" }
+iroh-quinn-proto = { git = "https://github.com/n0-computer/quinn", branch = "main" }
+netwatch = { git = "https://github.com/n0-computer/net-tools", branch = "quinn-latest" }
