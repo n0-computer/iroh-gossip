@@ -319,7 +319,7 @@
 <a href=#319 id=319 data-nosnippet>319</a>        topic::OutEvent::DisconnectPeer(peer) =&gt; {
 <a href=#320 id=320 data-nosnippet>320</a>            <span class="kw">let </span>empty = conns
 <a href=#321 id=321 data-nosnippet>321</a>                .get_mut(<span class="kw-2">&amp;</span>peer)
-<a href=#322 id=322 data-nosnippet>322</a>                .map(|list| list.remove(<span class="kw-2">&amp;</span>topic) &amp;&amp; list.is_empty())
+<a href=#322 id=322 data-nosnippet>322</a>                .map(|list| list.remove(<span class="kw-2">&amp;</span>topic) || list.is_empty())
 <a href=#323 id=323 data-nosnippet>323</a>                .unwrap_or(<span class="bool-val">false</span>);
 <a href=#324 id=324 data-nosnippet>324</a>            <span class="kw">if </span>empty {
 <a href=#325 id=325 data-nosnippet>325</a>                conns.remove(<span class="kw-2">&amp;</span>peer);
