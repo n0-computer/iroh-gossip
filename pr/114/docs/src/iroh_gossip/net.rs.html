@@ -1350,605 +1350,609 @@
 <a href=#1350 id=1350 data-nosnippet>1350</a>            </span>.unwrap()
 <a href=#1351 id=1351 data-nosnippet>1351</a>            .unwrap();
 <a href=#1352 id=1352 data-nosnippet>1352</a>
-<a href=#1353 id=1353 data-nosnippet>1353</a>        <span class="kw">let </span>expected: Vec&lt;Bytes&gt; = (<span class="number">0</span>..len)
-<a href=#1354 id=1354 data-nosnippet>1354</a>            .map(|i| Bytes::from(<span class="macro">format!</span>(<span class="string">"hi{i}"</span>).into_bytes()))
-<a href=#1355 id=1355 data-nosnippet>1355</a>            .collect();
-<a href=#1356 id=1356 data-nosnippet>1356</a>        <span class="macro">assert_eq!</span>(recv2, expected);
-<a href=#1357 id=1357 data-nosnippet>1357</a>        <span class="macro">assert_eq!</span>(recv3, expected);
-<a href=#1358 id=1358 data-nosnippet>1358</a>
-<a href=#1359 id=1359 data-nosnippet>1359</a>        cancel.cancel();
-<a href=#1360 id=1360 data-nosnippet>1360</a>        <span class="kw">for </span>t <span class="kw">in </span>tasks {
-<a href=#1361 id=1361 data-nosnippet>1361</a>            timeout(Duration::from_secs(<span class="number">10</span>), t)
-<a href=#1362 id=1362 data-nosnippet>1362</a>                .<span class="kw">await
-<a href=#1363 id=1363 data-nosnippet>1363</a>                </span>.unwrap()
-<a href=#1364 id=1364 data-nosnippet>1364</a>                .unwrap()
-<a href=#1365 id=1365 data-nosnippet>1365</a>                .unwrap();
-<a href=#1366 id=1366 data-nosnippet>1366</a>        }
-<a href=#1367 id=1367 data-nosnippet>1367</a>    }
-<a href=#1368 id=1368 data-nosnippet>1368</a>
-<a href=#1369 id=1369 data-nosnippet>1369</a>    <span class="doccomment">/// Test that when a gossip topic is no longer needed it's actually unsubscribed.
-<a href=#1370 id=1370 data-nosnippet>1370</a>    ///
-<a href=#1371 id=1371 data-nosnippet>1371</a>    /// This test will:
-<a href=#1372 id=1372 data-nosnippet>1372</a>    /// - Create two endpoints, the first using manual event loop.
-<a href=#1373 id=1373 data-nosnippet>1373</a>    /// - Subscribe both endpoints to the same topic. The first endpoint will subscribe twice and connect
-<a href=#1374 id=1374 data-nosnippet>1374</a>    ///   to the second endpoint. The second endpoint will subscribe without bootstrap.
-<a href=#1375 id=1375 data-nosnippet>1375</a>    /// - Ensure that the first endpoint removes the subscription iff all topic handles have been
-<a href=#1376 id=1376 data-nosnippet>1376</a>    ///   dropped
-<a href=#1377 id=1377 data-nosnippet>1377</a>    </span><span class="comment">// NOTE: this is a regression test.
-<a href=#1378 id=1378 data-nosnippet>1378</a>    </span><span class="attr">#[tokio::test]
-<a href=#1379 id=1379 data-nosnippet>1379</a>    #[traced_test]
-<a href=#1380 id=1380 data-nosnippet>1380</a>    </span><span class="kw">async fn </span>subscription_cleanup() -&gt; <span class="prelude-ty">Result</span> {
-<a href=#1381 id=1381 data-nosnippet>1381</a>        <span class="kw">let </span>rng = <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
-<a href=#1382 id=1382 data-nosnippet>1382</a>        <span class="kw">let </span>ct = CancellationToken::new();
-<a href=#1383 id=1383 data-nosnippet>1383</a>        <span class="kw">let </span>(relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().<span class="kw">await</span>.unwrap();
-<a href=#1384 id=1384 data-nosnippet>1384</a>
-<a href=#1385 id=1385 data-nosnippet>1385</a>        <span class="comment">// create the first endpoint with a manual actor loop
-<a href=#1386 id=1386 data-nosnippet>1386</a>        </span><span class="kw">let </span>(go1, actor, ep1_handle) =
-<a href=#1387 id=1387 data-nosnippet>1387</a>            Gossip::t_new_with_actor(rng, Default::default(), relay_map.clone(), <span class="kw-2">&amp;</span>ct).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1388 id=1388 data-nosnippet>1388</a>        <span class="kw">let </span><span class="kw-2">mut </span>actor = ManualActorLoop::new(actor).<span class="kw">await</span>;
-<a href=#1389 id=1389 data-nosnippet>1389</a>
-<a href=#1390 id=1390 data-nosnippet>1390</a>        <span class="comment">// create the second endpoint with the usual actor loop
-<a href=#1391 id=1391 data-nosnippet>1391</a>        </span><span class="kw">let </span>(go2, ep2, ep2_handle, _test_actor_handle) =
-<a href=#1392 id=1392 data-nosnippet>1392</a>            Gossip::t_new(rng, Default::default(), relay_map, <span class="kw-2">&amp;</span>ct).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1353 id=1353 data-nosnippet>1353</a>        <span class="comment">// We assert the received messages, but not their order.
+<a href=#1354 id=1354 data-nosnippet>1354</a>        // While commonly they will be received in-order, for go3 it may happen
+<a href=#1355 id=1355 data-nosnippet>1355</a>        // that the second message arrives before the first one, because it managed to
+<a href=#1356 id=1356 data-nosnippet>1356</a>        // forward-join go1 before the second message is published.
+<a href=#1357 id=1357 data-nosnippet>1357</a>        </span><span class="kw">let </span>expected: HashSet&lt;Bytes&gt; = (<span class="number">0</span>..len)
+<a href=#1358 id=1358 data-nosnippet>1358</a>            .map(|i| Bytes::from(<span class="macro">format!</span>(<span class="string">"hi{i}"</span>).into_bytes()))
+<a href=#1359 id=1359 data-nosnippet>1359</a>            .collect();
+<a href=#1360 id=1360 data-nosnippet>1360</a>        <span class="macro">assert_eq!</span>(HashSet::from_iter(recv2), expected);
+<a href=#1361 id=1361 data-nosnippet>1361</a>        <span class="macro">assert_eq!</span>(HashSet::from_iter(recv3), expected);
+<a href=#1362 id=1362 data-nosnippet>1362</a>
+<a href=#1363 id=1363 data-nosnippet>1363</a>        cancel.cancel();
+<a href=#1364 id=1364 data-nosnippet>1364</a>        <span class="kw">for </span>t <span class="kw">in </span>tasks {
+<a href=#1365 id=1365 data-nosnippet>1365</a>            timeout(Duration::from_secs(<span class="number">10</span>), t)
+<a href=#1366 id=1366 data-nosnippet>1366</a>                .<span class="kw">await
+<a href=#1367 id=1367 data-nosnippet>1367</a>                </span>.unwrap()
+<a href=#1368 id=1368 data-nosnippet>1368</a>                .unwrap()
+<a href=#1369 id=1369 data-nosnippet>1369</a>                .unwrap();
+<a href=#1370 id=1370 data-nosnippet>1370</a>        }
+<a href=#1371 id=1371 data-nosnippet>1371</a>    }
+<a href=#1372 id=1372 data-nosnippet>1372</a>
+<a href=#1373 id=1373 data-nosnippet>1373</a>    <span class="doccomment">/// Test that when a gossip topic is no longer needed it's actually unsubscribed.
+<a href=#1374 id=1374 data-nosnippet>1374</a>    ///
+<a href=#1375 id=1375 data-nosnippet>1375</a>    /// This test will:
+<a href=#1376 id=1376 data-nosnippet>1376</a>    /// - Create two endpoints, the first using manual event loop.
+<a href=#1377 id=1377 data-nosnippet>1377</a>    /// - Subscribe both endpoints to the same topic. The first endpoint will subscribe twice and connect
+<a href=#1378 id=1378 data-nosnippet>1378</a>    ///   to the second endpoint. The second endpoint will subscribe without bootstrap.
+<a href=#1379 id=1379 data-nosnippet>1379</a>    /// - Ensure that the first endpoint removes the subscription iff all topic handles have been
+<a href=#1380 id=1380 data-nosnippet>1380</a>    ///   dropped
+<a href=#1381 id=1381 data-nosnippet>1381</a>    </span><span class="comment">// NOTE: this is a regression test.
+<a href=#1382 id=1382 data-nosnippet>1382</a>    </span><span class="attr">#[tokio::test]
+<a href=#1383 id=1383 data-nosnippet>1383</a>    #[traced_test]
+<a href=#1384 id=1384 data-nosnippet>1384</a>    </span><span class="kw">async fn </span>subscription_cleanup() -&gt; <span class="prelude-ty">Result</span> {
+<a href=#1385 id=1385 data-nosnippet>1385</a>        <span class="kw">let </span>rng = <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
+<a href=#1386 id=1386 data-nosnippet>1386</a>        <span class="kw">let </span>ct = CancellationToken::new();
+<a href=#1387 id=1387 data-nosnippet>1387</a>        <span class="kw">let </span>(relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().<span class="kw">await</span>.unwrap();
+<a href=#1388 id=1388 data-nosnippet>1388</a>
+<a href=#1389 id=1389 data-nosnippet>1389</a>        <span class="comment">// create the first endpoint with a manual actor loop
+<a href=#1390 id=1390 data-nosnippet>1390</a>        </span><span class="kw">let </span>(go1, actor, ep1_handle) =
+<a href=#1391 id=1391 data-nosnippet>1391</a>            Gossip::t_new_with_actor(rng, Default::default(), relay_map.clone(), <span class="kw-2">&amp;</span>ct).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1392 id=1392 data-nosnippet>1392</a>        <span class="kw">let </span><span class="kw-2">mut </span>actor = ManualActorLoop::new(actor).<span class="kw">await</span>;
 <a href=#1393 id=1393 data-nosnippet>1393</a>
-<a href=#1394 id=1394 data-nosnippet>1394</a>        <span class="kw">let </span>endpoint_id1 = actor.endpoint.id();
-<a href=#1395 id=1395 data-nosnippet>1395</a>        <span class="kw">let </span>endpoint_id2 = ep2.id();
-<a href=#1396 id=1396 data-nosnippet>1396</a>        <span class="macro">tracing::info!</span>(
-<a href=#1397 id=1397 data-nosnippet>1397</a>            endpoint_1 = %endpoint_id1.fmt_short(),
-<a href=#1398 id=1398 data-nosnippet>1398</a>            endpoint_2 = %endpoint_id2.fmt_short(),
-<a href=#1399 id=1399 data-nosnippet>1399</a>            <span class="string">"endpoints ready"
-<a href=#1400 id=1400 data-nosnippet>1400</a>        </span>);
-<a href=#1401 id=1401 data-nosnippet>1401</a>
-<a href=#1402 id=1402 data-nosnippet>1402</a>        <span class="kw">let </span>topic: TopicId = blake3::hash(<span class="string">b"subscription_cleanup"</span>).into();
-<a href=#1403 id=1403 data-nosnippet>1403</a>        <span class="macro">tracing::info!</span>(%topic, <span class="string">"joining"</span>);
-<a href=#1404 id=1404 data-nosnippet>1404</a>
-<a href=#1405 id=1405 data-nosnippet>1405</a>        <span class="comment">// create the tasks for each gossip instance:
-<a href=#1406 id=1406 data-nosnippet>1406</a>        // - second endpoint subscribes once without bootstrap and listens to events
-<a href=#1407 id=1407 data-nosnippet>1407</a>        // - first endpoint subscribes twice with the second endpoint as bootstrap. This is done on command
-<a href=#1408 id=1408 data-nosnippet>1408</a>        //   from the main task (this)
-<a href=#1409 id=1409 data-nosnippet>1409</a>
-<a href=#1410 id=1410 data-nosnippet>1410</a>        // second endpoint
-<a href=#1411 id=1411 data-nosnippet>1411</a>        </span><span class="kw">let </span>ct2 = ct.clone();
-<a href=#1412 id=1412 data-nosnippet>1412</a>        <span class="kw">let </span>go2_task = <span class="kw">async move </span>{
-<a href=#1413 id=1413 data-nosnippet>1413</a>            <span class="kw">let </span>(_pub_tx, <span class="kw-2">mut </span>sub_rx) = go2.subscribe_and_join(topic, <span class="macro">vec!</span>[]).<span class="kw">await</span><span class="question-mark">?</span>.split();
-<a href=#1414 id=1414 data-nosnippet>1414</a>
-<a href=#1415 id=1415 data-nosnippet>1415</a>            <span class="kw">let </span>subscribe_fut = <span class="kw">async </span>{
-<a href=#1416 id=1416 data-nosnippet>1416</a>                <span class="kw">while let </span><span class="prelude-val">Some</span>(ev) = sub_rx.try_next().<span class="kw">await</span><span class="question-mark">? </span>{
-<a href=#1417 id=1417 data-nosnippet>1417</a>                    <span class="kw">match </span>ev {
-<a href=#1418 id=1418 data-nosnippet>1418</a>                        Event::Lagged =&gt; <span class="macro">tracing::debug!</span>(<span class="string">"missed some messages :("</span>),
-<a href=#1419 id=1419 data-nosnippet>1419</a>                        Event::Received(<span class="kw">_</span>) =&gt; <span class="macro">unreachable!</span>(<span class="string">"test does not send messages"</span>),
-<a href=#1420 id=1420 data-nosnippet>1420</a>                        other =&gt; <span class="macro">tracing::debug!</span>(<span class="question-mark">?</span>other, <span class="string">"gs event"</span>),
-<a href=#1421 id=1421 data-nosnippet>1421</a>                    }
-<a href=#1422 id=1422 data-nosnippet>1422</a>                }
-<a href=#1423 id=1423 data-nosnippet>1423</a>
-<a href=#1424 id=1424 data-nosnippet>1424</a>                <span class="macro">tracing::debug!</span>(<span class="string">"subscribe stream ended"</span>);
-<a href=#1425 id=1425 data-nosnippet>1425</a>                <span class="prelude-val">Ok</span>::&lt;<span class="kw">_</span>, AnyError&gt;(())
-<a href=#1426 id=1426 data-nosnippet>1426</a>            };
+<a href=#1394 id=1394 data-nosnippet>1394</a>        <span class="comment">// create the second endpoint with the usual actor loop
+<a href=#1395 id=1395 data-nosnippet>1395</a>        </span><span class="kw">let </span>(go2, ep2, ep2_handle, _test_actor_handle) =
+<a href=#1396 id=1396 data-nosnippet>1396</a>            Gossip::t_new(rng, Default::default(), relay_map, <span class="kw-2">&amp;</span>ct).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1397 id=1397 data-nosnippet>1397</a>
+<a href=#1398 id=1398 data-nosnippet>1398</a>        <span class="kw">let </span>endpoint_id1 = actor.endpoint.id();
+<a href=#1399 id=1399 data-nosnippet>1399</a>        <span class="kw">let </span>endpoint_id2 = ep2.id();
+<a href=#1400 id=1400 data-nosnippet>1400</a>        <span class="macro">tracing::info!</span>(
+<a href=#1401 id=1401 data-nosnippet>1401</a>            endpoint_1 = %endpoint_id1.fmt_short(),
+<a href=#1402 id=1402 data-nosnippet>1402</a>            endpoint_2 = %endpoint_id2.fmt_short(),
+<a href=#1403 id=1403 data-nosnippet>1403</a>            <span class="string">"endpoints ready"
+<a href=#1404 id=1404 data-nosnippet>1404</a>        </span>);
+<a href=#1405 id=1405 data-nosnippet>1405</a>
+<a href=#1406 id=1406 data-nosnippet>1406</a>        <span class="kw">let </span>topic: TopicId = blake3::hash(<span class="string">b"subscription_cleanup"</span>).into();
+<a href=#1407 id=1407 data-nosnippet>1407</a>        <span class="macro">tracing::info!</span>(%topic, <span class="string">"joining"</span>);
+<a href=#1408 id=1408 data-nosnippet>1408</a>
+<a href=#1409 id=1409 data-nosnippet>1409</a>        <span class="comment">// create the tasks for each gossip instance:
+<a href=#1410 id=1410 data-nosnippet>1410</a>        // - second endpoint subscribes once without bootstrap and listens to events
+<a href=#1411 id=1411 data-nosnippet>1411</a>        // - first endpoint subscribes twice with the second endpoint as bootstrap. This is done on command
+<a href=#1412 id=1412 data-nosnippet>1412</a>        //   from the main task (this)
+<a href=#1413 id=1413 data-nosnippet>1413</a>
+<a href=#1414 id=1414 data-nosnippet>1414</a>        // second endpoint
+<a href=#1415 id=1415 data-nosnippet>1415</a>        </span><span class="kw">let </span>ct2 = ct.clone();
+<a href=#1416 id=1416 data-nosnippet>1416</a>        <span class="kw">let </span>go2_task = <span class="kw">async move </span>{
+<a href=#1417 id=1417 data-nosnippet>1417</a>            <span class="kw">let </span>(_pub_tx, <span class="kw-2">mut </span>sub_rx) = go2.subscribe_and_join(topic, <span class="macro">vec!</span>[]).<span class="kw">await</span><span class="question-mark">?</span>.split();
+<a href=#1418 id=1418 data-nosnippet>1418</a>
+<a href=#1419 id=1419 data-nosnippet>1419</a>            <span class="kw">let </span>subscribe_fut = <span class="kw">async </span>{
+<a href=#1420 id=1420 data-nosnippet>1420</a>                <span class="kw">while let </span><span class="prelude-val">Some</span>(ev) = sub_rx.try_next().<span class="kw">await</span><span class="question-mark">? </span>{
+<a href=#1421 id=1421 data-nosnippet>1421</a>                    <span class="kw">match </span>ev {
+<a href=#1422 id=1422 data-nosnippet>1422</a>                        Event::Lagged =&gt; <span class="macro">tracing::debug!</span>(<span class="string">"missed some messages :("</span>),
+<a href=#1423 id=1423 data-nosnippet>1423</a>                        Event::Received(<span class="kw">_</span>) =&gt; <span class="macro">unreachable!</span>(<span class="string">"test does not send messages"</span>),
+<a href=#1424 id=1424 data-nosnippet>1424</a>                        other =&gt; <span class="macro">tracing::debug!</span>(<span class="question-mark">?</span>other, <span class="string">"gs event"</span>),
+<a href=#1425 id=1425 data-nosnippet>1425</a>                    }
+<a href=#1426 id=1426 data-nosnippet>1426</a>                }
 <a href=#1427 id=1427 data-nosnippet>1427</a>
-<a href=#1428 id=1428 data-nosnippet>1428</a>            <span class="macro">tokio::select!</span> {
-<a href=#1429 id=1429 data-nosnippet>1429</a>                <span class="kw">_ </span>= ct2.cancelled() =&gt; <span class="prelude-val">Ok</span>(()),
-<a href=#1430 id=1430 data-nosnippet>1430</a>                res = subscribe_fut =&gt; res,
-<a href=#1431 id=1431 data-nosnippet>1431</a>            }
-<a href=#1432 id=1432 data-nosnippet>1432</a>        }
-<a href=#1433 id=1433 data-nosnippet>1433</a>        .instrument(<span class="macro">tracing::debug_span!</span>(<span class="string">"endpoint_2"</span>, %endpoint_id2));
-<a href=#1434 id=1434 data-nosnippet>1434</a>        <span class="kw">let </span>go2_handle = task::spawn(go2_task);
-<a href=#1435 id=1435 data-nosnippet>1435</a>
-<a href=#1436 id=1436 data-nosnippet>1436</a>        <span class="comment">// first endpoint
-<a href=#1437 id=1437 data-nosnippet>1437</a>        </span><span class="kw">let </span>addr2 = EndpointAddr::new(endpoint_id2).with_relay_url(relay_url);
-<a href=#1438 id=1438 data-nosnippet>1438</a>        <span class="kw">let </span>memory_lookup = MemoryLookup::new();
-<a href=#1439 id=1439 data-nosnippet>1439</a>        memory_lookup.add_endpoint_info(addr2);
-<a href=#1440 id=1440 data-nosnippet>1440</a>        actor.endpoint.address_lookup().add(memory_lookup);
-<a href=#1441 id=1441 data-nosnippet>1441</a>        <span class="comment">// we use a channel to signal advancing steps to the task
-<a href=#1442 id=1442 data-nosnippet>1442</a>        </span><span class="kw">let </span>(tx, <span class="kw-2">mut </span>rx) = mpsc::channel::&lt;()&gt;(<span class="number">1</span>);
-<a href=#1443 id=1443 data-nosnippet>1443</a>        <span class="kw">let </span>ct1 = ct.clone();
-<a href=#1444 id=1444 data-nosnippet>1444</a>        <span class="kw">let </span>go1_task = <span class="kw">async move </span>{
-<a href=#1445 id=1445 data-nosnippet>1445</a>            <span class="comment">// first subscribe is done immediately
-<a href=#1446 id=1446 data-nosnippet>1446</a>            </span><span class="macro">tracing::info!</span>(<span class="string">"subscribing the first time"</span>);
-<a href=#1447 id=1447 data-nosnippet>1447</a>            <span class="kw">let </span>sub_1a = go1.subscribe_and_join(topic, <span class="macro">vec!</span>[endpoint_id2]).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1448 id=1448 data-nosnippet>1448</a>
-<a href=#1449 id=1449 data-nosnippet>1449</a>            <span class="comment">// wait for signal to subscribe a second time
-<a href=#1450 id=1450 data-nosnippet>1450</a>            </span>rx.recv().<span class="kw">await</span>.expect(<span class="string">"signal for second subscribe"</span>);
-<a href=#1451 id=1451 data-nosnippet>1451</a>            <span class="macro">tracing::info!</span>(<span class="string">"subscribing a second time"</span>);
-<a href=#1452 id=1452 data-nosnippet>1452</a>            <span class="kw">let </span>sub_1b = go1.subscribe_and_join(topic, <span class="macro">vec!</span>[endpoint_id2]).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1453 id=1453 data-nosnippet>1453</a>            drop(sub_1a);
-<a href=#1454 id=1454 data-nosnippet>1454</a>
-<a href=#1455 id=1455 data-nosnippet>1455</a>            <span class="comment">// wait for signal to drop the second handle as well
-<a href=#1456 id=1456 data-nosnippet>1456</a>            </span>rx.recv().<span class="kw">await</span>.expect(<span class="string">"signal for second subscribe"</span>);
-<a href=#1457 id=1457 data-nosnippet>1457</a>            <span class="macro">tracing::info!</span>(<span class="string">"dropping all handles"</span>);
-<a href=#1458 id=1458 data-nosnippet>1458</a>            drop(sub_1b);
-<a href=#1459 id=1459 data-nosnippet>1459</a>
-<a href=#1460 id=1460 data-nosnippet>1460</a>            <span class="comment">// wait for cancellation
-<a href=#1461 id=1461 data-nosnippet>1461</a>            </span>ct1.cancelled().<span class="kw">await</span>;
-<a href=#1462 id=1462 data-nosnippet>1462</a>            drop(go1);
+<a href=#1428 id=1428 data-nosnippet>1428</a>                <span class="macro">tracing::debug!</span>(<span class="string">"subscribe stream ended"</span>);
+<a href=#1429 id=1429 data-nosnippet>1429</a>                <span class="prelude-val">Ok</span>::&lt;<span class="kw">_</span>, AnyError&gt;(())
+<a href=#1430 id=1430 data-nosnippet>1430</a>            };
+<a href=#1431 id=1431 data-nosnippet>1431</a>
+<a href=#1432 id=1432 data-nosnippet>1432</a>            <span class="macro">tokio::select!</span> {
+<a href=#1433 id=1433 data-nosnippet>1433</a>                <span class="kw">_ </span>= ct2.cancelled() =&gt; <span class="prelude-val">Ok</span>(()),
+<a href=#1434 id=1434 data-nosnippet>1434</a>                res = subscribe_fut =&gt; res,
+<a href=#1435 id=1435 data-nosnippet>1435</a>            }
+<a href=#1436 id=1436 data-nosnippet>1436</a>        }
+<a href=#1437 id=1437 data-nosnippet>1437</a>        .instrument(<span class="macro">tracing::debug_span!</span>(<span class="string">"endpoint_2"</span>, %endpoint_id2));
+<a href=#1438 id=1438 data-nosnippet>1438</a>        <span class="kw">let </span>go2_handle = task::spawn(go2_task);
+<a href=#1439 id=1439 data-nosnippet>1439</a>
+<a href=#1440 id=1440 data-nosnippet>1440</a>        <span class="comment">// first endpoint
+<a href=#1441 id=1441 data-nosnippet>1441</a>        </span><span class="kw">let </span>addr2 = EndpointAddr::new(endpoint_id2).with_relay_url(relay_url);
+<a href=#1442 id=1442 data-nosnippet>1442</a>        <span class="kw">let </span>memory_lookup = MemoryLookup::new();
+<a href=#1443 id=1443 data-nosnippet>1443</a>        memory_lookup.add_endpoint_info(addr2);
+<a href=#1444 id=1444 data-nosnippet>1444</a>        actor.endpoint.address_lookup().add(memory_lookup);
+<a href=#1445 id=1445 data-nosnippet>1445</a>        <span class="comment">// we use a channel to signal advancing steps to the task
+<a href=#1446 id=1446 data-nosnippet>1446</a>        </span><span class="kw">let </span>(tx, <span class="kw-2">mut </span>rx) = mpsc::channel::&lt;()&gt;(<span class="number">1</span>);
+<a href=#1447 id=1447 data-nosnippet>1447</a>        <span class="kw">let </span>ct1 = ct.clone();
+<a href=#1448 id=1448 data-nosnippet>1448</a>        <span class="kw">let </span>go1_task = <span class="kw">async move </span>{
+<a href=#1449 id=1449 data-nosnippet>1449</a>            <span class="comment">// first subscribe is done immediately
+<a href=#1450 id=1450 data-nosnippet>1450</a>            </span><span class="macro">tracing::info!</span>(<span class="string">"subscribing the first time"</span>);
+<a href=#1451 id=1451 data-nosnippet>1451</a>            <span class="kw">let </span>sub_1a = go1.subscribe_and_join(topic, <span class="macro">vec!</span>[endpoint_id2]).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1452 id=1452 data-nosnippet>1452</a>
+<a href=#1453 id=1453 data-nosnippet>1453</a>            <span class="comment">// wait for signal to subscribe a second time
+<a href=#1454 id=1454 data-nosnippet>1454</a>            </span>rx.recv().<span class="kw">await</span>.expect(<span class="string">"signal for second subscribe"</span>);
+<a href=#1455 id=1455 data-nosnippet>1455</a>            <span class="macro">tracing::info!</span>(<span class="string">"subscribing a second time"</span>);
+<a href=#1456 id=1456 data-nosnippet>1456</a>            <span class="kw">let </span>sub_1b = go1.subscribe_and_join(topic, <span class="macro">vec!</span>[endpoint_id2]).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1457 id=1457 data-nosnippet>1457</a>            drop(sub_1a);
+<a href=#1458 id=1458 data-nosnippet>1458</a>
+<a href=#1459 id=1459 data-nosnippet>1459</a>            <span class="comment">// wait for signal to drop the second handle as well
+<a href=#1460 id=1460 data-nosnippet>1460</a>            </span>rx.recv().<span class="kw">await</span>.expect(<span class="string">"signal for second subscribe"</span>);
+<a href=#1461 id=1461 data-nosnippet>1461</a>            <span class="macro">tracing::info!</span>(<span class="string">"dropping all handles"</span>);
+<a href=#1462 id=1462 data-nosnippet>1462</a>            drop(sub_1b);
 <a href=#1463 id=1463 data-nosnippet>1463</a>
-<a href=#1464 id=1464 data-nosnippet>1464</a>            <span class="prelude-val">Ok</span>::&lt;<span class="kw">_</span>, AnyError&gt;(())
-<a href=#1465 id=1465 data-nosnippet>1465</a>        }
-<a href=#1466 id=1466 data-nosnippet>1466</a>        .instrument(<span class="macro">tracing::debug_span!</span>(<span class="string">"endpoint_1"</span>, %endpoint_id1));
-<a href=#1467 id=1467 data-nosnippet>1467</a>        <span class="kw">let </span>go1_handle = task::spawn(go1_task);
-<a href=#1468 id=1468 data-nosnippet>1468</a>
-<a href=#1469 id=1469 data-nosnippet>1469</a>        <span class="comment">// advance and check that the topic is now subscribed
-<a href=#1470 id=1470 data-nosnippet>1470</a>        </span>actor.steps(<span class="number">3</span>).<span class="kw">await</span>; <span class="comment">// handle our subscribe;
-<a href=#1471 id=1471 data-nosnippet>1471</a>                              // get peer connection;
-<a href=#1472 id=1472 data-nosnippet>1472</a>                              // receive the other peer's information for a NeighborUp
-<a href=#1473 id=1473 data-nosnippet>1473</a>        </span><span class="kw">let </span>state = actor.topics.get(<span class="kw-2">&amp;</span>topic).expect(<span class="string">"get registered topic"</span>);
-<a href=#1474 id=1474 data-nosnippet>1474</a>        <span class="macro">assert!</span>(state.joined());
-<a href=#1475 id=1475 data-nosnippet>1475</a>
-<a href=#1476 id=1476 data-nosnippet>1476</a>        <span class="comment">// signal the second subscribe, we should remain subscribed
-<a href=#1477 id=1477 data-nosnippet>1477</a>        </span>tx.send(())
-<a href=#1478 id=1478 data-nosnippet>1478</a>            .<span class="kw">await
-<a href=#1479 id=1479 data-nosnippet>1479</a>            </span>.std_context(<span class="string">"signal additional subscribe"</span>)<span class="question-mark">?</span>;
-<a href=#1480 id=1480 data-nosnippet>1480</a>        actor.steps(<span class="number">3</span>).<span class="kw">await</span>; <span class="comment">// subscribe; first receiver gone; first sender gone
-<a href=#1481 id=1481 data-nosnippet>1481</a>        </span><span class="kw">let </span>state = actor.topics.get(<span class="kw-2">&amp;</span>topic).expect(<span class="string">"get registered topic"</span>);
-<a href=#1482 id=1482 data-nosnippet>1482</a>        <span class="macro">assert!</span>(state.joined());
-<a href=#1483 id=1483 data-nosnippet>1483</a>
-<a href=#1484 id=1484 data-nosnippet>1484</a>        <span class="comment">// signal to drop the second handle, the topic should no longer be subscribed
-<a href=#1485 id=1485 data-nosnippet>1485</a>        </span>tx.send(()).<span class="kw">await</span>.std_context(<span class="string">"signal drop handles"</span>)<span class="question-mark">?</span>;
-<a href=#1486 id=1486 data-nosnippet>1486</a>        actor.steps(<span class="number">2</span>).<span class="kw">await</span>; <span class="comment">// second receiver gone; second sender gone
-<a href=#1487 id=1487 data-nosnippet>1487</a>        </span><span class="macro">assert!</span>(!actor.topics.contains_key(<span class="kw-2">&amp;</span>topic));
-<a href=#1488 id=1488 data-nosnippet>1488</a>
-<a href=#1489 id=1489 data-nosnippet>1489</a>        <span class="comment">// cleanup and ensure everything went as expected
-<a href=#1490 id=1490 data-nosnippet>1490</a>        </span>ct.cancel();
-<a href=#1491 id=1491 data-nosnippet>1491</a>        <span class="kw">let </span>wait = Duration::from_secs(<span class="number">2</span>);
-<a href=#1492 id=1492 data-nosnippet>1492</a>        timeout(wait, ep1_handle)
-<a href=#1493 id=1493 data-nosnippet>1493</a>            .<span class="kw">await
-<a href=#1494 id=1494 data-nosnippet>1494</a>            </span>.std_context(<span class="string">"wait endpoint1 task"</span>)<span class="question-mark">?
-<a href=#1495 id=1495 data-nosnippet>1495</a>            </span>.std_context(<span class="string">"join endpoint1 task"</span>)<span class="question-mark">??</span>;
-<a href=#1496 id=1496 data-nosnippet>1496</a>        timeout(wait, ep2_handle)
+<a href=#1464 id=1464 data-nosnippet>1464</a>            <span class="comment">// wait for cancellation
+<a href=#1465 id=1465 data-nosnippet>1465</a>            </span>ct1.cancelled().<span class="kw">await</span>;
+<a href=#1466 id=1466 data-nosnippet>1466</a>            drop(go1);
+<a href=#1467 id=1467 data-nosnippet>1467</a>
+<a href=#1468 id=1468 data-nosnippet>1468</a>            <span class="prelude-val">Ok</span>::&lt;<span class="kw">_</span>, AnyError&gt;(())
+<a href=#1469 id=1469 data-nosnippet>1469</a>        }
+<a href=#1470 id=1470 data-nosnippet>1470</a>        .instrument(<span class="macro">tracing::debug_span!</span>(<span class="string">"endpoint_1"</span>, %endpoint_id1));
+<a href=#1471 id=1471 data-nosnippet>1471</a>        <span class="kw">let </span>go1_handle = task::spawn(go1_task);
+<a href=#1472 id=1472 data-nosnippet>1472</a>
+<a href=#1473 id=1473 data-nosnippet>1473</a>        <span class="comment">// advance and check that the topic is now subscribed
+<a href=#1474 id=1474 data-nosnippet>1474</a>        </span>actor.steps(<span class="number">3</span>).<span class="kw">await</span>; <span class="comment">// handle our subscribe;
+<a href=#1475 id=1475 data-nosnippet>1475</a>                              // get peer connection;
+<a href=#1476 id=1476 data-nosnippet>1476</a>                              // receive the other peer's information for a NeighborUp
+<a href=#1477 id=1477 data-nosnippet>1477</a>        </span><span class="kw">let </span>state = actor.topics.get(<span class="kw-2">&amp;</span>topic).expect(<span class="string">"get registered topic"</span>);
+<a href=#1478 id=1478 data-nosnippet>1478</a>        <span class="macro">assert!</span>(state.joined());
+<a href=#1479 id=1479 data-nosnippet>1479</a>
+<a href=#1480 id=1480 data-nosnippet>1480</a>        <span class="comment">// signal the second subscribe, we should remain subscribed
+<a href=#1481 id=1481 data-nosnippet>1481</a>        </span>tx.send(())
+<a href=#1482 id=1482 data-nosnippet>1482</a>            .<span class="kw">await
+<a href=#1483 id=1483 data-nosnippet>1483</a>            </span>.std_context(<span class="string">"signal additional subscribe"</span>)<span class="question-mark">?</span>;
+<a href=#1484 id=1484 data-nosnippet>1484</a>        actor.steps(<span class="number">3</span>).<span class="kw">await</span>; <span class="comment">// subscribe; first receiver gone; first sender gone
+<a href=#1485 id=1485 data-nosnippet>1485</a>        </span><span class="kw">let </span>state = actor.topics.get(<span class="kw-2">&amp;</span>topic).expect(<span class="string">"get registered topic"</span>);
+<a href=#1486 id=1486 data-nosnippet>1486</a>        <span class="macro">assert!</span>(state.joined());
+<a href=#1487 id=1487 data-nosnippet>1487</a>
+<a href=#1488 id=1488 data-nosnippet>1488</a>        <span class="comment">// signal to drop the second handle, the topic should no longer be subscribed
+<a href=#1489 id=1489 data-nosnippet>1489</a>        </span>tx.send(()).<span class="kw">await</span>.std_context(<span class="string">"signal drop handles"</span>)<span class="question-mark">?</span>;
+<a href=#1490 id=1490 data-nosnippet>1490</a>        actor.steps(<span class="number">2</span>).<span class="kw">await</span>; <span class="comment">// second receiver gone; second sender gone
+<a href=#1491 id=1491 data-nosnippet>1491</a>        </span><span class="macro">assert!</span>(!actor.topics.contains_key(<span class="kw-2">&amp;</span>topic));
+<a href=#1492 id=1492 data-nosnippet>1492</a>
+<a href=#1493 id=1493 data-nosnippet>1493</a>        <span class="comment">// cleanup and ensure everything went as expected
+<a href=#1494 id=1494 data-nosnippet>1494</a>        </span>ct.cancel();
+<a href=#1495 id=1495 data-nosnippet>1495</a>        <span class="kw">let </span>wait = Duration::from_secs(<span class="number">2</span>);
+<a href=#1496 id=1496 data-nosnippet>1496</a>        timeout(wait, ep1_handle)
 <a href=#1497 id=1497 data-nosnippet>1497</a>            .<span class="kw">await
-<a href=#1498 id=1498 data-nosnippet>1498</a>            </span>.std_context(<span class="string">"wait endpoint2 task"</span>)<span class="question-mark">?
-<a href=#1499 id=1499 data-nosnippet>1499</a>            </span>.std_context(<span class="string">"join endpoint2 task"</span>)<span class="question-mark">??</span>;
-<a href=#1500 id=1500 data-nosnippet>1500</a>        timeout(wait, go1_handle)
+<a href=#1498 id=1498 data-nosnippet>1498</a>            </span>.std_context(<span class="string">"wait endpoint1 task"</span>)<span class="question-mark">?
+<a href=#1499 id=1499 data-nosnippet>1499</a>            </span>.std_context(<span class="string">"join endpoint1 task"</span>)<span class="question-mark">??</span>;
+<a href=#1500 id=1500 data-nosnippet>1500</a>        timeout(wait, ep2_handle)
 <a href=#1501 id=1501 data-nosnippet>1501</a>            .<span class="kw">await
-<a href=#1502 id=1502 data-nosnippet>1502</a>            </span>.std_context(<span class="string">"wait gossip1 task"</span>)<span class="question-mark">?
-<a href=#1503 id=1503 data-nosnippet>1503</a>            </span>.std_context(<span class="string">"join gossip1 task"</span>)<span class="question-mark">??</span>;
-<a href=#1504 id=1504 data-nosnippet>1504</a>        timeout(wait, go2_handle)
+<a href=#1502 id=1502 data-nosnippet>1502</a>            </span>.std_context(<span class="string">"wait endpoint2 task"</span>)<span class="question-mark">?
+<a href=#1503 id=1503 data-nosnippet>1503</a>            </span>.std_context(<span class="string">"join endpoint2 task"</span>)<span class="question-mark">??</span>;
+<a href=#1504 id=1504 data-nosnippet>1504</a>        timeout(wait, go1_handle)
 <a href=#1505 id=1505 data-nosnippet>1505</a>            .<span class="kw">await
-<a href=#1506 id=1506 data-nosnippet>1506</a>            </span>.std_context(<span class="string">"wait gossip2 task"</span>)<span class="question-mark">?
-<a href=#1507 id=1507 data-nosnippet>1507</a>            </span>.std_context(<span class="string">"join gossip2 task"</span>)<span class="question-mark">??</span>;
-<a href=#1508 id=1508 data-nosnippet>1508</a>        timeout(wait, actor.finish())
+<a href=#1506 id=1506 data-nosnippet>1506</a>            </span>.std_context(<span class="string">"wait gossip1 task"</span>)<span class="question-mark">?
+<a href=#1507 id=1507 data-nosnippet>1507</a>            </span>.std_context(<span class="string">"join gossip1 task"</span>)<span class="question-mark">??</span>;
+<a href=#1508 id=1508 data-nosnippet>1508</a>        timeout(wait, go2_handle)
 <a href=#1509 id=1509 data-nosnippet>1509</a>            .<span class="kw">await
-<a href=#1510 id=1510 data-nosnippet>1510</a>            </span>.std_context(<span class="string">"wait actor finish"</span>)<span class="question-mark">?</span>;
-<a href=#1511 id=1511 data-nosnippet>1511</a>
-<a href=#1512 id=1512 data-nosnippet>1512</a>        <span class="prelude-val">Ok</span>(())
-<a href=#1513 id=1513 data-nosnippet>1513</a>    }
-<a href=#1514 id=1514 data-nosnippet>1514</a>
-<a href=#1515 id=1515 data-nosnippet>1515</a>    <span class="doccomment">/// Test that endpoints can reconnect to each other.
-<a href=#1516 id=1516 data-nosnippet>1516</a>    ///
-<a href=#1517 id=1517 data-nosnippet>1517</a>    /// This test will create two endpoints subscribed to the same topic. The second endpoint will
-<a href=#1518 id=1518 data-nosnippet>1518</a>    /// unsubscribe and then resubscribe and connection between the endpoints should succeed both
-<a href=#1519 id=1519 data-nosnippet>1519</a>    /// times.
-<a href=#1520 id=1520 data-nosnippet>1520</a>    </span><span class="comment">// NOTE: This is a regression test
-<a href=#1521 id=1521 data-nosnippet>1521</a>    </span><span class="attr">#[tokio::test]
-<a href=#1522 id=1522 data-nosnippet>1522</a>    #[traced_test]
-<a href=#1523 id=1523 data-nosnippet>1523</a>    </span><span class="kw">async fn </span>can_reconnect() -&gt; <span class="prelude-ty">Result</span> {
-<a href=#1524 id=1524 data-nosnippet>1524</a>        <span class="kw">let </span>rng = <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
-<a href=#1525 id=1525 data-nosnippet>1525</a>        <span class="kw">let </span>ct = CancellationToken::new();
-<a href=#1526 id=1526 data-nosnippet>1526</a>        <span class="kw">let </span>(relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().<span class="kw">await</span>.unwrap();
-<a href=#1527 id=1527 data-nosnippet>1527</a>
-<a href=#1528 id=1528 data-nosnippet>1528</a>        <span class="kw">let </span>(go1, ep1, ep1_handle, _test_actor_handle1) =
-<a href=#1529 id=1529 data-nosnippet>1529</a>            Gossip::t_new(rng, Default::default(), relay_map.clone(), <span class="kw-2">&amp;</span>ct).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1530 id=1530 data-nosnippet>1530</a>
-<a href=#1531 id=1531 data-nosnippet>1531</a>        <span class="kw">let </span>(go2, ep2, ep2_handle, _test_actor_handle2) =
-<a href=#1532 id=1532 data-nosnippet>1532</a>            Gossip::t_new(rng, Default::default(), relay_map, <span class="kw-2">&amp;</span>ct).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1533 id=1533 data-nosnippet>1533</a>
-<a href=#1534 id=1534 data-nosnippet>1534</a>        <span class="kw">let </span>endpoint_id1 = ep1.id();
-<a href=#1535 id=1535 data-nosnippet>1535</a>        <span class="kw">let </span>endpoint_id2 = ep2.id();
-<a href=#1536 id=1536 data-nosnippet>1536</a>        <span class="macro">tracing::info!</span>(
-<a href=#1537 id=1537 data-nosnippet>1537</a>            endpoint_1 = %endpoint_id1.fmt_short(),
-<a href=#1538 id=1538 data-nosnippet>1538</a>            endpoint_2 = %endpoint_id2.fmt_short(),
-<a href=#1539 id=1539 data-nosnippet>1539</a>            <span class="string">"endpoints ready"
-<a href=#1540 id=1540 data-nosnippet>1540</a>        </span>);
-<a href=#1541 id=1541 data-nosnippet>1541</a>
-<a href=#1542 id=1542 data-nosnippet>1542</a>        <span class="kw">let </span>topic: TopicId = blake3::hash(<span class="string">b"can_reconnect"</span>).into();
-<a href=#1543 id=1543 data-nosnippet>1543</a>        <span class="macro">tracing::info!</span>(%topic, <span class="string">"joining"</span>);
-<a href=#1544 id=1544 data-nosnippet>1544</a>
-<a href=#1545 id=1545 data-nosnippet>1545</a>        <span class="kw">let </span>ct2 = ct.child_token();
-<a href=#1546 id=1546 data-nosnippet>1546</a>        <span class="comment">// channel used to signal the second gossip instance to advance the test
-<a href=#1547 id=1547 data-nosnippet>1547</a>        </span><span class="kw">let </span>(tx, <span class="kw-2">mut </span>rx) = mpsc::channel::&lt;()&gt;(<span class="number">1</span>);
-<a href=#1548 id=1548 data-nosnippet>1548</a>        <span class="kw">let </span>addr1 = EndpointAddr::new(endpoint_id1).with_relay_url(relay_url.clone());
-<a href=#1549 id=1549 data-nosnippet>1549</a>        <span class="kw">let </span>memory_lookup = MemoryLookup::new();
-<a href=#1550 id=1550 data-nosnippet>1550</a>        memory_lookup.add_endpoint_info(addr1);
-<a href=#1551 id=1551 data-nosnippet>1551</a>        ep2.address_lookup().add(memory_lookup.clone());
-<a href=#1552 id=1552 data-nosnippet>1552</a>        <span class="kw">let </span>go2_task = <span class="kw">async move </span>{
-<a href=#1553 id=1553 data-nosnippet>1553</a>            <span class="kw">let </span><span class="kw-2">mut </span>sub = go2.subscribe(topic, Vec::new()).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1554 id=1554 data-nosnippet>1554</a>            sub.joined().<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1555 id=1555 data-nosnippet>1555</a>
-<a href=#1556 id=1556 data-nosnippet>1556</a>            rx.recv().<span class="kw">await</span>.expect(<span class="string">"signal to unsubscribe"</span>);
-<a href=#1557 id=1557 data-nosnippet>1557</a>            <span class="macro">tracing::info!</span>(<span class="string">"unsubscribing"</span>);
-<a href=#1558 id=1558 data-nosnippet>1558</a>            drop(sub);
+<a href=#1510 id=1510 data-nosnippet>1510</a>            </span>.std_context(<span class="string">"wait gossip2 task"</span>)<span class="question-mark">?
+<a href=#1511 id=1511 data-nosnippet>1511</a>            </span>.std_context(<span class="string">"join gossip2 task"</span>)<span class="question-mark">??</span>;
+<a href=#1512 id=1512 data-nosnippet>1512</a>        timeout(wait, actor.finish())
+<a href=#1513 id=1513 data-nosnippet>1513</a>            .<span class="kw">await
+<a href=#1514 id=1514 data-nosnippet>1514</a>            </span>.std_context(<span class="string">"wait actor finish"</span>)<span class="question-mark">?</span>;
+<a href=#1515 id=1515 data-nosnippet>1515</a>
+<a href=#1516 id=1516 data-nosnippet>1516</a>        <span class="prelude-val">Ok</span>(())
+<a href=#1517 id=1517 data-nosnippet>1517</a>    }
+<a href=#1518 id=1518 data-nosnippet>1518</a>
+<a href=#1519 id=1519 data-nosnippet>1519</a>    <span class="doccomment">/// Test that endpoints can reconnect to each other.
+<a href=#1520 id=1520 data-nosnippet>1520</a>    ///
+<a href=#1521 id=1521 data-nosnippet>1521</a>    /// This test will create two endpoints subscribed to the same topic. The second endpoint will
+<a href=#1522 id=1522 data-nosnippet>1522</a>    /// unsubscribe and then resubscribe and connection between the endpoints should succeed both
+<a href=#1523 id=1523 data-nosnippet>1523</a>    /// times.
+<a href=#1524 id=1524 data-nosnippet>1524</a>    </span><span class="comment">// NOTE: This is a regression test
+<a href=#1525 id=1525 data-nosnippet>1525</a>    </span><span class="attr">#[tokio::test]
+<a href=#1526 id=1526 data-nosnippet>1526</a>    #[traced_test]
+<a href=#1527 id=1527 data-nosnippet>1527</a>    </span><span class="kw">async fn </span>can_reconnect() -&gt; <span class="prelude-ty">Result</span> {
+<a href=#1528 id=1528 data-nosnippet>1528</a>        <span class="kw">let </span>rng = <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
+<a href=#1529 id=1529 data-nosnippet>1529</a>        <span class="kw">let </span>ct = CancellationToken::new();
+<a href=#1530 id=1530 data-nosnippet>1530</a>        <span class="kw">let </span>(relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().<span class="kw">await</span>.unwrap();
+<a href=#1531 id=1531 data-nosnippet>1531</a>
+<a href=#1532 id=1532 data-nosnippet>1532</a>        <span class="kw">let </span>(go1, ep1, ep1_handle, _test_actor_handle1) =
+<a href=#1533 id=1533 data-nosnippet>1533</a>            Gossip::t_new(rng, Default::default(), relay_map.clone(), <span class="kw-2">&amp;</span>ct).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1534 id=1534 data-nosnippet>1534</a>
+<a href=#1535 id=1535 data-nosnippet>1535</a>        <span class="kw">let </span>(go2, ep2, ep2_handle, _test_actor_handle2) =
+<a href=#1536 id=1536 data-nosnippet>1536</a>            Gossip::t_new(rng, Default::default(), relay_map, <span class="kw-2">&amp;</span>ct).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1537 id=1537 data-nosnippet>1537</a>
+<a href=#1538 id=1538 data-nosnippet>1538</a>        <span class="kw">let </span>endpoint_id1 = ep1.id();
+<a href=#1539 id=1539 data-nosnippet>1539</a>        <span class="kw">let </span>endpoint_id2 = ep2.id();
+<a href=#1540 id=1540 data-nosnippet>1540</a>        <span class="macro">tracing::info!</span>(
+<a href=#1541 id=1541 data-nosnippet>1541</a>            endpoint_1 = %endpoint_id1.fmt_short(),
+<a href=#1542 id=1542 data-nosnippet>1542</a>            endpoint_2 = %endpoint_id2.fmt_short(),
+<a href=#1543 id=1543 data-nosnippet>1543</a>            <span class="string">"endpoints ready"
+<a href=#1544 id=1544 data-nosnippet>1544</a>        </span>);
+<a href=#1545 id=1545 data-nosnippet>1545</a>
+<a href=#1546 id=1546 data-nosnippet>1546</a>        <span class="kw">let </span>topic: TopicId = blake3::hash(<span class="string">b"can_reconnect"</span>).into();
+<a href=#1547 id=1547 data-nosnippet>1547</a>        <span class="macro">tracing::info!</span>(%topic, <span class="string">"joining"</span>);
+<a href=#1548 id=1548 data-nosnippet>1548</a>
+<a href=#1549 id=1549 data-nosnippet>1549</a>        <span class="kw">let </span>ct2 = ct.child_token();
+<a href=#1550 id=1550 data-nosnippet>1550</a>        <span class="comment">// channel used to signal the second gossip instance to advance the test
+<a href=#1551 id=1551 data-nosnippet>1551</a>        </span><span class="kw">let </span>(tx, <span class="kw-2">mut </span>rx) = mpsc::channel::&lt;()&gt;(<span class="number">1</span>);
+<a href=#1552 id=1552 data-nosnippet>1552</a>        <span class="kw">let </span>addr1 = EndpointAddr::new(endpoint_id1).with_relay_url(relay_url.clone());
+<a href=#1553 id=1553 data-nosnippet>1553</a>        <span class="kw">let </span>memory_lookup = MemoryLookup::new();
+<a href=#1554 id=1554 data-nosnippet>1554</a>        memory_lookup.add_endpoint_info(addr1);
+<a href=#1555 id=1555 data-nosnippet>1555</a>        ep2.address_lookup().add(memory_lookup.clone());
+<a href=#1556 id=1556 data-nosnippet>1556</a>        <span class="kw">let </span>go2_task = <span class="kw">async move </span>{
+<a href=#1557 id=1557 data-nosnippet>1557</a>            <span class="kw">let </span><span class="kw-2">mut </span>sub = go2.subscribe(topic, Vec::new()).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1558 id=1558 data-nosnippet>1558</a>            sub.joined().<span class="kw">await</span><span class="question-mark">?</span>;
 <a href=#1559 id=1559 data-nosnippet>1559</a>
-<a href=#1560 id=1560 data-nosnippet>1560</a>            rx.recv().<span class="kw">await</span>.expect(<span class="string">"signal to subscribe again"</span>);
-<a href=#1561 id=1561 data-nosnippet>1561</a>            <span class="macro">tracing::info!</span>(<span class="string">"resubscribing"</span>);
-<a href=#1562 id=1562 data-nosnippet>1562</a>            <span class="kw">let </span><span class="kw-2">mut </span>sub = go2.subscribe(topic, <span class="macro">vec!</span>[endpoint_id1]).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1560 id=1560 data-nosnippet>1560</a>            rx.recv().<span class="kw">await</span>.expect(<span class="string">"signal to unsubscribe"</span>);
+<a href=#1561 id=1561 data-nosnippet>1561</a>            <span class="macro">tracing::info!</span>(<span class="string">"unsubscribing"</span>);
+<a href=#1562 id=1562 data-nosnippet>1562</a>            drop(sub);
 <a href=#1563 id=1563 data-nosnippet>1563</a>
-<a href=#1564 id=1564 data-nosnippet>1564</a>            sub.joined().<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1565 id=1565 data-nosnippet>1565</a>            <span class="macro">tracing::info!</span>(<span class="string">"subscription successful!"</span>);
-<a href=#1566 id=1566 data-nosnippet>1566</a>
-<a href=#1567 id=1567 data-nosnippet>1567</a>            ct2.cancelled().<span class="kw">await</span>;
-<a href=#1568 id=1568 data-nosnippet>1568</a>
-<a href=#1569 id=1569 data-nosnippet>1569</a>            <span class="prelude-val">Ok</span>::&lt;<span class="kw">_</span>, ApiError&gt;(())
-<a href=#1570 id=1570 data-nosnippet>1570</a>        }
-<a href=#1571 id=1571 data-nosnippet>1571</a>        .instrument(<span class="macro">tracing::debug_span!</span>(<span class="string">"endpoint_2"</span>, %endpoint_id2));
-<a href=#1572 id=1572 data-nosnippet>1572</a>        <span class="kw">let </span>go2_handle = task::spawn(go2_task);
-<a href=#1573 id=1573 data-nosnippet>1573</a>
-<a href=#1574 id=1574 data-nosnippet>1574</a>        <span class="kw">let </span>addr2 = EndpointAddr::new(endpoint_id2).with_relay_url(relay_url);
-<a href=#1575 id=1575 data-nosnippet>1575</a>        memory_lookup.add_endpoint_info(addr2);
-<a href=#1576 id=1576 data-nosnippet>1576</a>        ep1.address_lookup().add(memory_lookup);
+<a href=#1564 id=1564 data-nosnippet>1564</a>            rx.recv().<span class="kw">await</span>.expect(<span class="string">"signal to subscribe again"</span>);
+<a href=#1565 id=1565 data-nosnippet>1565</a>            <span class="macro">tracing::info!</span>(<span class="string">"resubscribing"</span>);
+<a href=#1566 id=1566 data-nosnippet>1566</a>            <span class="kw">let </span><span class="kw-2">mut </span>sub = go2.subscribe(topic, <span class="macro">vec!</span>[endpoint_id1]).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1567 id=1567 data-nosnippet>1567</a>
+<a href=#1568 id=1568 data-nosnippet>1568</a>            sub.joined().<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1569 id=1569 data-nosnippet>1569</a>            <span class="macro">tracing::info!</span>(<span class="string">"subscription successful!"</span>);
+<a href=#1570 id=1570 data-nosnippet>1570</a>
+<a href=#1571 id=1571 data-nosnippet>1571</a>            ct2.cancelled().<span class="kw">await</span>;
+<a href=#1572 id=1572 data-nosnippet>1572</a>
+<a href=#1573 id=1573 data-nosnippet>1573</a>            <span class="prelude-val">Ok</span>::&lt;<span class="kw">_</span>, ApiError&gt;(())
+<a href=#1574 id=1574 data-nosnippet>1574</a>        }
+<a href=#1575 id=1575 data-nosnippet>1575</a>        .instrument(<span class="macro">tracing::debug_span!</span>(<span class="string">"endpoint_2"</span>, %endpoint_id2));
+<a href=#1576 id=1576 data-nosnippet>1576</a>        <span class="kw">let </span>go2_handle = task::spawn(go2_task);
 <a href=#1577 id=1577 data-nosnippet>1577</a>
-<a href=#1578 id=1578 data-nosnippet>1578</a>        <span class="kw">let </span><span class="kw-2">mut </span>sub = go1.subscribe(topic, <span class="macro">vec!</span>[endpoint_id2]).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1579 id=1579 data-nosnippet>1579</a>        <span class="comment">// wait for subscribed notification
-<a href=#1580 id=1580 data-nosnippet>1580</a>        </span>sub.joined().<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1578 id=1578 data-nosnippet>1578</a>        <span class="kw">let </span>addr2 = EndpointAddr::new(endpoint_id2).with_relay_url(relay_url);
+<a href=#1579 id=1579 data-nosnippet>1579</a>        memory_lookup.add_endpoint_info(addr2);
+<a href=#1580 id=1580 data-nosnippet>1580</a>        ep1.address_lookup().add(memory_lookup);
 <a href=#1581 id=1581 data-nosnippet>1581</a>
-<a href=#1582 id=1582 data-nosnippet>1582</a>        <span class="comment">// signal endpoint_2 to unsubscribe
-<a href=#1583 id=1583 data-nosnippet>1583</a>        </span>tx.send(()).<span class="kw">await</span>.std_context(<span class="string">"signal unsubscribe"</span>)<span class="question-mark">?</span>;
-<a href=#1584 id=1584 data-nosnippet>1584</a>
-<a href=#1585 id=1585 data-nosnippet>1585</a>        <span class="comment">// we should receive a Neighbor down event
-<a href=#1586 id=1586 data-nosnippet>1586</a>        </span><span class="kw">let </span>conn_timeout = Duration::from_millis(<span class="number">500</span>);
-<a href=#1587 id=1587 data-nosnippet>1587</a>        <span class="kw">let </span>ev = timeout(conn_timeout, sub.try_next())
-<a href=#1588 id=1588 data-nosnippet>1588</a>            .<span class="kw">await
-<a href=#1589 id=1589 data-nosnippet>1589</a>            </span>.std_context(<span class="string">"wait neighbor down"</span>)<span class="question-mark">??</span>;
-<a href=#1590 id=1590 data-nosnippet>1590</a>        <span class="macro">assert_eq!</span>(ev, <span class="prelude-val">Some</span>(Event::NeighborDown(endpoint_id2)));
-<a href=#1591 id=1591 data-nosnippet>1591</a>        <span class="macro">tracing::info!</span>(<span class="string">"endpoint 2 left"</span>);
-<a href=#1592 id=1592 data-nosnippet>1592</a>
-<a href=#1593 id=1593 data-nosnippet>1593</a>        <span class="comment">// signal endpoint_2 to subscribe again
-<a href=#1594 id=1594 data-nosnippet>1594</a>        </span>tx.send(()).<span class="kw">await</span>.std_context(<span class="string">"signal resubscribe"</span>)<span class="question-mark">?</span>;
-<a href=#1595 id=1595 data-nosnippet>1595</a>
-<a href=#1596 id=1596 data-nosnippet>1596</a>        <span class="kw">let </span>conn_timeout = Duration::from_millis(<span class="number">500</span>);
-<a href=#1597 id=1597 data-nosnippet>1597</a>        <span class="kw">let </span>ev = timeout(conn_timeout, sub.try_next())
-<a href=#1598 id=1598 data-nosnippet>1598</a>            .<span class="kw">await
-<a href=#1599 id=1599 data-nosnippet>1599</a>            </span>.std_context(<span class="string">"wait neighbor up"</span>)<span class="question-mark">??</span>;
-<a href=#1600 id=1600 data-nosnippet>1600</a>        <span class="macro">assert_eq!</span>(ev, <span class="prelude-val">Some</span>(Event::NeighborUp(endpoint_id2)));
-<a href=#1601 id=1601 data-nosnippet>1601</a>        <span class="macro">tracing::info!</span>(<span class="string">"endpoint 2 rejoined!"</span>);
-<a href=#1602 id=1602 data-nosnippet>1602</a>
-<a href=#1603 id=1603 data-nosnippet>1603</a>        <span class="comment">// cleanup and ensure everything went as expected
-<a href=#1604 id=1604 data-nosnippet>1604</a>        </span>ct.cancel();
-<a href=#1605 id=1605 data-nosnippet>1605</a>        <span class="kw">let </span>wait = Duration::from_secs(<span class="number">2</span>);
-<a href=#1606 id=1606 data-nosnippet>1606</a>        timeout(wait, ep1_handle)
-<a href=#1607 id=1607 data-nosnippet>1607</a>            .<span class="kw">await
-<a href=#1608 id=1608 data-nosnippet>1608</a>            </span>.std_context(<span class="string">"wait endpoint1 task"</span>)<span class="question-mark">?
-<a href=#1609 id=1609 data-nosnippet>1609</a>            </span>.std_context(<span class="string">"join endpoint1 task"</span>)<span class="question-mark">??</span>;
-<a href=#1610 id=1610 data-nosnippet>1610</a>        timeout(wait, ep2_handle)
+<a href=#1582 id=1582 data-nosnippet>1582</a>        <span class="kw">let </span><span class="kw-2">mut </span>sub = go1.subscribe(topic, <span class="macro">vec!</span>[endpoint_id2]).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1583 id=1583 data-nosnippet>1583</a>        <span class="comment">// wait for subscribed notification
+<a href=#1584 id=1584 data-nosnippet>1584</a>        </span>sub.joined().<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1585 id=1585 data-nosnippet>1585</a>
+<a href=#1586 id=1586 data-nosnippet>1586</a>        <span class="comment">// signal endpoint_2 to unsubscribe
+<a href=#1587 id=1587 data-nosnippet>1587</a>        </span>tx.send(()).<span class="kw">await</span>.std_context(<span class="string">"signal unsubscribe"</span>)<span class="question-mark">?</span>;
+<a href=#1588 id=1588 data-nosnippet>1588</a>
+<a href=#1589 id=1589 data-nosnippet>1589</a>        <span class="comment">// we should receive a Neighbor down event
+<a href=#1590 id=1590 data-nosnippet>1590</a>        </span><span class="kw">let </span>conn_timeout = Duration::from_millis(<span class="number">500</span>);
+<a href=#1591 id=1591 data-nosnippet>1591</a>        <span class="kw">let </span>ev = timeout(conn_timeout, sub.try_next())
+<a href=#1592 id=1592 data-nosnippet>1592</a>            .<span class="kw">await
+<a href=#1593 id=1593 data-nosnippet>1593</a>            </span>.std_context(<span class="string">"wait neighbor down"</span>)<span class="question-mark">??</span>;
+<a href=#1594 id=1594 data-nosnippet>1594</a>        <span class="macro">assert_eq!</span>(ev, <span class="prelude-val">Some</span>(Event::NeighborDown(endpoint_id2)));
+<a href=#1595 id=1595 data-nosnippet>1595</a>        <span class="macro">tracing::info!</span>(<span class="string">"endpoint 2 left"</span>);
+<a href=#1596 id=1596 data-nosnippet>1596</a>
+<a href=#1597 id=1597 data-nosnippet>1597</a>        <span class="comment">// signal endpoint_2 to subscribe again
+<a href=#1598 id=1598 data-nosnippet>1598</a>        </span>tx.send(()).<span class="kw">await</span>.std_context(<span class="string">"signal resubscribe"</span>)<span class="question-mark">?</span>;
+<a href=#1599 id=1599 data-nosnippet>1599</a>
+<a href=#1600 id=1600 data-nosnippet>1600</a>        <span class="kw">let </span>conn_timeout = Duration::from_millis(<span class="number">500</span>);
+<a href=#1601 id=1601 data-nosnippet>1601</a>        <span class="kw">let </span>ev = timeout(conn_timeout, sub.try_next())
+<a href=#1602 id=1602 data-nosnippet>1602</a>            .<span class="kw">await
+<a href=#1603 id=1603 data-nosnippet>1603</a>            </span>.std_context(<span class="string">"wait neighbor up"</span>)<span class="question-mark">??</span>;
+<a href=#1604 id=1604 data-nosnippet>1604</a>        <span class="macro">assert_eq!</span>(ev, <span class="prelude-val">Some</span>(Event::NeighborUp(endpoint_id2)));
+<a href=#1605 id=1605 data-nosnippet>1605</a>        <span class="macro">tracing::info!</span>(<span class="string">"endpoint 2 rejoined!"</span>);
+<a href=#1606 id=1606 data-nosnippet>1606</a>
+<a href=#1607 id=1607 data-nosnippet>1607</a>        <span class="comment">// cleanup and ensure everything went as expected
+<a href=#1608 id=1608 data-nosnippet>1608</a>        </span>ct.cancel();
+<a href=#1609 id=1609 data-nosnippet>1609</a>        <span class="kw">let </span>wait = Duration::from_secs(<span class="number">2</span>);
+<a href=#1610 id=1610 data-nosnippet>1610</a>        timeout(wait, ep1_handle)
 <a href=#1611 id=1611 data-nosnippet>1611</a>            .<span class="kw">await
-<a href=#1612 id=1612 data-nosnippet>1612</a>            </span>.std_context(<span class="string">"wait endpoint2 task"</span>)<span class="question-mark">?
-<a href=#1613 id=1613 data-nosnippet>1613</a>            </span>.std_context(<span class="string">"join endpoint2 task"</span>)<span class="question-mark">??</span>;
-<a href=#1614 id=1614 data-nosnippet>1614</a>        timeout(wait, go2_handle)
+<a href=#1612 id=1612 data-nosnippet>1612</a>            </span>.std_context(<span class="string">"wait endpoint1 task"</span>)<span class="question-mark">?
+<a href=#1613 id=1613 data-nosnippet>1613</a>            </span>.std_context(<span class="string">"join endpoint1 task"</span>)<span class="question-mark">??</span>;
+<a href=#1614 id=1614 data-nosnippet>1614</a>        timeout(wait, ep2_handle)
 <a href=#1615 id=1615 data-nosnippet>1615</a>            .<span class="kw">await
-<a href=#1616 id=1616 data-nosnippet>1616</a>            </span>.std_context(<span class="string">"wait gossip2 task"</span>)<span class="question-mark">?
-<a href=#1617 id=1617 data-nosnippet>1617</a>            </span>.std_context(<span class="string">"join gossip2 task"</span>)<span class="question-mark">??</span>;
-<a href=#1618 id=1618 data-nosnippet>1618</a>
-<a href=#1619 id=1619 data-nosnippet>1619</a>        Result::Ok(())
-<a href=#1620 id=1620 data-nosnippet>1620</a>    }
-<a href=#1621 id=1621 data-nosnippet>1621</a>
-<a href=#1622 id=1622 data-nosnippet>1622</a>    <span class="attr">#[tokio::test]
-<a href=#1623 id=1623 data-nosnippet>1623</a>    #[traced_test]
-<a href=#1624 id=1624 data-nosnippet>1624</a>    </span><span class="kw">async fn </span>can_die_and_reconnect() -&gt; <span class="prelude-ty">Result</span> {
-<a href=#1625 id=1625 data-nosnippet>1625</a>        <span class="doccomment">/// Runs a future in a separate runtime on a separate thread, cancelling everything
-<a href=#1626 id=1626 data-nosnippet>1626</a>        /// abruptly once `cancel` is invoked.
-<a href=#1627 id=1627 data-nosnippet>1627</a>        </span><span class="kw">fn </span>run_in_thread&lt;T: Send + <span class="lifetime">'static</span>&gt;(
-<a href=#1628 id=1628 data-nosnippet>1628</a>            cancel: CancellationToken,
-<a href=#1629 id=1629 data-nosnippet>1629</a>            fut: <span class="kw">impl </span>std::future::Future&lt;Output = T&gt; + Send + <span class="lifetime">'static</span>,
-<a href=#1630 id=1630 data-nosnippet>1630</a>        ) -&gt; std::thread::JoinHandle&lt;<span class="prelude-ty">Option</span>&lt;T&gt;&gt; {
-<a href=#1631 id=1631 data-nosnippet>1631</a>            std::thread::spawn(<span class="kw">move </span>|| {
-<a href=#1632 id=1632 data-nosnippet>1632</a>                <span class="kw">let </span>rt = tokio::runtime::Builder::new_current_thread()
-<a href=#1633 id=1633 data-nosnippet>1633</a>                    .enable_all()
-<a href=#1634 id=1634 data-nosnippet>1634</a>                    .build()
-<a href=#1635 id=1635 data-nosnippet>1635</a>                    .unwrap();
-<a href=#1636 id=1636 data-nosnippet>1636</a>                rt.block_on(<span class="kw">async move </span>{ cancel.run_until_cancelled(fut).<span class="kw">await </span>})
-<a href=#1637 id=1637 data-nosnippet>1637</a>            })
-<a href=#1638 id=1638 data-nosnippet>1638</a>        }
-<a href=#1639 id=1639 data-nosnippet>1639</a>
-<a href=#1640 id=1640 data-nosnippet>1640</a>        <span class="doccomment">/// Spawns a new endpoint and gossip instance.
-<a href=#1641 id=1641 data-nosnippet>1641</a>        </span><span class="kw">async fn </span>spawn_gossip(
-<a href=#1642 id=1642 data-nosnippet>1642</a>            secret_key: SecretKey,
-<a href=#1643 id=1643 data-nosnippet>1643</a>            relay_map: RelayMap,
-<a href=#1644 id=1644 data-nosnippet>1644</a>        ) -&gt; <span class="prelude-ty">Result</span>&lt;(Router, Gossip), BindError&gt; {
-<a href=#1645 id=1645 data-nosnippet>1645</a>            <span class="kw">let </span>ep = Endpoint::empty_builder(RelayMode::Custom(relay_map))
-<a href=#1646 id=1646 data-nosnippet>1646</a>                .secret_key(secret_key)
-<a href=#1647 id=1647 data-nosnippet>1647</a>                .insecure_skip_relay_cert_verify(<span class="bool-val">true</span>)
-<a href=#1648 id=1648 data-nosnippet>1648</a>                .bind()
-<a href=#1649 id=1649 data-nosnippet>1649</a>                .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1650 id=1650 data-nosnippet>1650</a>            <span class="kw">let </span>gossip = Gossip::builder().spawn(ep.clone());
-<a href=#1651 id=1651 data-nosnippet>1651</a>            <span class="kw">let </span>router = Router::builder(ep)
-<a href=#1652 id=1652 data-nosnippet>1652</a>                .accept(GOSSIP_ALPN, gossip.clone())
-<a href=#1653 id=1653 data-nosnippet>1653</a>                .spawn();
-<a href=#1654 id=1654 data-nosnippet>1654</a>            <span class="prelude-val">Ok</span>((router, gossip))
-<a href=#1655 id=1655 data-nosnippet>1655</a>        }
-<a href=#1656 id=1656 data-nosnippet>1656</a>
-<a href=#1657 id=1657 data-nosnippet>1657</a>        <span class="doccomment">/// Spawns a gossip endpoint, and broadcasts a single message, then sleep until cancelled externally.
-<a href=#1658 id=1658 data-nosnippet>1658</a>        </span><span class="kw">async fn </span>broadcast_once(
-<a href=#1659 id=1659 data-nosnippet>1659</a>            secret_key: SecretKey,
-<a href=#1660 id=1660 data-nosnippet>1660</a>            relay_map: RelayMap,
-<a href=#1661 id=1661 data-nosnippet>1661</a>            bootstrap_addr: EndpointAddr,
-<a href=#1662 id=1662 data-nosnippet>1662</a>            topic_id: TopicId,
-<a href=#1663 id=1663 data-nosnippet>1663</a>            message: String,
-<a href=#1664 id=1664 data-nosnippet>1664</a>        ) -&gt; <span class="prelude-ty">Result</span> {
-<a href=#1665 id=1665 data-nosnippet>1665</a>            <span class="kw">let </span>(router, gossip) = spawn_gossip(secret_key, relay_map).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1666 id=1666 data-nosnippet>1666</a>            <span class="macro">info!</span>(endpoint_id = %router.endpoint().id().fmt_short(), <span class="string">"broadcast endpoint spawned"</span>);
-<a href=#1667 id=1667 data-nosnippet>1667</a>            <span class="kw">let </span>bootstrap = <span class="macro">vec!</span>[bootstrap_addr.id];
-<a href=#1668 id=1668 data-nosnippet>1668</a>            <span class="kw">let </span>memory_lookup = MemoryLookup::new();
-<a href=#1669 id=1669 data-nosnippet>1669</a>            memory_lookup.add_endpoint_info(bootstrap_addr);
-<a href=#1670 id=1670 data-nosnippet>1670</a>            router.endpoint().address_lookup().add(memory_lookup);
-<a href=#1671 id=1671 data-nosnippet>1671</a>            <span class="kw">let </span><span class="kw-2">mut </span>topic = gossip.subscribe_and_join(topic_id, bootstrap).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1672 id=1672 data-nosnippet>1672</a>            topic.broadcast(message.as_bytes().to_vec().into()).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1673 id=1673 data-nosnippet>1673</a>            std::future::pending::&lt;()&gt;().<span class="kw">await</span>;
-<a href=#1674 id=1674 data-nosnippet>1674</a>            <span class="prelude-val">Ok</span>(())
-<a href=#1675 id=1675 data-nosnippet>1675</a>        }
-<a href=#1676 id=1676 data-nosnippet>1676</a>
-<a href=#1677 id=1677 data-nosnippet>1677</a>        <span class="kw">let </span>(relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().<span class="kw">await</span>.unwrap();
-<a href=#1678 id=1678 data-nosnippet>1678</a>        <span class="kw">let </span><span class="kw-2">mut </span>rng = <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
-<a href=#1679 id=1679 data-nosnippet>1679</a>        <span class="kw">let </span>topic_id = TopicId::from_bytes(rng.random());
+<a href=#1616 id=1616 data-nosnippet>1616</a>            </span>.std_context(<span class="string">"wait endpoint2 task"</span>)<span class="question-mark">?
+<a href=#1617 id=1617 data-nosnippet>1617</a>            </span>.std_context(<span class="string">"join endpoint2 task"</span>)<span class="question-mark">??</span>;
+<a href=#1618 id=1618 data-nosnippet>1618</a>        timeout(wait, go2_handle)
+<a href=#1619 id=1619 data-nosnippet>1619</a>            .<span class="kw">await
+<a href=#1620 id=1620 data-nosnippet>1620</a>            </span>.std_context(<span class="string">"wait gossip2 task"</span>)<span class="question-mark">?
+<a href=#1621 id=1621 data-nosnippet>1621</a>            </span>.std_context(<span class="string">"join gossip2 task"</span>)<span class="question-mark">??</span>;
+<a href=#1622 id=1622 data-nosnippet>1622</a>
+<a href=#1623 id=1623 data-nosnippet>1623</a>        Result::Ok(())
+<a href=#1624 id=1624 data-nosnippet>1624</a>    }
+<a href=#1625 id=1625 data-nosnippet>1625</a>
+<a href=#1626 id=1626 data-nosnippet>1626</a>    <span class="attr">#[tokio::test]
+<a href=#1627 id=1627 data-nosnippet>1627</a>    #[traced_test]
+<a href=#1628 id=1628 data-nosnippet>1628</a>    </span><span class="kw">async fn </span>can_die_and_reconnect() -&gt; <span class="prelude-ty">Result</span> {
+<a href=#1629 id=1629 data-nosnippet>1629</a>        <span class="doccomment">/// Runs a future in a separate runtime on a separate thread, cancelling everything
+<a href=#1630 id=1630 data-nosnippet>1630</a>        /// abruptly once `cancel` is invoked.
+<a href=#1631 id=1631 data-nosnippet>1631</a>        </span><span class="kw">fn </span>run_in_thread&lt;T: Send + <span class="lifetime">'static</span>&gt;(
+<a href=#1632 id=1632 data-nosnippet>1632</a>            cancel: CancellationToken,
+<a href=#1633 id=1633 data-nosnippet>1633</a>            fut: <span class="kw">impl </span>std::future::Future&lt;Output = T&gt; + Send + <span class="lifetime">'static</span>,
+<a href=#1634 id=1634 data-nosnippet>1634</a>        ) -&gt; std::thread::JoinHandle&lt;<span class="prelude-ty">Option</span>&lt;T&gt;&gt; {
+<a href=#1635 id=1635 data-nosnippet>1635</a>            std::thread::spawn(<span class="kw">move </span>|| {
+<a href=#1636 id=1636 data-nosnippet>1636</a>                <span class="kw">let </span>rt = tokio::runtime::Builder::new_current_thread()
+<a href=#1637 id=1637 data-nosnippet>1637</a>                    .enable_all()
+<a href=#1638 id=1638 data-nosnippet>1638</a>                    .build()
+<a href=#1639 id=1639 data-nosnippet>1639</a>                    .unwrap();
+<a href=#1640 id=1640 data-nosnippet>1640</a>                rt.block_on(<span class="kw">async move </span>{ cancel.run_until_cancelled(fut).<span class="kw">await </span>})
+<a href=#1641 id=1641 data-nosnippet>1641</a>            })
+<a href=#1642 id=1642 data-nosnippet>1642</a>        }
+<a href=#1643 id=1643 data-nosnippet>1643</a>
+<a href=#1644 id=1644 data-nosnippet>1644</a>        <span class="doccomment">/// Spawns a new endpoint and gossip instance.
+<a href=#1645 id=1645 data-nosnippet>1645</a>        </span><span class="kw">async fn </span>spawn_gossip(
+<a href=#1646 id=1646 data-nosnippet>1646</a>            secret_key: SecretKey,
+<a href=#1647 id=1647 data-nosnippet>1647</a>            relay_map: RelayMap,
+<a href=#1648 id=1648 data-nosnippet>1648</a>        ) -&gt; <span class="prelude-ty">Result</span>&lt;(Router, Gossip), BindError&gt; {
+<a href=#1649 id=1649 data-nosnippet>1649</a>            <span class="kw">let </span>ep = Endpoint::empty_builder(RelayMode::Custom(relay_map))
+<a href=#1650 id=1650 data-nosnippet>1650</a>                .secret_key(secret_key)
+<a href=#1651 id=1651 data-nosnippet>1651</a>                .insecure_skip_relay_cert_verify(<span class="bool-val">true</span>)
+<a href=#1652 id=1652 data-nosnippet>1652</a>                .bind()
+<a href=#1653 id=1653 data-nosnippet>1653</a>                .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1654 id=1654 data-nosnippet>1654</a>            <span class="kw">let </span>gossip = Gossip::builder().spawn(ep.clone());
+<a href=#1655 id=1655 data-nosnippet>1655</a>            <span class="kw">let </span>router = Router::builder(ep)
+<a href=#1656 id=1656 data-nosnippet>1656</a>                .accept(GOSSIP_ALPN, gossip.clone())
+<a href=#1657 id=1657 data-nosnippet>1657</a>                .spawn();
+<a href=#1658 id=1658 data-nosnippet>1658</a>            <span class="prelude-val">Ok</span>((router, gossip))
+<a href=#1659 id=1659 data-nosnippet>1659</a>        }
+<a href=#1660 id=1660 data-nosnippet>1660</a>
+<a href=#1661 id=1661 data-nosnippet>1661</a>        <span class="doccomment">/// Spawns a gossip endpoint, and broadcasts a single message, then sleep until cancelled externally.
+<a href=#1662 id=1662 data-nosnippet>1662</a>        </span><span class="kw">async fn </span>broadcast_once(
+<a href=#1663 id=1663 data-nosnippet>1663</a>            secret_key: SecretKey,
+<a href=#1664 id=1664 data-nosnippet>1664</a>            relay_map: RelayMap,
+<a href=#1665 id=1665 data-nosnippet>1665</a>            bootstrap_addr: EndpointAddr,
+<a href=#1666 id=1666 data-nosnippet>1666</a>            topic_id: TopicId,
+<a href=#1667 id=1667 data-nosnippet>1667</a>            message: String,
+<a href=#1668 id=1668 data-nosnippet>1668</a>        ) -&gt; <span class="prelude-ty">Result</span> {
+<a href=#1669 id=1669 data-nosnippet>1669</a>            <span class="kw">let </span>(router, gossip) = spawn_gossip(secret_key, relay_map).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1670 id=1670 data-nosnippet>1670</a>            <span class="macro">info!</span>(endpoint_id = %router.endpoint().id().fmt_short(), <span class="string">"broadcast endpoint spawned"</span>);
+<a href=#1671 id=1671 data-nosnippet>1671</a>            <span class="kw">let </span>bootstrap = <span class="macro">vec!</span>[bootstrap_addr.id];
+<a href=#1672 id=1672 data-nosnippet>1672</a>            <span class="kw">let </span>memory_lookup = MemoryLookup::new();
+<a href=#1673 id=1673 data-nosnippet>1673</a>            memory_lookup.add_endpoint_info(bootstrap_addr);
+<a href=#1674 id=1674 data-nosnippet>1674</a>            router.endpoint().address_lookup().add(memory_lookup);
+<a href=#1675 id=1675 data-nosnippet>1675</a>            <span class="kw">let </span><span class="kw-2">mut </span>topic = gossip.subscribe_and_join(topic_id, bootstrap).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1676 id=1676 data-nosnippet>1676</a>            topic.broadcast(message.as_bytes().to_vec().into()).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1677 id=1677 data-nosnippet>1677</a>            std::future::pending::&lt;()&gt;().<span class="kw">await</span>;
+<a href=#1678 id=1678 data-nosnippet>1678</a>            <span class="prelude-val">Ok</span>(())
+<a href=#1679 id=1679 data-nosnippet>1679</a>        }
 <a href=#1680 id=1680 data-nosnippet>1680</a>
-<a href=#1681 id=1681 data-nosnippet>1681</a>        <span class="comment">// spawn a gossip endpoint, send the endpoint's address on addr_tx,
-<a href=#1682 id=1682 data-nosnippet>1682</a>        // then wait to receive `count` messages, and terminate.
-<a href=#1683 id=1683 data-nosnippet>1683</a>        </span><span class="kw">let </span>(addr_tx, addr_rx) = tokio::sync::oneshot::channel();
-<a href=#1684 id=1684 data-nosnippet>1684</a>        <span class="kw">let </span>(msgs_recv_tx, <span class="kw-2">mut </span>msgs_recv_rx) = tokio::sync::mpsc::channel(<span class="number">3</span>);
-<a href=#1685 id=1685 data-nosnippet>1685</a>        <span class="kw">let </span>recv_task = tokio::task::spawn({
-<a href=#1686 id=1686 data-nosnippet>1686</a>            <span class="kw">let </span>relay_map = relay_map.clone();
-<a href=#1687 id=1687 data-nosnippet>1687</a>            <span class="kw">let </span>secret_key = SecretKey::generate(<span class="kw-2">&amp;mut </span>rng);
-<a href=#1688 id=1688 data-nosnippet>1688</a>            <span class="kw">async move </span>{
-<a href=#1689 id=1689 data-nosnippet>1689</a>                <span class="kw">let </span>(router, gossip) = spawn_gossip(secret_key, relay_map).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1690 id=1690 data-nosnippet>1690</a>                <span class="comment">// wait for the relay to be set. iroh currently has issues when trying
-<a href=#1691 id=1691 data-nosnippet>1691</a>                // to immediately reconnect with changed direct addresses, but when the
-<a href=#1692 id=1692 data-nosnippet>1692</a>                // relay path is available it works.
-<a href=#1693 id=1693 data-nosnippet>1693</a>                // See https://github.com/n0-computer/iroh/pull/3372
-<a href=#1694 id=1694 data-nosnippet>1694</a>                </span>router.endpoint().online().<span class="kw">await</span>;
-<a href=#1695 id=1695 data-nosnippet>1695</a>                <span class="kw">let </span>addr = router.endpoint().addr();
-<a href=#1696 id=1696 data-nosnippet>1696</a>                <span class="macro">info!</span>(endpoint_id = %addr.id.fmt_short(), <span class="string">"recv endpoint spawned"</span>);
-<a href=#1697 id=1697 data-nosnippet>1697</a>                addr_tx.send(addr).unwrap();
-<a href=#1698 id=1698 data-nosnippet>1698</a>                <span class="kw">let </span><span class="kw-2">mut </span>topic = gossip.subscribe_and_join(topic_id, <span class="macro">vec!</span>[]).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1699 id=1699 data-nosnippet>1699</a>                <span class="kw">while let </span><span class="prelude-val">Some</span>(event) = topic.try_next().<span class="kw">await</span>.unwrap() {
-<a href=#1700 id=1700 data-nosnippet>1700</a>                    <span class="kw">if let </span>Event::Received(message) = event {
-<a href=#1701 id=1701 data-nosnippet>1701</a>                        <span class="kw">let </span>message = std::str::from_utf8(<span class="kw-2">&amp;</span>message.content)
-<a href=#1702 id=1702 data-nosnippet>1702</a>                            .std_context(<span class="string">"decode broadcast message"</span>)<span class="question-mark">?
-<a href=#1703 id=1703 data-nosnippet>1703</a>                            </span>.to_string();
-<a href=#1704 id=1704 data-nosnippet>1704</a>                        msgs_recv_tx
-<a href=#1705 id=1705 data-nosnippet>1705</a>                            .send(message)
-<a href=#1706 id=1706 data-nosnippet>1706</a>                            .<span class="kw">await
-<a href=#1707 id=1707 data-nosnippet>1707</a>                            </span>.std_context(<span class="string">"forward received message"</span>)<span class="question-mark">?</span>;
-<a href=#1708 id=1708 data-nosnippet>1708</a>                    }
-<a href=#1709 id=1709 data-nosnippet>1709</a>                }
-<a href=#1710 id=1710 data-nosnippet>1710</a>                <span class="prelude-val">Ok</span>::&lt;<span class="kw">_</span>, AnyError&gt;(())
-<a href=#1711 id=1711 data-nosnippet>1711</a>            }
-<a href=#1712 id=1712 data-nosnippet>1712</a>        });
-<a href=#1713 id=1713 data-nosnippet>1713</a>
-<a href=#1714 id=1714 data-nosnippet>1714</a>        <span class="kw">let </span>endpoint0_addr = addr_rx.<span class="kw">await</span>.std_context(<span class="string">"receive endpoint address"</span>)<span class="question-mark">?</span>;
-<a href=#1715 id=1715 data-nosnippet>1715</a>        <span class="kw">let </span>max_wait = Duration::from_secs(<span class="number">5</span>);
-<a href=#1716 id=1716 data-nosnippet>1716</a>
-<a href=#1717 id=1717 data-nosnippet>1717</a>        <span class="comment">// spawn a endpoint, send a message, and then abruptly terminate the endpoint ungracefully
-<a href=#1718 id=1718 data-nosnippet>1718</a>        // after the message was received on our receiver endpoint.
-<a href=#1719 id=1719 data-nosnippet>1719</a>        </span><span class="kw">let </span>cancel = CancellationToken::new();
-<a href=#1720 id=1720 data-nosnippet>1720</a>        <span class="kw">let </span>secret = SecretKey::generate(<span class="kw-2">&amp;mut </span>rng);
-<a href=#1721 id=1721 data-nosnippet>1721</a>        <span class="kw">let </span>join_handle_1 = run_in_thread(
-<a href=#1722 id=1722 data-nosnippet>1722</a>            cancel.clone(),
-<a href=#1723 id=1723 data-nosnippet>1723</a>            broadcast_once(
-<a href=#1724 id=1724 data-nosnippet>1724</a>                secret.clone(),
-<a href=#1725 id=1725 data-nosnippet>1725</a>                relay_map.clone(),
-<a href=#1726 id=1726 data-nosnippet>1726</a>                endpoint0_addr.clone(),
-<a href=#1727 id=1727 data-nosnippet>1727</a>                topic_id,
-<a href=#1728 id=1728 data-nosnippet>1728</a>                <span class="string">"msg1"</span>.to_string(),
-<a href=#1729 id=1729 data-nosnippet>1729</a>            ),
-<a href=#1730 id=1730 data-nosnippet>1730</a>        );
-<a href=#1731 id=1731 data-nosnippet>1731</a>        <span class="comment">// assert that we received the message on the receiver endpoint.
-<a href=#1732 id=1732 data-nosnippet>1732</a>        </span><span class="kw">let </span>msg = timeout(max_wait, msgs_recv_rx.recv())
-<a href=#1733 id=1733 data-nosnippet>1733</a>            .<span class="kw">await
-<a href=#1734 id=1734 data-nosnippet>1734</a>            </span>.std_context(<span class="string">"wait for first broadcast"</span>)<span class="question-mark">?
-<a href=#1735 id=1735 data-nosnippet>1735</a>            </span>.std_context(<span class="string">"receiver dropped channel"</span>)<span class="question-mark">?</span>;
-<a href=#1736 id=1736 data-nosnippet>1736</a>        <span class="macro">assert_eq!</span>(<span class="kw-2">&amp;</span>msg, <span class="string">"msg1"</span>);
-<a href=#1737 id=1737 data-nosnippet>1737</a>        <span class="macro">info!</span>(<span class="string">"kill broadcast endpoint"</span>);
-<a href=#1738 id=1738 data-nosnippet>1738</a>        cancel.cancel();
-<a href=#1739 id=1739 data-nosnippet>1739</a>
-<a href=#1740 id=1740 data-nosnippet>1740</a>        <span class="comment">// spawns the endpoint again with the same endpoint id, and send another message
-<a href=#1741 id=1741 data-nosnippet>1741</a>        </span><span class="kw">let </span>cancel = CancellationToken::new();
-<a href=#1742 id=1742 data-nosnippet>1742</a>        <span class="kw">let </span>join_handle_2 = run_in_thread(
-<a href=#1743 id=1743 data-nosnippet>1743</a>            cancel.clone(),
-<a href=#1744 id=1744 data-nosnippet>1744</a>            broadcast_once(
-<a href=#1745 id=1745 data-nosnippet>1745</a>                secret.clone(),
-<a href=#1746 id=1746 data-nosnippet>1746</a>                relay_map.clone(),
-<a href=#1747 id=1747 data-nosnippet>1747</a>                endpoint0_addr.clone(),
-<a href=#1748 id=1748 data-nosnippet>1748</a>                topic_id,
-<a href=#1749 id=1749 data-nosnippet>1749</a>                <span class="string">"msg2"</span>.to_string(),
-<a href=#1750 id=1750 data-nosnippet>1750</a>            ),
-<a href=#1751 id=1751 data-nosnippet>1751</a>        );
-<a href=#1752 id=1752 data-nosnippet>1752</a>        <span class="comment">// assert that we received the message on the receiver endpoint.
-<a href=#1753 id=1753 data-nosnippet>1753</a>        // this means that the reconnect with the same endpoint id worked.
-<a href=#1754 id=1754 data-nosnippet>1754</a>        </span><span class="kw">let </span>msg = timeout(max_wait, msgs_recv_rx.recv())
-<a href=#1755 id=1755 data-nosnippet>1755</a>            .<span class="kw">await
-<a href=#1756 id=1756 data-nosnippet>1756</a>            </span>.std_context(<span class="string">"wait for second broadcast"</span>)<span class="question-mark">?
-<a href=#1757 id=1757 data-nosnippet>1757</a>            </span>.std_context(<span class="string">"receiver dropped channel"</span>)<span class="question-mark">?</span>;
-<a href=#1758 id=1758 data-nosnippet>1758</a>        <span class="macro">assert_eq!</span>(<span class="kw-2">&amp;</span>msg, <span class="string">"msg2"</span>);
-<a href=#1759 id=1759 data-nosnippet>1759</a>        <span class="macro">info!</span>(<span class="string">"kill broadcast endpoint"</span>);
-<a href=#1760 id=1760 data-nosnippet>1760</a>        cancel.cancel();
-<a href=#1761 id=1761 data-nosnippet>1761</a>
-<a href=#1762 id=1762 data-nosnippet>1762</a>        <span class="macro">info!</span>(<span class="string">"kill recv endpoint"</span>);
-<a href=#1763 id=1763 data-nosnippet>1763</a>        recv_task.abort();
-<a href=#1764 id=1764 data-nosnippet>1764</a>        <span class="macro">assert!</span>(join_handle_1.join().unwrap().is_none());
-<a href=#1765 id=1765 data-nosnippet>1765</a>        <span class="macro">assert!</span>(join_handle_2.join().unwrap().is_none());
-<a href=#1766 id=1766 data-nosnippet>1766</a>
-<a href=#1767 id=1767 data-nosnippet>1767</a>        <span class="prelude-val">Ok</span>(())
-<a href=#1768 id=1768 data-nosnippet>1768</a>    }
-<a href=#1769 id=1769 data-nosnippet>1769</a>
-<a href=#1770 id=1770 data-nosnippet>1770</a>    <span class="attr">#[tokio::test]
-<a href=#1771 id=1771 data-nosnippet>1771</a>    #[traced_test]
-<a href=#1772 id=1772 data-nosnippet>1772</a>    </span><span class="kw">async fn </span>gossip_change_alpn() -&gt; n0_error::Result&lt;()&gt; {
-<a href=#1773 id=1773 data-nosnippet>1773</a>        <span class="kw">let </span>alpn = <span class="string">b"my-gossip-alpn"</span>;
-<a href=#1774 id=1774 data-nosnippet>1774</a>        <span class="kw">let </span>topic_id = TopicId::from([<span class="number">0u8</span>; <span class="number">32</span>]);
-<a href=#1775 id=1775 data-nosnippet>1775</a>
-<a href=#1776 id=1776 data-nosnippet>1776</a>        <span class="kw">let </span>ep1 = Endpoint::empty_builder(RelayMode::Disabled).bind().<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1777 id=1777 data-nosnippet>1777</a>        <span class="kw">let </span>ep2 = Endpoint::empty_builder(RelayMode::Disabled).bind().<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1778 id=1778 data-nosnippet>1778</a>        <span class="kw">let </span>gossip1 = Gossip::builder().alpn(alpn).spawn(ep1.clone());
-<a href=#1779 id=1779 data-nosnippet>1779</a>        <span class="kw">let </span>gossip2 = Gossip::builder().alpn(alpn).spawn(ep2.clone());
-<a href=#1780 id=1780 data-nosnippet>1780</a>        <span class="kw">let </span>router1 = Router::builder(ep1).accept(alpn, gossip1.clone()).spawn();
-<a href=#1781 id=1781 data-nosnippet>1781</a>        <span class="kw">let </span>router2 = Router::builder(ep2).accept(alpn, gossip2.clone()).spawn();
-<a href=#1782 id=1782 data-nosnippet>1782</a>
-<a href=#1783 id=1783 data-nosnippet>1783</a>        <span class="kw">let </span>addr1 = router1.endpoint().addr();
-<a href=#1784 id=1784 data-nosnippet>1784</a>        <span class="kw">let </span>id1 = addr1.id;
-<a href=#1785 id=1785 data-nosnippet>1785</a>        <span class="kw">let </span>memory_lookup = MemoryLookup::new();
-<a href=#1786 id=1786 data-nosnippet>1786</a>        memory_lookup.add_endpoint_info(addr1);
-<a href=#1787 id=1787 data-nosnippet>1787</a>        router2.endpoint().address_lookup().add(memory_lookup);
-<a href=#1788 id=1788 data-nosnippet>1788</a>
-<a href=#1789 id=1789 data-nosnippet>1789</a>        <span class="kw">let </span><span class="kw-2">mut </span>topic1 = gossip1.subscribe(topic_id, <span class="macro">vec!</span>[]).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1790 id=1790 data-nosnippet>1790</a>        <span class="kw">let </span><span class="kw-2">mut </span>topic2 = gossip2.subscribe(topic_id, <span class="macro">vec!</span>[id1]).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1791 id=1791 data-nosnippet>1791</a>
-<a href=#1792 id=1792 data-nosnippet>1792</a>        timeout(Duration::from_secs(<span class="number">3</span>), topic1.joined())
-<a href=#1793 id=1793 data-nosnippet>1793</a>            .<span class="kw">await
-<a href=#1794 id=1794 data-nosnippet>1794</a>            </span>.std_context(<span class="string">"wait topic1 join"</span>)<span class="question-mark">??</span>;
-<a href=#1795 id=1795 data-nosnippet>1795</a>        timeout(Duration::from_secs(<span class="number">3</span>), topic2.joined())
-<a href=#1796 id=1796 data-nosnippet>1796</a>            .<span class="kw">await
-<a href=#1797 id=1797 data-nosnippet>1797</a>            </span>.std_context(<span class="string">"wait topic2 join"</span>)<span class="question-mark">??</span>;
-<a href=#1798 id=1798 data-nosnippet>1798</a>        router1.shutdown().<span class="kw">await</span>.std_context(<span class="string">"shutdown router1"</span>)<span class="question-mark">?</span>;
-<a href=#1799 id=1799 data-nosnippet>1799</a>        router2.shutdown().<span class="kw">await</span>.std_context(<span class="string">"shutdown router2"</span>)<span class="question-mark">?</span>;
-<a href=#1800 id=1800 data-nosnippet>1800</a>        <span class="prelude-val">Ok</span>(())
-<a href=#1801 id=1801 data-nosnippet>1801</a>    }
-<a href=#1802 id=1802 data-nosnippet>1802</a>
-<a href=#1803 id=1803 data-nosnippet>1803</a>    <span class="attr">#[tokio::test]
-<a href=#1804 id=1804 data-nosnippet>1804</a>    #[traced_test]
-<a href=#1805 id=1805 data-nosnippet>1805</a>    </span><span class="kw">async fn </span>gossip_rely_on_gossip_address_lookup() -&gt; n0_error::Result&lt;()&gt; {
-<a href=#1806 id=1806 data-nosnippet>1806</a>        <span class="kw">let </span>rng = <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
-<a href=#1807 id=1807 data-nosnippet>1807</a>
-<a href=#1808 id=1808 data-nosnippet>1808</a>        <span class="kw">async fn </span>spawn(
-<a href=#1809 id=1809 data-nosnippet>1809</a>            rng: <span class="kw-2">&amp;mut </span><span class="kw">impl </span>CryptoRng,
-<a href=#1810 id=1810 data-nosnippet>1810</a>        ) -&gt; n0_error::Result&lt;(EndpointId, Router, Gossip, GossipSender, GossipReceiver)&gt; {
-<a href=#1811 id=1811 data-nosnippet>1811</a>            <span class="kw">let </span>topic_id = TopicId::from([<span class="number">0u8</span>; <span class="number">32</span>]);
-<a href=#1812 id=1812 data-nosnippet>1812</a>            <span class="kw">let </span>ep = Endpoint::empty_builder(RelayMode::Disabled)
-<a href=#1813 id=1813 data-nosnippet>1813</a>                .secret_key(SecretKey::generate(rng))
-<a href=#1814 id=1814 data-nosnippet>1814</a>                .bind()
-<a href=#1815 id=1815 data-nosnippet>1815</a>                .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1816 id=1816 data-nosnippet>1816</a>            <span class="kw">let </span>endpoint_id = ep.id();
-<a href=#1817 id=1817 data-nosnippet>1817</a>            <span class="kw">let </span>gossip = Gossip::builder().spawn(ep.clone());
-<a href=#1818 id=1818 data-nosnippet>1818</a>            <span class="kw">let </span>router = Router::builder(ep)
-<a href=#1819 id=1819 data-nosnippet>1819</a>                .accept(GOSSIP_ALPN, gossip.clone())
-<a href=#1820 id=1820 data-nosnippet>1820</a>                .spawn();
-<a href=#1821 id=1821 data-nosnippet>1821</a>            <span class="kw">let </span>topic = gossip.subscribe(topic_id, <span class="macro">vec!</span>[]).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1822 id=1822 data-nosnippet>1822</a>            <span class="kw">let </span>(sender, receiver) = topic.split();
-<a href=#1823 id=1823 data-nosnippet>1823</a>            <span class="prelude-val">Ok</span>((endpoint_id, router, gossip, sender, receiver))
-<a href=#1824 id=1824 data-nosnippet>1824</a>        }
-<a href=#1825 id=1825 data-nosnippet>1825</a>
-<a href=#1826 id=1826 data-nosnippet>1826</a>        <span class="comment">// spawn 3 endpoints without relay or address lookup
-<a href=#1827 id=1827 data-nosnippet>1827</a>        </span><span class="kw">let </span>(n1, r1, _g1, _tx1, <span class="kw-2">mut </span>rx1) = spawn(rng).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1828 id=1828 data-nosnippet>1828</a>        <span class="kw">let </span>(n2, r2, _g2, tx2, <span class="kw-2">mut </span>rx2) = spawn(rng).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1829 id=1829 data-nosnippet>1829</a>        <span class="kw">let </span>(n3, r3, _g3, tx3, <span class="kw-2">mut </span>rx3) = spawn(rng).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1830 id=1830 data-nosnippet>1830</a>
-<a href=#1831 id=1831 data-nosnippet>1831</a>        <span class="macro">println!</span>(<span class="string">"endpoints {:?}"</span>, [n1, n2, n3]);
-<a href=#1832 id=1832 data-nosnippet>1832</a>
-<a href=#1833 id=1833 data-nosnippet>1833</a>        <span class="comment">// create a mem lookup that has only endpoint 1 addr info set
-<a href=#1834 id=1834 data-nosnippet>1834</a>        </span><span class="kw">let </span>addr1 = r1.endpoint().addr();
-<a href=#1835 id=1835 data-nosnippet>1835</a>        <span class="kw">let </span>lookup = MemoryLookup::new();
-<a href=#1836 id=1836 data-nosnippet>1836</a>        lookup.add_endpoint_info(addr1);
-<a href=#1837 id=1837 data-nosnippet>1837</a>
-<a href=#1838 id=1838 data-nosnippet>1838</a>        <span class="comment">// add addr info of endpoint1 to endpoint2 and join endpoint1
-<a href=#1839 id=1839 data-nosnippet>1839</a>        </span>r2.endpoint().address_lookup().add(lookup.clone());
-<a href=#1840 id=1840 data-nosnippet>1840</a>        tx2.join_peers(<span class="macro">vec!</span>[n1]).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1681 id=1681 data-nosnippet>1681</a>        <span class="kw">let </span>(relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().<span class="kw">await</span>.unwrap();
+<a href=#1682 id=1682 data-nosnippet>1682</a>        <span class="kw">let </span><span class="kw-2">mut </span>rng = <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
+<a href=#1683 id=1683 data-nosnippet>1683</a>        <span class="kw">let </span>topic_id = TopicId::from_bytes(rng.random());
+<a href=#1684 id=1684 data-nosnippet>1684</a>
+<a href=#1685 id=1685 data-nosnippet>1685</a>        <span class="comment">// spawn a gossip endpoint, send the endpoint's address on addr_tx,
+<a href=#1686 id=1686 data-nosnippet>1686</a>        // then wait to receive `count` messages, and terminate.
+<a href=#1687 id=1687 data-nosnippet>1687</a>        </span><span class="kw">let </span>(addr_tx, addr_rx) = tokio::sync::oneshot::channel();
+<a href=#1688 id=1688 data-nosnippet>1688</a>        <span class="kw">let </span>(msgs_recv_tx, <span class="kw-2">mut </span>msgs_recv_rx) = tokio::sync::mpsc::channel(<span class="number">3</span>);
+<a href=#1689 id=1689 data-nosnippet>1689</a>        <span class="kw">let </span>recv_task = tokio::task::spawn({
+<a href=#1690 id=1690 data-nosnippet>1690</a>            <span class="kw">let </span>relay_map = relay_map.clone();
+<a href=#1691 id=1691 data-nosnippet>1691</a>            <span class="kw">let </span>secret_key = SecretKey::generate(<span class="kw-2">&amp;mut </span>rng);
+<a href=#1692 id=1692 data-nosnippet>1692</a>            <span class="kw">async move </span>{
+<a href=#1693 id=1693 data-nosnippet>1693</a>                <span class="kw">let </span>(router, gossip) = spawn_gossip(secret_key, relay_map).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1694 id=1694 data-nosnippet>1694</a>                <span class="comment">// wait for the relay to be set. iroh currently has issues when trying
+<a href=#1695 id=1695 data-nosnippet>1695</a>                // to immediately reconnect with changed direct addresses, but when the
+<a href=#1696 id=1696 data-nosnippet>1696</a>                // relay path is available it works.
+<a href=#1697 id=1697 data-nosnippet>1697</a>                // See https://github.com/n0-computer/iroh/pull/3372
+<a href=#1698 id=1698 data-nosnippet>1698</a>                </span>router.endpoint().online().<span class="kw">await</span>;
+<a href=#1699 id=1699 data-nosnippet>1699</a>                <span class="kw">let </span>addr = router.endpoint().addr();
+<a href=#1700 id=1700 data-nosnippet>1700</a>                <span class="macro">info!</span>(endpoint_id = %addr.id.fmt_short(), <span class="string">"recv endpoint spawned"</span>);
+<a href=#1701 id=1701 data-nosnippet>1701</a>                addr_tx.send(addr).unwrap();
+<a href=#1702 id=1702 data-nosnippet>1702</a>                <span class="kw">let </span><span class="kw-2">mut </span>topic = gossip.subscribe_and_join(topic_id, <span class="macro">vec!</span>[]).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1703 id=1703 data-nosnippet>1703</a>                <span class="kw">while let </span><span class="prelude-val">Some</span>(event) = topic.try_next().<span class="kw">await</span>.unwrap() {
+<a href=#1704 id=1704 data-nosnippet>1704</a>                    <span class="kw">if let </span>Event::Received(message) = event {
+<a href=#1705 id=1705 data-nosnippet>1705</a>                        <span class="kw">let </span>message = std::str::from_utf8(<span class="kw-2">&amp;</span>message.content)
+<a href=#1706 id=1706 data-nosnippet>1706</a>                            .std_context(<span class="string">"decode broadcast message"</span>)<span class="question-mark">?
+<a href=#1707 id=1707 data-nosnippet>1707</a>                            </span>.to_string();
+<a href=#1708 id=1708 data-nosnippet>1708</a>                        msgs_recv_tx
+<a href=#1709 id=1709 data-nosnippet>1709</a>                            .send(message)
+<a href=#1710 id=1710 data-nosnippet>1710</a>                            .<span class="kw">await
+<a href=#1711 id=1711 data-nosnippet>1711</a>                            </span>.std_context(<span class="string">"forward received message"</span>)<span class="question-mark">?</span>;
+<a href=#1712 id=1712 data-nosnippet>1712</a>                    }
+<a href=#1713 id=1713 data-nosnippet>1713</a>                }
+<a href=#1714 id=1714 data-nosnippet>1714</a>                <span class="prelude-val">Ok</span>::&lt;<span class="kw">_</span>, AnyError&gt;(())
+<a href=#1715 id=1715 data-nosnippet>1715</a>            }
+<a href=#1716 id=1716 data-nosnippet>1716</a>        });
+<a href=#1717 id=1717 data-nosnippet>1717</a>
+<a href=#1718 id=1718 data-nosnippet>1718</a>        <span class="kw">let </span>endpoint0_addr = addr_rx.<span class="kw">await</span>.std_context(<span class="string">"receive endpoint address"</span>)<span class="question-mark">?</span>;
+<a href=#1719 id=1719 data-nosnippet>1719</a>        <span class="kw">let </span>max_wait = Duration::from_secs(<span class="number">5</span>);
+<a href=#1720 id=1720 data-nosnippet>1720</a>
+<a href=#1721 id=1721 data-nosnippet>1721</a>        <span class="comment">// spawn a endpoint, send a message, and then abruptly terminate the endpoint ungracefully
+<a href=#1722 id=1722 data-nosnippet>1722</a>        // after the message was received on our receiver endpoint.
+<a href=#1723 id=1723 data-nosnippet>1723</a>        </span><span class="kw">let </span>cancel = CancellationToken::new();
+<a href=#1724 id=1724 data-nosnippet>1724</a>        <span class="kw">let </span>secret = SecretKey::generate(<span class="kw-2">&amp;mut </span>rng);
+<a href=#1725 id=1725 data-nosnippet>1725</a>        <span class="kw">let </span>join_handle_1 = run_in_thread(
+<a href=#1726 id=1726 data-nosnippet>1726</a>            cancel.clone(),
+<a href=#1727 id=1727 data-nosnippet>1727</a>            broadcast_once(
+<a href=#1728 id=1728 data-nosnippet>1728</a>                secret.clone(),
+<a href=#1729 id=1729 data-nosnippet>1729</a>                relay_map.clone(),
+<a href=#1730 id=1730 data-nosnippet>1730</a>                endpoint0_addr.clone(),
+<a href=#1731 id=1731 data-nosnippet>1731</a>                topic_id,
+<a href=#1732 id=1732 data-nosnippet>1732</a>                <span class="string">"msg1"</span>.to_string(),
+<a href=#1733 id=1733 data-nosnippet>1733</a>            ),
+<a href=#1734 id=1734 data-nosnippet>1734</a>        );
+<a href=#1735 id=1735 data-nosnippet>1735</a>        <span class="comment">// assert that we received the message on the receiver endpoint.
+<a href=#1736 id=1736 data-nosnippet>1736</a>        </span><span class="kw">let </span>msg = timeout(max_wait, msgs_recv_rx.recv())
+<a href=#1737 id=1737 data-nosnippet>1737</a>            .<span class="kw">await
+<a href=#1738 id=1738 data-nosnippet>1738</a>            </span>.std_context(<span class="string">"wait for first broadcast"</span>)<span class="question-mark">?
+<a href=#1739 id=1739 data-nosnippet>1739</a>            </span>.std_context(<span class="string">"receiver dropped channel"</span>)<span class="question-mark">?</span>;
+<a href=#1740 id=1740 data-nosnippet>1740</a>        <span class="macro">assert_eq!</span>(<span class="kw-2">&amp;</span>msg, <span class="string">"msg1"</span>);
+<a href=#1741 id=1741 data-nosnippet>1741</a>        <span class="macro">info!</span>(<span class="string">"kill broadcast endpoint"</span>);
+<a href=#1742 id=1742 data-nosnippet>1742</a>        cancel.cancel();
+<a href=#1743 id=1743 data-nosnippet>1743</a>
+<a href=#1744 id=1744 data-nosnippet>1744</a>        <span class="comment">// spawns the endpoint again with the same endpoint id, and send another message
+<a href=#1745 id=1745 data-nosnippet>1745</a>        </span><span class="kw">let </span>cancel = CancellationToken::new();
+<a href=#1746 id=1746 data-nosnippet>1746</a>        <span class="kw">let </span>join_handle_2 = run_in_thread(
+<a href=#1747 id=1747 data-nosnippet>1747</a>            cancel.clone(),
+<a href=#1748 id=1748 data-nosnippet>1748</a>            broadcast_once(
+<a href=#1749 id=1749 data-nosnippet>1749</a>                secret.clone(),
+<a href=#1750 id=1750 data-nosnippet>1750</a>                relay_map.clone(),
+<a href=#1751 id=1751 data-nosnippet>1751</a>                endpoint0_addr.clone(),
+<a href=#1752 id=1752 data-nosnippet>1752</a>                topic_id,
+<a href=#1753 id=1753 data-nosnippet>1753</a>                <span class="string">"msg2"</span>.to_string(),
+<a href=#1754 id=1754 data-nosnippet>1754</a>            ),
+<a href=#1755 id=1755 data-nosnippet>1755</a>        );
+<a href=#1756 id=1756 data-nosnippet>1756</a>        <span class="comment">// assert that we received the message on the receiver endpoint.
+<a href=#1757 id=1757 data-nosnippet>1757</a>        // this means that the reconnect with the same endpoint id worked.
+<a href=#1758 id=1758 data-nosnippet>1758</a>        </span><span class="kw">let </span>msg = timeout(max_wait, msgs_recv_rx.recv())
+<a href=#1759 id=1759 data-nosnippet>1759</a>            .<span class="kw">await
+<a href=#1760 id=1760 data-nosnippet>1760</a>            </span>.std_context(<span class="string">"wait for second broadcast"</span>)<span class="question-mark">?
+<a href=#1761 id=1761 data-nosnippet>1761</a>            </span>.std_context(<span class="string">"receiver dropped channel"</span>)<span class="question-mark">?</span>;
+<a href=#1762 id=1762 data-nosnippet>1762</a>        <span class="macro">assert_eq!</span>(<span class="kw-2">&amp;</span>msg, <span class="string">"msg2"</span>);
+<a href=#1763 id=1763 data-nosnippet>1763</a>        <span class="macro">info!</span>(<span class="string">"kill broadcast endpoint"</span>);
+<a href=#1764 id=1764 data-nosnippet>1764</a>        cancel.cancel();
+<a href=#1765 id=1765 data-nosnippet>1765</a>
+<a href=#1766 id=1766 data-nosnippet>1766</a>        <span class="macro">info!</span>(<span class="string">"kill recv endpoint"</span>);
+<a href=#1767 id=1767 data-nosnippet>1767</a>        recv_task.abort();
+<a href=#1768 id=1768 data-nosnippet>1768</a>        <span class="macro">assert!</span>(join_handle_1.join().unwrap().is_none());
+<a href=#1769 id=1769 data-nosnippet>1769</a>        <span class="macro">assert!</span>(join_handle_2.join().unwrap().is_none());
+<a href=#1770 id=1770 data-nosnippet>1770</a>
+<a href=#1771 id=1771 data-nosnippet>1771</a>        <span class="prelude-val">Ok</span>(())
+<a href=#1772 id=1772 data-nosnippet>1772</a>    }
+<a href=#1773 id=1773 data-nosnippet>1773</a>
+<a href=#1774 id=1774 data-nosnippet>1774</a>    <span class="attr">#[tokio::test]
+<a href=#1775 id=1775 data-nosnippet>1775</a>    #[traced_test]
+<a href=#1776 id=1776 data-nosnippet>1776</a>    </span><span class="kw">async fn </span>gossip_change_alpn() -&gt; n0_error::Result&lt;()&gt; {
+<a href=#1777 id=1777 data-nosnippet>1777</a>        <span class="kw">let </span>alpn = <span class="string">b"my-gossip-alpn"</span>;
+<a href=#1778 id=1778 data-nosnippet>1778</a>        <span class="kw">let </span>topic_id = TopicId::from([<span class="number">0u8</span>; <span class="number">32</span>]);
+<a href=#1779 id=1779 data-nosnippet>1779</a>
+<a href=#1780 id=1780 data-nosnippet>1780</a>        <span class="kw">let </span>ep1 = Endpoint::empty_builder(RelayMode::Disabled).bind().<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1781 id=1781 data-nosnippet>1781</a>        <span class="kw">let </span>ep2 = Endpoint::empty_builder(RelayMode::Disabled).bind().<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1782 id=1782 data-nosnippet>1782</a>        <span class="kw">let </span>gossip1 = Gossip::builder().alpn(alpn).spawn(ep1.clone());
+<a href=#1783 id=1783 data-nosnippet>1783</a>        <span class="kw">let </span>gossip2 = Gossip::builder().alpn(alpn).spawn(ep2.clone());
+<a href=#1784 id=1784 data-nosnippet>1784</a>        <span class="kw">let </span>router1 = Router::builder(ep1).accept(alpn, gossip1.clone()).spawn();
+<a href=#1785 id=1785 data-nosnippet>1785</a>        <span class="kw">let </span>router2 = Router::builder(ep2).accept(alpn, gossip2.clone()).spawn();
+<a href=#1786 id=1786 data-nosnippet>1786</a>
+<a href=#1787 id=1787 data-nosnippet>1787</a>        <span class="kw">let </span>addr1 = router1.endpoint().addr();
+<a href=#1788 id=1788 data-nosnippet>1788</a>        <span class="kw">let </span>id1 = addr1.id;
+<a href=#1789 id=1789 data-nosnippet>1789</a>        <span class="kw">let </span>memory_lookup = MemoryLookup::new();
+<a href=#1790 id=1790 data-nosnippet>1790</a>        memory_lookup.add_endpoint_info(addr1);
+<a href=#1791 id=1791 data-nosnippet>1791</a>        router2.endpoint().address_lookup().add(memory_lookup);
+<a href=#1792 id=1792 data-nosnippet>1792</a>
+<a href=#1793 id=1793 data-nosnippet>1793</a>        <span class="kw">let </span><span class="kw-2">mut </span>topic1 = gossip1.subscribe(topic_id, <span class="macro">vec!</span>[]).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1794 id=1794 data-nosnippet>1794</a>        <span class="kw">let </span><span class="kw-2">mut </span>topic2 = gossip2.subscribe(topic_id, <span class="macro">vec!</span>[id1]).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1795 id=1795 data-nosnippet>1795</a>
+<a href=#1796 id=1796 data-nosnippet>1796</a>        timeout(Duration::from_secs(<span class="number">3</span>), topic1.joined())
+<a href=#1797 id=1797 data-nosnippet>1797</a>            .<span class="kw">await
+<a href=#1798 id=1798 data-nosnippet>1798</a>            </span>.std_context(<span class="string">"wait topic1 join"</span>)<span class="question-mark">??</span>;
+<a href=#1799 id=1799 data-nosnippet>1799</a>        timeout(Duration::from_secs(<span class="number">3</span>), topic2.joined())
+<a href=#1800 id=1800 data-nosnippet>1800</a>            .<span class="kw">await
+<a href=#1801 id=1801 data-nosnippet>1801</a>            </span>.std_context(<span class="string">"wait topic2 join"</span>)<span class="question-mark">??</span>;
+<a href=#1802 id=1802 data-nosnippet>1802</a>        router1.shutdown().<span class="kw">await</span>.std_context(<span class="string">"shutdown router1"</span>)<span class="question-mark">?</span>;
+<a href=#1803 id=1803 data-nosnippet>1803</a>        router2.shutdown().<span class="kw">await</span>.std_context(<span class="string">"shutdown router2"</span>)<span class="question-mark">?</span>;
+<a href=#1804 id=1804 data-nosnippet>1804</a>        <span class="prelude-val">Ok</span>(())
+<a href=#1805 id=1805 data-nosnippet>1805</a>    }
+<a href=#1806 id=1806 data-nosnippet>1806</a>
+<a href=#1807 id=1807 data-nosnippet>1807</a>    <span class="attr">#[tokio::test]
+<a href=#1808 id=1808 data-nosnippet>1808</a>    #[traced_test]
+<a href=#1809 id=1809 data-nosnippet>1809</a>    </span><span class="kw">async fn </span>gossip_rely_on_gossip_address_lookup() -&gt; n0_error::Result&lt;()&gt; {
+<a href=#1810 id=1810 data-nosnippet>1810</a>        <span class="kw">let </span>rng = <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
+<a href=#1811 id=1811 data-nosnippet>1811</a>
+<a href=#1812 id=1812 data-nosnippet>1812</a>        <span class="kw">async fn </span>spawn(
+<a href=#1813 id=1813 data-nosnippet>1813</a>            rng: <span class="kw-2">&amp;mut </span><span class="kw">impl </span>CryptoRng,
+<a href=#1814 id=1814 data-nosnippet>1814</a>        ) -&gt; n0_error::Result&lt;(EndpointId, Router, Gossip, GossipSender, GossipReceiver)&gt; {
+<a href=#1815 id=1815 data-nosnippet>1815</a>            <span class="kw">let </span>topic_id = TopicId::from([<span class="number">0u8</span>; <span class="number">32</span>]);
+<a href=#1816 id=1816 data-nosnippet>1816</a>            <span class="kw">let </span>ep = Endpoint::empty_builder(RelayMode::Disabled)
+<a href=#1817 id=1817 data-nosnippet>1817</a>                .secret_key(SecretKey::generate(rng))
+<a href=#1818 id=1818 data-nosnippet>1818</a>                .bind()
+<a href=#1819 id=1819 data-nosnippet>1819</a>                .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1820 id=1820 data-nosnippet>1820</a>            <span class="kw">let </span>endpoint_id = ep.id();
+<a href=#1821 id=1821 data-nosnippet>1821</a>            <span class="kw">let </span>gossip = Gossip::builder().spawn(ep.clone());
+<a href=#1822 id=1822 data-nosnippet>1822</a>            <span class="kw">let </span>router = Router::builder(ep)
+<a href=#1823 id=1823 data-nosnippet>1823</a>                .accept(GOSSIP_ALPN, gossip.clone())
+<a href=#1824 id=1824 data-nosnippet>1824</a>                .spawn();
+<a href=#1825 id=1825 data-nosnippet>1825</a>            <span class="kw">let </span>topic = gossip.subscribe(topic_id, <span class="macro">vec!</span>[]).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1826 id=1826 data-nosnippet>1826</a>            <span class="kw">let </span>(sender, receiver) = topic.split();
+<a href=#1827 id=1827 data-nosnippet>1827</a>            <span class="prelude-val">Ok</span>((endpoint_id, router, gossip, sender, receiver))
+<a href=#1828 id=1828 data-nosnippet>1828</a>        }
+<a href=#1829 id=1829 data-nosnippet>1829</a>
+<a href=#1830 id=1830 data-nosnippet>1830</a>        <span class="comment">// spawn 3 endpoints without relay or address lookup
+<a href=#1831 id=1831 data-nosnippet>1831</a>        </span><span class="kw">let </span>(n1, r1, _g1, _tx1, <span class="kw-2">mut </span>rx1) = spawn(rng).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1832 id=1832 data-nosnippet>1832</a>        <span class="kw">let </span>(n2, r2, _g2, tx2, <span class="kw-2">mut </span>rx2) = spawn(rng).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1833 id=1833 data-nosnippet>1833</a>        <span class="kw">let </span>(n3, r3, _g3, tx3, <span class="kw-2">mut </span>rx3) = spawn(rng).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1834 id=1834 data-nosnippet>1834</a>
+<a href=#1835 id=1835 data-nosnippet>1835</a>        <span class="macro">println!</span>(<span class="string">"endpoints {:?}"</span>, [n1, n2, n3]);
+<a href=#1836 id=1836 data-nosnippet>1836</a>
+<a href=#1837 id=1837 data-nosnippet>1837</a>        <span class="comment">// create a mem lookup that has only endpoint 1 addr info set
+<a href=#1838 id=1838 data-nosnippet>1838</a>        </span><span class="kw">let </span>addr1 = r1.endpoint().addr();
+<a href=#1839 id=1839 data-nosnippet>1839</a>        <span class="kw">let </span>lookup = MemoryLookup::new();
+<a href=#1840 id=1840 data-nosnippet>1840</a>        lookup.add_endpoint_info(addr1);
 <a href=#1841 id=1841 data-nosnippet>1841</a>
-<a href=#1842 id=1842 data-nosnippet>1842</a>        <span class="comment">// await join endpoint2 -&gt; nodde1
-<a href=#1843 id=1843 data-nosnippet>1843</a>        </span>timeout(Duration::from_secs(<span class="number">3</span>), rx1.joined())
-<a href=#1844 id=1844 data-nosnippet>1844</a>            .<span class="kw">await
-<a href=#1845 id=1845 data-nosnippet>1845</a>            </span>.std_context(<span class="string">"wait rx1 join"</span>)<span class="question-mark">??</span>;
-<a href=#1846 id=1846 data-nosnippet>1846</a>        timeout(Duration::from_secs(<span class="number">3</span>), rx2.joined())
-<a href=#1847 id=1847 data-nosnippet>1847</a>            .<span class="kw">await
-<a href=#1848 id=1848 data-nosnippet>1848</a>            </span>.std_context(<span class="string">"wait rx2 join"</span>)<span class="question-mark">??</span>;
-<a href=#1849 id=1849 data-nosnippet>1849</a>
-<a href=#1850 id=1850 data-nosnippet>1850</a>        <span class="comment">// add addr info of endpoint1 to endpoint3 and join endpoint1
-<a href=#1851 id=1851 data-nosnippet>1851</a>        </span>r3.endpoint().address_lookup().add(lookup.clone());
-<a href=#1852 id=1852 data-nosnippet>1852</a>        tx3.join_peers(<span class="macro">vec!</span>[n1]).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1842 id=1842 data-nosnippet>1842</a>        <span class="comment">// add addr info of endpoint1 to endpoint2 and join endpoint1
+<a href=#1843 id=1843 data-nosnippet>1843</a>        </span>r2.endpoint().address_lookup().add(lookup.clone());
+<a href=#1844 id=1844 data-nosnippet>1844</a>        tx2.join_peers(<span class="macro">vec!</span>[n1]).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1845 id=1845 data-nosnippet>1845</a>
+<a href=#1846 id=1846 data-nosnippet>1846</a>        <span class="comment">// await join endpoint2 -&gt; nodde1
+<a href=#1847 id=1847 data-nosnippet>1847</a>        </span>timeout(Duration::from_secs(<span class="number">3</span>), rx1.joined())
+<a href=#1848 id=1848 data-nosnippet>1848</a>            .<span class="kw">await
+<a href=#1849 id=1849 data-nosnippet>1849</a>            </span>.std_context(<span class="string">"wait rx1 join"</span>)<span class="question-mark">??</span>;
+<a href=#1850 id=1850 data-nosnippet>1850</a>        timeout(Duration::from_secs(<span class="number">3</span>), rx2.joined())
+<a href=#1851 id=1851 data-nosnippet>1851</a>            .<span class="kw">await
+<a href=#1852 id=1852 data-nosnippet>1852</a>            </span>.std_context(<span class="string">"wait rx2 join"</span>)<span class="question-mark">??</span>;
 <a href=#1853 id=1853 data-nosnippet>1853</a>
-<a href=#1854 id=1854 data-nosnippet>1854</a>        <span class="comment">// await join at endpoint3: n1 and n2
-<a href=#1855 id=1855 data-nosnippet>1855</a>        // n2 only works because because we use gossip address lookup!
-<a href=#1856 id=1856 data-nosnippet>1856</a>        </span><span class="kw">let </span>ev = timeout(Duration::from_secs(<span class="number">3</span>), rx3.next())
-<a href=#1857 id=1857 data-nosnippet>1857</a>            .<span class="kw">await
-<a href=#1858 id=1858 data-nosnippet>1858</a>            </span>.std_context(<span class="string">"wait rx3 first neighbor"</span>)<span class="question-mark">?</span>;
-<a href=#1859 id=1859 data-nosnippet>1859</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(ev, <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(Event::NeighborUp(<span class="kw">_</span>)))));
-<a href=#1860 id=1860 data-nosnippet>1860</a>        <span class="kw">let </span>ev = timeout(Duration::from_secs(<span class="number">3</span>), rx3.next())
+<a href=#1854 id=1854 data-nosnippet>1854</a>        <span class="comment">// add addr info of endpoint1 to endpoint3 and join endpoint1
+<a href=#1855 id=1855 data-nosnippet>1855</a>        </span>r3.endpoint().address_lookup().add(lookup.clone());
+<a href=#1856 id=1856 data-nosnippet>1856</a>        tx3.join_peers(<span class="macro">vec!</span>[n1]).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1857 id=1857 data-nosnippet>1857</a>
+<a href=#1858 id=1858 data-nosnippet>1858</a>        <span class="comment">// await join at endpoint3: n1 and n2
+<a href=#1859 id=1859 data-nosnippet>1859</a>        // n2 only works because because we use gossip address lookup!
+<a href=#1860 id=1860 data-nosnippet>1860</a>        </span><span class="kw">let </span>ev = timeout(Duration::from_secs(<span class="number">3</span>), rx3.next())
 <a href=#1861 id=1861 data-nosnippet>1861</a>            .<span class="kw">await
-<a href=#1862 id=1862 data-nosnippet>1862</a>            </span>.std_context(<span class="string">"wait rx3 second neighbor"</span>)<span class="question-mark">?</span>;
+<a href=#1862 id=1862 data-nosnippet>1862</a>            </span>.std_context(<span class="string">"wait rx3 first neighbor"</span>)<span class="question-mark">?</span>;
 <a href=#1863 id=1863 data-nosnippet>1863</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(ev, <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(Event::NeighborUp(<span class="kw">_</span>)))));
-<a href=#1864 id=1864 data-nosnippet>1864</a>
-<a href=#1865 id=1865 data-nosnippet>1865</a>        <span class="macro">assert_eq!</span>(sorted(rx3.neighbors()), sorted([n1, n2]));
-<a href=#1866 id=1866 data-nosnippet>1866</a>
-<a href=#1867 id=1867 data-nosnippet>1867</a>        <span class="kw">let </span>ev = timeout(Duration::from_secs(<span class="number">3</span>), rx2.next())
-<a href=#1868 id=1868 data-nosnippet>1868</a>            .<span class="kw">await
-<a href=#1869 id=1869 data-nosnippet>1869</a>            </span>.std_context(<span class="string">"wait rx2 neighbor"</span>)<span class="question-mark">?</span>;
-<a href=#1870 id=1870 data-nosnippet>1870</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(ev, <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(Event::NeighborUp(n))) <span class="kw">if </span>n == n3));
-<a href=#1871 id=1871 data-nosnippet>1871</a>
-<a href=#1872 id=1872 data-nosnippet>1872</a>        <span class="kw">let </span>ev = timeout(Duration::from_secs(<span class="number">3</span>), rx1.next())
-<a href=#1873 id=1873 data-nosnippet>1873</a>            .<span class="kw">await
-<a href=#1874 id=1874 data-nosnippet>1874</a>            </span>.std_context(<span class="string">"wait rx1 neighbor"</span>)<span class="question-mark">?</span>;
-<a href=#1875 id=1875 data-nosnippet>1875</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(ev, <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(Event::NeighborUp(n))) <span class="kw">if </span>n == n3));
-<a href=#1876 id=1876 data-nosnippet>1876</a>
-<a href=#1877 id=1877 data-nosnippet>1877</a>        <span class="macro">tokio::try_join!</span>(r1.shutdown(), r2.shutdown(), r3.shutdown())
-<a href=#1878 id=1878 data-nosnippet>1878</a>            .std_context(<span class="string">"shutdown routers"</span>)<span class="question-mark">?</span>;
-<a href=#1879 id=1879 data-nosnippet>1879</a>        <span class="prelude-val">Ok</span>(())
-<a href=#1880 id=1880 data-nosnippet>1880</a>    }
-<a href=#1881 id=1881 data-nosnippet>1881</a>
-<a href=#1882 id=1882 data-nosnippet>1882</a>    <span class="kw">fn </span>sorted&lt;T: Ord&gt;(input: <span class="kw">impl </span>IntoIterator&lt;Item = T&gt;) -&gt; Vec&lt;T&gt; {
-<a href=#1883 id=1883 data-nosnippet>1883</a>        <span class="kw">let </span><span class="kw-2">mut </span>out: Vec&lt;<span class="kw">_</span>&gt; = input.into_iter().collect();
-<a href=#1884 id=1884 data-nosnippet>1884</a>        out.sort();
-<a href=#1885 id=1885 data-nosnippet>1885</a>        out
-<a href=#1886 id=1886 data-nosnippet>1886</a>    }
-<a href=#1887 id=1887 data-nosnippet>1887</a>
-<a href=#1888 id=1888 data-nosnippet>1888</a>    <span class="doccomment">/// Test that dropping sender doesn't close topic while receiver is still listening.
-<a href=#1889 id=1889 data-nosnippet>1889</a>    ///
-<a href=#1890 id=1890 data-nosnippet>1890</a>    /// This is a common footgun: users split a GossipTopic, drop the sender early,
-<a href=#1891 id=1891 data-nosnippet>1891</a>    /// and expect the receiver to keep working. With the bug (using &amp;&amp; in still_needed),
-<a href=#1892 id=1892 data-nosnippet>1892</a>    /// the topic closes immediately when sender is dropped.
-<a href=#1893 id=1893 data-nosnippet>1893</a>    </span><span class="attr">#[tokio::test]
-<a href=#1894 id=1894 data-nosnippet>1894</a>    #[traced_test]
-<a href=#1895 id=1895 data-nosnippet>1895</a>    </span><span class="kw">async fn </span>topic_stays_alive_after_sender_drop() -&gt; n0_error::Result&lt;()&gt; {
-<a href=#1896 id=1896 data-nosnippet>1896</a>        <span class="kw">let </span>topic_id = TopicId::from([<span class="number">99u8</span>; <span class="number">32</span>]);
-<a href=#1897 id=1897 data-nosnippet>1897</a>
-<a href=#1898 id=1898 data-nosnippet>1898</a>        <span class="kw">let </span>ep1 = Endpoint::empty_builder(RelayMode::Disabled).bind().<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1899 id=1899 data-nosnippet>1899</a>        <span class="kw">let </span>ep2 = Endpoint::empty_builder(RelayMode::Disabled).bind().<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1900 id=1900 data-nosnippet>1900</a>        <span class="kw">let </span>gossip1 = Gossip::builder().spawn(ep1.clone());
-<a href=#1901 id=1901 data-nosnippet>1901</a>        <span class="kw">let </span>gossip2 = Gossip::builder().spawn(ep2.clone());
-<a href=#1902 id=1902 data-nosnippet>1902</a>        <span class="kw">let </span>router1 = Router::builder(ep1)
-<a href=#1903 id=1903 data-nosnippet>1903</a>            .accept(<span class="kw">crate</span>::ALPN, gossip1.clone())
-<a href=#1904 id=1904 data-nosnippet>1904</a>            .spawn();
-<a href=#1905 id=1905 data-nosnippet>1905</a>        <span class="kw">let </span>router2 = Router::builder(ep2)
-<a href=#1906 id=1906 data-nosnippet>1906</a>            .accept(<span class="kw">crate</span>::ALPN, gossip2.clone())
-<a href=#1907 id=1907 data-nosnippet>1907</a>            .spawn();
-<a href=#1908 id=1908 data-nosnippet>1908</a>
-<a href=#1909 id=1909 data-nosnippet>1909</a>        <span class="kw">let </span>addr1 = router1.endpoint().addr();
-<a href=#1910 id=1910 data-nosnippet>1910</a>        <span class="kw">let </span>id1 = addr1.id;
-<a href=#1911 id=1911 data-nosnippet>1911</a>        <span class="kw">let </span>mem_lookup = MemoryLookup::new();
-<a href=#1912 id=1912 data-nosnippet>1912</a>        mem_lookup.add_endpoint_info(addr1);
-<a href=#1913 id=1913 data-nosnippet>1913</a>        router2.endpoint().address_lookup().add(mem_lookup);
-<a href=#1914 id=1914 data-nosnippet>1914</a>
-<a href=#1915 id=1915 data-nosnippet>1915</a>        <span class="kw">let </span>topic1 = gossip1.subscribe(topic_id, <span class="macro">vec!</span>[]).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1916 id=1916 data-nosnippet>1916</a>        <span class="kw">let </span>topic2 = gossip2.subscribe(topic_id, <span class="macro">vec!</span>[id1]).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1917 id=1917 data-nosnippet>1917</a>
-<a href=#1918 id=1918 data-nosnippet>1918</a>        <span class="kw">let </span>(tx1, <span class="kw-2">mut </span>rx1) = topic1.split();
-<a href=#1919 id=1919 data-nosnippet>1919</a>        <span class="kw">let </span>(tx2, <span class="kw-2">mut </span>rx2) = topic2.split();
-<a href=#1920 id=1920 data-nosnippet>1920</a>
-<a href=#1921 id=1921 data-nosnippet>1921</a>        <span class="comment">// Wait for mesh to form
-<a href=#1922 id=1922 data-nosnippet>1922</a>        </span>timeout(Duration::from_secs(<span class="number">3</span>), rx1.joined())
-<a href=#1923 id=1923 data-nosnippet>1923</a>            .<span class="kw">await
-<a href=#1924 id=1924 data-nosnippet>1924</a>            </span>.std_context(<span class="string">"wait rx1 join"</span>)<span class="question-mark">??</span>;
-<a href=#1925 id=1925 data-nosnippet>1925</a>        timeout(Duration::from_secs(<span class="number">3</span>), rx2.joined())
-<a href=#1926 id=1926 data-nosnippet>1926</a>            .<span class="kw">await
-<a href=#1927 id=1927 data-nosnippet>1927</a>            </span>.std_context(<span class="string">"wait rx2 join"</span>)<span class="question-mark">??</span>;
-<a href=#1928 id=1928 data-nosnippet>1928</a>
-<a href=#1929 id=1929 data-nosnippet>1929</a>        <span class="comment">// Node 1 drops its sender - simulating the footgun where user drops sender early
-<a href=#1930 id=1930 data-nosnippet>1930</a>        </span>drop(tx1);
-<a href=#1931 id=1931 data-nosnippet>1931</a>
-<a href=#1932 id=1932 data-nosnippet>1932</a>        <span class="comment">// Node 2 sends a message - receiver on node 1 should still get it
-<a href=#1933 id=1933 data-nosnippet>1933</a>        </span>tx2.broadcast(<span class="string">b"hello from node2"</span>.to_vec().into()).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1934 id=1934 data-nosnippet>1934</a>
-<a href=#1935 id=1935 data-nosnippet>1935</a>        <span class="comment">// Node 1's receiver should still work and receive the message
-<a href=#1936 id=1936 data-nosnippet>1936</a>        </span><span class="kw">let </span>event = timeout(Duration::from_secs(<span class="number">3</span>), rx1.next())
-<a href=#1937 id=1937 data-nosnippet>1937</a>            .<span class="kw">await
-<a href=#1938 id=1938 data-nosnippet>1938</a>            </span>.std_context(<span class="string">"wait for message on rx1"</span>)<span class="question-mark">?</span>;
-<a href=#1939 id=1939 data-nosnippet>1939</a>
-<a href=#1940 id=1940 data-nosnippet>1940</a>        <span class="kw">match </span>event {
-<a href=#1941 id=1941 data-nosnippet>1941</a>            <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(Event::Received(msg))) =&gt; {
-<a href=#1942 id=1942 data-nosnippet>1942</a>                <span class="macro">assert_eq!</span>(<span class="kw-2">&amp;</span>msg.content[..], <span class="string">b"hello from node2"</span>);
-<a href=#1943 id=1943 data-nosnippet>1943</a>            }
-<a href=#1944 id=1944 data-nosnippet>1944</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected Received event, got {:?}"</span>, other),
-<a href=#1945 id=1945 data-nosnippet>1945</a>        }
-<a href=#1946 id=1946 data-nosnippet>1946</a>
-<a href=#1947 id=1947 data-nosnippet>1947</a>        drop(tx2);
-<a href=#1948 id=1948 data-nosnippet>1948</a>        drop(rx1);
-<a href=#1949 id=1949 data-nosnippet>1949</a>        drop(rx2);
-<a href=#1950 id=1950 data-nosnippet>1950</a>        router1.shutdown().<span class="kw">await</span>.std_context(<span class="string">"shutdown router1"</span>)<span class="question-mark">?</span>;
-<a href=#1951 id=1951 data-nosnippet>1951</a>        router2.shutdown().<span class="kw">await</span>.std_context(<span class="string">"shutdown router2"</span>)<span class="question-mark">?</span>;
-<a href=#1952 id=1952 data-nosnippet>1952</a>        <span class="prelude-val">Ok</span>(())
-<a href=#1953 id=1953 data-nosnippet>1953</a>    }
-<a href=#1954 id=1954 data-nosnippet>1954</a>}</code></pre></div></section></main></body></html>
+<a href=#1864 id=1864 data-nosnippet>1864</a>        <span class="kw">let </span>ev = timeout(Duration::from_secs(<span class="number">3</span>), rx3.next())
+<a href=#1865 id=1865 data-nosnippet>1865</a>            .<span class="kw">await
+<a href=#1866 id=1866 data-nosnippet>1866</a>            </span>.std_context(<span class="string">"wait rx3 second neighbor"</span>)<span class="question-mark">?</span>;
+<a href=#1867 id=1867 data-nosnippet>1867</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(ev, <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(Event::NeighborUp(<span class="kw">_</span>)))));
+<a href=#1868 id=1868 data-nosnippet>1868</a>
+<a href=#1869 id=1869 data-nosnippet>1869</a>        <span class="macro">assert_eq!</span>(sorted(rx3.neighbors()), sorted([n1, n2]));
+<a href=#1870 id=1870 data-nosnippet>1870</a>
+<a href=#1871 id=1871 data-nosnippet>1871</a>        <span class="kw">let </span>ev = timeout(Duration::from_secs(<span class="number">3</span>), rx2.next())
+<a href=#1872 id=1872 data-nosnippet>1872</a>            .<span class="kw">await
+<a href=#1873 id=1873 data-nosnippet>1873</a>            </span>.std_context(<span class="string">"wait rx2 neighbor"</span>)<span class="question-mark">?</span>;
+<a href=#1874 id=1874 data-nosnippet>1874</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(ev, <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(Event::NeighborUp(n))) <span class="kw">if </span>n == n3));
+<a href=#1875 id=1875 data-nosnippet>1875</a>
+<a href=#1876 id=1876 data-nosnippet>1876</a>        <span class="kw">let </span>ev = timeout(Duration::from_secs(<span class="number">3</span>), rx1.next())
+<a href=#1877 id=1877 data-nosnippet>1877</a>            .<span class="kw">await
+<a href=#1878 id=1878 data-nosnippet>1878</a>            </span>.std_context(<span class="string">"wait rx1 neighbor"</span>)<span class="question-mark">?</span>;
+<a href=#1879 id=1879 data-nosnippet>1879</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(ev, <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(Event::NeighborUp(n))) <span class="kw">if </span>n == n3));
+<a href=#1880 id=1880 data-nosnippet>1880</a>
+<a href=#1881 id=1881 data-nosnippet>1881</a>        <span class="macro">tokio::try_join!</span>(r1.shutdown(), r2.shutdown(), r3.shutdown())
+<a href=#1882 id=1882 data-nosnippet>1882</a>            .std_context(<span class="string">"shutdown routers"</span>)<span class="question-mark">?</span>;
+<a href=#1883 id=1883 data-nosnippet>1883</a>        <span class="prelude-val">Ok</span>(())
+<a href=#1884 id=1884 data-nosnippet>1884</a>    }
+<a href=#1885 id=1885 data-nosnippet>1885</a>
+<a href=#1886 id=1886 data-nosnippet>1886</a>    <span class="kw">fn </span>sorted&lt;T: Ord&gt;(input: <span class="kw">impl </span>IntoIterator&lt;Item = T&gt;) -&gt; Vec&lt;T&gt; {
+<a href=#1887 id=1887 data-nosnippet>1887</a>        <span class="kw">let </span><span class="kw-2">mut </span>out: Vec&lt;<span class="kw">_</span>&gt; = input.into_iter().collect();
+<a href=#1888 id=1888 data-nosnippet>1888</a>        out.sort();
+<a href=#1889 id=1889 data-nosnippet>1889</a>        out
+<a href=#1890 id=1890 data-nosnippet>1890</a>    }
+<a href=#1891 id=1891 data-nosnippet>1891</a>
+<a href=#1892 id=1892 data-nosnippet>1892</a>    <span class="doccomment">/// Test that dropping sender doesn't close topic while receiver is still listening.
+<a href=#1893 id=1893 data-nosnippet>1893</a>    ///
+<a href=#1894 id=1894 data-nosnippet>1894</a>    /// This is a common footgun: users split a GossipTopic, drop the sender early,
+<a href=#1895 id=1895 data-nosnippet>1895</a>    /// and expect the receiver to keep working. With the bug (using &amp;&amp; in still_needed),
+<a href=#1896 id=1896 data-nosnippet>1896</a>    /// the topic closes immediately when sender is dropped.
+<a href=#1897 id=1897 data-nosnippet>1897</a>    </span><span class="attr">#[tokio::test]
+<a href=#1898 id=1898 data-nosnippet>1898</a>    #[traced_test]
+<a href=#1899 id=1899 data-nosnippet>1899</a>    </span><span class="kw">async fn </span>topic_stays_alive_after_sender_drop() -&gt; n0_error::Result&lt;()&gt; {
+<a href=#1900 id=1900 data-nosnippet>1900</a>        <span class="kw">let </span>topic_id = TopicId::from([<span class="number">99u8</span>; <span class="number">32</span>]);
+<a href=#1901 id=1901 data-nosnippet>1901</a>
+<a href=#1902 id=1902 data-nosnippet>1902</a>        <span class="kw">let </span>ep1 = Endpoint::empty_builder(RelayMode::Disabled).bind().<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1903 id=1903 data-nosnippet>1903</a>        <span class="kw">let </span>ep2 = Endpoint::empty_builder(RelayMode::Disabled).bind().<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1904 id=1904 data-nosnippet>1904</a>        <span class="kw">let </span>gossip1 = Gossip::builder().spawn(ep1.clone());
+<a href=#1905 id=1905 data-nosnippet>1905</a>        <span class="kw">let </span>gossip2 = Gossip::builder().spawn(ep2.clone());
+<a href=#1906 id=1906 data-nosnippet>1906</a>        <span class="kw">let </span>router1 = Router::builder(ep1)
+<a href=#1907 id=1907 data-nosnippet>1907</a>            .accept(<span class="kw">crate</span>::ALPN, gossip1.clone())
+<a href=#1908 id=1908 data-nosnippet>1908</a>            .spawn();
+<a href=#1909 id=1909 data-nosnippet>1909</a>        <span class="kw">let </span>router2 = Router::builder(ep2)
+<a href=#1910 id=1910 data-nosnippet>1910</a>            .accept(<span class="kw">crate</span>::ALPN, gossip2.clone())
+<a href=#1911 id=1911 data-nosnippet>1911</a>            .spawn();
+<a href=#1912 id=1912 data-nosnippet>1912</a>
+<a href=#1913 id=1913 data-nosnippet>1913</a>        <span class="kw">let </span>addr1 = router1.endpoint().addr();
+<a href=#1914 id=1914 data-nosnippet>1914</a>        <span class="kw">let </span>id1 = addr1.id;
+<a href=#1915 id=1915 data-nosnippet>1915</a>        <span class="kw">let </span>mem_lookup = MemoryLookup::new();
+<a href=#1916 id=1916 data-nosnippet>1916</a>        mem_lookup.add_endpoint_info(addr1);
+<a href=#1917 id=1917 data-nosnippet>1917</a>        router2.endpoint().address_lookup().add(mem_lookup);
+<a href=#1918 id=1918 data-nosnippet>1918</a>
+<a href=#1919 id=1919 data-nosnippet>1919</a>        <span class="kw">let </span>topic1 = gossip1.subscribe(topic_id, <span class="macro">vec!</span>[]).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1920 id=1920 data-nosnippet>1920</a>        <span class="kw">let </span>topic2 = gossip2.subscribe(topic_id, <span class="macro">vec!</span>[id1]).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1921 id=1921 data-nosnippet>1921</a>
+<a href=#1922 id=1922 data-nosnippet>1922</a>        <span class="kw">let </span>(tx1, <span class="kw-2">mut </span>rx1) = topic1.split();
+<a href=#1923 id=1923 data-nosnippet>1923</a>        <span class="kw">let </span>(tx2, <span class="kw-2">mut </span>rx2) = topic2.split();
+<a href=#1924 id=1924 data-nosnippet>1924</a>
+<a href=#1925 id=1925 data-nosnippet>1925</a>        <span class="comment">// Wait for mesh to form
+<a href=#1926 id=1926 data-nosnippet>1926</a>        </span>timeout(Duration::from_secs(<span class="number">3</span>), rx1.joined())
+<a href=#1927 id=1927 data-nosnippet>1927</a>            .<span class="kw">await
+<a href=#1928 id=1928 data-nosnippet>1928</a>            </span>.std_context(<span class="string">"wait rx1 join"</span>)<span class="question-mark">??</span>;
+<a href=#1929 id=1929 data-nosnippet>1929</a>        timeout(Duration::from_secs(<span class="number">3</span>), rx2.joined())
+<a href=#1930 id=1930 data-nosnippet>1930</a>            .<span class="kw">await
+<a href=#1931 id=1931 data-nosnippet>1931</a>            </span>.std_context(<span class="string">"wait rx2 join"</span>)<span class="question-mark">??</span>;
+<a href=#1932 id=1932 data-nosnippet>1932</a>
+<a href=#1933 id=1933 data-nosnippet>1933</a>        <span class="comment">// Node 1 drops its sender - simulating the footgun where user drops sender early
+<a href=#1934 id=1934 data-nosnippet>1934</a>        </span>drop(tx1);
+<a href=#1935 id=1935 data-nosnippet>1935</a>
+<a href=#1936 id=1936 data-nosnippet>1936</a>        <span class="comment">// Node 2 sends a message - receiver on node 1 should still get it
+<a href=#1937 id=1937 data-nosnippet>1937</a>        </span>tx2.broadcast(<span class="string">b"hello from node2"</span>.to_vec().into()).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1938 id=1938 data-nosnippet>1938</a>
+<a href=#1939 id=1939 data-nosnippet>1939</a>        <span class="comment">// Node 1's receiver should still work and receive the message
+<a href=#1940 id=1940 data-nosnippet>1940</a>        </span><span class="kw">let </span>event = timeout(Duration::from_secs(<span class="number">3</span>), rx1.next())
+<a href=#1941 id=1941 data-nosnippet>1941</a>            .<span class="kw">await
+<a href=#1942 id=1942 data-nosnippet>1942</a>            </span>.std_context(<span class="string">"wait for message on rx1"</span>)<span class="question-mark">?</span>;
+<a href=#1943 id=1943 data-nosnippet>1943</a>
+<a href=#1944 id=1944 data-nosnippet>1944</a>        <span class="kw">match </span>event {
+<a href=#1945 id=1945 data-nosnippet>1945</a>            <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(Event::Received(msg))) =&gt; {
+<a href=#1946 id=1946 data-nosnippet>1946</a>                <span class="macro">assert_eq!</span>(<span class="kw-2">&amp;</span>msg.content[..], <span class="string">b"hello from node2"</span>);
+<a href=#1947 id=1947 data-nosnippet>1947</a>            }
+<a href=#1948 id=1948 data-nosnippet>1948</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected Received event, got {:?}"</span>, other),
+<a href=#1949 id=1949 data-nosnippet>1949</a>        }
+<a href=#1950 id=1950 data-nosnippet>1950</a>
+<a href=#1951 id=1951 data-nosnippet>1951</a>        drop(tx2);
+<a href=#1952 id=1952 data-nosnippet>1952</a>        drop(rx1);
+<a href=#1953 id=1953 data-nosnippet>1953</a>        drop(rx2);
+<a href=#1954 id=1954 data-nosnippet>1954</a>        router1.shutdown().<span class="kw">await</span>.std_context(<span class="string">"shutdown router1"</span>)<span class="question-mark">?</span>;
+<a href=#1955 id=1955 data-nosnippet>1955</a>        router2.shutdown().<span class="kw">await</span>.std_context(<span class="string">"shutdown router2"</span>)<span class="question-mark">?</span>;
+<a href=#1956 id=1956 data-nosnippet>1956</a>        <span class="prelude-val">Ok</span>(())
+<a href=#1957 id=1957 data-nosnippet>1957</a>    }
+<a href=#1958 id=1958 data-nosnippet>1958</a>}</code></pre></div></section></main></body></html>
