@@ -186,8 +186,13 @@ impl Builder {
         let metrics = Arc::new(Metrics::default());
         let address_lookup = GossipAddressLookup::default();
         endpoint.address_lookup().add(address_lookup.clone());
-        let (actor, rpc_tx, local_tx) =
-            Actor::new(endpoint, self.config, metrics.clone(), self.alpn, address_lookup);
+        let (actor, rpc_tx, local_tx) = Actor::new(
+            endpoint,
+            self.config,
+            metrics.clone(),
+            self.alpn,
+            address_lookup,
+        );
         let me = actor.endpoint.id().fmt_short();
         let max_message_size = actor.state.max_message_size();
 
@@ -1061,8 +1066,8 @@ pub(crate) mod test {
     use bytes::Bytes;
     use futures_concurrency::future::TryJoin;
     use iroh::{
-        address_lookup::memory::MemoryLookup, endpoint::BindError, protocol::Router,
-        RelayMap, RelayMode, SecretKey,
+        address_lookup::memory::MemoryLookup, endpoint::BindError, protocol::Router, RelayMap,
+        RelayMode, SecretKey,
     };
     use n0_error::{AnyError, Result, StdResultExt};
     use n0_tracing_test::traced_test;
@@ -1903,9 +1908,9 @@ pub(crate) mod test {
 
         let addr1 = router1.endpoint().addr();
         let id1 = addr1.id;
-        let static_provider = StaticProvider::new();
-        static_provider.add_endpoint_info(addr1);
-        router2.endpoint().discovery().add(static_provider);
+        let mem_lookup = MemoryLookup::new();
+        mem_lookup.add_endpoint_info(addr1);
+        router2.endpoint().address_lookup().add(mem_lookup);
 
         let topic1 = gossip1.subscribe(topic_id, vec![]).await?;
         let topic2 = gossip2.subscribe(topic_id, vec![id1]).await?;

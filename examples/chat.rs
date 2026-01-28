@@ -9,8 +9,8 @@ use bytes::Bytes;
 use clap::Parser;
 use futures_lite::StreamExt;
 use iroh::{
-    address_lookup::memory::MemoryLookup, Endpoint, EndpointAddr, PublicKey, RelayMode,
-    RelayUrl, SecretKey,
+    address_lookup::memory::MemoryLookup, Endpoint, EndpointAddr, PublicKey, RelayMode, RelayUrl,
+    SecretKey,
 };
 use iroh_gossip::{
     api::{Event, GossipReceiver},

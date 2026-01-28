@@ -143,7 +143,7 @@ fn main() -> Result<()> {
                     .collect()
             };
             let mut results = results?;
-            results.sort_by(|a, b| a.scenario.label().cmp(&b.scenario.label()));
+            results.sort_by_key(|a| a.scenario.label());
             for result in results {
                 print_result(&result);
             }

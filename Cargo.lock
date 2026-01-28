@@ -405,9 +405,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.5.54"
+version = "4.5.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6e6ff9dcd79cff5cd969a17a545d79e84ab086e444102a591e288a8aa3ce394"
+checksum = "3e34525d5bbbd55da2bb745d34b36121baac88d07619a9a09cfcf4a6c0832785"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -415,9 +415,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.5.54"
+version = "4.5.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa42cf4d2b7a41bc8f663a7cab4031ebafa1bf3875705bfaf8466dc60ab52c00"
+checksum = "59a20016a20a3da95bef50ec7238dbd09baeef4311dcdd38ec15aba69812fb61"
 dependencies = [
  "anstream",
  "anstyle",
@@ -427,9 +427,9 @@ dependencies = [
 
 [[package]]
 name = "clap_derive"
-version = "4.5.49"
+version = "4.5.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a0b5487afeab2deb2ff4e03a807ad1a03ac532ff5a2cee5d86884440c7f7671"
+checksum = "a92793da1a46a5f2a02a6f4c46c6496b28c43638adea8306fcb0caa1634f24e5"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -847,9 +847,9 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "ed25519"
-version = "3.0.0-rc.2"
+version = "3.0.0-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "594435fe09e345ee388e4e8422072ff7dfeca8729389fbd997b3f5504c44cd47"
+checksum = "3d058004dae83c9cf58f3d81612d0296bbf0a52dd7d7b6afa30ab7228bb6119f"
 dependencies = [
  "pkcs8",
  "serde",
@@ -1428,9 +1428,9 @@ dependencies = [
 
 [[package]]
 name = "iana-time-zone"
-version = "0.1.64"
+version = "0.1.65"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33e57f83510bb73707521ebaffa789ec8caf86f9657cad665b092b581d40e9fb"
+checksum = "e31bc9ad994ba00e440a8aa5c9ef0ec67d5cb5e5cb0cc7f8b744a35b389cc470"
 dependencies = [
  "android_system_properties",
  "core-foundation-sys",
@@ -1625,8 +1625,9 @@ dependencies = [
 
 [[package]]
 name = "iroh"
-version = "0.95.1"
-source = "git+https://github.com/n0-computer/iroh?branch=release-0-96#f582e74df6e5dec1e111c8d33c739fd473857f34"
+version = "0.96.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3790cc3a5ef6a89a1e30b64de54de31e692958e2dc8a37cf2831d52c76805de9"
 dependencies = [
  "axum",
  "backon",
@@ -1644,13 +1645,14 @@ dependencies = [
  "iroh-metrics",
  "iroh-quinn",
  "iroh-quinn-proto",
- "iroh-quinn-udp",
+ "iroh-quinn-udp 0.8.0",
  "iroh-relay",
  "n0-error",
  "n0-future",
  "n0-watcher",
  "netdev",
- "netwatch",
+ "netwatch 0.14.0",
+ "papaya",
  "pin-project",
  "pkarr",
  "pkcs8",
@@ -1660,7 +1662,6 @@ dependencies = [
  "rustc-hash",
  "rustls",
  "rustls-pki-types",
- "rustls-platform-verifier 0.5.3",
  "rustls-webpki",
  "serde",
  "smallvec",
@@ -1674,13 +1675,13 @@ dependencies = [
  "url",
  "wasm-bindgen-futures",
  "webpki-roots",
- "z32",
 ]
 
 [[package]]
 name = "iroh-base"
-version = "0.95.1"
-source = "git+https://github.com/n0-computer/iroh?branch=release-0-96#f582e74df6e5dec1e111c8d33c739fd473857f34"
+version = "0.96.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4c3fc0440c8775bf2677a58550fcef7e544346add01bf1b163f9fc0cedd436e"
 dependencies = [
  "curve25519-dalek",
  "data-encoding",
@@ -1769,13 +1770,14 @@ dependencies = [
 
 [[package]]
 name = "iroh-quinn"
-version = "0.15.0"
-source = "git+https://github.com/n0-computer/quinn?branch=main#aa6c3735cee6d3074d5421a97b5e48332de8e7b3"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8a207ea77da14b683e8d454088795b6ac38e5d5cf26ded6868b9d80392cf8c1"
 dependencies = [
  "bytes",
  "cfg_aliases",
  "iroh-quinn-proto",
- "iroh-quinn-udp",
+ "iroh-quinn-udp 0.8.0",
  "pin-project-lite",
  "rustc-hash",
  "rustls",
@@ -1789,8 +1791,9 @@ dependencies = [
 
 [[package]]
 name = "iroh-quinn-proto"
-version = "0.14.0"
-source = "git+https://github.com/n0-computer/quinn?branch=main#aa6c3735cee6d3074d5421a97b5e48332de8e7b3"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f66e567aa8b052c5632b8fc902fbb503891eda705553494ccddf3505257be40"
 dependencies = [
  "bytes",
  "derive_more",
@@ -1804,7 +1807,7 @@ dependencies = [
  "rustc-hash",
  "rustls",
  "rustls-pki-types",
- "rustls-platform-verifier 0.6.2",
+ "rustls-platform-verifier",
  "slab",
  "sorted-index-buffer",
  "thiserror 2.0.18",
@@ -1816,7 +1819,21 @@ dependencies = [
 [[package]]
 name = "iroh-quinn-udp"
 version = "0.7.0"
-source = "git+https://github.com/n0-computer/quinn?branch=main#aa6c3735cee6d3074d5421a97b5e48332de8e7b3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a91fe9ec3db6615d7ab1b303717f3b98fc40b96955a4ea25b113b1b879f7481f"
+dependencies = [
+ "cfg_aliases",
+ "libc",
+ "socket2 0.6.2",
+ "tracing",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "iroh-quinn-udp"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f981dadd5a072a9e0efcd24bdcc388e570073f7e51b33505ceb1ef4668c80c86"
 dependencies = [
  "cfg_aliases",
  "libc",
@@ -1827,8 +1844,9 @@ dependencies = [
 
 [[package]]
 name = "iroh-relay"
-version = "0.95.1"
-source = "git+https://github.com/n0-computer/iroh?branch=release-0-96#f582e74df6e5dec1e111c8d33c739fd473857f34"
+version = "0.96.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "236c6f131ce774f7cc7548f467890c313b09f7849b8d703360d6602bc8c5184c"
 dependencies = [
  "ahash",
  "blake3",
@@ -1887,8 +1905,9 @@ dependencies = [
 
 [[package]]
 name = "irpc"
-version = "0.11.0"
-source = "git+https://github.com/n0-computer/irpc?branch=feat-multipath#06b1456b6cdd3bf615078b3bd7697035c489008a"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1bbc84aaeab13a6d7502bae4f40f2517b643924842e0230ea0bf807477cc208"
 dependencies = [
  "futures-buffered",
  "futures-util",
@@ -1909,7 +1928,8 @@ dependencies = [
 [[package]]
 name = "irpc-derive"
 version = "0.9.0"
-source = "git+https://github.com/n0-computer/irpc?branch=feat-multipath#06b1456b6cdd3bf615078b3bd7697035c489008a"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "58148196d2230183c9679431ac99b57e172000326d664e8456fa2cd27af6505a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2266,13 +2286,50 @@ dependencies = [
 [[package]]
 name = "netwatch"
 version = "0.13.0"
-source = "git+https://github.com/n0-computer/net-tools?branch=quinn-latest#31b6c5442f7763b8d15ea4e49875e7b66464df45"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "970729c08dbe7987d698f996c6b4945cbfdcdd6ee627df6de51d5469cec13b99"
 dependencies = [
  "atomic-waker",
  "bytes",
  "cfg_aliases",
  "derive_more",
- "iroh-quinn-udp",
+ "iroh-quinn-udp 0.7.0",
+ "js-sys",
+ "libc",
+ "n0-error",
+ "n0-future",
+ "n0-watcher",
+ "netdev",
+ "netlink-packet-core",
+ "netlink-packet-route 0.28.0",
+ "netlink-proto",
+ "netlink-sys",
+ "objc2-core-foundation",
+ "objc2-system-configuration",
+ "pin-project-lite",
+ "serde",
+ "socket2 0.6.2",
+ "time",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "web-sys",
+ "windows",
+ "windows-result",
+ "wmi",
+]
+
+[[package]]
+name = "netwatch"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "454b8c0759b2097581f25ed5180b4a1d14c324fde6d0734932a288e044d06232"
+dependencies = [
+ "atomic-waker",
+ "bytes",
+ "cfg_aliases",
+ "derive_more",
+ "iroh-quinn-udp 0.8.0",
  "js-sys",
  "libc",
  "n0-error",
@@ -2482,6 +2539,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
+name = "papaya"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f92dd0b07c53a0a0c764db2ace8c541dc47320dad97c2200c2a637ab9dd2328f"
+dependencies = [
+ "equivalent",
+ "seize",
+]
+
+[[package]]
 name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2659,7 +2726,7 @@ dependencies = [
  "iroh-metrics",
  "libc",
  "n0-error",
- "netwatch",
+ "netwatch 0.13.0",
  "num_enum",
  "rand",
  "serde",
@@ -3096,27 +3163,6 @@ dependencies = [
 
 [[package]]
 name = "rustls-platform-verifier"
-version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19787cda76408ec5404443dc8b31795c87cd8fec49762dc75fa727740d34acc1"
-dependencies = [
- "core-foundation",
- "core-foundation-sys",
- "jni",
- "log",
- "once_cell",
- "rustls",
- "rustls-native-certs",
- "rustls-platform-verifier-android",
- "rustls-webpki",
- "security-framework",
- "security-framework-sys",
- "webpki-root-certs 0.26.11",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "rustls-platform-verifier"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d99feebc72bae7ab76ba994bb5e121b8d83d910ca40b36e0921f53becc41784"
@@ -3132,7 +3178,7 @@ dependencies = [
  "rustls-webpki",
  "security-framework",
  "security-framework-sys",
- "webpki-root-certs 1.0.5",
+ "webpki-root-certs",
  "windows-sys 0.61.2",
 ]
 
@@ -3216,6 +3262,16 @@ checksum = "cc1f0cbffaac4852523ce30d8bd3c5cdc873501d96ff467ca09b6767bb8cd5c0"
 dependencies = [
  "core-foundation-sys",
  "libc",
+]
+
+[[package]]
+name = "seize"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b55fb86dfd3a2f5f76ea78310a88f96c4ea21a3031f8d212443d56123fd0521"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3406,9 +3462,9 @@ dependencies = [
 
 [[package]]
 name = "siphasher"
-version = "1.0.1"
+version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56199f7ddabf13fe5074ce809e7d3f42b42ae711800501b5b16ea82ad029c39d"
+checksum = "b2aa850e253778c88a04c3d7323b043aeda9d3e30d5971937c1855769763678e"
 
 [[package]]
 name = "slab"
@@ -4212,15 +4268,6 @@ dependencies = [
 
 [[package]]
 name = "webpki-root-certs"
-version = "0.26.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75c7f0ef91146ebfb530314f5f1d24528d7f0767efbfd31dce919275413e393e"
-dependencies = [
- "webpki-root-certs 1.0.5",
-]
-
-[[package]]
-name = "webpki-root-certs"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36a29fc0408b113f68cf32637857ab740edfafdf460c326cd2afaa2d84cc05dc"
@@ -4819,18 +4866,18 @@ checksum = "2164e798d9e3d84ee2c91139ace54638059a3b23e361f5c11781c2c6459bde0f"
 
 [[package]]
 name = "zerocopy"
-version = "0.8.34"
+version = "0.8.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71ddd76bcebeed25db614f82bf31a9f4222d3fbba300e6fb6c00afa26cbd4d9d"
+checksum = "fdea86ddd5568519879b8187e1cf04e24fce28f7fe046ceecbce472ff19a2572"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.34"
+version = "0.8.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8187381b52e32220d50b255276aa16a084ec0a9017a0ca2152a1f55c539758d"
+checksum = "0c15e1b46eff7c6c91195752e0eeed8ef040e391cdece7c25376957d5f15df22"
 dependencies = [
  "proc-macro2",
  "quote",
