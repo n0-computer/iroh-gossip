@@ -1350,11 +1350,15 @@ pub(crate) mod test {
             .unwrap()
             .unwrap();
 
-        let expected: Vec<Bytes> = (0..len)
+        // We assert the received messages, but not their order.
+        // While commonly they will be received in-order, for go3 it may happen
+        // that the second message arrives before the first one, because it managed to
+        // forward-join go1 before the second message is published.
+        let expected: HashSet<Bytes> = (0..len)
             .map(|i| Bytes::from(format!("hi{i}").into_bytes()))
             .collect();
-        assert_eq!(recv2, expected);
-        assert_eq!(recv3, expected);
+        assert_eq!(HashSet::from_iter(recv2), expected);
+        assert_eq!(HashSet::from_iter(recv3), expected);
 
         cancel.cancel();
         for t in tasks {
