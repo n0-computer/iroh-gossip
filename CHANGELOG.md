@@ -2,6 +2,26 @@
 
 All notable changes to iroh-gossip will be documented in this file.
 
+## [0.96.0](https://github.com/n0-computer/iroh-gossip/compare/v0.95.0..0.96.0) - 2026-01-29
+
+### ⛰️  Features
+
+- Add `neighbors()` method to `GossipTopic` ([#124](https://github.com/n0-computer/iroh-gossip/issues/124)) - ([9e4ddaa](https://github.com/n0-computer/iroh-gossip/commit/9e4ddaa904c6e1b853081b9f2e4f9628ed274b08))
+
+### 🐛 Bug Fixes
+
+- Keep topic alive if either senders or receivers exist ([#119](https://github.com/n0-computer/iroh-gossip/issues/119)) - ([34b0e0e](https://github.com/n0-computer/iroh-gossip/commit/34b0e0ea87a2f0a6011d026bcffce78697689072))
+- Clean-up connections after unexpected disconnects ([#117](https://github.com/n0-computer/iroh-gossip/issues/117)) - ([84f3945](https://github.com/n0-computer/iroh-gossip/commit/84f394577a4e8b52660a83dbbc955f0accb31b5a))
+
+### 🧪 Testing
+
+- Switch from tracing-test to n0-tracing-test ([#125](https://github.com/n0-computer/iroh-gossip/issues/125)) - ([48f522b](https://github.com/n0-computer/iroh-gossip/commit/48f522bb1504a7fbf4eb51112ea724fa1593a35f))
+
+### ⚙️ Miscellaneous Tasks
+
+- Ignore rustls-pemfile unmaintained advisory ([#122](https://github.com/n0-computer/iroh-gossip/issues/122)) - ([16c68bb](https://github.com/n0-computer/iroh-gossip/commit/16c68bb187c7127eb5694bfbbd1ec3da518bcc25))
+- Upgrade to `iroh`v0.96 and the latest version of `iroh-quinn` ([#114](https://github.com/n0-computer/iroh-gossip/issues/114)) - ([13ef379](https://github.com/n0-computer/iroh-gossip/commit/13ef379f60e91f7292ae287051245db25ca8dd02))
+
 ## [0.95.0](https://github.com/n0-computer/iroh-gossip/compare/v0.94.0..0.95.0) - 2025-11-06
 
 ### Deps/refactor
