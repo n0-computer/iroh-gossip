@@ -9,8 +9,8 @@ use bytes::Bytes;
 use clap::Parser;
 use futures_lite::StreamExt;
 use iroh::{
-    discovery::static_provider::StaticProvider, Endpoint, EndpointAddr, PublicKey, RelayMode,
-    RelayUrl, SecretKey,
+    address_lookup::memory::MemoryLookup, Endpoint, EndpointAddr, PublicKey, RelayMode, RelayUrl,
+    SecretKey,
 };
 use iroh_gossip::{
     api::{Event, GossipReceiver},
@@ -108,15 +108,15 @@ async fn main() -> Result<()> {
     };
     println!("> using relay servers: {}", fmt_relay_mode(&relay_mode));
 
-    // create a static provider to pass in endpoint addresses to
-    let static_provider = StaticProvider::new();
+    // create a memory lookup to pass in endpoint addresses to
+    let memory_lookup = MemoryLookup::new();
 
     // build our magic endpoint
     let endpoint = Endpoint::builder()
         .secret_key(secret_key)
-        .discovery(static_provider.clone())
+        .address_lookup(memory_lookup.clone())
         .relay_mode(relay_mode.clone())
-        .bind_addr_v4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))
+        .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))?
         .bind()
         .await?;
     println!("> our endpoint id: {}", endpoint.id());
@@ -150,7 +150,7 @@ async fn main() -> Result<()> {
         println!("> trying to connect to {} peers...", peers.len());
         // add the peer addrs from the ticket to our endpoint's addressbook so that they can be dialed
         for peer in peers.into_iter() {
-            static_provider.add_endpoint_info(peer);
+            memory_lookup.add_endpoint_info(peer);
         }
     };
     let (sender, receiver) = gossip.subscribe_and_join(topic, peer_ids).await?.split();

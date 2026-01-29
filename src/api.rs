@@ -416,7 +416,7 @@ mod tests {
     #[tokio::test]
     #[n0_tracing_test::traced_test]
     async fn test_rpc() -> n0_error::Result<()> {
-        use iroh::{discovery::static_provider::StaticProvider, protocol::Router, RelayMap};
+        use iroh::{address_lookup::memory::MemoryLookup, protocol::Router, RelayMap};
         use n0_error::{AnyError, Result, StackResultExt, StdResultExt};
         use n0_future::{time::Duration, StreamExt};
         use rand_chacha::rand_core::SeedableRng;
@@ -461,11 +461,11 @@ mod tests {
             (endpoint_id, endpoint_addr, task)
         };
 
-        // create static provider to add endpoint addr manually
-        let static_provider = StaticProvider::new();
-        static_provider.add_endpoint_info(endpoint2_addr);
+        // create a memory lookup service to add endpoint addr manually
+        let memory_lookup = MemoryLookup::new();
+        memory_lookup.add_endpoint_info(endpoint2_addr);
 
-        router.endpoint().discovery().add(static_provider);
+        router.endpoint().address_lookup().add(memory_lookup);
 
         // expose the gossip endpoint over RPC
         let (rpc_server_endpoint, rpc_server_cert) =
