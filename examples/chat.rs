@@ -174,7 +174,12 @@ async fn main() -> Result<()> {
     // broadcast each line we type
     println!("> type a message and hit enter to broadcast...");
     while let Some(text) = line_rx.recv().await {
-        let message = Message::Message { text: text.clone() };
+        let message = Message::Message {
+            text: text.clone(),
+            // use a random nonce to ensure the message is unique - the gossip protocol deduplicates
+            // messages based on the hash of the message, so identical messages are ignored.
+            nonce: rand::random(),
+        };
         let encoded_message = SignedMessage::sign_and_encode(endpoint.secret_key(), &message)?;
         sender.broadcast(encoded_message).await?;
         println!("> sent: {text}");
@@ -197,7 +202,7 @@ async fn subscribe_loop(mut receiver: GossipReceiver) -> Result<()> {
                     names.insert(from, name.clone());
                     println!("> {} is now known as {}", from.fmt_short(), name);
                 }
-                Message::Message { text } => {
+                Message::Message { text, nonce: _ } => {
                     let name = names
                         .get(&from)
                         .map_or_else(|| from.fmt_short().to_string(), String::to_string);
@@ -260,10 +265,21 @@ impl SignedMessage {
     }
 }
 
+/// A chat message.
 #[derive(Debug, Serialize, Deserialize)]
 enum Message {
-    AboutMe { name: String },
-    Message { text: String },
+    AboutMe {
+        name: String,
+    },
+    /// A chat message.
+    ///
+    /// `nonce` is used to uniquely identify each message - iroh-gossip deduplicates
+    /// based on the hash of the message, so we need to ensure that the message is
+    /// unique, so two identical chat messages are still delivered.
+    Message {
+        text: String,
+        nonce: u32,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
