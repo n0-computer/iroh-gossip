@@ -680,6 +680,7 @@ impl<PI: PeerIdentity> State<PI> {
 
     fn on_evict_cache_timer(&mut self, now: Instant, io: &mut impl IO<PI>) {
         self.cache.expire_until(now);
+        self.received_messages.expire_until(now);
         io.push(OutEvent::ScheduleTimer(
             self.config.cache_evict_interval,
             Timer::EvictCache,
