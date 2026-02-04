@@ -32,10 +32,10 @@ use tokio::sync::{
     mpsc::{self, error::SendError as TokioSendError},
     oneshot, Notify,
 };
-use tracing::{debug, error, error_span, info, trace, Instrument};
+use tracing::{debug, error, error_span, trace, Instrument};
 
 pub type OnConnected =
-    Arc<dyn Fn(&Endpoint, ConnectionRef) -> n0_future::future::Boxed<io::Result<()>> + Send + Sync>;
+    Arc<dyn Fn(&Endpoint, Connection) -> n0_future::future::Boxed<io::Result<()>> + Send + Sync>;
 
 /// Configuration options for the connection pool
 #[derive(derive_more::Debug, Clone)]
@@ -68,7 +68,7 @@ impl Options {
     /// Set the on_connected callback
     pub fn with_on_connected<F, Fut>(mut self, f: F) -> Self
     where
-        F: Fn(Endpoint, ConnectionRef) -> Fut + Send + Sync + 'static,
+        F: Fn(Endpoint, Connection) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = io::Result<()>> + Send + 'static,
     {
         self.on_connected = Some(Arc::new(move |ep, conn| {
@@ -84,12 +84,6 @@ impl Options {
 pub struct ConnectionRef {
     connection: iroh::endpoint::Connection,
     _permit: OneConnection,
-}
-
-impl ConnectionRef {
-    pub fn inner(&self) -> &Connection {
-        &self.connection
-    }
 }
 
 impl Deref for ConnectionRef {
@@ -207,7 +201,7 @@ struct Context {
 
 impl Context {
     async fn run_connection_actor(self: Arc<Self>, mode: Mode, mut rx: mpsc::Receiver<RequestRef>) {
-        trace!("Connection actor starting");
+        trace!(?mode, "Connection actor starting");
         let context = self;
 
         let counter = ConnectionCounter::new();
@@ -215,15 +209,10 @@ impl Context {
 
         let conn_fut = {
             let context = context.clone();
-            let counter = counter.clone();
             async move {
                 let conn = match mode {
-                    Mode::Handle(conn) => {
-                        info!(id=%node_id.fmt_short(), "starting new conn actor: handle connection");
-                        conn
-                    }
+                    Mode::Handle(conn) => conn,
                     Mode::Connect(node_id) => {
-                        info!(id=%node_id.fmt_short(), "starting new conn actor: connect");
                         let conn = context
                             .endpoint
                             .connect(node_id, &context.alpn)
@@ -233,8 +222,7 @@ impl Context {
                     }
                 };
                 if let Some(on_connect) = &context.options.on_connected {
-                    let conn = ConnectionRef::new(conn.clone(), counter.get_one());
-                    on_connect(&context.endpoint, conn)
+                    on_connect(&context.endpoint, conn.clone())
                         .await
                         .map_err(PoolConnectError::from)?;
                 }
@@ -270,12 +258,19 @@ impl Context {
 
                 // Handle new work
                 handler = rx.recv() => {
-                    debug!(current=counter.current(), "msg {handler:?}");
                     match handler {
                         Some(RequestRef { mode, tx }) => {
                             assert!(mode.remote_id() == node_id, "Not for me!");
                             if let Mode::Handle(conn) = mode {
-                                info!("handle new conn: replace old");
+                                debug!("handle new conn: replace old");
+                                if let Some(on_connect) = &context.options.on_connected {
+                                    if let Err(err) = on_connect(&context.endpoint, conn.clone())
+                                        .await
+                                        .map_err(PoolConnectError::from) {
+                                            tx.send(Err(err)).ok();
+                                            continue;
+                                        }
+                                }
                                 conn_close.as_mut().set_future({
                                     closed(conn.clone())
                                 });
@@ -288,7 +283,7 @@ impl Context {
                             match &state {
                                 Ok(state) => {
                                     let res = ConnectionRef::new(state.clone(), counter.get_one());
-                                    info!(current_count=counter.current(), "Handing out ConnectionRef");
+                                    debug!(current_count=counter.current(), "Handing out ConnectionRef");
 
                                     // clear the idle timer
                                     idle_timer.as_mut().set_none();

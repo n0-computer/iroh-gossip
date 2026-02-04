@@ -7,6 +7,7 @@ use std::{
     ops::{ControlFlow, DerefMut},
     sync::{Arc, Mutex},
     task::{ready, Poll},
+    time::Duration,
 };
 
 use bytes::Bytes;
@@ -19,7 +20,6 @@ use irpc::{
     channel::{self, mpsc::RecvError},
     WithChannels,
 };
-use irpc_iroh::IrohRemoteConnection;
 use n0_error::{anyerr, stack_error};
 use n0_future::{
     boxed::BoxFuture,
@@ -37,13 +37,14 @@ use tokio::{
 use tracing::{debug, error_span, instrument, trace, warn, Instrument};
 
 use self::{
-    connection_pool::{ConnectionPool, ConnectionRef, PoolConnectError},
+    connection_pool::{ConnectionPool, ConnectionRef},
     discovery::GossipDiscovery,
     util::{AddrInfo, Timers},
 };
 use crate::{
     api::{self, GossipApi},
     metrics::Metrics,
+    net::net_proto::{GossipReceiver, GossipSender},
     proto::{self, Config, HyparviewConfig, PeerData, PlumtreeConfig, TopicId},
 };
 
@@ -194,16 +195,12 @@ impl Gossip {
         &self.0.metrics
     }
 
+    #[tracing::instrument("gossip", parent=None, skip_all, fields(me=%endpoint.id().fmt_short()))]
     fn new(endpoint: Endpoint, config: Config, alpn: Option<Bytes>) -> Self {
         let metrics = Arc::new(Metrics::default());
         let max_message_size = config.max_message_size;
-        let me = endpoint.id();
         let (api_tx, pool, actor) = Actor::new(endpoint, config, alpn, metrics.clone());
-        let actor_task = task::spawn(
-            actor
-                .run()
-                .instrument(error_span!("gossip", me=%me.fmt_short())),
-        );
+        let actor_task = task::spawn(actor.run().instrument(tracing::Span::current()));
 
         Self(Arc::new(Inner {
             max_message_size,
@@ -235,17 +232,17 @@ impl Gossip {
 pub struct ActorStoppedError;
 
 #[derive(strum::Display)]
-enum ActorToTopic {
+enum TopicMessage {
     ApiJoin(ApiJoinRequest),
     RemoteConnected {
         remote: EndpointId,
-        channels: TopicChannels,
+        stream: GossipReceiver,
     },
 }
 
 type ApiJoinRequest = WithChannels<api::JoinRequest, api::Request>;
 type ApiRecvStream = BoxStream<Result<api::Command, RecvError>>;
-type RemoteRecvStream = BoxStream<(EndpointId, Result<Option<ProtoMessage>, RecvError>)>;
+type RemoteRecvStream = BoxStream<(EndpointId, n0_error::Result<Option<ProtoMessage>>)>;
 
 #[derive(Debug, Default, Clone)]
 struct TopicMap(Arc<Mutex<TopicMapInner>>);
@@ -279,19 +276,17 @@ impl TopicMap {
         inner.topics.get(topic_id).cloned()
     }
 
-    async fn join_next(&self) {
+    async fn join_next(&self) -> TopicId {
         std::future::poll_fn(|cx| {
             let mut inner = self.0.lock().expect("poisoned");
-            loop {
-                if inner.tasks.is_empty() {
-                    return Poll::Pending;
-                } else {
-                    let res =
-                        ready!(inner.tasks.poll_join_next(cx)).expect("task map is not empty");
-                    let actor = res.expect("topic actortask panicked");
-                    trace!(topic=%actor.topic_id.fmt_short(), "tick: topic actor finished");
-                    inner.topics.remove(&actor.topic_id);
-                }
+            if inner.tasks.is_empty() {
+                Poll::Pending
+            } else {
+                let res = ready!(inner.tasks.poll_join_next(cx)).expect("task map is not empty");
+                let actor = res.expect("topic actortask panicked");
+                trace!(topic=%actor.topic_id.fmt_short(), "tick: topic actor finished");
+                inner.topics.remove(&actor.topic_id);
+                Poll::Ready(actor.topic_id)
             }
         })
         .await
@@ -335,7 +330,7 @@ impl Actor {
         let alpn = alpn.unwrap_or_else(|| crate::ALPN.to_vec().into());
 
         let topics = TopicMap::default();
-        let options = connection_pool::Options::default().with_on_connected({
+        let mut options = connection_pool::Options::default().with_on_connected({
             let topics = topics.clone();
             move |_ep, conn| {
                 let topics = topics.clone();
@@ -345,6 +340,8 @@ impl Actor {
                 })
             }
         });
+        options.connect_timeout = Duration::from_secs(10);
+        options.idle_timeout = Duration::from_secs(10);
         let pool = ConnectionPool::new(endpoint.clone(), &alpn, options);
 
         let shared = Arc::new(Shared {
@@ -426,7 +423,10 @@ impl Actor {
                     }
                 }
             }
-            _ = self.topics.join_next() => unreachable!("future never completes"),
+            topic_id = self.topics.join_next() => {
+                trace!(%topic_id, "topic actor stopped");
+                ControlFlow::Continue(())
+            }
             else => unreachable!("reached else arm, but all fallible cases should be handled"),
         }
     }
@@ -441,54 +441,33 @@ impl Actor {
             api::RpcMessage::Join(msg) => (msg.inner.topic_id, msg),
         };
         let topic = self.topics.get_or_init(topic_id, &self.shared);
-        if topic.send(ActorToTopic::ApiJoin(msg)).await.is_err() {
+        if topic.send(TopicMessage::ApiJoin(msg)).await.is_err() {
             warn!(topic=%topic_id.fmt_short(), "Topic actor dead");
         }
     }
 }
 
-async fn accept_loop(topics: TopicMap, conn: ConnectionRef) {
-    let conn_inner = conn.inner().clone();
-    let request_stream = n0_future::stream::unfold(Some(conn_inner), async |conn| {
-        let conn = conn?;
-        match irpc_iroh::read_request::<net_proto::Request>(&conn).await {
-            Err(err) => Some((Err(err), None)),
-            Ok(None) => None,
-            Ok(Some(request)) => Some((Ok(request), Some(conn))),
-        }
-    });
-    tokio::pin!(request_stream);
+async fn accept_loop(topics: TopicMap, conn: Connection) {
+    loop {
+        let stream = match GossipReceiver::accept(&conn).await {
+            Ok(Some(stream)) => stream,
+            _ => break,
+        };
 
-    while let Some(Ok(request)) = request_stream.next().await {
-        match request {
-            net_proto::GossipMessage::Join(msg) => {
-                let WithChannels { inner, tx, rx, .. } = msg;
-                let topic_id = inner.topic_id;
-                let Some(topic) = topics.get(&topic_id) else {
-                    continue;
-                };
-                let tx = Guarded {
-                    value: tx,
-                    _guard: conn.clone(),
-                };
-                let rx = Guarded {
-                    value: rx,
-                    _guard: conn.clone(),
-                };
-                let channels = TopicChannels { tx, rx };
-                let msg = ActorToTopic::RemoteConnected {
-                    remote: conn.remote_id(),
-                    channels,
-                };
-                topic.send(msg).await.ok();
-            }
-        }
+        let Some(topic) = topics.get(&stream.topic_id()) else {
+            continue;
+        };
+        let msg = TopicMessage::RemoteConnected {
+            remote: conn.remote_id(),
+            stream,
+        };
+        topic.send(msg).await.ok();
     }
 }
 
 #[derive(Debug, Clone)]
 struct TopicHandle {
-    tx: mpsc::Sender<ActorToTopic>,
+    tx: mpsc::Sender<TopicMessage>,
     #[cfg(test)]
     joined: Arc<AtomicBool>,
 }
@@ -506,9 +485,8 @@ impl TopicHandle {
             topic_id,
             shared,
             state,
-            actor_rx: rx,
+            rx,
             peer_data,
-            // to_actor_tx,
             api_send_tx: forward_event_tx,
             init: false,
             #[cfg(test)]
@@ -531,7 +509,7 @@ impl TopicHandle {
         (handle, actor)
     }
 
-    async fn send(&self, msg: ActorToTopic) -> Result<(), mpsc::error::SendError<ActorToTopic>> {
+    async fn send(&self, msg: TopicMessage) -> Result<(), mpsc::error::SendError<TopicMessage>> {
         self.tx.send(msg).await
     }
 
@@ -557,13 +535,13 @@ struct TopicActor {
 
     // -- senders and receivers
     peer_data: Direct<PeerData>,
-    actor_rx: mpsc::Receiver<ActorToTopic>,
+    rx: mpsc::Receiver<TopicMessage>,
     remote_senders: HashMap<EndpointId, MaybeSender>,
     remote_receivers: MergeUnbounded<RemoteRecvStream>,
     api_receivers: MergeUnbounded<ApiRecvStream>,
     api_send_tx: broadcast::Sender<ProtoEvent>,
     api_send_tasks: JoinSet<()>,
-    connecting: FuturesUnordered<BoxFuture<(EndpointId, Result<ConnectionRef, PoolConnectError>)>>,
+    connecting: FuturesUnordered<BoxFuture<(EndpointId, n0_error::Result<Guarded<GossipSender>>)>>,
 }
 
 impl TopicActor {
@@ -574,7 +552,7 @@ impl TopicActor {
         loop {
             trace!("wait for tick");
             tokio::select! {
-                Some(msg) = self.actor_rx.recv() => {
+                Some(msg) = self.rx.recv() => {
                     trace!("tick: actor_rx {msg}");
                     self.handle_actor_message(msg).await;
                 },
@@ -623,10 +601,6 @@ impl TopicActor {
                 self.process_out_events(now).await;
             }
 
-            // if self.to_actor_tx.is_closed() {
-            //     warn!("Channel to main actor closed: abort topic loop");
-            //     break;
-            // }
             if self.init && self.api_receivers.is_empty() && self.api_send_tasks.is_empty() {
                 debug!("Closing topic: All API subscribers dropped");
                 self.handle_in_event(InEvent::Command(Command::Quit)).await;
@@ -640,31 +614,10 @@ impl TopicActor {
 
     async fn handle_connected(
         &mut self,
-        (remote, conn): (EndpointId, Result<ConnectionRef, PoolConnectError>),
+        (remote, tx): (EndpointId, n0_error::Result<Guarded<GossipSender>>),
     ) {
-        match conn {
-            Ok(conn) => {
-                let client: irpc::Client<net_proto::Request> =
-                    irpc::Client::boxed(IrohRemoteConnection::new(conn.inner().clone()));
-                let req = net_proto::JoinRequest {
-                    topic_id: self.topic_id,
-                };
-                // TODO: Has to happen in task
-                let Ok((tx, rx)) = client.bidi_streaming(req, 64, 64).await else {
-                    self.handle_in_event(InEvent::PeerDisconnected(remote))
-                        .await;
-                    return;
-                };
-                let tx = Guarded {
-                    value: tx,
-                    _guard: conn.clone(),
-                };
-                let rx = Guarded {
-                    value: rx,
-                    _guard: conn.clone(),
-                };
-                self.remote_receivers
-                    .push(Box::pin(into_stream(rx).map(move |msg| (remote, msg))));
+        match tx {
+            Ok(tx) => {
                 let sender = self.remote_senders.entry(remote).or_default();
                 if let Err(err) = sender.init(tx).await {
                     warn!("Remote failed while pushing queued messages: {err:?}");
@@ -677,18 +630,27 @@ impl TopicActor {
         }
     }
 
-    async fn handle_actor_message(&mut self, msg: ActorToTopic) {
+    async fn handle_actor_message(&mut self, msg: TopicMessage) {
         match msg {
-            ActorToTopic::RemoteConnected { remote, channels } => {
-                let TopicChannels { tx, rx } = channels;
-                self.remote_receivers
-                    .push(Box::pin(into_stream(rx).map(move |msg| (remote, msg))));
-                let sender = self.remote_senders.entry(remote).or_default();
-                if let Err(err) = sender.init(tx).await {
-                    warn!("Remote failed while pushing queued messages: {err:?}");
+            TopicMessage::RemoteConnected { remote, stream } => {
+                // Replace our sender if this a new connection.
+                if let Some(old) = self.remote_senders.get_mut(&remote) {
+                    if !old.is_same_conn(&stream) {
+                        if let Ok(conn) = self.shared.pool.get_or_connect(remote).await {
+                            if let Ok(tx) = GossipSender::init(&conn, self.topic_id).await {
+                                let tx = Guarded::new(tx, conn);
+                                if let Err(err) = old.init(tx).await {
+                                    warn!("Remote failed while pushing queued messages: {err:?}");
+                                }
+                            }
+                        }
+                    }
                 }
+                // We keep old receivers to fully drain them and just add our new receiver.
+                self.remote_receivers
+                    .push(Box::pin(into_stream(stream).map(move |msg| (remote, msg))));
             }
-            ActorToTopic::ApiJoin(req) => {
+            TopicMessage::ApiJoin(req) => {
                 self.init = true;
                 let WithChannels { inner, tx, rx, .. } = req;
                 let initial_neighbors = self.neighbors.clone().into_iter();
@@ -708,7 +670,7 @@ impl TopicActor {
     async fn handle_remote_message(
         &mut self,
         remote: EndpointId,
-        message: Result<Option<ProtoMessage>, RecvError>,
+        message: n0_error::Result<Option<ProtoMessage>>,
     ) {
         let event = match message {
             Ok(Some(message)) => InEvent::RecvMessage(remote, message),
@@ -763,13 +725,10 @@ impl TopicActor {
             hash_map::Entry::Vacant(entry) => {
                 debug!("requesting new connection");
                 let pool = self.shared.pool.clone();
+                let topic = self.topic_id;
                 self.connecting.push(Box::pin(async move {
-                    (remote, pool.get_or_connect(remote).await)
+                    (remote, connect(pool, remote, topic).await)
                 }));
-                // self.to_actor_tx
-                //     .send(LocalActorMessage::Connect(remote, self.topic_id))
-                //     .await
-                //     .ok();
                 entry.insert(Default::default())
             }
         };
@@ -794,6 +753,17 @@ impl TopicActor {
         }
         self.api_send_tx.send(event).ok();
     }
+}
+
+async fn connect(
+    pool: ConnectionPool,
+    remote: EndpointId,
+    topic: TopicId,
+) -> n0_error::Result<Guarded<GossipSender>> {
+    let conn = pool.get_or_connect(remote).await?;
+    let tx = GossipSender::init(&conn, topic).await?;
+    let tx = Guarded::new(tx, conn.clone());
+    Ok(tx)
 }
 
 async fn forward_events(
@@ -823,19 +793,21 @@ async fn forward_events(
     }
 }
 
-#[derive(Debug)]
-struct TopicChannels {
-    /// Sender for messages to the remote.
-    tx: Guarded<channel::mpsc::Sender<ProtoMessage>>,
-    /// Receiver for messages to the remote.
-    rx: Guarded<channel::mpsc::Receiver<ProtoMessage>>,
-}
-
 #[derive(Debug, derive_more::Deref)]
 struct Guarded<T> {
     #[deref]
     value: T,
-    _guard: ConnectionRef,
+    conn: ConnectionRef,
+}
+
+impl<T> Guarded<T> {
+    fn new(value: T, conn: ConnectionRef) -> Self {
+        Self { value, conn }
+    }
+
+    fn conn(&self) -> &ConnectionRef {
+        &self.conn
+    }
 }
 
 impl<T> DerefMut for Guarded<T> {
@@ -846,12 +818,19 @@ impl<T> DerefMut for Guarded<T> {
 
 #[derive(Debug)]
 enum MaybeSender {
-    Active(Guarded<channel::mpsc::Sender<ProtoMessage>>),
+    Active(Guarded<GossipSender>),
     Pending(Vec<ProtoMessage>),
 }
 
 impl MaybeSender {
-    async fn send(&mut self, message: ProtoMessage) -> Result<(), channel::SendError> {
+    fn is_same_conn(&self, recv: &GossipReceiver) -> bool {
+        match self {
+            MaybeSender::Active(guarded) => recv.is_same_conn(guarded.conn()),
+            MaybeSender::Pending(_) => false,
+        }
+    }
+
+    async fn send(&mut self, message: ProtoMessage) -> n0_error::Result<()> {
         match self {
             Self::Active(sender) => sender.send(message).await,
             Self::Pending(messages) => {
@@ -861,10 +840,7 @@ impl MaybeSender {
         }
     }
 
-    async fn init(
-        &mut self,
-        sender: Guarded<channel::mpsc::Sender<ProtoMessage>>,
-    ) -> Result<(), channel::SendError> {
+    async fn init(&mut self, mut sender: Guarded<GossipSender>) -> n0_error::Result<()> {
         debug!("Initializing new sender");
         *self = match self {
             Self::Active(_old) => {
@@ -889,12 +865,9 @@ impl Default for MaybeSender {
     }
 }
 
-// TODO: Upstream to irpc: This differs from Receiver::into_stream: it returns
-// None after the first error, whereas upstream would loop on the error
-fn into_stream<T: irpc::RpcMessage>(
-    receiver: impl DerefMut<Target = channel::mpsc::Receiver<T>> + Send + Sync + 'static,
-    // receiver: channel::mpsc::Receiver<T>,
-) -> impl Stream<Item = Result<Option<T>, RecvError>> + Send + Sync + 'static {
+fn into_stream(
+    receiver: GossipReceiver,
+) -> impl Stream<Item = n0_error::Result<Option<ProtoMessage>>> + Send + Sync + 'static {
     n0_future::stream::unfold(Some(receiver), |recv| async move {
         let mut recv = recv?;
         let res = recv.recv().await;
@@ -1244,6 +1217,7 @@ pub(crate) mod tests {
             // first subscribe is done immediately
             tracing::info!("subscribing the first time");
             let sub_1a = go1.subscribe_and_join(topic, vec![endpoint_id2]).await?;
+            tracing::info!("subscribed the first time");
 
             go1_joined_tx.send(()).await.unwrap();
 
@@ -1274,9 +1248,7 @@ pub(crate) mod tests {
         let go1_handle = task::spawn(go1_task);
 
         // advance and check that the topic is now subscribed
-        actor.steps(3).await?; // api_rx subscribe;
-                               // local_rx connection request (from topic actor);
-                               // dialer connected;
+        actor.steps(1).await?; // api_rx subscribe;
         go1_joined_rx.recv().await.unwrap();
         tracing::info!("subscribe and join done, should be joined");
         let state = actor.topics.get(&topic).expect("get registered topic");
@@ -1301,7 +1273,7 @@ pub(crate) mod tests {
 
         // cleanup and ensure everything went as expected
         ct.cancel();
-        let wait = Duration::from_secs(2);
+        let wait = Duration::from_secs(4);
         timeout(wait, ep1_handle)
             .await
             .std_context("wait endpoint1 task")?;
