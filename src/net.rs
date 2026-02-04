@@ -14,7 +14,7 @@ use bytes::Bytes;
 use iroh::{
     endpoint::Connection,
     protocol::{AcceptError, ProtocolHandler},
-    Endpoint, EndpointAddr, EndpointId, Watcher,
+    Endpoint, EndpointAddr, EndpointId,
 };
 use irpc::{
     channel::{self, mpsc::RecvError},
@@ -28,7 +28,7 @@ use n0_future::{
     time::Instant,
     FuturesUnordered, MergeUnbounded, Stream, StreamExt,
 };
-use n0_watcher::{Direct, Watchable};
+use n0_watcher::{Direct, Watchable, Watcher};
 use rand::rngs::StdRng;
 use tokio::{
     sync::{broadcast, mpsc},
@@ -37,8 +37,8 @@ use tokio::{
 use tracing::{debug, error_span, instrument, trace, warn, Instrument};
 
 use self::{
+    address_lookup::GossipAddressLookup,
     connection_pool::{ConnectionPool, ConnectionRef},
-    discovery::GossipDiscovery,
     util::{AddrInfo, Timers},
 };
 use crate::{
@@ -48,8 +48,8 @@ use crate::{
     proto::{self, Config, HyparviewConfig, PeerData, PlumtreeConfig, TopicId},
 };
 
+mod address_lookup;
 mod connection_pool;
-mod discovery;
 mod net_proto;
 mod util;
 
@@ -298,7 +298,7 @@ struct Shared {
     config: Config,
     our_peer_data: n0_watcher::Watchable<PeerData>,
     metrics: Arc<Metrics>,
-    discovery: GossipDiscovery,
+    address_lookup: GossipAddressLookup,
     pool: ConnectionPool,
 }
 
@@ -323,8 +323,8 @@ impl Actor {
         let me = endpoint.id();
 
         let endpoint_addr_updates = endpoint.watch_addr().stream();
-        let discovery = GossipDiscovery::default();
-        endpoint.discovery().add(discovery.clone());
+        let address_lookup = GossipAddressLookup::default();
+        endpoint.address_lookup().add(address_lookup.clone());
         let initial_peer_data = AddrInfo::from(endpoint.addr()).encode();
 
         let alpn = alpn.unwrap_or_else(|| crate::ALPN.to_vec().into());
@@ -349,7 +349,7 @@ impl Actor {
             config,
             our_peer_data: Watchable::new(initial_peer_data),
             metrics: metrics.clone(),
-            discovery,
+            address_lookup,
             pool: pool.clone(),
         });
 
@@ -712,7 +712,9 @@ impl TopicActor {
                     self.remote_senders.remove(&endpoint_id);
                 }
                 OutEvent::PeerData(endpoint_id, peer_data) => {
-                    self.shared.discovery.add_peer_data(endpoint_id, peer_data);
+                    self.shared
+                        .address_lookup
+                        .add_peer_data(endpoint_id, peer_data);
                 }
             }
         }
@@ -899,8 +901,8 @@ pub(crate) mod tests {
     use bytes::Bytes;
     use futures_concurrency::future::TryJoin;
     use iroh::{
-        discovery::static_provider::StaticProvider, endpoint::BindError, protocol::Router,
-        EndpointAddr, RelayMap, RelayMode, SecretKey,
+        address_lookup::memory::MemoryLookup, endpoint::BindError, protocol::Router, EndpointAddr,
+        RelayMap, RelayMode, SecretKey,
     };
     use n0_error::{AnyError, Result, StdResultExt};
     use n0_tracing_test::traced_test;
@@ -964,7 +966,7 @@ pub(crate) mod tests {
     pub(crate) async fn create_endpoint(
         rng: &mut rand_chacha::ChaCha12Rng,
         relay_map: RelayMap,
-        static_provider: Option<StaticProvider>,
+        memory_lookup: Option<MemoryLookup>,
     ) -> Result<Endpoint, BindError> {
         let ep = Endpoint::empty_builder(RelayMode::Custom(relay_map))
             .secret_key(SecretKey::generate(rng))
@@ -973,8 +975,8 @@ pub(crate) mod tests {
             .bind()
             .await?;
 
-        if let Some(static_provider) = static_provider {
-            ep.discovery().add(static_provider);
+        if let Some(memory_lookup) = memory_lookup {
+            ep.address_lookup().add(memory_lookup);
         }
         ep.online().await;
         Ok(ep)
@@ -1018,15 +1020,15 @@ pub(crate) mod tests {
         let mut rng = rand_chacha::ChaCha12Rng::seed_from_u64(1);
         let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
 
-        let static_provider = StaticProvider::new();
+        let memory_lookup = MemoryLookup::new();
 
-        let ep1 = create_endpoint(&mut rng, relay_map.clone(), Some(static_provider.clone()))
+        let ep1 = create_endpoint(&mut rng, relay_map.clone(), Some(memory_lookup.clone()))
             .await
             .unwrap();
-        let ep2 = create_endpoint(&mut rng, relay_map.clone(), Some(static_provider.clone()))
+        let ep2 = create_endpoint(&mut rng, relay_map.clone(), Some(memory_lookup.clone()))
             .await
             .unwrap();
-        let ep3 = create_endpoint(&mut rng, relay_map.clone(), Some(static_provider.clone()))
+        let ep3 = create_endpoint(&mut rng, relay_map.clone(), Some(memory_lookup.clone()))
             .await
             .unwrap();
 
@@ -1051,8 +1053,8 @@ pub(crate) mod tests {
 
         let addr1 = EndpointAddr::new(pi1).with_relay_url(relay_url.clone());
         let addr2 = EndpointAddr::new(pi2).with_relay_url(relay_url);
-        static_provider.add_endpoint_info(addr1.clone());
-        static_provider.add_endpoint_info(addr2.clone());
+        memory_lookup.add_endpoint_info(addr1.clone());
+        memory_lookup.add_endpoint_info(addr2.clone());
 
         debug!("----- joining  ----- ");
         // join the topics and wait for the connection to succeed
@@ -1122,11 +1124,15 @@ pub(crate) mod tests {
             .unwrap()
             .unwrap();
 
-        let expected: Vec<Bytes> = (0..len)
+        // We assert the received messages, but not their order.
+        // While commonly they will be received in-order, for go3 it may happen
+        // that the second message arrives before the first one, because it managed to
+        // forward-join go1 before the second message is published.
+        let expected: HashSet<Bytes> = (0..len)
             .map(|i| Bytes::from(format!("hi{i}").into_bytes()))
             .collect();
-        assert_eq!(recv2, expected);
-        assert_eq!(recv3, expected);
+        assert_eq!(HashSet::from_iter(recv2), expected);
+        assert_eq!(HashSet::from_iter(recv3), expected);
 
         cancel.cancel();
         for t in tasks {
@@ -1206,9 +1212,9 @@ pub(crate) mod tests {
 
         // first endpoint
         let addr2 = EndpointAddr::new(endpoint_id2).with_relay_url(relay_url);
-        let static_provider = StaticProvider::new();
-        static_provider.add_endpoint_info(addr2);
-        actor.endpoint().discovery().add(static_provider);
+        let memory_lookup = MemoryLookup::new();
+        memory_lookup.add_endpoint_info(addr2);
+        actor.endpoint().address_lookup().add(memory_lookup);
         // we use a channel to signal advancing steps to the task
         let (go1_resubscribe_tx, mut go1_resubscribe_rx) = mpsc::channel::<()>(1);
         let (go1_joined_tx, mut go1_joined_rx) = mpsc::channel::<()>(1);
@@ -1328,9 +1334,9 @@ pub(crate) mod tests {
         // channel used to signal the second gossip instance to advance the test
         let (tx, mut rx) = mpsc::channel::<()>(1);
         let addr1 = EndpointAddr::new(endpoint_id1).with_relay_url(relay_url.clone());
-        let static_provider = StaticProvider::new();
-        static_provider.add_endpoint_info(addr1);
-        ep2.discovery().add(static_provider.clone());
+        let memory_lookup = MemoryLookup::new();
+        memory_lookup.add_endpoint_info(addr1);
+        ep2.address_lookup().add(memory_lookup.clone());
         let go2_task = async move {
             let mut sub = go2.subscribe(topic, Vec::new()).await?;
             sub.joined().await?;
@@ -1352,8 +1358,8 @@ pub(crate) mod tests {
         let go2_handle = task::spawn(go2_task);
 
         let addr2 = EndpointAddr::new(endpoint_id2).with_relay_url(relay_url);
-        static_provider.add_endpoint_info(addr2);
-        ep1.discovery().add(static_provider);
+        memory_lookup.add_endpoint_info(addr2);
+        ep1.address_lookup().add(memory_lookup);
 
         let mut sub = go1.subscribe(topic, vec![endpoint_id2]).await?;
         // wait for subscribed notification
@@ -1443,9 +1449,9 @@ pub(crate) mod tests {
             let (router, gossip) = spawn_gossip(secret_key, relay_map).await?;
             info!(endpoint_id = %router.endpoint().id().fmt_short(), "broadcast endpoint spawned");
             let bootstrap = vec![bootstrap_addr.id];
-            let static_provider = StaticProvider::new();
-            static_provider.add_endpoint_info(bootstrap_addr);
-            router.endpoint().discovery().add(static_provider);
+            let memory_lookup = MemoryLookup::new();
+            memory_lookup.add_endpoint_info(bootstrap_addr);
+            router.endpoint().address_lookup().add(memory_lookup);
             let mut topic = gossip.subscribe_and_join(topic_id, bootstrap).await?;
             topic.broadcast(message.as_bytes().to_vec().into()).await?;
             std::future::pending::<()>().await;
@@ -1560,9 +1566,9 @@ pub(crate) mod tests {
 
         let addr1 = router1.endpoint().addr();
         let id1 = addr1.id;
-        let static_provider = StaticProvider::new();
-        static_provider.add_endpoint_info(addr1);
-        router2.endpoint().discovery().add(static_provider);
+        let memory_lookup = MemoryLookup::new();
+        memory_lookup.add_endpoint_info(addr1);
+        router2.endpoint().address_lookup().add(memory_lookup);
 
         let mut topic1 = gossip1.subscribe(topic_id, vec![]).await?;
         let mut topic2 = gossip2.subscribe(topic_id, vec![id1]).await?;
@@ -1580,7 +1586,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     #[traced_test]
-    async fn gossip_rely_on_gossip_discovery() -> n0_error::Result<()> {
+    async fn gossip_rely_on_gossip_address_lookup() -> n0_error::Result<()> {
         let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
 
         async fn spawn(
@@ -1601,20 +1607,20 @@ pub(crate) mod tests {
             Ok((endpoint_id, router, gossip, sender, receiver))
         }
 
-        // spawn 3 endpoints without relay or discovery
+        // spawn 3 endpoints without relay or address lookup
         let (n1, r1, _g1, _tx1, mut rx1) = spawn(rng).await?;
         let (n2, r2, _g2, tx2, mut rx2) = spawn(rng).await?;
         let (n3, r3, _g3, tx3, mut rx3) = spawn(rng).await?;
 
         println!("endpoints {:?}", [n1, n2, n3]);
 
-        // create a static discovery that has only endpoint 1 addr info set
+        // create a mem lookup that has only endpoint 1 addr info set
         let addr1 = r1.endpoint().addr();
-        let disco = StaticProvider::new();
-        disco.add_endpoint_info(addr1);
+        let lookup = MemoryLookup::new();
+        lookup.add_endpoint_info(addr1);
 
         // add addr info of endpoint1 to endpoint2 and join endpoint1
-        r2.endpoint().discovery().add(disco.clone());
+        r2.endpoint().address_lookup().add(lookup.clone());
         tx2.join_peers(vec![n1]).await?;
 
         // await join endpoint2 -> nodde1
@@ -1626,11 +1632,11 @@ pub(crate) mod tests {
             .std_context("wait rx2 join")??;
 
         // add addr info of endpoint1 to endpoint3 and join endpoint1
-        r3.endpoint().discovery().add(disco.clone());
+        r3.endpoint().address_lookup().add(lookup.clone());
         tx3.join_peers(vec![n1]).await?;
 
         // await join at endpoint3: n1 and n2
-        // n2 only works because because we use gossip discovery!
+        // n2 only works because because we use gossip address lookup!
         let ev = timeout(Duration::from_secs(3), rx3.next())
             .await
             .std_context("wait rx3 first neighbor")?;
@@ -1661,5 +1667,72 @@ pub(crate) mod tests {
         let mut out: Vec<_> = input.into_iter().collect();
         out.sort();
         out
+    }
+
+    /// Test that dropping sender doesn't close topic while receiver is still listening.
+    ///
+    /// This is a common footgun: users split a GossipTopic, drop the sender early,
+    /// and expect the receiver to keep working. With the bug (using && in still_needed),
+    /// the topic closes immediately when sender is dropped.
+    #[tokio::test]
+    #[traced_test]
+    async fn topic_stays_alive_after_sender_drop() -> n0_error::Result<()> {
+        let topic_id = TopicId::from([99u8; 32]);
+
+        let ep1 = Endpoint::empty_builder(RelayMode::Disabled).bind().await?;
+        let ep2 = Endpoint::empty_builder(RelayMode::Disabled).bind().await?;
+        let gossip1 = Gossip::builder().spawn(ep1.clone());
+        let gossip2 = Gossip::builder().spawn(ep2.clone());
+        let router1 = Router::builder(ep1)
+            .accept(crate::ALPN, gossip1.clone())
+            .spawn();
+        let router2 = Router::builder(ep2)
+            .accept(crate::ALPN, gossip2.clone())
+            .spawn();
+
+        let addr1 = router1.endpoint().addr();
+        let id1 = addr1.id;
+        let mem_lookup = MemoryLookup::new();
+        mem_lookup.add_endpoint_info(addr1);
+        router2.endpoint().address_lookup().add(mem_lookup);
+
+        let topic1 = gossip1.subscribe(topic_id, vec![]).await?;
+        let topic2 = gossip2.subscribe(topic_id, vec![id1]).await?;
+
+        let (tx1, mut rx1) = topic1.split();
+        let (tx2, mut rx2) = topic2.split();
+
+        // Wait for mesh to form
+        timeout(Duration::from_secs(3), rx1.joined())
+            .await
+            .std_context("wait rx1 join")??;
+        timeout(Duration::from_secs(3), rx2.joined())
+            .await
+            .std_context("wait rx2 join")??;
+
+        // Node 1 drops its sender - simulating the footgun where user drops sender early
+        drop(tx1);
+
+        // Node 2 sends a message - receiver on node 1 should still get it
+        tx2.broadcast(b"hello from node2".to_vec().into()).await?;
+
+        // Node 1's receiver should still work and receive the message
+        let event = timeout(Duration::from_secs(3), rx1.next())
+            .await
+            .std_context("wait for message on rx1")?;
+
+        match event {
+            Some(Ok(Event::Received(msg))) => {
+                assert_eq!(&msg.content[..], b"hello from node2");
+            }
+            other => panic!("expected Received event, got {:?}", other),
+        }
+
+        drop(tx2);
+        drop(rx1);
+        drop(rx2);
+        router1.shutdown().await.std_context("shutdown router1")?;
+        router2.shutdown().await.std_context("shutdown router2")?;
+        Ok(())
     }
 }

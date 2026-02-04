@@ -4,7 +4,7 @@ use n0_error::{Result, StdResultExt};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // create an iroh endpoint that includes the standard discovery mechanisms
+    // create an iroh endpoint that includes the standard address lookup mechanisms
     // we've built at number0
     let endpoint = Endpoint::bind().await?;
 

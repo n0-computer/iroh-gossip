@@ -1,4 +1,4 @@
-//! A discovery service to gather addressing info collected from gossip Join and ForwardJoin messages.
+//! An address lookup service to gather addressing info collected from gossip Join and ForwardJoin messages.
 
 use std::{
     collections::{btree_map::Entry, BTreeMap},
@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use iroh::discovery::{Discovery, DiscoveryError, DiscoveryItem, EndpointData, EndpointInfo};
+use iroh::address_lookup::{self, AddressLookup, EndpointData, EndpointInfo};
 use iroh_base::EndpointId;
 use n0_future::{
     boxed::BoxStream,
@@ -34,12 +34,12 @@ impl Default for RetentionOpts {
     }
 }
 
-/// A static endpoint discovery that expires endpoints after some time.
+/// An address lookup service that expires endpoints after some time.
 ///
 /// It is added to the endpoint when constructing a gossip instance, and the gossip actor
 /// then adds endpoint addresses as received with Join or ForwardJoin messages.
 #[derive(Debug, Clone)]
-pub(crate) struct GossipDiscovery {
+pub(crate) struct GossipAddressLookup {
     endpoints: NodeMap,
     _task_handle: Arc<AbortOnDropHandle<()>>,
 }
@@ -52,16 +52,16 @@ struct StoredEndpointInfo {
     last_updated: SystemTime,
 }
 
-impl Default for GossipDiscovery {
+impl Default for GossipAddressLookup {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl GossipDiscovery {
+impl GossipAddressLookup {
     const PROVENANCE: &'static str = "gossip";
 
-    /// Creates a new gossip discovery instance.
+    /// Creates a new gossip address lookup instance.
     pub(crate) fn new() -> Self {
         Self::with_opts(Default::default())
     }
@@ -93,8 +93,8 @@ impl GossipDiscovery {
 
     /// Augments endpoint addressing information for the given endpoint ID.
     ///
-    /// The provided addressing information is combined with the existing info in the static
-    /// provider.  Any new direct addresses are added to those already present while the
+    /// The provided addressing information is combined with the existing info in the in-memory
+    /// lookup.  Any new direct addresses are added to those already present while the
     /// relay URL is overwritten.
     pub(crate) fn add(&self, endpoint_info: impl Into<EndpointInfo>) {
         let last_updated = SystemTime::now();
@@ -127,11 +127,11 @@ impl GossipDiscovery {
     }
 }
 
-impl Discovery for GossipDiscovery {
+impl AddressLookup for GossipAddressLookup {
     fn resolve(
         &self,
         endpoint_id: EndpointId,
-    ) -> Option<BoxStream<Result<DiscoveryItem, DiscoveryError>>> {
+    ) -> Option<BoxStream<Result<address_lookup::Item, address_lookup::Error>>> {
         let guard = self.endpoints.read().expect("poisoned");
         let info = guard.get(&endpoint_id)?;
         let last_updated = info
@@ -139,7 +139,7 @@ impl Discovery for GossipDiscovery {
             .duration_since(SystemTime::UNIX_EPOCH)
             .expect("time drift")
             .as_micros() as u64;
-        let item = DiscoveryItem::new(
+        let item = address_lookup::Item::new(
             EndpointInfo::from_parts(endpoint_id, info.data.clone()),
             Self::PROVENANCE,
             Some(last_updated),
@@ -152,11 +152,11 @@ impl Discovery for GossipDiscovery {
 mod tests {
     use std::time::Duration;
 
-    use iroh::{discovery::Discovery, EndpointAddr, SecretKey};
+    use iroh::{address_lookup::AddressLookup, EndpointAddr, SecretKey};
     use n0_future::StreamExt;
     use rand::SeedableRng;
 
-    use super::{GossipDiscovery, RetentionOpts};
+    use super::{GossipAddressLookup, RetentionOpts};
 
     #[tokio::test]
     async fn test_retention() {
@@ -164,7 +164,7 @@ mod tests {
             evict_interval: Duration::from_millis(100),
             retention: Duration::from_millis(500),
         };
-        let disco = GossipDiscovery::with_opts(opts);
+        let disco = GossipAddressLookup::with_opts(opts);
 
         let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
         let k1 = SecretKey::generate(rng);
