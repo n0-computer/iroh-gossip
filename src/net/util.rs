@@ -1,38 +1,12 @@
 //! Utilities for iroh-gossip networking
 
-use std::{
-    collections::BTreeSet,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::collections::BTreeSet;
 
-use iroh::{endpoint::Connection, EndpointAddr, EndpointId, TransportAddr};
-use irpc::rpc::RemoteService;
-use n0_future::{
-    time::{sleep_until, Instant},
-    Stream,
-};
+use iroh::{EndpointAddr, EndpointId, TransportAddr};
+use n0_future::time::{sleep_until, Instant};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Notify;
 
 use crate::proto::{util::TimerMap, PeerData};
-
-pub use irpc_iroh::IrohRemoteConnection;
-pub(crate) fn accept_stream<T: RemoteService>(
-    connection: Connection,
-) -> impl Stream<Item = std::io::Result<T::Message>> {
-    n0_future::stream::unfold(Some(connection), async |conn| {
-        let conn = conn?;
-        match irpc_iroh::read_request::<T>(&conn).await {
-            Err(err) => Some((Err(err), None)),
-            Ok(None) => None,
-            Ok(Some(request)) => Some((Ok(request), Some(conn))),
-        }
-    })
-}
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AddrInfo {
@@ -102,102 +76,5 @@ impl<T> Timers<T> {
     /// Pops the earliest timer that expires at or before `now`.
     pub fn pop_before(&mut self, now: Instant) -> Option<(Instant, T)> {
         self.map.pop_before(now)
-    }
-}
-
-#[derive(Debug)]
-struct ConnectionCounterInner {
-    count: AtomicUsize,
-    notify: Notify,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CloseGuard {
-    inner: Arc<ConnectionCounterInner>,
-}
-
-impl CloseGuard {
-    pub(crate) fn new() -> Self {
-        Self {
-            inner: Arc::new(ConnectionCounterInner {
-                count: Default::default(),
-                notify: Notify::new(),
-            }),
-        }
-    }
-
-    /// Increase the connection count and return a guard for the new connection
-    pub(crate) fn get_one(&self) -> ConnDropGuard {
-        self.inner.count.fetch_add(1, Ordering::SeqCst);
-        ConnDropGuard {
-            inner: self.inner.clone(),
-        }
-    }
-
-    pub(crate) fn guard<T>(&self, item: T) -> Guarded<T> {
-        Guarded::new(item, self.get_one())
-    }
-
-    pub(crate) fn is_idle(&self) -> bool {
-        self.inner.count.load(Ordering::SeqCst) == 0
-    }
-
-    pub(crate) async fn idle(&self) {
-        self.inner.notify.notified().await
-    }
-
-    pub(crate) async fn idle_for(&self, duration: Duration) {
-        let fut = self.idle();
-        tokio::pin!(fut);
-        loop {
-            (&mut fut).await;
-            fut.set(self.idle());
-            tokio::time::sleep(duration).await;
-            if self.is_idle() {
-                break;
-            }
-        }
-    }
-}
-
-/// Guard for one connection
-#[derive(Debug)]
-pub(crate) struct ConnDropGuard {
-    inner: Arc<ConnectionCounterInner>,
-}
-
-impl Clone for ConnDropGuard {
-    fn clone(&self) -> Self {
-        self.inner.count.fetch_add(1, Ordering::SeqCst);
-        Self {
-            inner: self.inner.clone(),
-        }
-    }
-}
-
-impl Drop for ConnDropGuard {
-    fn drop(&mut self) {
-        let prev = self.inner.count.fetch_sub(1, Ordering::SeqCst);
-        if prev == 1 {
-            self.inner.notify.notify_waiters();
-        }
-    }
-}
-
-#[derive(derive_more::Deref, derive_more::DerefMut, Debug)]
-pub(crate) struct Guarded<T> {
-    #[deref]
-    #[deref_mut]
-    inner: T,
-    guard: ConnDropGuard,
-}
-
-impl<T> Guarded<T> {
-    pub(crate) fn new(inner: T, guard: ConnDropGuard) -> Self {
-        Self { inner, guard }
-    }
-
-    pub(crate) fn split(self) -> (T, ConnDropGuard) {
-        (self.inner, self.guard)
     }
 }

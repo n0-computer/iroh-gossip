@@ -5,7 +5,8 @@ use std::sync::atomic::AtomicBool;
 use std::{
     collections::{hash_map, BTreeSet, HashMap, HashSet, VecDeque},
     ops::{ControlFlow, DerefMut},
-    sync::Arc,
+    sync::{Arc, Mutex},
+    task::{ready, Poll},
 };
 
 use bytes::Bytes;
@@ -18,12 +19,14 @@ use irpc::{
     channel::{self, mpsc::RecvError},
     WithChannels,
 };
+use irpc_iroh::IrohRemoteConnection;
 use n0_error::{anyerr, stack_error};
 use n0_future::{
+    boxed::BoxFuture,
     stream::Boxed as BoxStream,
     task::{self, AbortOnDropHandle},
     time::Instant,
-    MergeUnbounded, Stream, StreamExt,
+    FuturesUnordered, MergeUnbounded, Stream, StreamExt,
 };
 use n0_watcher::{Direct, Watchable};
 use rand::rngs::StdRng;
@@ -34,9 +37,9 @@ use tokio::{
 use tracing::{debug, error_span, instrument, trace, warn, Instrument};
 
 use self::{
+    connection_pool::{ConnectionPool, ConnectionRef, PoolConnectError},
     discovery::GossipDiscovery,
-    peer_manager::{PeerManager, PeerManagerEvent, TopicChannels},
-    util::{AddrInfo, Guarded, Timers},
+    util::{AddrInfo, Timers},
 };
 use crate::{
     api::{self, GossipApi},
@@ -44,9 +47,9 @@ use crate::{
     proto::{self, Config, HyparviewConfig, PeerData, PlumtreeConfig, TopicId},
 };
 
-mod dialer;
+mod connection_pool;
 mod discovery;
-pub(crate) mod peer_manager;
+mod net_proto;
 mod util;
 
 /// ALPN protocol name
@@ -87,18 +90,10 @@ impl std::ops::Deref for Gossip {
     }
 }
 
-#[derive(derive_more::Debug)]
-enum LocalActorMessage {
-    #[debug("HandleConnection({})", _0.fmt_short())]
-    HandleConnection(EndpointId, Connection),
-    #[debug("Connect({}, {})", _0.fmt_short(), _1.fmt_short())]
-    Connect(EndpointId, TopicId),
-}
-
 #[derive(Debug)]
 struct Inner {
     api: GossipApi,
-    local_tx: mpsc::Sender<LocalActorMessage>,
+    pool: ConnectionPool,
     _actor_handle: AbortOnDropHandle<()>,
     max_message_size: usize,
     metrics: Arc<Metrics>,
@@ -106,8 +101,7 @@ struct Inner {
 
 impl ProtocolHandler for Gossip {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        let remote = connection.remote_id();
-        self.handle_connection(remote, connection)
+        self.handle_connection(connection)
             .await
             .map_err(|err| AcceptError::from_err(anyerr!(err)))?;
         Ok(())
@@ -186,14 +180,10 @@ impl Gossip {
     /// Handle an incoming [`Connection`].
     ///
     /// Make sure to check the ALPN protocol yourself before passing the connection.
-    pub async fn handle_connection(
-        &self,
-        remote: EndpointId,
-        connection: Connection,
-    ) -> Result<(), ActorStoppedError> {
+    pub async fn handle_connection(&self, connection: Connection) -> Result<(), ActorStoppedError> {
         self.0
-            .local_tx
-            .send(LocalActorMessage::HandleConnection(remote, connection))
+            .pool
+            .handle_connection(connection)
             .await
             .map_err(|_| ActorStoppedError::new())?;
         Ok(())
@@ -208,7 +198,7 @@ impl Gossip {
         let metrics = Arc::new(Metrics::default());
         let max_message_size = config.max_message_size;
         let me = endpoint.id();
-        let (api_tx, local_tx, actor) = Actor::new(endpoint, config, alpn, metrics.clone());
+        let (api_tx, pool, actor) = Actor::new(endpoint, config, alpn, metrics.clone());
         let actor_task = task::spawn(
             actor
                 .run()
@@ -216,9 +206,9 @@ impl Gossip {
         );
 
         Self(Arc::new(Inner {
-            local_tx,
             max_message_size,
             api: GossipApi::local(api_tx),
+            pool,
             metrics,
             _actor_handle: AbortOnDropHandle::new(actor_task),
         }))
@@ -228,9 +218,9 @@ impl Gossip {
     fn new_with_actor(endpoint: Endpoint, config: Config, alpn: Option<Bytes>) -> (Self, Actor) {
         let metrics = Arc::new(Metrics::default());
         let max_message_size = config.max_message_size;
-        let (api_tx, local_tx, actor) = Actor::new(endpoint, config, alpn, metrics.clone());
+        let (api_tx, pool, actor) = Actor::new(endpoint, config, alpn, metrics.clone());
         let handle = Self(Arc::new(Inner {
-            local_tx,
+            pool,
             max_message_size,
             api: GossipApi::local(api_tx),
             metrics,
@@ -251,26 +241,79 @@ enum ActorToTopic {
         remote: EndpointId,
         channels: TopicChannels,
     },
-    RemoteConnectFailed(EndpointId),
 }
 
 type ApiJoinRequest = WithChannels<api::JoinRequest, api::Request>;
 type ApiRecvStream = BoxStream<Result<api::Command, RecvError>>;
 type RemoteRecvStream = BoxStream<(EndpointId, Result<Option<ProtoMessage>, RecvError>)>;
 
-struct Actor {
+#[derive(Debug, Default, Clone)]
+struct TopicMap(Arc<Mutex<TopicMapInner>>);
+
+#[derive(Debug, Default)]
+struct TopicMapInner {
+    topics: HashMap<TopicId, TopicHandle>,
+    tasks: JoinSet<TopicActor>,
+}
+
+impl TopicMap {
+    fn get_or_init(&self, topic_id: TopicId, shared: &Arc<Shared>) -> TopicHandle {
+        let mut inner = self.0.lock().expect("poisoned");
+        match inner.topics.entry(topic_id) {
+            hash_map::Entry::Occupied(entry) => entry.get().clone(),
+            hash_map::Entry::Vacant(entry) => {
+                let (handle, actor) = TopicHandle::new(topic_id, shared.clone());
+                let topic = entry.insert(handle).clone();
+                inner.tasks.spawn(
+                    actor
+                        .run()
+                        .instrument(error_span!("topic", topic=%topic_id.fmt_short())),
+                );
+                topic
+            }
+        }
+    }
+
+    fn get(&self, topic_id: &TopicId) -> Option<TopicHandle> {
+        let inner = self.0.lock().expect("poisoned");
+        inner.topics.get(topic_id).cloned()
+    }
+
+    async fn join_next(&self) {
+        std::future::poll_fn(|cx| {
+            let mut inner = self.0.lock().expect("poisoned");
+            loop {
+                if inner.tasks.is_empty() {
+                    return Poll::Pending;
+                } else {
+                    let res =
+                        ready!(inner.tasks.poll_join_next(cx)).expect("task map is not empty");
+                    let actor = res.expect("topic actortask panicked");
+                    trace!(topic=%actor.topic_id.fmt_short(), "tick: topic actor finished");
+                    inner.topics.remove(&actor.topic_id);
+                }
+            }
+        })
+        .await
+    }
+}
+
+struct Shared {
     me: EndpointId,
     config: Config,
-    local_rx: mpsc::Receiver<LocalActorMessage>,
-    local_tx: mpsc::Sender<LocalActorMessage>,
-    api_rx: mpsc::Receiver<api::RpcMessage>,
-    topics: HashMap<TopicId, TopicHandle>,
-    topic_tasks: JoinSet<TopicActor>,
-    peer_manager: PeerManager,
     our_peer_data: n0_watcher::Watchable<PeerData>,
     metrics: Arc<Metrics>,
-    endpoint_addr_updates: BoxStream<EndpointAddr>,
     discovery: GossipDiscovery,
+    pool: ConnectionPool,
+}
+
+struct Actor {
+    #[cfg(test)]
+    endpoint: Endpoint,
+    shared: Arc<Shared>,
+    topics: TopicMap,
+    api_rx: mpsc::Receiver<api::RpcMessage>,
+    endpoint_addr_updates: BoxStream<EndpointAddr>,
 }
 
 impl Actor {
@@ -279,13 +322,8 @@ impl Actor {
         config: Config,
         alpn: Option<Bytes>,
         metrics: Arc<Metrics>,
-    ) -> (
-        mpsc::Sender<api::RpcMessage>,
-        mpsc::Sender<LocalActorMessage>,
-        Self,
-    ) {
+    ) -> (mpsc::Sender<api::RpcMessage>, ConnectionPool, Self) {
         let (api_tx, api_rx) = tokio::sync::mpsc::channel(16);
-        let (local_tx, local_rx) = tokio::sync::mpsc::channel(16);
 
         let me = endpoint.id();
 
@@ -295,24 +333,39 @@ impl Actor {
         let initial_peer_data = AddrInfo::from(endpoint.addr()).encode();
 
         let alpn = alpn.unwrap_or_else(|| crate::ALPN.to_vec().into());
-        let peer_manager = PeerManager::new(endpoint, alpn);
+
+        let topics = TopicMap::default();
+        let options = connection_pool::Options::default().with_on_connected({
+            let topics = topics.clone();
+            move |_ep, conn| {
+                let topics = topics.clone();
+                Box::pin(async move {
+                    task::spawn(accept_loop(topics, conn));
+                    Ok(())
+                })
+            }
+        });
+        let pool = ConnectionPool::new(endpoint.clone(), &alpn, options);
+
+        let shared = Arc::new(Shared {
+            me,
+            config,
+            our_peer_data: Watchable::new(initial_peer_data),
+            metrics: metrics.clone(),
+            discovery,
+            pool: pool.clone(),
+        });
 
         (
             api_tx,
-            local_tx.clone(),
+            pool,
             Actor {
-                me,
-                config,
+                #[cfg(test)]
+                endpoint,
+                shared,
                 api_rx,
-                local_tx,
-                local_rx,
                 endpoint_addr_updates: Box::pin(endpoint_addr_updates),
-                our_peer_data: Watchable::new(initial_peer_data),
-                metrics: metrics.clone(),
-                topics: Default::default(),
-                discovery,
-                peer_manager,
-                topic_tasks: JoinSet::new(),
+                topics,
             },
         )
     }
@@ -327,13 +380,13 @@ impl Actor {
     }
 
     #[cfg(test)]
-    #[instrument("gossip", skip_all, fields(me=%self.me.fmt_short()))]
+    #[instrument("gossip", skip_all, fields(me=%self.shared.me.fmt_short()))]
     pub(crate) async fn finish(self) {
         self.run().await
     }
 
     #[cfg(test)]
-    #[instrument("gossip", skip_all, fields(me=%self.me.fmt_short()))]
+    #[instrument("gossip", skip_all, fields(me=%self.shared.me.fmt_short()))]
     pub(crate) async fn steps(&mut self, n: usize) -> Result<(), ActorStoppedError> {
         for _ in 0..n {
             if self.tick().await == ControlFlow::Break(()) {
@@ -344,8 +397,7 @@ impl Actor {
     }
 
     async fn tick(&mut self) -> ControlFlow<(), ()> {
-        trace!(pm_empty = self.peer_manager.is_empty(), "wait for tick");
-        self.metrics.actor_tick_main.inc();
+        self.shared.metrics.actor_tick_main.inc();
         tokio::select! {
             addr = self.endpoint_addr_updates.next() => {
                 trace!("tick: endpoint_addr_update");
@@ -356,29 +408,10 @@ impl Actor {
                     }
                     Some(addr) => {
                         let data = AddrInfo::from(addr).encode();
-                        self.our_peer_data.set(data).ok();
+                        self.shared.our_peer_data.set(data).ok();
                         ControlFlow::Continue(())
                     }
                 }
-            }
-            Some(msg) = self.local_rx.recv() => {
-                trace!("tick: local_rx {msg:?}");
-                match msg {
-                    LocalActorMessage::HandleConnection(endpoint_id, connection) => {
-                        self.peer_manager.handle_connection(endpoint_id, connection);
-                    }
-                    LocalActorMessage::Connect(endpoint_id, topic_id) => {
-                        self.peer_manager.connect_topic(endpoint_id, topic_id);
-                    }
-                }
-                ControlFlow::Continue(())
-            }
-            event = self.peer_manager.next(), if !self.peer_manager.is_empty() => {
-                trace!(?event, "tick: peer_manager event");
-                if let Some(event) = event {
-                    self.handle_peer_manager_event(event).await;
-                }
-                ControlFlow::Continue(())
             }
             msg = self.api_rx.recv() => {
                 trace!(some=msg.is_some(), "tick: api_rx");
@@ -393,81 +426,67 @@ impl Actor {
                     }
                 }
             }
-            Some(actor) = self.topic_tasks.join_next(), if !self.topic_tasks.is_empty() => {
-                let actor = actor.expect("topic actor task panicked");
-                trace!(topic=%actor.topic_id.fmt_short(), "tick: topic actor finished");
-                self.topics.remove(&actor.topic_id);
-                ControlFlow::Continue(())
-            }
+            _ = self.topics.join_next() => unreachable!("future never completes"),
             else => unreachable!("reached else arm, but all fallible cases should be handled"),
         }
     }
 
     #[cfg(test)]
     fn endpoint(&self) -> &Endpoint {
-        &self.peer_manager.endpoint
-    }
-
-    async fn handle_peer_manager_event(&mut self, event: PeerManagerEvent) {
-        match event {
-            PeerManagerEvent::TopicReady {
-                remote,
-                topic,
-                channels,
-            } => {
-                trace!(remote=%remote.fmt_short(), topic=%topic.fmt_short(), "topic streams ready");
-                if let Some(topic_handle) = self.topics.get(&topic) {
-                    if let Err(_err) = topic_handle
-                        .send(ActorToTopic::RemoteConnected { remote, channels })
-                        .await
-                    {
-                        warn!(topic=%topic.fmt_short(), "Topic actor dead");
-                    }
-                } else {
-                    debug!(topic=%topic.fmt_short(), "ignore topic streams: unknown topic");
-                }
-            }
-            PeerManagerEvent::ConnectFailed { remote, topics } => {
-                debug!(remote=%remote.fmt_short(), ?topics, "Connection failed");
-                for topic_id in topics {
-                    if let Some(handle) = self.topics.get(&topic_id) {
-                        handle
-                            .send(ActorToTopic::RemoteConnectFailed(remote))
-                            .await
-                            .ok();
-                    }
-                }
-            }
-        }
+        &self.endpoint
     }
 
     async fn handle_api_message(&mut self, msg: api::RpcMessage) {
         let (topic_id, msg) = match msg {
             api::RpcMessage::Join(msg) => (msg.inner.topic_id, msg),
         };
-        let topic = self.topics.entry(topic_id).or_insert_with(|| {
-            let (handle, actor) = TopicHandle::new(
-                self.me,
-                topic_id,
-                self.config.clone(),
-                self.local_tx.clone(),
-                self.our_peer_data.watch(),
-                self.metrics.clone(),
-                self.discovery.clone(),
-            );
-            self.topic_tasks.spawn(
-                actor
-                    .run()
-                    .instrument(error_span!("topic", topic=%topic_id.fmt_short())),
-            );
-            handle
-        });
+        let topic = self.topics.get_or_init(topic_id, &self.shared);
         if topic.send(ActorToTopic::ApiJoin(msg)).await.is_err() {
             warn!(topic=%topic_id.fmt_short(), "Topic actor dead");
         }
     }
 }
 
+async fn accept_loop(topics: TopicMap, conn: ConnectionRef) {
+    let conn_inner = conn.inner().clone();
+    let request_stream = n0_future::stream::unfold(Some(conn_inner), async |conn| {
+        let conn = conn?;
+        match irpc_iroh::read_request::<net_proto::Request>(&conn).await {
+            Err(err) => Some((Err(err), None)),
+            Ok(None) => None,
+            Ok(Some(request)) => Some((Ok(request), Some(conn))),
+        }
+    });
+    tokio::pin!(request_stream);
+
+    while let Some(Ok(request)) = request_stream.next().await {
+        match request {
+            net_proto::GossipMessage::Join(msg) => {
+                let WithChannels { inner, tx, rx, .. } = msg;
+                let topic_id = inner.topic_id;
+                let Some(topic) = topics.get(&topic_id) else {
+                    continue;
+                };
+                let tx = Guarded {
+                    value: tx,
+                    _guard: conn.clone(),
+                };
+                let rx = Guarded {
+                    value: rx,
+                    _guard: conn.clone(),
+                };
+                let channels = TopicChannels { tx, rx };
+                let msg = ActorToTopic::RemoteConnected {
+                    remote: conn.remote_id(),
+                    channels,
+                };
+                topic.send(msg).await.ok();
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 struct TopicHandle {
     tx: mpsc::Sender<ActorToTopic>,
     #[cfg(test)]
@@ -475,31 +494,23 @@ struct TopicHandle {
 }
 
 impl TopicHandle {
-    fn new(
-        me: EndpointId,
-        topic_id: TopicId,
-        config: proto::Config,
-        to_actor_tx: mpsc::Sender<LocalActorMessage>,
-        peer_data: Direct<PeerData>,
-        metrics: Arc<Metrics>,
-        discovery: GossipDiscovery,
-    ) -> (Self, TopicActor) {
+    fn new(topic_id: TopicId, shared: Arc<Shared>) -> (Self, TopicActor) {
         let (tx, rx) = mpsc::channel(16);
         // TODO: peer_data
-        let state = State::new(me, None, config);
+        let state = State::new(shared.me, None, shared.config.clone());
         #[cfg(test)]
         let joined = Arc::new(AtomicBool::new(false));
+        let peer_data = shared.our_peer_data.watch();
         let (forward_event_tx, _) = broadcast::channel(512);
         let actor = TopicActor {
             topic_id,
+            shared,
             state,
             actor_rx: rx,
-            to_actor_tx,
             peer_data,
+            // to_actor_tx,
             api_send_tx: forward_event_tx,
-            metrics,
             init: false,
-            discovery,
             #[cfg(test)]
             joined: joined.clone(),
             timers: Default::default(),
@@ -510,6 +521,7 @@ impl TopicHandle {
             remote_receivers: Default::default(),
             drop_peers_queue: Default::default(),
             api_send_tasks: Default::default(),
+            connecting: Default::default(),
         };
         let handle = Self {
             tx,
@@ -531,6 +543,7 @@ impl TopicHandle {
 
 struct TopicActor {
     topic_id: TopicId,
+    shared: Arc<Shared>,
 
     // -- state
     state: State,
@@ -544,21 +557,18 @@ struct TopicActor {
 
     // -- senders and receivers
     peer_data: Direct<PeerData>,
-    to_actor_tx: mpsc::Sender<LocalActorMessage>,
     actor_rx: mpsc::Receiver<ActorToTopic>,
     remote_senders: HashMap<EndpointId, MaybeSender>,
     remote_receivers: MergeUnbounded<RemoteRecvStream>,
     api_receivers: MergeUnbounded<ApiRecvStream>,
     api_send_tx: broadcast::Sender<ProtoEvent>,
     api_send_tasks: JoinSet<()>,
-
-    metrics: Arc<Metrics>,
-    discovery: GossipDiscovery,
+    connecting: FuturesUnordered<BoxFuture<(EndpointId, Result<ConnectionRef, PoolConnectError>)>>,
 }
 
 impl TopicActor {
     pub async fn run(mut self) -> Self {
-        self.metrics.topics_joined.inc();
+        self.shared.metrics.topics_joined.inc();
         let peer_data = self.peer_data.clone().stream();
         tokio::pin!(peer_data);
         loop {
@@ -568,6 +578,9 @@ impl TopicActor {
                     trace!("tick: actor_rx {msg}");
                     self.handle_actor_message(msg).await;
                 },
+                Some(conn) = self.connecting.next(), if !self.connecting.is_empty() => {
+                    self.handle_connected(conn).await;
+                }
                 Some(message) = self.api_receivers.next(), if !self.api_receivers.is_empty() => {
                     let message = match message {
                         Ok(message) => message,
@@ -610,10 +623,10 @@ impl TopicActor {
                 self.process_out_events(now).await;
             }
 
-            if self.to_actor_tx.is_closed() {
-                warn!("Channel to main actor closed: abort topic loop");
-                break;
-            }
+            // if self.to_actor_tx.is_closed() {
+            //     warn!("Channel to main actor closed: abort topic loop");
+            //     break;
+            // }
             if self.init && self.api_receivers.is_empty() && self.api_send_tasks.is_empty() {
                 debug!("Closing topic: All API subscribers dropped");
                 self.handle_in_event(InEvent::Command(Command::Quit)).await;
@@ -621,8 +634,47 @@ impl TopicActor {
                 break;
             }
         }
-        self.metrics.topics_quit.inc();
+        self.shared.metrics.topics_quit.inc();
         self
+    }
+
+    async fn handle_connected(
+        &mut self,
+        (remote, conn): (EndpointId, Result<ConnectionRef, PoolConnectError>),
+    ) {
+        match conn {
+            Ok(conn) => {
+                let client: irpc::Client<net_proto::Request> =
+                    irpc::Client::boxed(IrohRemoteConnection::new(conn.inner().clone()));
+                let req = net_proto::JoinRequest {
+                    topic_id: self.topic_id,
+                };
+                // TODO: Has to happen in task
+                let Ok((tx, rx)) = client.bidi_streaming(req, 64, 64).await else {
+                    self.handle_in_event(InEvent::PeerDisconnected(remote))
+                        .await;
+                    return;
+                };
+                let tx = Guarded {
+                    value: tx,
+                    _guard: conn.clone(),
+                };
+                let rx = Guarded {
+                    value: rx,
+                    _guard: conn.clone(),
+                };
+                self.remote_receivers
+                    .push(Box::pin(into_stream(rx).map(move |msg| (remote, msg))));
+                let sender = self.remote_senders.entry(remote).or_default();
+                if let Err(err) = sender.init(tx).await {
+                    warn!("Remote failed while pushing queued messages: {err:?}");
+                }
+            }
+            Err(_err) => {
+                self.handle_in_event(InEvent::PeerDisconnected(remote))
+                    .await
+            }
+        }
     }
 
     async fn handle_actor_message(&mut self, msg: ActorToTopic) {
@@ -650,10 +702,6 @@ impl TopicActor {
                 )))
                 .await;
             }
-            ActorToTopic::RemoteConnectFailed(endpoint_id) => {
-                self.handle_in_event(InEvent::PeerDisconnected(endpoint_id))
-                    .await
-            }
         }
     }
 
@@ -679,7 +727,7 @@ impl TopicActor {
     async fn handle_in_event(&mut self, event: InEvent) {
         trace!("in_event {event:?}");
         let now = Instant::now();
-        self.metrics.track_in_event(&event);
+        self.shared.metrics.track_in_event(&event);
         self.out_events.extend(self.state.handle(event, now));
         self.process_out_events(now).await;
     }
@@ -687,7 +735,7 @@ impl TopicActor {
     async fn process_out_events(&mut self, now: Instant) {
         while let Some(event) = self.out_events.pop_front() {
             trace!("out_event {event:?}");
-            self.metrics.track_out_event(&event);
+            self.shared.metrics.track_out_event(&event);
             match event {
                 OutEvent::SendMessage(endpoint_id, message) => {
                     self.send(endpoint_id, message).await;
@@ -702,7 +750,7 @@ impl TopicActor {
                     self.remote_senders.remove(&endpoint_id);
                 }
                 OutEvent::PeerData(endpoint_id, peer_data) => {
-                    self.discovery.add_peer_data(endpoint_id, peer_data);
+                    self.shared.discovery.add_peer_data(endpoint_id, peer_data);
                 }
             }
         }
@@ -714,10 +762,14 @@ impl TopicActor {
             hash_map::Entry::Occupied(entry) => entry.into_mut(),
             hash_map::Entry::Vacant(entry) => {
                 debug!("requesting new connection");
-                self.to_actor_tx
-                    .send(LocalActorMessage::Connect(remote, self.topic_id))
-                    .await
-                    .ok();
+                let pool = self.shared.pool.clone();
+                self.connecting.push(Box::pin(async move {
+                    (remote, pool.get_or_connect(remote).await)
+                }));
+                // self.to_actor_tx
+                //     .send(LocalActorMessage::Connect(remote, self.topic_id))
+                //     .await
+                //     .ok();
                 entry.insert(Default::default())
             }
         };
@@ -772,6 +824,27 @@ async fn forward_events(
 }
 
 #[derive(Debug)]
+struct TopicChannels {
+    /// Sender for messages to the remote.
+    tx: Guarded<channel::mpsc::Sender<ProtoMessage>>,
+    /// Receiver for messages to the remote.
+    rx: Guarded<channel::mpsc::Receiver<ProtoMessage>>,
+}
+
+#[derive(Debug, derive_more::Deref)]
+struct Guarded<T> {
+    #[deref]
+    value: T,
+    _guard: ConnectionRef,
+}
+
+impl<T> DerefMut for Guarded<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.value
+    }
+}
+
+#[derive(Debug)]
 enum MaybeSender {
     Active(Guarded<channel::mpsc::Sender<ProtoMessage>>),
     Pending(Vec<ProtoMessage>),
@@ -820,6 +893,7 @@ impl Default for MaybeSender {
 // None after the first error, whereas upstream would loop on the error
 fn into_stream<T: irpc::RpcMessage>(
     receiver: impl DerefMut<Target = channel::mpsc::Receiver<T>> + Send + Sync + 'static,
+    // receiver: channel::mpsc::Receiver<T>,
 ) -> impl Stream<Item = Result<Option<T>, RecvError>> + Send + Sync + 'static {
     n0_future::stream::unfold(Some(receiver), |recv| async move {
         let mut recv = recv?;
@@ -957,8 +1031,7 @@ pub(crate) mod tests {
                         let connection = connecting
                             .await
                             .std_context("await incoming connection")?;
-                            let remote_endpoint_id = connection.remote_id();
-                            gossip.handle_connection(remote_endpoint_id, connection).await?
+                            gossip.handle_connection(connection).await?
                     }
                 }
             }
@@ -1224,7 +1297,7 @@ pub(crate) mod tests {
             .await
             .std_context("signal drop handles")?;
         actor.steps(1).await?; // topic task finished
-        assert!(!actor.topics.contains_key(&topic));
+        assert!(actor.topics.get(&topic).is_none());
 
         // cleanup and ensure everything went as expected
         ct.cancel();
