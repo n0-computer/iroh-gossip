@@ -1,7 +1,7 @@
 //! Networking for the `iroh-gossip` protocol
 
 use std::{
-    collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque, hash_map::Entry},
     net::SocketAddr,
     pin::Pin,
     sync::Arc,
@@ -9,25 +9,25 @@ use std::{
 };
 
 use bytes::Bytes;
-use futures_concurrency::stream::{stream_group, StreamGroup};
+use futures_concurrency::stream::{StreamGroup, stream_group};
 use futures_util::FutureExt as _;
 use iroh::{
+    Endpoint, EndpointAddr, EndpointId, PublicKey, RelayUrl, Watcher,
     endpoint::Connection,
     protocol::{AcceptError, ProtocolHandler},
-    Endpoint, EndpointAddr, EndpointId, PublicKey, RelayUrl, Watcher,
 };
 use irpc::WithChannels;
 use n0_error::{e, stack_error};
 use n0_future::{
+    Stream, StreamExt as _,
     task::{self, AbortOnDropHandle, JoinSet},
     time::Instant,
-    Stream, StreamExt as _,
 };
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, error_span, trace, warn, Instrument};
+use tracing::{Instrument, debug, error, error_span, trace, warn};
 
 use self::{
     address_lookup::GossipAddressLookup,
@@ -222,9 +222,9 @@ impl Gossip {
         }
     }
 
-    /// Listen on a quinn endpoint for incoming RPC connections.
+    /// Listen on a noq endpoint for incoming RPC connections.
     #[cfg(feature = "rpc")]
-    pub async fn listen(self, endpoint: quinn::Endpoint) {
+    pub async fn listen(self, endpoint: noq::Endpoint) {
         self.inner.api.listen(endpoint).await
     }
 
@@ -1066,8 +1066,8 @@ pub(crate) mod test {
     use bytes::Bytes;
     use futures_concurrency::future::TryJoin;
     use iroh::{
-        address_lookup::memory::MemoryLookup, endpoint::BindError, protocol::Router, RelayMap,
-        RelayMode, SecretKey,
+        RelayMap, RelayMode, SecretKey, address_lookup::memory::MemoryLookup, endpoint::BindError,
+        protocol::Router,
     };
     use n0_error::{AnyError, Result, StdResultExt};
     use n0_tracing_test::traced_test;
@@ -1472,8 +1472,8 @@ pub(crate) mod test {
 
         // advance and check that the topic is now subscribed
         actor.steps(3).await; // handle our subscribe;
-                              // get peer connection;
-                              // receive the other peer's information for a NeighborUp
+        // get peer connection;
+        // receive the other peer's information for a NeighborUp
         let state = actor.topics.get(&topic).expect("get registered topic");
         assert!(state.joined());
 

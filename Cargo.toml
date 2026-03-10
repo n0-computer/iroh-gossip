@@ -74,7 +74,7 @@ irpc = { version = "0.12.0", optional = true, default-features = false, features
 n0-error = { version = "0.1", features = ["anyhow"] }
 
 # rpc dependencies (optional)
-quinn = { package = "iroh-quinn", version = "0.16.0", optional = true }
+noq = { version = "0.17.0", optional = true }
 
 # test-utils dependencies (optional)
 rand_chacha = { version = "0.9", optional = true }
@@ -127,9 +127,9 @@ net = [
 rpc = [
     "dep:irpc",
     "dep:tokio",
-    "dep:quinn",
+    "dep:noq",
     "irpc/rpc",
-    "irpc/quinn_endpoint_setup",
+    "irpc/noq_endpoint_setup",
 ]
 test-utils = ["dep:rand_chacha", "dep:humantime-serde"]
 simulator = [
@@ -174,5 +174,4 @@ debug = true
 [patch.crates-io]
 iroh = { git = "https://github.com/n0-computer/iroh.git", branch = "main" }
 iroh-base = { git = "https://github.com/n0-computer/iroh.git", branch = "main" }
-iroh-metrics = { git = "https://github.com/n0-computer/iroh-metrics.git", branch = "iroh-X" }
-irpc = { git = "https://github.com/n0-computer/irpc.git", branch = "iroh-X" }
+irpc = { git = "https://github.com/n0-computer/irpc.git", branch = "feat-noq" }

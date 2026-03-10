@@ -10,7 +10,7 @@ use std::{
 
 use bytes::Bytes;
 use iroh_base::EndpointId;
-use irpc::{channel::mpsc, rpc_requests, Client};
+use irpc::{Client, channel::mpsc, rpc_requests};
 use n0_error::{e, stack_error};
 use n0_future::{Stream, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
@@ -94,15 +94,15 @@ impl GossipApi {
 
     /// Connect to a remote as a RPC client.
     #[cfg(feature = "rpc")]
-    pub fn connect(endpoint: quinn::Endpoint, addr: std::net::SocketAddr) -> Self {
-        let inner = irpc::Client::quinn(endpoint, addr);
+    pub fn connect(endpoint: noq::Endpoint, addr: std::net::SocketAddr) -> Self {
+        let inner = irpc::Client::noq(endpoint, addr);
         Self { client: inner }
     }
 
-    /// Listen on a quinn endpoint for incoming RPC connections.
+    /// Listen on a noq endpoint for incoming RPC connections.
     #[cfg(all(feature = "rpc", feature = "net"))]
-    pub(crate) async fn listen(&self, endpoint: quinn::Endpoint) {
-        use irpc::rpc::{listen, RemoteService};
+    pub(crate) async fn listen(&self, endpoint: noq::Endpoint) {
+        use irpc::rpc::{RemoteService, listen};
 
         let local = self
             .client
@@ -416,16 +416,16 @@ mod tests {
     #[tokio::test]
     #[n0_tracing_test::traced_test]
     async fn test_rpc() -> n0_error::Result<()> {
-        use iroh::{address_lookup::memory::MemoryLookup, protocol::Router, RelayMap};
+        use iroh::{RelayMap, address_lookup::memory::MemoryLookup, protocol::Router};
         use n0_error::{AnyError, Result, StackResultExt, StdResultExt};
-        use n0_future::{time::Duration, StreamExt};
+        use n0_future::{StreamExt, time::Duration};
         use rand_chacha::rand_core::SeedableRng;
 
         use crate::{
-            api::{Event, GossipApi},
-            net::{test::create_endpoint, Gossip},
-            proto::TopicId,
             ALPN,
+            api::{Event, GossipApi},
+            net::{Gossip, test::create_endpoint},
+            proto::TopicId,
         };
 
         let mut rng = rand_chacha::ChaCha12Rng::seed_from_u64(1);
