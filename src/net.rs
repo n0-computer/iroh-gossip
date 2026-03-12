@@ -1,7 +1,7 @@
 //! Networking for the `iroh-gossip` protocol
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet, VecDeque, hash_map::Entry},
+    collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
     net::SocketAddr,
     pin::Pin,
     sync::Arc,
@@ -9,25 +9,25 @@ use std::{
 };
 
 use bytes::Bytes;
-use futures_concurrency::stream::{StreamGroup, stream_group};
+use futures_concurrency::stream::{stream_group, StreamGroup};
 use futures_util::FutureExt as _;
 use iroh::{
-    Endpoint, EndpointAddr, EndpointId, PublicKey, RelayUrl, Watcher,
     endpoint::Connection,
     protocol::{AcceptError, ProtocolHandler},
+    Endpoint, EndpointAddr, EndpointId, PublicKey, RelayUrl, Watcher,
 };
 use irpc::WithChannels;
 use n0_error::{e, stack_error};
 use n0_future::{
-    Stream, StreamExt as _,
     task::{self, AbortOnDropHandle, JoinSet},
     time::Instant,
+    Stream, StreamExt as _,
 };
-use rand::{SeedableRng, rngs::StdRng};
+use rand::{rngs::StdRng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, debug, error, error_span, trace, warn};
+use tracing::{debug, error, error_span, trace, warn, Instrument};
 
 use self::{
     address_lookup::GossipAddressLookup,
@@ -185,7 +185,15 @@ impl Builder {
     pub fn spawn(self, endpoint: Endpoint) -> Gossip {
         let metrics = Arc::new(Metrics::default());
         let address_lookup = GossipAddressLookup::default();
-        endpoint.address_lookup().add(address_lookup.clone());
+
+        // `Endpoint::address_lookup` returns `Err` when the endpoint is closed.
+        // In that case, the gossip actor will close too very soon for other reasons,
+        // so it's fine if we only add our `GossipAddressLookup` for the non-closed
+        // case. The alternative would be to return a `Result` from `spawn`,
+        // but as long as this is the only direct error case, it seem unwarranted.
+        if let Ok(endpoint_addr_lookup) = endpoint.address_lookup().as_ref() {
+            endpoint_addr_lookup.add(address_lookup.clone());
+        }
         let (actor, rpc_tx, local_tx) = Actor::new(
             endpoint,
             self.config,
@@ -1066,8 +1074,8 @@ pub(crate) mod test {
     use bytes::Bytes;
     use futures_concurrency::future::TryJoin;
     use iroh::{
-        RelayMap, RelayMode, SecretKey, address_lookup::memory::MemoryLookup, endpoint::BindError,
-        protocol::Router,
+        address_lookup::memory::MemoryLookup, endpoint::BindError, protocol::Router,
+        tls::CaRootsConfig, RelayMap, RelayMode, SecretKey,
     };
     use n0_error::{AnyError, Result, StdResultExt};
     use n0_tracing_test::traced_test;
@@ -1144,7 +1152,10 @@ pub(crate) mod test {
             let endpoint = create_endpoint(rng, relay_map, None).await?;
             let metrics = Arc::new(Metrics::default());
             let address_lookup = GossipAddressLookup::default();
-            endpoint.address_lookup().add(address_lookup.clone());
+            endpoint
+                .address_lookup()
+                .expect("endpoint is not closed")
+                .add(address_lookup.clone());
 
             let (actor, to_actor_tx, conn_tx) =
                 Actor::new(endpoint, config, metrics.clone(), None, address_lookup);
@@ -1197,12 +1208,14 @@ pub(crate) mod test {
         let ep = Endpoint::empty_builder(RelayMode::Custom(relay_map))
             .secret_key(SecretKey::generate(rng))
             .alpns(vec![GOSSIP_ALPN.to_vec()])
-            .insecure_skip_relay_cert_verify(true)
+            .ca_roots_config(CaRootsConfig::insecure_skip_verify())
             .bind()
             .await?;
 
         if let Some(memory_lookup) = memory_lookup {
-            ep.address_lookup().add(memory_lookup);
+            ep.address_lookup()
+                .expect("endpoint is not closed")
+                .add(memory_lookup);
         }
         ep.online().await;
         Ok(ep)
@@ -1441,7 +1454,7 @@ pub(crate) mod test {
         let addr2 = EndpointAddr::new(endpoint_id2).with_relay_url(relay_url);
         let memory_lookup = MemoryLookup::new();
         memory_lookup.add_endpoint_info(addr2);
-        actor.endpoint.address_lookup().add(memory_lookup);
+        actor.endpoint.address_lookup()?.add(memory_lookup);
         // we use a channel to signal advancing steps to the task
         let (tx, mut rx) = mpsc::channel::<()>(1);
         let ct1 = ct.clone();
@@ -1472,8 +1485,8 @@ pub(crate) mod test {
 
         // advance and check that the topic is now subscribed
         actor.steps(3).await; // handle our subscribe;
-        // get peer connection;
-        // receive the other peer's information for a NeighborUp
+                              // get peer connection;
+                              // receive the other peer's information for a NeighborUp
         let state = actor.topics.get(&topic).expect("get registered topic");
         assert!(state.joined());
 
@@ -1552,7 +1565,7 @@ pub(crate) mod test {
         let addr1 = EndpointAddr::new(endpoint_id1).with_relay_url(relay_url.clone());
         let memory_lookup = MemoryLookup::new();
         memory_lookup.add_endpoint_info(addr1);
-        ep2.address_lookup().add(memory_lookup.clone());
+        ep2.address_lookup()?.add(memory_lookup.clone());
         let go2_task = async move {
             let mut sub = go2.subscribe(topic, Vec::new()).await?;
             sub.joined().await?;
@@ -1577,7 +1590,7 @@ pub(crate) mod test {
 
         let addr2 = EndpointAddr::new(endpoint_id2).with_relay_url(relay_url);
         memory_lookup.add_endpoint_info(addr2);
-        ep1.address_lookup().add(memory_lookup);
+        ep1.address_lookup()?.add(memory_lookup);
 
         let mut sub = go1.subscribe(topic, vec![endpoint_id2]).await?;
         // wait for subscribed notification
@@ -1648,7 +1661,7 @@ pub(crate) mod test {
         ) -> Result<(Router, Gossip), BindError> {
             let ep = Endpoint::empty_builder(RelayMode::Custom(relay_map))
                 .secret_key(secret_key)
-                .insecure_skip_relay_cert_verify(true)
+                .ca_roots_config(CaRootsConfig::insecure_skip_verify())
                 .bind()
                 .await?;
             let gossip = Gossip::builder().spawn(ep.clone());
@@ -1671,7 +1684,7 @@ pub(crate) mod test {
             let bootstrap = vec![bootstrap_addr.id];
             let memory_lookup = MemoryLookup::new();
             memory_lookup.add_endpoint_info(bootstrap_addr);
-            router.endpoint().address_lookup().add(memory_lookup);
+            router.endpoint().address_lookup()?.add(memory_lookup);
             let mut topic = gossip.subscribe_and_join(topic_id, bootstrap).await?;
             topic.broadcast(message.as_bytes().to_vec().into()).await?;
             std::future::pending::<()>().await;
@@ -1788,7 +1801,7 @@ pub(crate) mod test {
         let id1 = addr1.id;
         let memory_lookup = MemoryLookup::new();
         memory_lookup.add_endpoint_info(addr1);
-        router2.endpoint().address_lookup().add(memory_lookup);
+        router2.endpoint().address_lookup()?.add(memory_lookup);
 
         let mut topic1 = gossip1.subscribe(topic_id, vec![]).await?;
         let mut topic2 = gossip2.subscribe(topic_id, vec![id1]).await?;
@@ -1840,7 +1853,7 @@ pub(crate) mod test {
         lookup.add_endpoint_info(addr1);
 
         // add addr info of endpoint1 to endpoint2 and join endpoint1
-        r2.endpoint().address_lookup().add(lookup.clone());
+        r2.endpoint().address_lookup()?.add(lookup.clone());
         tx2.join_peers(vec![n1]).await?;
 
         // await join endpoint2 -> nodde1
@@ -1852,7 +1865,7 @@ pub(crate) mod test {
             .std_context("wait rx2 join")??;
 
         // add addr info of endpoint1 to endpoint3 and join endpoint1
-        r3.endpoint().address_lookup().add(lookup.clone());
+        r3.endpoint().address_lookup()?.add(lookup.clone());
         tx3.join_peers(vec![n1]).await?;
 
         // await join at endpoint3: n1 and n2
@@ -1914,7 +1927,7 @@ pub(crate) mod test {
         let id1 = addr1.id;
         let mem_lookup = MemoryLookup::new();
         mem_lookup.add_endpoint_info(addr1);
-        router2.endpoint().address_lookup().add(mem_lookup);
+        router2.endpoint().address_lookup()?.add(mem_lookup);
 
         let topic1 = gossip1.subscribe(topic_id, vec![]).await?;
         let topic2 = gossip2.subscribe(topic_id, vec![id1]).await?;

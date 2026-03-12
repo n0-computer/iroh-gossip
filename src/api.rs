@@ -10,7 +10,7 @@ use std::{
 
 use bytes::Bytes;
 use iroh_base::EndpointId;
-use irpc::{Client, channel::mpsc, rpc_requests};
+use irpc::{channel::mpsc, rpc_requests, Client};
 use n0_error::{e, stack_error};
 use n0_future::{Stream, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
@@ -102,7 +102,7 @@ impl GossipApi {
     /// Listen on a noq endpoint for incoming RPC connections.
     #[cfg(all(feature = "rpc", feature = "net"))]
     pub(crate) async fn listen(&self, endpoint: noq::Endpoint) {
-        use irpc::rpc::{RemoteService, listen};
+        use irpc::rpc::{listen, RemoteService};
 
         let local = self
             .client
@@ -416,16 +416,16 @@ mod tests {
     #[tokio::test]
     #[n0_tracing_test::traced_test]
     async fn test_rpc() -> n0_error::Result<()> {
-        use iroh::{RelayMap, address_lookup::memory::MemoryLookup, protocol::Router};
+        use iroh::{address_lookup::memory::MemoryLookup, protocol::Router, RelayMap};
         use n0_error::{AnyError, Result, StackResultExt, StdResultExt};
-        use n0_future::{StreamExt, time::Duration};
+        use n0_future::{time::Duration, StreamExt};
         use rand_chacha::rand_core::SeedableRng;
 
         use crate::{
-            ALPN,
             api::{Event, GossipApi},
-            net::{Gossip, test::create_endpoint},
+            net::{test::create_endpoint, Gossip},
             proto::TopicId,
+            ALPN,
         };
 
         let mut rng = rand_chacha::ChaCha12Rng::seed_from_u64(1);
@@ -465,7 +465,7 @@ mod tests {
         let memory_lookup = MemoryLookup::new();
         memory_lookup.add_endpoint_info(endpoint2_addr);
 
-        router.endpoint().address_lookup().add(memory_lookup);
+        router.endpoint().address_lookup()?.add(memory_lookup);
 
         // expose the gossip endpoint over RPC
         let (rpc_server_endpoint, rpc_server_cert) =
