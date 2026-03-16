@@ -11,7 +11,7 @@ The <code>net</code> module implements networking logic for running <code>iroh-g
 <p>Iroh provides a <a href="https://docs.rs/iroh/latest/iroh/protocol/struct.Router.html"><code>Router</code></a> that takes an <a href="https://docs.rs/iroh/latest/iroh/endpoint/struct.Endpoint.html"><code>Endpoint</code></a> and any protocols needed for the application. Similar to a router in webserver library, it runs a loop accepting incoming connections and routes them to the specific protocol handler, based on <code>ALPN</code>.</p>
 <p>Here is a basic example of how to set up <code>iroh-gossip</code> with <code>iroh</code>:</p>
 
-<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>iroh::{protocol::Router, Endpoint, EndpointId};
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>iroh::{protocol::Router, Endpoint, EndpointId, endpoint::presets};
 <span class="kw">use </span>iroh_gossip::{api::Event, Gossip, TopicId};
 <span class="kw">use </span>n0_error::{<span class="prelude-ty">Result</span>, StdResultExt};
 <span class="kw">use </span>n0_future::StreamExt;
@@ -20,7 +20,7 @@ The <code>net</code> module implements networking logic for running <code>iroh-g
 </span><span class="kw">async fn </span>main() -&gt; <span class="prelude-ty">Result</span>&lt;()&gt; {
     <span class="comment">// create an iroh endpoint that includes the standard discovery mechanisms
     // we've built at number0
-    </span><span class="kw">let </span>endpoint = Endpoint::bind().<span class="kw">await</span><span class="question-mark">?</span>;
+    </span><span class="kw">let </span>endpoint = Endpoint::bind(presets::N0).<span class="kw">await</span><span class="question-mark">?</span>;
 
     <span class="comment">// build gossip protocol
     </span><span class="kw">let </span>gossip = Gossip::builder().spawn(endpoint.clone());
