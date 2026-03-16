@@ -2,6 +2,16 @@
 
 All notable changes to iroh-gossip will be documented in this file.
 
+## [0.97.0](https://github.com/n0-computer/iroh-gossip/compare/v0.96.0..0.97.0) - 2026-03-16
+
+### ⛰️  Features
+
+- [**breaking**] Update to iroh@0.97 ([#130](https://github.com/n0-computer/iroh-gossip/issues/130)) - ([62b4805](https://github.com/n0-computer/iroh-gossip/commit/62b4805d8e9d6088d2fde9bb8bdb5590390b334b))
+
+### 🐛 Bug Fixes
+
+- Evict message id cache ([#128](https://github.com/n0-computer/iroh-gossip/issues/128)) - ([c1ad5da](https://github.com/n0-computer/iroh-gossip/commit/c1ad5da464e0238425b29be748478d027ea0b878))
+
 ## [0.96.0](https://github.com/n0-computer/iroh-gossip/compare/v0.95.0..0.96.0) - 2026-01-29
 
 ### ⛰️  Features
