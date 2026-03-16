@@ -26,7 +26,6 @@ allow = [
     "MIT",
     "Zlib",
     "Unicode-3.0",
-    "MPL-2.0",
     "Unlicense",
 ]
 
@@ -39,3 +38,4 @@ hash = 3171872035
 path = "LICENSE"
 
 [sources]
+allow-git = []

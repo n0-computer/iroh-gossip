@@ -9,8 +9,8 @@ use bytes::Bytes;
 use clap::Parser;
 use futures_lite::StreamExt;
 use iroh::{
-    address_lookup::memory::MemoryLookup, Endpoint, EndpointAddr, PublicKey, RelayMode, RelayUrl,
-    SecretKey,
+    address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, EndpointAddr, PublicKey,
+    RelayMode, RelayUrl, SecretKey,
 };
 use iroh_gossip::{
     api::{Event, GossipReceiver},
@@ -112,7 +112,7 @@ async fn main() -> Result<()> {
     let memory_lookup = MemoryLookup::new();
 
     // build our magic endpoint
-    let endpoint = Endpoint::builder()
+    let endpoint = Endpoint::builder(presets::N0)
         .secret_key(secret_key)
         .address_lookup(memory_lookup.clone())
         .relay_mode(relay_mode.clone())

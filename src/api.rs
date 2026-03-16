@@ -94,14 +94,14 @@ impl GossipApi {
 
     /// Connect to a remote as a RPC client.
     #[cfg(feature = "rpc")]
-    pub fn connect(endpoint: quinn::Endpoint, addr: std::net::SocketAddr) -> Self {
-        let inner = irpc::Client::quinn(endpoint, addr);
+    pub fn connect(endpoint: noq::Endpoint, addr: std::net::SocketAddr) -> Self {
+        let inner = irpc::Client::noq(endpoint, addr);
         Self { client: inner }
     }
 
-    /// Listen on a quinn endpoint for incoming RPC connections.
+    /// Listen on a noq endpoint for incoming RPC connections.
     #[cfg(all(feature = "rpc", feature = "net"))]
-    pub(crate) async fn listen(&self, endpoint: quinn::Endpoint) {
+    pub(crate) async fn listen(&self, endpoint: noq::Endpoint) {
         use irpc::rpc::{listen, RemoteService};
 
         let local = self
@@ -465,7 +465,7 @@ mod tests {
         let memory_lookup = MemoryLookup::new();
         memory_lookup.add_endpoint_info(endpoint2_addr);
 
-        router.endpoint().address_lookup().add(memory_lookup);
+        router.endpoint().address_lookup()?.add(memory_lookup);
 
         // expose the gossip endpoint over RPC
         let (rpc_server_endpoint, rpc_server_cert) =
