@@ -1,4 +1,4 @@
-use iroh::{protocol::Router, Endpoint};
+use iroh::{endpoint::presets, protocol::Router, Endpoint};
 use iroh_gossip::{net::Gossip, ALPN};
 use n0_error::{Result, StdResultExt};
 
@@ -6,7 +6,7 @@ use n0_error::{Result, StdResultExt};
 async fn main() -> Result<()> {
     // create an iroh endpoint that includes the standard address lookup mechanisms
     // we've built at number0
-    let endpoint = Endpoint::bind().await?;
+    let endpoint = Endpoint::bind(presets::N0).await?;
 
     // build gossip protocol
     let gossip = Gossip::builder().spawn(endpoint.clone());
