@@ -75,10 +75,13 @@ impl GossipAddressLookup {
                         break;
                     };
                     let now = SystemTime::now();
-                    endpoints.write().unwrap_or_else(|e| e.into_inner()).retain(|_k, v| {
-                        let age = now.duration_since(v.last_updated).unwrap_or(Duration::MAX);
-                        age <= opts.retention
-                    });
+                    endpoints
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .retain(|_k, v| {
+                            let age = now.duration_since(v.last_updated).unwrap_or(Duration::MAX);
+                            age <= opts.retention
+                        });
                 }
             })
         };
