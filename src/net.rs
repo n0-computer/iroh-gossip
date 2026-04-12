@@ -452,7 +452,10 @@ impl Actor {
             event = self.in_event_rx.recv() => {
                 trace!(?i, "tick: in_event_rx");
                 self.metrics.actor_tick_in_event_rx.inc();
-                let event = event.expect("unreachable: in_event_tx is never dropped before receiver");
+                let Some(event) = event else {
+                    warn!("in_event channel closed unexpectedly");
+                    return false;
+                };
                 self.handle_in_event(event, Instant::now()).await;
             }
             _ = self.timers.wait_next() => {
@@ -465,16 +468,25 @@ impl Actor {
             }
             Some(res) = self.connection_tasks.join_next(), if !self.connection_tasks.is_empty() => {
                 trace!(?i, "tick: connection_tasks");
-                let (peer_id, conn, result) = res.expect("connection task panicked");
-                self.handle_connection_task_finished(peer_id, conn, result).await;
+                match res {
+                    Ok((peer_id, conn, result)) => {
+                        self.handle_connection_task_finished(peer_id, conn, result).await;
+                    }
+                    Err(err) => {
+                        error!("connection task panicked: {err}");
+                    }
+                }
             }
             Some(res) = self.topic_event_forwarders.join_next(), if !self.topic_event_forwarders.is_empty() => {
-                let topic_id = res.expect("topic event forwarder panicked");
-                if let Some(state) = self.topics.get_mut(&topic_id) {
-                    if !state.still_needed() {
-                        self.quit_queue.push_back(topic_id);
-                        self.process_quit_queue().await;
+                if let Ok(topic_id) = res {
+                    if let Some(state) = self.topics.get_mut(&topic_id) {
+                        if !state.still_needed() {
+                            self.quit_queue.push_back(topic_id);
+                            self.process_quit_queue().await;
+                        }
                     }
+                } else if let Err(err) = res {
+                    error!("topic event forwarder panicked: {err}");
                 }
             }
         }
