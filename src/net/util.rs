@@ -381,7 +381,7 @@ pub async fn write_frame<T: Serialize>(
     max_message_size: usize,
 ) -> Result<(), WriteError> {
     let len = postcard::experimental::serialized_size(&message)?;
-    if len >= max_message_size {
+    if len > max_message_size {
         return Err(e!(WriteError::TooLarge));
     }
     buffer.clear();
