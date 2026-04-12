@@ -75,7 +75,7 @@ impl GossipAddressLookup {
                         break;
                     };
                     let now = SystemTime::now();
-                    endpoints.write().expect("poisoned").retain(|_k, v| {
+                    endpoints.write().unwrap_or_else(|e| e.into_inner()).retain(|_k, v| {
                         let age = now.duration_since(v.last_updated).unwrap_or(Duration::MAX);
                         age <= opts.retention
                     });
@@ -96,7 +96,7 @@ impl GossipAddressLookup {
     pub(crate) fn add(&self, endpoint_info: impl Into<EndpointInfo>) {
         let last_updated = SystemTime::now();
         let EndpointInfo { endpoint_id, data } = endpoint_info.into();
-        let mut guard = self.endpoints.write().expect("poisoned");
+        let mut guard = self.endpoints.write().unwrap_or_else(|e| e.into_inner());
         match guard.entry(endpoint_id) {
             Entry::Occupied(mut entry) => {
                 let existing = entry.get_mut();
@@ -116,7 +116,7 @@ impl AddressLookup for GossipAddressLookup {
         &self,
         endpoint_id: EndpointId,
     ) -> Option<BoxStream<Result<address_lookup::Item, address_lookup::Error>>> {
-        let guard = self.endpoints.read().expect("poisoned");
+        let guard = self.endpoints.read().unwrap_or_else(|e| e.into_inner());
         let info = guard.get(&endpoint_id)?;
         let last_updated = info
             .last_updated
