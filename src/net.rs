@@ -754,6 +754,12 @@ impl Actor {
 
 type ConnId = usize;
 
+/// Maximum number of extra connections to keep per peer beyond the active one.
+///
+/// If a peer opens more connections than this, the oldest extra connections are
+/// forgotten (their tasks will terminate naturally when the send channel is dropped).
+const MAX_OTHER_CONNS_PER_PEER: usize = 4;
+
 #[derive(Debug)]
 enum PeerState {
     Pending {
@@ -793,6 +799,10 @@ impl PeerState {
                 // the `connection_loop` of the old connection will terminate, which will also
                 // notify the peer that the old connection may be dropped.
                 other_conns.push(*active_conn_id);
+                // Drop oldest extra connections if we exceed the limit.
+                while other_conns.len() > MAX_OTHER_CONNS_PER_PEER {
+                    other_conns.remove(0);
+                }
                 *active_send_tx = send_tx;
                 *active_conn_id = conn_id;
                 Vec::new()
