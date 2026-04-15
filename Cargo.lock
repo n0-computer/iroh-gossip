@@ -1604,7 +1604,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tokio",
  "tower-service",
  "tracing",
@@ -1830,7 +1830,7 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "0.97.0"
-source = "git+https://github.com/n0-computer/iroh?branch=main#ea7a634fad49c40bae47eb1bad98e9284e500b4a"
+source = "git+https://github.com/n0-computer/iroh?branch=main#0a22d769052d491015d14cdc4d544a1144981f5d"
 dependencies = [
  "axum",
  "backon",
@@ -1885,7 +1885,7 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "0.97.0"
-source = "git+https://github.com/n0-computer/iroh?branch=main#ea7a634fad49c40bae47eb1bad98e9284e500b4a"
+source = "git+https://github.com/n0-computer/iroh?branch=main#0a22d769052d491015d14cdc4d544a1144981f5d"
 dependencies = [
  "curve25519-dalek",
  "data-encoding",
@@ -1979,7 +1979,7 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "0.97.0"
-source = "git+https://github.com/n0-computer/iroh?branch=main#ea7a634fad49c40bae47eb1bad98e9284e500b4a"
+source = "git+https://github.com/n0-computer/iroh?branch=main#0a22d769052d491015d14cdc4d544a1144981f5d"
 dependencies = [
  "ahash",
  "blake3",
@@ -2518,7 +2518,7 @@ dependencies = [
 [[package]]
 name = "noq"
 version = "0.17.0"
-source = "git+https://github.com/n0-computer/noq?branch=main#e5e862cb76f0294750b69ce57ee8d6408b760458"
+source = "git+https://github.com/n0-computer/noq?branch=main#17ce1822764a0e94f957a28cd388c49add99ce66"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -2528,7 +2528,7 @@ dependencies = [
  "pin-project-lite",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -2539,7 +2539,7 @@ dependencies = [
 [[package]]
 name = "noq-proto"
 version = "0.16.0"
-source = "git+https://github.com/n0-computer/noq?branch=main#e5e862cb76f0294750b69ce57ee8d6408b760458"
+source = "git+https://github.com/n0-computer/noq?branch=main#17ce1822764a0e94f957a28cd388c49add99ce66"
 dependencies = [
  "aes-gcm",
  "aws-lc-rs",
@@ -2566,11 +2566,11 @@ dependencies = [
 [[package]]
 name = "noq-udp"
 version = "0.9.0"
-source = "git+https://github.com/n0-computer/noq?branch=main#e5e862cb76f0294750b69ce57ee8d6408b760458"
+source = "git+https://github.com/n0-computer/noq?branch=main#17ce1822764a0e94f957a28cd388c49add99ce66"
 dependencies = [
  "cfg_aliases",
  "libc",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -3069,7 +3069,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3106,7 +3106,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tracing",
  "windows-sys 0.60.2",
 ]
