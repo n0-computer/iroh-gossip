@@ -1210,7 +1210,7 @@
 <a href=#1210 id=1210 data-nosnippet>1210</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;Endpoint, BindError&gt; {
 <a href=#1211 id=1211 data-nosnippet>1211</a>        <span class="kw">let </span>ep = Endpoint::builder(presets::Minimal)
 <a href=#1212 id=1212 data-nosnippet>1212</a>            .relay_mode(RelayMode::Custom(relay_map))
-<a href=#1213 id=1213 data-nosnippet>1213</a>            .secret_key(SecretKey::generate(rng))
+<a href=#1213 id=1213 data-nosnippet>1213</a>            .secret_key(SecretKey::from_bytes(<span class="kw-2">&amp;</span>rng.random()))
 <a href=#1214 id=1214 data-nosnippet>1214</a>            .alpns(<span class="macro">vec!</span>[GOSSIP_ALPN.to_vec()])
 <a href=#1215 id=1215 data-nosnippet>1215</a>            .ca_roots_config(CaRootsConfig::insecure_skip_verify())
 <a href=#1216 id=1216 data-nosnippet>1216</a>            .bind()
@@ -1697,7 +1697,7 @@
 <a href=#1697 id=1697 data-nosnippet>1697</a>        }
 <a href=#1698 id=1698 data-nosnippet>1698</a>
 <a href=#1699 id=1699 data-nosnippet>1699</a>        <span class="kw">let </span>(relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().<span class="kw">await</span>.unwrap();
-<a href=#1700 id=1700 data-nosnippet>1700</a>        <span class="kw">let </span><span class="kw-2">mut </span>rng = <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
+<a href=#1700 id=1700 data-nosnippet>1700</a>        <span class="kw">let </span>rng = <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
 <a href=#1701 id=1701 data-nosnippet>1701</a>        <span class="kw">let </span>topic_id = TopicId::from_bytes(rng.random());
 <a href=#1702 id=1702 data-nosnippet>1702</a>
 <a href=#1703 id=1703 data-nosnippet>1703</a>        <span class="comment">// spawn a gossip endpoint, send the endpoint's address on addr_tx,
@@ -1706,7 +1706,7 @@
 <a href=#1706 id=1706 data-nosnippet>1706</a>        <span class="kw">let </span>(msgs_recv_tx, <span class="kw-2">mut </span>msgs_recv_rx) = tokio::sync::mpsc::channel(<span class="number">3</span>);
 <a href=#1707 id=1707 data-nosnippet>1707</a>        <span class="kw">let </span>recv_task = tokio::task::spawn({
 <a href=#1708 id=1708 data-nosnippet>1708</a>            <span class="kw">let </span>relay_map = relay_map.clone();
-<a href=#1709 id=1709 data-nosnippet>1709</a>            <span class="kw">let </span>secret_key = SecretKey::generate(<span class="kw-2">&amp;mut </span>rng);
+<a href=#1709 id=1709 data-nosnippet>1709</a>            <span class="kw">let </span>secret_key = SecretKey::from_bytes(<span class="kw-2">&amp;</span>rng.random());
 <a href=#1710 id=1710 data-nosnippet>1710</a>            <span class="kw">async move </span>{
 <a href=#1711 id=1711 data-nosnippet>1711</a>                <span class="kw">let </span>(router, gossip) = spawn_gossip(secret_key, relay_map).<span class="kw">await</span><span class="question-mark">?</span>;
 <a href=#1712 id=1712 data-nosnippet>1712</a>                <span class="comment">// wait for the relay to be set. iroh currently has issues when trying
@@ -1739,7 +1739,7 @@
 <a href=#1739 id=1739 data-nosnippet>1739</a>        <span class="comment">// spawn a endpoint, send a message, and then abruptly terminate the endpoint ungracefully
 <a href=#1740 id=1740 data-nosnippet>1740</a>        // after the message was received on our receiver endpoint.
 <a href=#1741 id=1741 data-nosnippet>1741</a>        </span><span class="kw">let </span>cancel = CancellationToken::new();
-<a href=#1742 id=1742 data-nosnippet>1742</a>        <span class="kw">let </span>secret = SecretKey::generate(<span class="kw-2">&amp;mut </span>rng);
+<a href=#1742 id=1742 data-nosnippet>1742</a>        <span class="kw">let </span>secret = SecretKey::from_bytes(<span class="kw-2">&amp;</span>rng.random());
 <a href=#1743 id=1743 data-nosnippet>1743</a>        <span class="kw">let </span>join_handle_1 = run_in_thread(
 <a href=#1744 id=1744 data-nosnippet>1744</a>            cancel.clone(),
 <a href=#1745 id=1745 data-nosnippet>1745</a>            broadcast_once(
@@ -1832,7 +1832,7 @@
 <a href=#1832 id=1832 data-nosnippet>1832</a>        ) -&gt; n0_error::Result&lt;(EndpointId, Router, Gossip, GossipSender, GossipReceiver)&gt; {
 <a href=#1833 id=1833 data-nosnippet>1833</a>            <span class="kw">let </span>topic_id = TopicId::from([<span class="number">0u8</span>; <span class="number">32</span>]);
 <a href=#1834 id=1834 data-nosnippet>1834</a>            <span class="kw">let </span>ep = Endpoint::builder(presets::Minimal)
-<a href=#1835 id=1835 data-nosnippet>1835</a>                .secret_key(SecretKey::generate(rng))
+<a href=#1835 id=1835 data-nosnippet>1835</a>                .secret_key(SecretKey::from_bytes(<span class="kw-2">&amp;</span>rng.random()))
 <a href=#1836 id=1836 data-nosnippet>1836</a>                .bind()
 <a href=#1837 id=1837 data-nosnippet>1837</a>                .<span class="kw">await</span><span class="question-mark">?</span>;
 <a href=#1838 id=1838 data-nosnippet>1838</a>            <span class="kw">let </span>endpoint_id = ep.id();
