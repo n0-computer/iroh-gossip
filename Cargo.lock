@@ -1402,9 +1402,9 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hickory-net"
-version = "0.26.0-beta.3"
+version = "0.26.0-beta.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "acbafe58dd6a1bfa058c9c3dd3372c54665a1935e504a25783cdcf9bf14b21d6"
+checksum = "bc867c64bc89c63a3b1c34258e3bbbd73eb18f8ab785ff352c81c98ad187f78e"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1431,9 +1431,9 @@ dependencies = [
 
 [[package]]
 name = "hickory-proto"
-version = "0.26.0-beta.3"
+version = "0.26.0-beta.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7ddac4552e5be0deead6df196824a5964b0797302569ef4686b75d32efad052"
+checksum = "b91ba40132ef5ec8f1eabddb35d1b5d9fae3699c4545c590401893636097caee"
 dependencies = [
  "data-encoding",
  "idna",
@@ -1604,7 +1604,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -2528,7 +2528,7 @@ dependencies = [
  "pin-project-lite",
  "rustc-hash",
  "rustls",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -2570,7 +2570,7 @@ source = "git+https://github.com/n0-computer/noq?branch=main#e5e862cb76f0294750b
 dependencies = [
  "cfg_aliases",
  "libc",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -3069,7 +3069,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3106,7 +3106,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]
