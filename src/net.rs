@@ -1210,7 +1210,7 @@ pub(crate) mod tests {
     ) -> Result<Endpoint, BindError> {
         let ep = Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Custom(relay_map))
-            .secret_key(SecretKey::generate(rng))
+            .secret_key(SecretKey::from_bytes(&rng.random()))
             .alpns(vec![GOSSIP_ALPN.to_vec()])
             .ca_roots_config(CaRootsConfig::insecure_skip_verify())
             .bind()
@@ -1697,7 +1697,7 @@ pub(crate) mod tests {
         }
 
         let (relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
-        let mut rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
+        let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
         let topic_id = TopicId::from_bytes(rng.random());
 
         // spawn a gossip endpoint, send the endpoint's address on addr_tx,
@@ -1706,7 +1706,7 @@ pub(crate) mod tests {
         let (msgs_recv_tx, mut msgs_recv_rx) = tokio::sync::mpsc::channel(3);
         let recv_task = tokio::task::spawn({
             let relay_map = relay_map.clone();
-            let secret_key = SecretKey::generate(&mut rng);
+            let secret_key = SecretKey::from_bytes(&rng.random());
             async move {
                 let (router, gossip) = spawn_gossip(secret_key, relay_map).await?;
                 // wait for the relay to be set. iroh currently has issues when trying
@@ -1739,7 +1739,7 @@ pub(crate) mod tests {
         // spawn a endpoint, send a message, and then abruptly terminate the endpoint ungracefully
         // after the message was received on our receiver endpoint.
         let cancel = CancellationToken::new();
-        let secret = SecretKey::generate(&mut rng);
+        let secret = SecretKey::from_bytes(&rng.random());
         let join_handle_1 = run_in_thread(
             cancel.clone(),
             broadcast_once(
@@ -1832,7 +1832,7 @@ pub(crate) mod tests {
         ) -> n0_error::Result<(EndpointId, Router, Gossip, GossipSender, GossipReceiver)> {
             let topic_id = TopicId::from([0u8; 32]);
             let ep = Endpoint::builder(presets::Minimal)
-                .secret_key(SecretKey::generate(rng))
+                .secret_key(SecretKey::from_bytes(&rng.random()))
                 .bind()
                 .await?;
             let endpoint_id = ep.id();
