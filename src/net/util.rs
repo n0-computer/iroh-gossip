@@ -13,6 +13,7 @@ use iroh::{
 };
 use n0_error::{e, stack_error};
 use n0_future::{
+    task::JoinSet,
     time::{sleep_until, Instant},
     FuturesUnordered, StreamExt,
 };
@@ -20,7 +21,6 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::mpsc,
-    task::JoinSet,
 };
 use tracing::{debug, trace, Instrument};
 
