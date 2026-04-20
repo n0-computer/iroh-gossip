@@ -3,7 +3,7 @@
 <a href=#3 id=3 data-nosnippet>3</a></span><span class="kw">use </span>std::collections::{hash_map, HashMap, HashSet};
 <a href=#4 id=4 data-nosnippet>4</a>
 <a href=#5 id=5 data-nosnippet>5</a><span class="kw">use </span>n0_future::time::{Duration, Instant};
-<a href=#6 id=6 data-nosnippet>6</a><span class="kw">use </span>rand::Rng;
+<a href=#6 id=6 data-nosnippet>6</a><span class="kw">use </span>rand::{Rng, SeedableRng};
 <a href=#7 id=7 data-nosnippet>7</a><span class="kw">use </span>serde::{Deserialize, Serialize};
 <a href=#8 id=8 data-nosnippet>8</a><span class="kw">use </span>tracing::trace;
 <a href=#9 id=9 data-nosnippet>9</a>
@@ -161,7 +161,7 @@
 <a href=#161 id=161 data-nosnippet>161</a>    peer_topics: ConnsMap&lt;PI&gt;,
 <a href=#162 id=162 data-nosnippet>162</a>}
 <a href=#163 id=163 data-nosnippet>163</a>
-<a href=#164 id=164 data-nosnippet>164</a><span class="kw">impl</span>&lt;PI: PeerIdentity, R: Rng + Clone&gt; State&lt;PI, R&gt; {
+<a href=#164 id=164 data-nosnippet>164</a><span class="kw">impl</span>&lt;PI: PeerIdentity, R: Rng + SeedableRng&gt; State&lt;PI, R&gt; {
 <a href=#165 id=165 data-nosnippet>165</a>    <span class="doccomment">/// Create a new protocol state instance.
 <a href=#166 id=166 data-nosnippet>166</a>    ///
 <a href=#167 id=167 data-nosnippet>167</a>    /// `me` is the [`PeerIdentity`] of the local node, `peer_data` is the initial [`PeerData`]
@@ -252,7 +252,7 @@
 <a href=#252 id=252 data-nosnippet>252</a>                            <span class="self">self</span>.me,
 <a href=#253 id=253 data-nosnippet>253</a>                            <span class="prelude-val">Some</span>(<span class="self">self</span>.me_data.clone()),
 <a href=#254 id=254 data-nosnippet>254</a>                            <span class="self">self</span>.config.clone(),
-<a href=#255 id=255 data-nosnippet>255</a>                            <span class="self">self</span>.rng.clone(),
+<a href=#255 id=255 data-nosnippet>255</a>                            R::from_rng(<span class="kw-2">&amp;mut </span><span class="self">self</span>.rng),
 <a href=#256 id=256 data-nosnippet>256</a>                        ));
 <a href=#257 id=257 data-nosnippet>257</a>                    }
 <a href=#258 id=258 data-nosnippet>258</a>                }

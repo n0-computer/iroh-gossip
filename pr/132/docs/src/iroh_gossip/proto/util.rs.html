@@ -8,7 +8,7 @@
 <a href=#8 id=8 data-nosnippet>8</a><span class="kw">use </span>n0_future::time::Instant;
 <a href=#9 id=9 data-nosnippet>9</a><span class="kw">use </span>rand::{
 <a href=#10 id=10 data-nosnippet>10</a>    seq::{IteratorRandom, SliceRandom},
-<a href=#11 id=11 data-nosnippet>11</a>    Rng,
+<a href=#11 id=11 data-nosnippet>11</a>    Rng, RngExt,
 <a href=#12 id=12 data-nosnippet>12</a>};
 <a href=#13 id=13 data-nosnippet>13</a>
 <a href=#14 id=14 data-nosnippet>14</a><span class="doccomment">/// Implement methods, display, debug and conversion traits for 32 byte identifiers.
@@ -402,8 +402,8 @@
 <a href=#402 id=402 data-nosnippet>402</a>
 <a href=#403 id=403 data-nosnippet>403</a>    <span class="kw">use super</span>::{IndexSet, TimeBoundCache, TimerMap};
 <a href=#404 id=404 data-nosnippet>404</a>
-<a href=#405 id=405 data-nosnippet>405</a>    <span class="kw">fn </span>test_rng() -&gt; rand_chacha::ChaCha12Rng {
-<a href=#406 id=406 data-nosnippet>406</a>        rand_chacha::ChaCha12Rng::seed_from_u64(<span class="number">42</span>)
+<a href=#405 id=405 data-nosnippet>405</a>    <span class="kw">fn </span>test_rng() -&gt; rand::rngs::ChaCha12Rng {
+<a href=#406 id=406 data-nosnippet>406</a>        rand::rngs::ChaCha12Rng::seed_from_u64(<span class="number">42</span>)
 <a href=#407 id=407 data-nosnippet>407</a>    }
 <a href=#408 id=408 data-nosnippet>408</a>
 <a href=#409 id=409 data-nosnippet>409</a>    <span class="attr">#[test]

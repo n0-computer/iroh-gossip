@@ -419,7 +419,7 @@
 <a href=#419 id=419 data-nosnippet>419</a>        <span class="kw">use </span>iroh::{address_lookup::memory::MemoryLookup, protocol::Router, RelayMap};
 <a href=#420 id=420 data-nosnippet>420</a>        <span class="kw">use </span>n0_error::{AnyError, <span class="prelude-ty">Result</span>, StackResultExt, StdResultExt};
 <a href=#421 id=421 data-nosnippet>421</a>        <span class="kw">use </span>n0_future::{time::Duration, StreamExt};
-<a href=#422 id=422 data-nosnippet>422</a>        <span class="kw">use </span>rand_chacha::rand_core::SeedableRng;
+<a href=#422 id=422 data-nosnippet>422</a>        <span class="kw">use </span>rand::SeedableRng;
 <a href=#423 id=423 data-nosnippet>423</a>
 <a href=#424 id=424 data-nosnippet>424</a>        <span class="kw">use crate</span>::{
 <a href=#425 id=425 data-nosnippet>425</a>            api::{Event, GossipApi},
@@ -428,11 +428,11 @@
 <a href=#428 id=428 data-nosnippet>428</a>            ALPN,
 <a href=#429 id=429 data-nosnippet>429</a>        };
 <a href=#430 id=430 data-nosnippet>430</a>
-<a href=#431 id=431 data-nosnippet>431</a>        <span class="kw">let </span><span class="kw-2">mut </span>rng = rand_chacha::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
+<a href=#431 id=431 data-nosnippet>431</a>        <span class="kw">let </span><span class="kw-2">mut </span>rng = rand::rngs::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
 <a href=#432 id=432 data-nosnippet>432</a>        <span class="kw">let </span>(relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().<span class="kw">await</span>.unwrap();
 <a href=#433 id=433 data-nosnippet>433</a>
 <a href=#434 id=434 data-nosnippet>434</a>        <span class="kw">async fn </span>create_gossip_endpoint(
-<a href=#435 id=435 data-nosnippet>435</a>            rng: <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng,
+<a href=#435 id=435 data-nosnippet>435</a>            rng: <span class="kw-2">&amp;mut </span>rand::rngs::ChaCha12Rng,
 <a href=#436 id=436 data-nosnippet>436</a>            relay_map: RelayMap,
 <a href=#437 id=437 data-nosnippet>437</a>        ) -&gt; <span class="prelude-ty">Result</span>&lt;(Router, Gossip)&gt; {
 <a href=#438 id=438 data-nosnippet>438</a>            <span class="kw">let </span>endpoint = create_endpoint(rng, relay_map, <span class="prelude-val">None</span>).<span class="kw">await</span><span class="question-mark">?</span>;

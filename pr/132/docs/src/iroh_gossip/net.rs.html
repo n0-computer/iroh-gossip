@@ -1082,7 +1082,7 @@
 <a href=#1082 id=1082 data-nosnippet>1082</a>    };
 <a href=#1083 id=1083 data-nosnippet>1083</a>    <span class="kw">use </span>n0_error::{AnyError, <span class="prelude-ty">Result</span>, StdResultExt};
 <a href=#1084 id=1084 data-nosnippet>1084</a>    <span class="kw">use </span>n0_tracing_test::traced_test;
-<a href=#1085 id=1085 data-nosnippet>1085</a>    <span class="kw">use </span>rand::{CryptoRng, Rng};
+<a href=#1085 id=1085 data-nosnippet>1085</a>    <span class="kw">use </span>rand::{CryptoRng, RngExt};
 <a href=#1086 id=1086 data-nosnippet>1086</a>    <span class="kw">use </span>tokio::{spawn, time::timeout};
 <a href=#1087 id=1087 data-nosnippet>1087</a>    <span class="kw">use </span>tokio_util::sync::CancellationToken;
 <a href=#1088 id=1088 data-nosnippet>1088</a>    <span class="kw">use </span>tracing::{info, instrument};
@@ -1147,7 +1147,7 @@
 <a href=#1147 id=1147 data-nosnippet>1147</a>        /// actually spawned as [`Builder::spawn`] would, the gossip instance will have a
 <a href=#1148 id=1148 data-nosnippet>1148</a>        /// handle to a dummy task instead.
 <a href=#1149 id=1149 data-nosnippet>1149</a>        </span><span class="kw">async fn </span>t_new_with_actor(
-<a href=#1150 id=1150 data-nosnippet>1150</a>            rng: <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng,
+<a href=#1150 id=1150 data-nosnippet>1150</a>            rng: <span class="kw-2">&amp;mut </span>rand::rngs::ChaCha12Rng,
 <a href=#1151 id=1151 data-nosnippet>1151</a>            config: proto::Config,
 <a href=#1152 id=1152 data-nosnippet>1152</a>            relay_map: RelayMap,
 <a href=#1153 id=1153 data-nosnippet>1153</a>            cancel: <span class="kw-2">&amp;</span>CancellationToken,
@@ -1188,7 +1188,7 @@
 <a href=#1188 id=1188 data-nosnippet>1188</a>
 <a href=#1189 id=1189 data-nosnippet>1189</a>        <span class="doccomment">/// Crates a new testing gossip instance with the normal actor loop.
 <a href=#1190 id=1190 data-nosnippet>1190</a>        </span><span class="kw">async fn </span>t_new(
-<a href=#1191 id=1191 data-nosnippet>1191</a>            rng: <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng,
+<a href=#1191 id=1191 data-nosnippet>1191</a>            rng: <span class="kw-2">&amp;mut </span>rand::rngs::ChaCha12Rng,
 <a href=#1192 id=1192 data-nosnippet>1192</a>            config: proto::Config,
 <a href=#1193 id=1193 data-nosnippet>1193</a>            relay_map: RelayMap,
 <a href=#1194 id=1194 data-nosnippet>1194</a>            cancel: <span class="kw-2">&amp;</span>CancellationToken,
@@ -1204,7 +1204,7 @@
 <a href=#1204 id=1204 data-nosnippet>1204</a>    }
 <a href=#1205 id=1205 data-nosnippet>1205</a>
 <a href=#1206 id=1206 data-nosnippet>1206</a>    <span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">async fn </span>create_endpoint(
-<a href=#1207 id=1207 data-nosnippet>1207</a>        rng: <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng,
+<a href=#1207 id=1207 data-nosnippet>1207</a>        rng: <span class="kw-2">&amp;mut </span>rand::rngs::ChaCha12Rng,
 <a href=#1208 id=1208 data-nosnippet>1208</a>        relay_map: RelayMap,
 <a href=#1209 id=1209 data-nosnippet>1209</a>        memory_lookup: <span class="prelude-ty">Option</span>&lt;MemoryLookup&gt;,
 <a href=#1210 id=1210 data-nosnippet>1210</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;Endpoint, BindError&gt; {
@@ -1260,7 +1260,7 @@
 <a href=#1260 id=1260 data-nosnippet>1260</a>    <span class="attr">#[tokio::test]
 <a href=#1261 id=1261 data-nosnippet>1261</a>    #[traced_test]
 <a href=#1262 id=1262 data-nosnippet>1262</a>    </span><span class="kw">async fn </span>gossip_net_smoke() {
-<a href=#1263 id=1263 data-nosnippet>1263</a>        <span class="kw">let </span><span class="kw-2">mut </span>rng = rand_chacha::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
+<a href=#1263 id=1263 data-nosnippet>1263</a>        <span class="kw">let </span><span class="kw-2">mut </span>rng = rand::rngs::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
 <a href=#1264 id=1264 data-nosnippet>1264</a>        <span class="kw">let </span>(relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().<span class="kw">await</span>.unwrap();
 <a href=#1265 id=1265 data-nosnippet>1265</a>
 <a href=#1266 id=1266 data-nosnippet>1266</a>        <span class="kw">let </span>memory_lookup = MemoryLookup::new();
@@ -1399,7 +1399,7 @@
 <a href=#1399 id=1399 data-nosnippet>1399</a>    </span><span class="attr">#[tokio::test]
 <a href=#1400 id=1400 data-nosnippet>1400</a>    #[traced_test]
 <a href=#1401 id=1401 data-nosnippet>1401</a>    </span><span class="kw">async fn </span>subscription_cleanup() -&gt; <span class="prelude-ty">Result</span> {
-<a href=#1402 id=1402 data-nosnippet>1402</a>        <span class="kw">let </span>rng = <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
+<a href=#1402 id=1402 data-nosnippet>1402</a>        <span class="kw">let </span>rng = <span class="kw-2">&amp;mut </span>rand::rngs::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
 <a href=#1403 id=1403 data-nosnippet>1403</a>        <span class="kw">let </span>ct = CancellationToken::new();
 <a href=#1404 id=1404 data-nosnippet>1404</a>        <span class="kw">let </span>(relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().<span class="kw">await</span>.unwrap();
 <a href=#1405 id=1405 data-nosnippet>1405</a>
@@ -1542,7 +1542,7 @@
 <a href=#1542 id=1542 data-nosnippet>1542</a>    </span><span class="attr">#[tokio::test]
 <a href=#1543 id=1543 data-nosnippet>1543</a>    #[traced_test]
 <a href=#1544 id=1544 data-nosnippet>1544</a>    </span><span class="kw">async fn </span>can_reconnect() -&gt; <span class="prelude-ty">Result</span> {
-<a href=#1545 id=1545 data-nosnippet>1545</a>        <span class="kw">let </span>rng = <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
+<a href=#1545 id=1545 data-nosnippet>1545</a>        <span class="kw">let </span>rng = <span class="kw-2">&amp;mut </span>rand::rngs::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
 <a href=#1546 id=1546 data-nosnippet>1546</a>        <span class="kw">let </span>ct = CancellationToken::new();
 <a href=#1547 id=1547 data-nosnippet>1547</a>        <span class="kw">let </span>(relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().<span class="kw">await</span>.unwrap();
 <a href=#1548 id=1548 data-nosnippet>1548</a>
@@ -1697,7 +1697,7 @@
 <a href=#1697 id=1697 data-nosnippet>1697</a>        }
 <a href=#1698 id=1698 data-nosnippet>1698</a>
 <a href=#1699 id=1699 data-nosnippet>1699</a>        <span class="kw">let </span>(relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().<span class="kw">await</span>.unwrap();
-<a href=#1700 id=1700 data-nosnippet>1700</a>        <span class="kw">let </span>rng = <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
+<a href=#1700 id=1700 data-nosnippet>1700</a>        <span class="kw">let </span>rng = <span class="kw-2">&amp;mut </span>rand::rngs::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
 <a href=#1701 id=1701 data-nosnippet>1701</a>        <span class="kw">let </span>topic_id = TopicId::from_bytes(rng.random());
 <a href=#1702 id=1702 data-nosnippet>1702</a>
 <a href=#1703 id=1703 data-nosnippet>1703</a>        <span class="comment">// spawn a gossip endpoint, send the endpoint's address on addr_tx,
@@ -1825,7 +1825,7 @@
 <a href=#1825 id=1825 data-nosnippet>1825</a>    <span class="attr">#[tokio::test]
 <a href=#1826 id=1826 data-nosnippet>1826</a>    #[traced_test]
 <a href=#1827 id=1827 data-nosnippet>1827</a>    </span><span class="kw">async fn </span>gossip_rely_on_gossip_address_lookup() -&gt; n0_error::Result&lt;()&gt; {
-<a href=#1828 id=1828 data-nosnippet>1828</a>        <span class="kw">let </span>rng = <span class="kw-2">&amp;mut </span>rand_chacha::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
+<a href=#1828 id=1828 data-nosnippet>1828</a>        <span class="kw">let </span>rng = <span class="kw-2">&amp;mut </span>rand::rngs::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
 <a href=#1829 id=1829 data-nosnippet>1829</a>
 <a href=#1830 id=1830 data-nosnippet>1830</a>        <span class="kw">async fn </span>spawn(
 <a href=#1831 id=1831 data-nosnippet>1831</a>            rng: <span class="kw-2">&amp;mut </span><span class="kw">impl </span>CryptoRng,
