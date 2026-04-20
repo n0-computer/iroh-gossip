@@ -423,7 +423,7 @@ mod tests {
 
         use crate::{
             api::{Event, GossipApi},
-            net::{test::create_endpoint, Gossip},
+            net::{tests::create_endpoint, Gossip},
             proto::TopicId,
             ALPN,
         };
