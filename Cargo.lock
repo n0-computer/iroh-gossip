@@ -331,12 +331,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "base32"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "022dfe9eb35f19ebbcb51e0b40a5ab759f46ad60cadf7297e0bd085afb50e076"
-
-[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -821,6 +815,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
 
 [[package]]
+name = "data-encoding-macro"
+version = "0.1.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8142a83c17aa9461d637e649271eae18bf2edd00e91f2e105df36c3c16355bdb"
+dependencies = [
+ "data-encoding",
+ "data-encoding-macro-internal",
+]
+
+[[package]]
+name = "data-encoding-macro-internal"
+version = "0.1.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ab67060fc6b8ef687992d439ca0fa36e7ed17e9a0b16b25b601e8757df720de"
+dependencies = [
+ "data-encoding",
+ "syn",
+]
+
+[[package]]
 name = "der"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -950,9 +964,9 @@ dependencies = [
 
 [[package]]
 name = "dlopen2"
-version = "0.5.0"
+version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09b4f5f101177ff01b8ec4ecc81eead416a8aa42819a2869311b3420fa114ffa"
+checksum = "5e2c5bd4158e66d1e215c49b837e11d62f3267b30c92f1d171c4d3105e3dc4d4"
 dependencies = [
  "libc",
  "once_cell",
@@ -1402,9 +1416,9 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hickory-net"
-version = "0.26.0-beta.1"
+version = "0.26.0-beta.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc867c64bc89c63a3b1c34258e3bbbd73eb18f8ab785ff352c81c98ad187f78e"
+checksum = "1e232f503c4cfe3f4ea6594971255ecab9f6a0080c4c8e0e17630cc701322aa4"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1431,9 +1445,9 @@ dependencies = [
 
 [[package]]
 name = "hickory-proto"
-version = "0.26.0-beta.1"
+version = "0.26.0-beta.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b91ba40132ef5ec8f1eabddb35d1b5d9fae3699c4545c590401893636097caee"
+checksum = "fcca12171ce774c549f35510be702f4da00ef12ca486f0f2acb2ee96f2f5ca0f"
 dependencies = [
  "data-encoding",
  "idna",
@@ -1451,9 +1465,9 @@ dependencies = [
 
 [[package]]
 name = "hickory-resolver"
-version = "0.26.0-beta.1"
+version = "0.26.0-beta.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b3691451dab87ca2d7e3018ae231347d3a502ef3e8c4430f454f7efefa84b1d"
+checksum = "1e7d2c928fa078e6640f26cf1b537b212e1688829c3944780025c7084e8bbbf6"
 dependencies = [
  "cfg-if",
  "futures-util",
@@ -1756,11 +1770,10 @@ dependencies = [
 
 [[package]]
 name = "igd-next"
-version = "0.16.2"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "516893339c97f6011282d5825ac94fc1c7aad5cad26bdc2d0cee068c0bf97f97"
+checksum = "bac9a3c8278f43b4cd8463380f4a25653ac843e5b177e1d3eaf849cc9ba10d4d"
 dependencies = [
- "async-trait",
  "attohttpc",
  "bytes",
  "futures",
@@ -1769,7 +1782,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "log",
- "rand 0.9.2",
+ "rand 0.10.0",
  "tokio",
  "url",
  "xmltree",
@@ -1829,8 +1842,9 @@ dependencies = [
 
 [[package]]
 name = "iroh"
-version = "0.97.0"
-source = "git+https://github.com/n0-computer/iroh?branch=main#0a22d769052d491015d14cdc4d544a1144981f5d"
+version = "0.98.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "936882068af6037912c205ad73ae83e1ab9b81f5bd01200210c90f000e24f4d3"
 dependencies = [
  "axum",
  "backon",
@@ -1847,18 +1861,18 @@ dependencies = [
  "http",
  "ipnet",
  "iroh-base",
+ "iroh-dns",
  "iroh-metrics",
  "iroh-relay",
  "n0-error",
  "n0-future",
  "n0-watcher",
  "netwatch",
- "noq",
- "noq-proto",
- "noq-udp",
+ "noq 0.18.0",
+ "noq-proto 0.17.0",
+ "noq-udp 0.10.0",
  "papaya",
  "pin-project",
- "pkarr",
  "pkcs8",
  "portable-atomic",
  "portmapper",
@@ -1871,7 +1885,6 @@ dependencies = [
  "serde",
  "smallvec",
  "strum",
- "sync_wrapper",
  "time",
  "tokio",
  "tokio-stream",
@@ -1884,11 +1897,13 @@ dependencies = [
 
 [[package]]
 name = "iroh-base"
-version = "0.97.0"
-source = "git+https://github.com/n0-computer/iroh?branch=main#0a22d769052d491015d14cdc4d544a1144981f5d"
+version = "0.98.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "738865784637830fb14204ebd3047922db83bc1816a59027af29579b9c27bd99"
 dependencies = [
  "curve25519-dalek",
  "data-encoding",
+ "data-encoding-macro",
  "derive_more",
  "digest",
  "ed25519-dalek",
@@ -1900,6 +1915,20 @@ dependencies = [
  "url",
  "zeroize",
  "zeroize_derive",
+]
+
+[[package]]
+name = "iroh-dns"
+version = "0.98.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca474630d1e62ddef83149db6babe6a1055d901df9054349d31b22df99811b92"
+dependencies = [
+ "derive_more",
+ "iroh-base",
+ "n0-error",
+ "n0-future",
+ "simple-dns",
+ "strum",
 ]
 
 [[package]]
@@ -1926,7 +1955,7 @@ dependencies = [
  "n0-error",
  "n0-future",
  "n0-tracing-test",
- "noq",
+ "noq 0.18.0",
  "postcard",
  "rand 0.9.2",
  "rand_chacha",
@@ -1978,8 +2007,9 @@ dependencies = [
 
 [[package]]
 name = "iroh-relay"
-version = "0.97.0"
-source = "git+https://github.com/n0-computer/iroh?branch=main#0a22d769052d491015d14cdc4d544a1144981f5d"
+version = "0.98.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4aa6e9a7277bfbb439739c52b57eb5f9288030983928412022b8e94a43d4d838"
 dependencies = [
  "ahash",
  "blake3",
@@ -1996,15 +2026,15 @@ dependencies = [
  "hyper",
  "hyper-util",
  "iroh-base",
+ "iroh-dns",
  "iroh-metrics",
  "lru",
  "n0-error",
  "n0-future",
- "noq",
- "noq-proto",
+ "noq 0.18.0",
+ "noq-proto 0.17.0",
  "num_enum",
  "pin-project",
- "pkarr",
  "postcard",
  "rand 0.10.0",
  "rcgen",
@@ -2033,7 +2063,6 @@ dependencies = [
  "vergen-gitcl",
  "webpki-roots",
  "ws_stream_wasm",
- "z32",
 ]
 
 [[package]]
@@ -2047,7 +2076,7 @@ dependencies = [
  "irpc-derive",
  "n0-error",
  "n0-future",
- "noq",
+ "noq 0.17.0",
  "postcard",
  "rcgen",
  "rustls",
@@ -2401,9 +2430,9 @@ checksum = "27b02d87554356db9e9a873add8782d4ea6e3e58ea071a9adb9a2e8ddb884a8b"
 
 [[package]]
 name = "netdev"
-version = "0.40.1"
+version = "0.42.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b0a0096d9613ee878dba89bbe595f079d373e3f1960d882e4f2f78ff9c30a0a"
+checksum = "e30af1a5073b82356d9317c18226826370b4288eba2f71c7e84e18bae51b3847"
 dependencies = [
  "block2",
  "dispatch2",
@@ -2412,13 +2441,13 @@ dependencies = [
  "libc",
  "mac-addr",
  "netlink-packet-core",
- "netlink-packet-route",
+ "netlink-packet-route 0.29.0",
  "netlink-sys",
  "objc2-core-foundation",
  "objc2-system-configuration",
  "once_cell",
  "plist",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2435,6 +2464,18 @@ name = "netlink-packet-route"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df9854ea6ad14e3f4698a7f03b65bce0833dd2d81d594a0e4a984170537146b6"
+dependencies = [
+ "bitflags",
+ "libc",
+ "log",
+ "netlink-packet-core",
+]
+
+[[package]]
+name = "netlink-packet-route"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be8919612f6028ab4eacbbfe1234a9a43e3722c6e0915e7ff519066991905092"
 dependencies = [
  "bitflags",
  "libc",
@@ -2471,9 +2512,9 @@ dependencies = [
 
 [[package]]
 name = "netwatch"
-version = "0.15.0"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b1b27babe89ef9f2237bc6c028bea24fa84163a1b6f8f17ff93573ebd7d861f"
+checksum = "6fc0d4b4134425d9834e591b1a6f807ea365c6d941d738942215564af5f28a97"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -2486,10 +2527,10 @@ dependencies = [
  "n0-watcher",
  "netdev",
  "netlink-packet-core",
- "netlink-packet-route",
+ "netlink-packet-route 0.30.0",
  "netlink-proto",
  "netlink-sys",
- "noq-udp",
+ "noq-udp 0.10.0",
  "objc2-core-foundation",
  "objc2-system-configuration",
  "pin-project-lite",
@@ -2518,13 +2559,35 @@ dependencies = [
 [[package]]
 name = "noq"
 version = "0.17.0"
-source = "git+https://github.com/n0-computer/noq?branch=main#17ce1822764a0e94f957a28cd388c49add99ce66"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8df966fb44ac763bc86da97fa6c811c54ae82ef656575949f93c6dae0c9f09bf"
+dependencies = [
+ "bytes",
+ "cfg_aliases",
+ "noq-proto 0.16.0",
+ "noq-udp 0.9.0",
+ "pin-project-lite",
+ "rustc-hash",
+ "rustls",
+ "socket2 0.6.3",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "web-time",
+]
+
+[[package]]
+name = "noq"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b969bd157c3bd3bab239a1a8b14f67f2033fa012770367fcbd5b42d71ae3548"
 dependencies = [
  "bytes",
  "cfg_aliases",
  "derive_more",
- "noq-proto",
- "noq-udp",
+ "noq-proto 0.17.0",
+ "noq-udp 0.10.0",
  "pin-project-lite",
  "rustc-hash",
  "rustls",
@@ -2539,7 +2602,34 @@ dependencies = [
 [[package]]
 name = "noq-proto"
 version = "0.16.0"
-source = "git+https://github.com/n0-computer/noq?branch=main#17ce1822764a0e94f957a28cd388c49add99ce66"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c61b72abd670eebc05b5cf720e077b04a3ef3354bc7bc19f1c3524cb424db7b"
+dependencies = [
+ "aes-gcm",
+ "bytes",
+ "derive_more",
+ "enum-assoc",
+ "getrandom 0.3.4",
+ "identity-hash",
+ "lru-slab",
+ "rand 0.9.2",
+ "ring",
+ "rustc-hash",
+ "rustls",
+ "rustls-pki-types",
+ "slab",
+ "sorted-index-buffer",
+ "thiserror 2.0.18",
+ "tinyvec",
+ "tracing",
+ "web-time",
+]
+
+[[package]]
+name = "noq-proto"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cdec6f5039d98ee5377b2f532d495a555eb664c53161b1b5780dcaeac678b60e"
 dependencies = [
  "aes-gcm",
  "aws-lc-rs",
@@ -2566,7 +2656,8 @@ dependencies = [
 [[package]]
 name = "noq-udp"
 version = "0.9.0"
-source = "git+https://github.com/n0-computer/noq?branch=main#17ce1822764a0e94f957a28cd388c49add99ce66"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb9be4fedd6b98f3ba82ccd3506f4d0219fb723c3f97c67e12fe1494aa020e44"
 dependencies = [
  "cfg_aliases",
  "libc",
@@ -2576,18 +2667,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "ntimestamp"
-version = "1.0.0"
+name = "noq-udp"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c50f94c405726d3e0095e89e72f75ce7f6587b94a8bd8dc8054b73f65c0fd68c"
+checksum = "ee91b05f4f3353290936ba1f3233518868fb4e2da99cb4c90d1f8cebb064e527"
 dependencies = [
- "base32",
- "document-features",
- "getrandom 0.2.17",
- "httpdate",
- "js-sys",
- "once_cell",
- "serde",
+ "cfg_aliases",
+ "libc",
+ "socket2 0.6.3",
+ "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2867,25 +2956,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 
 [[package]]
-name = "pkarr"
-version = "5.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f950360d31be432c0c9467fba5024a94f55128e7f32bc9d32db140369f24c77"
-dependencies = [
- "base32",
- "bytes",
- "cfg_aliases",
- "document-features",
- "ed25519-dalek",
- "getrandom 0.4.2",
- "ntimestamp",
- "self_cell",
- "serde",
- "simple-dns",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "pkcs8"
 version = "0.11.0-rc.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2931,9 +3001,9 @@ dependencies = [
 
 [[package]]
 name = "portmapper"
-version = "0.15.0"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74748bc706fa6b6aebac6bbe0bbe0de806b384cb5c557ea974f771360a4e3858"
+checksum = "a145e62ddd9aecc9c7b1a3c84cea2a803386c7f4da7795bf9f0d50d90dc52549"
 dependencies = [
  "base64",
  "bytes",
@@ -2947,7 +3017,7 @@ dependencies = [
  "n0-error",
  "netwatch",
  "num_enum",
- "rand 0.9.2",
+ "rand 0.10.0",
  "serde",
  "smallvec",
  "socket2 0.6.3",
@@ -3572,12 +3642,6 @@ dependencies = [
  "libc",
  "windows-sys 0.61.2",
 ]
-
-[[package]]
-name = "self_cell"
-version = "1.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b12e76d157a900eb52e81bc6e9f3069344290341720e9178cde2407113ac8d89"
 
 [[package]]
 name = "semver"
@@ -4853,15 +4917,6 @@ dependencies = [
 
 [[package]]
 name = "windows-sys"
-version = "0.59.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
-dependencies = [
- "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows-sys"
 version = "0.60.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2f500e4d28234f72040990ec9d39e3a6b950f9f22d3dba18416c35882612bcb"
@@ -5341,12 +5396,6 @@ dependencies = [
  "syn",
  "synstructure",
 ]
-
-[[package]]
-name = "z32"
-version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2164e798d9e3d84ee2c91139ace54638059a3b23e361f5c11781c2c6459bde0f"
 
 [[package]]
 name = "zerocopy"
