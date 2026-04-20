@@ -33,6 +33,7 @@ unused-async = "warn"
 
 [dependencies]
 blake3 = "1.8"
+constant_time_eq = "<0.4.3" # pin to avoid MSRV bump
 bytes = { version = "1.7", features = ["serde"] }
 data-encoding = "2.6.0"
 derive_more = { version = "2.0.1", features = [
