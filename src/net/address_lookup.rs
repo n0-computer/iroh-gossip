@@ -138,7 +138,7 @@ mod tests {
 
     use iroh::{address_lookup::AddressLookup, EndpointAddr, SecretKey};
     use n0_future::StreamExt;
-    use rand::{Rng, SeedableRng};
+    use rand::SeedableRng;
 
     use super::{GossipAddressLookup, RetentionOpts};
 
@@ -150,7 +150,7 @@ mod tests {
         };
         let disco = GossipAddressLookup::with_opts(opts);
 
-        let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
+        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
         let k1 = SecretKey::from_bytes(&rng.random());
         let a1 = EndpointAddr::new(k1.public());
 

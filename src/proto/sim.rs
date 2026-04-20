@@ -8,8 +8,8 @@ use std::{
 
 use bytes::Bytes;
 use n0_future::time::{Duration, Instant};
+use rand::rngs::ChaCha12Rng;
 use rand::{seq::IteratorRandom, Rng, SeedableRng};
-use rand_chacha::ChaCha12Rng;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, debug_span, info, info_span, trace, warn};
 
@@ -849,7 +849,7 @@ pub struct Simulator {
     /// Configuration of the simulator.
     pub config: SimulatorConfig,
     /// The [`Network`]
-    pub network: Network<PeerId, rand_chacha::ChaCha12Rng>,
+    pub network: Network<PeerId, rand::rngs::ChaCha12Rng>,
     /// List of [`RoundStats`] of all previous rounds.
     round_stats: Vec<RoundStats>,
 }
@@ -862,7 +862,7 @@ impl Simulator {
     ) -> Self {
         let network_config = network_config.into();
         info!("start {simulator_config:?} {network_config:?}");
-        let rng = rand_chacha::ChaCha12Rng::seed_from_u64(simulator_config.rng_seed);
+        let rng = rand::rngs::ChaCha12Rng::seed_from_u64(simulator_config.rng_seed);
         Self {
             network: Network::new(network_config, rng),
             config: simulator_config,

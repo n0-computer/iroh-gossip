@@ -23,7 +23,7 @@ use n0_future::{
     time::Instant,
     Stream, StreamExt as _,
 };
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{rngs::ThreadRng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -276,7 +276,7 @@ impl Gossip {
 struct Actor {
     alpn: Bytes,
     /// Protocol state
-    state: proto::State<PublicKey, StdRng>,
+    state: proto::State<PublicKey, ThreadRng>,
     /// The endpoint through which we dial peers
     endpoint: Endpoint,
     /// Dial machine to connect to peers
@@ -323,7 +323,7 @@ impl Actor {
             peer_id,
             Default::default(),
             config,
-            rand::rngs::StdRng::from_rng(&mut rand::rng()),
+            rand::rngs::ThreadRng::default(),
         );
         let (rpc_tx, rpc_rx) = mpsc::channel(TO_ACTOR_CAP);
         let (local_tx, local_rx) = mpsc::channel(16);
@@ -1082,7 +1082,7 @@ pub(crate) mod tests {
     };
     use n0_error::{AnyError, Result, StdResultExt};
     use n0_tracing_test::traced_test;
-    use rand::{CryptoRng, Rng};
+    use rand::CryptoRng;
     use tokio::{spawn, time::timeout};
     use tokio_util::sync::CancellationToken;
     use tracing::{info, instrument};
@@ -1147,7 +1147,7 @@ pub(crate) mod tests {
         /// actually spawned as [`Builder::spawn`] would, the gossip instance will have a
         /// handle to a dummy task instead.
         async fn t_new_with_actor(
-            rng: &mut rand_chacha::ChaCha12Rng,
+            rng: &mut rand::rngs::ChaCha12Rng,
             config: proto::Config,
             relay_map: RelayMap,
             cancel: &CancellationToken,
@@ -1188,7 +1188,7 @@ pub(crate) mod tests {
 
         /// Crates a new testing gossip instance with the normal actor loop.
         async fn t_new(
-            rng: &mut rand_chacha::ChaCha12Rng,
+            rng: &mut rand::rngs::ChaCha12Rng,
             config: proto::Config,
             relay_map: RelayMap,
             cancel: &CancellationToken,
@@ -1204,7 +1204,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) async fn create_endpoint(
-        rng: &mut rand_chacha::ChaCha12Rng,
+        rng: &mut rand::rngs::ChaCha12Rng,
         relay_map: RelayMap,
         memory_lookup: Option<MemoryLookup>,
     ) -> Result<Endpoint, BindError> {
@@ -1260,7 +1260,7 @@ pub(crate) mod tests {
     #[tokio::test]
     #[traced_test]
     async fn gossip_net_smoke() {
-        let mut rng = rand_chacha::ChaCha12Rng::seed_from_u64(1);
+        let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(1);
         let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
 
         let memory_lookup = MemoryLookup::new();
@@ -1399,7 +1399,7 @@ pub(crate) mod tests {
     #[tokio::test]
     #[traced_test]
     async fn subscription_cleanup() -> Result {
-        let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
+        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
         let ct = CancellationToken::new();
         let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
 
@@ -1542,7 +1542,7 @@ pub(crate) mod tests {
     #[tokio::test]
     #[traced_test]
     async fn can_reconnect() -> Result {
-        let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
+        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
         let ct = CancellationToken::new();
         let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
 
@@ -1697,7 +1697,7 @@ pub(crate) mod tests {
         }
 
         let (relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
-        let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
+        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
         let topic_id = TopicId::from_bytes(rng.random());
 
         // spawn a gossip endpoint, send the endpoint's address on addr_tx,
@@ -1825,7 +1825,7 @@ pub(crate) mod tests {
     #[tokio::test]
     #[traced_test]
     async fn gossip_rely_on_gossip_address_lookup() -> n0_error::Result<()> {
-        let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
+        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
 
         async fn spawn(
             rng: &mut impl CryptoRng,

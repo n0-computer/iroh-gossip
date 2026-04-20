@@ -402,8 +402,8 @@ mod test {
 
     use super::{IndexSet, TimeBoundCache, TimerMap};
 
-    fn test_rng() -> rand_chacha::ChaCha12Rng {
-        rand_chacha::ChaCha12Rng::seed_from_u64(42)
+    fn test_rng() -> rand::rngs::ChaCha12Rng {
+        rand::rngs::ChaCha12Rng::seed_from_u64(42)
     }
 
     #[test]

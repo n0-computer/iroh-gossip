@@ -419,7 +419,7 @@ mod tests {
         use iroh::{address_lookup::memory::MemoryLookup, protocol::Router, RelayMap};
         use n0_error::{AnyError, Result, StackResultExt, StdResultExt};
         use n0_future::{time::Duration, StreamExt};
-        use rand_chacha::rand_core::SeedableRng;
+        use rand::rngs::rand_core::SeedableRng;
 
         use crate::{
             api::{Event, GossipApi},
@@ -428,11 +428,11 @@ mod tests {
             ALPN,
         };
 
-        let mut rng = rand_chacha::ChaCha12Rng::seed_from_u64(1);
+        let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(1);
         let (relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
 
         async fn create_gossip_endpoint(
-            rng: &mut rand_chacha::ChaCha12Rng,
+            rng: &mut rand::rngs::ChaCha12Rng,
             relay_map: RelayMap,
         ) -> Result<(Router, Gossip)> {
             let endpoint = create_endpoint(rng, relay_map, None).await?;
