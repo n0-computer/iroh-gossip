@@ -8,7 +8,7 @@ use std::{
 use n0_future::time::Instant;
 use rand::{
     seq::{IteratorRandom, SliceRandom},
-    Rng,
+    Rng, RngExt,
 };
 
 /// Implement methods, display, debug and conversion traits for 32 byte identifiers.
@@ -402,8 +402,8 @@ mod test {
 
     use super::{IndexSet, TimeBoundCache, TimerMap};
 
-    fn test_rng() -> rand_chacha::ChaCha12Rng {
-        rand_chacha::ChaCha12Rng::seed_from_u64(42)
+    fn test_rng() -> rand::rngs::ChaCha12Rng {
+        rand::rngs::ChaCha12Rng::seed_from_u64(42)
     }
 
     #[test]

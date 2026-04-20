@@ -1068,18 +1068,21 @@ impl Dialer {
 }
 
 #[cfg(test)]
-pub(crate) mod test {
+pub(crate) mod tests {
     use std::time::Duration;
 
     use bytes::Bytes;
     use futures_concurrency::future::TryJoin;
     use iroh::{
-        address_lookup::memory::MemoryLookup, endpoint::BindError, protocol::Router,
-        tls::CaRootsConfig, RelayMap, RelayMode, SecretKey,
+        address_lookup::memory::MemoryLookup,
+        endpoint::{presets, BindError},
+        protocol::Router,
+        tls::CaRootsConfig,
+        RelayMap, RelayMode, SecretKey,
     };
     use n0_error::{AnyError, Result, StdResultExt};
     use n0_tracing_test::traced_test;
-    use rand::{CryptoRng, Rng};
+    use rand::{CryptoRng, RngExt};
     use tokio::{spawn, time::timeout};
     use tokio_util::sync::CancellationToken;
     use tracing::{info, instrument};
@@ -1144,7 +1147,7 @@ pub(crate) mod test {
         /// actually spawned as [`Builder::spawn`] would, the gossip instance will have a
         /// handle to a dummy task instead.
         async fn t_new_with_actor(
-            rng: &mut rand_chacha::ChaCha12Rng,
+            rng: &mut rand::rngs::ChaCha12Rng,
             config: proto::Config,
             relay_map: RelayMap,
             cancel: &CancellationToken,
@@ -1185,7 +1188,7 @@ pub(crate) mod test {
 
         /// Crates a new testing gossip instance with the normal actor loop.
         async fn t_new(
-            rng: &mut rand_chacha::ChaCha12Rng,
+            rng: &mut rand::rngs::ChaCha12Rng,
             config: proto::Config,
             relay_map: RelayMap,
             cancel: &CancellationToken,
@@ -1201,13 +1204,13 @@ pub(crate) mod test {
     }
 
     pub(crate) async fn create_endpoint(
-        rng: &mut rand_chacha::ChaCha12Rng,
+        rng: &mut rand::rngs::ChaCha12Rng,
         relay_map: RelayMap,
         memory_lookup: Option<MemoryLookup>,
     ) -> Result<Endpoint, BindError> {
-        let ep = Endpoint::empty_builder()
+        let ep = Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Custom(relay_map))
-            .secret_key(SecretKey::generate(rng))
+            .secret_key(SecretKey::from_bytes(&rng.random()))
             .alpns(vec![GOSSIP_ALPN.to_vec()])
             .ca_roots_config(CaRootsConfig::insecure_skip_verify())
             .bind()
@@ -1257,7 +1260,7 @@ pub(crate) mod test {
     #[tokio::test]
     #[traced_test]
     async fn gossip_net_smoke() {
-        let mut rng = rand_chacha::ChaCha12Rng::seed_from_u64(1);
+        let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(1);
         let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
 
         let memory_lookup = MemoryLookup::new();
@@ -1396,7 +1399,7 @@ pub(crate) mod test {
     #[tokio::test]
     #[traced_test]
     async fn subscription_cleanup() -> Result {
-        let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
+        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
         let ct = CancellationToken::new();
         let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
 
@@ -1539,7 +1542,7 @@ pub(crate) mod test {
     #[tokio::test]
     #[traced_test]
     async fn can_reconnect() -> Result {
-        let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
+        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
         let ct = CancellationToken::new();
         let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
 
@@ -1660,7 +1663,7 @@ pub(crate) mod test {
             secret_key: SecretKey,
             relay_map: RelayMap,
         ) -> Result<(Router, Gossip), BindError> {
-            let ep = Endpoint::empty_builder()
+            let ep = Endpoint::builder(presets::Minimal)
                 .relay_mode(RelayMode::Custom(relay_map))
                 .secret_key(secret_key)
                 .ca_roots_config(CaRootsConfig::insecure_skip_verify())
@@ -1694,7 +1697,7 @@ pub(crate) mod test {
         }
 
         let (relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
-        let mut rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
+        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
         let topic_id = TopicId::from_bytes(rng.random());
 
         // spawn a gossip endpoint, send the endpoint's address on addr_tx,
@@ -1703,7 +1706,7 @@ pub(crate) mod test {
         let (msgs_recv_tx, mut msgs_recv_rx) = tokio::sync::mpsc::channel(3);
         let recv_task = tokio::task::spawn({
             let relay_map = relay_map.clone();
-            let secret_key = SecretKey::generate(&mut rng);
+            let secret_key = SecretKey::from_bytes(&rng.random());
             async move {
                 let (router, gossip) = spawn_gossip(secret_key, relay_map).await?;
                 // wait for the relay to be set. iroh currently has issues when trying
@@ -1736,7 +1739,7 @@ pub(crate) mod test {
         // spawn a endpoint, send a message, and then abruptly terminate the endpoint ungracefully
         // after the message was received on our receiver endpoint.
         let cancel = CancellationToken::new();
-        let secret = SecretKey::generate(&mut rng);
+        let secret = SecretKey::from_bytes(&rng.random());
         let join_handle_1 = run_in_thread(
             cancel.clone(),
             broadcast_once(
@@ -1792,8 +1795,8 @@ pub(crate) mod test {
         let alpn = b"my-gossip-alpn";
         let topic_id = TopicId::from([0u8; 32]);
 
-        let ep1 = Endpoint::empty_builder().bind().await?;
-        let ep2 = Endpoint::empty_builder().bind().await?;
+        let ep1 = Endpoint::bind(presets::Minimal).await?;
+        let ep2 = Endpoint::bind(presets::Minimal).await?;
         let gossip1 = Gossip::builder().alpn(alpn).spawn(ep1.clone());
         let gossip2 = Gossip::builder().alpn(alpn).spawn(ep2.clone());
         let router1 = Router::builder(ep1).accept(alpn, gossip1.clone()).spawn();
@@ -1822,14 +1825,14 @@ pub(crate) mod test {
     #[tokio::test]
     #[traced_test]
     async fn gossip_rely_on_gossip_address_lookup() -> n0_error::Result<()> {
-        let rng = &mut rand_chacha::ChaCha12Rng::seed_from_u64(1);
+        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
 
         async fn spawn(
             rng: &mut impl CryptoRng,
         ) -> n0_error::Result<(EndpointId, Router, Gossip, GossipSender, GossipReceiver)> {
             let topic_id = TopicId::from([0u8; 32]);
-            let ep = Endpoint::empty_builder()
-                .secret_key(SecretKey::generate(rng))
+            let ep = Endpoint::builder(presets::Minimal)
+                .secret_key(SecretKey::from_bytes(&rng.random()))
                 .bind()
                 .await?;
             let endpoint_id = ep.id();
@@ -1914,8 +1917,8 @@ pub(crate) mod test {
     async fn topic_stays_alive_after_sender_drop() -> n0_error::Result<()> {
         let topic_id = TopicId::from([99u8; 32]);
 
-        let ep1 = Endpoint::empty_builder().bind().await?;
-        let ep2 = Endpoint::empty_builder().bind().await?;
+        let ep1 = Endpoint::bind(presets::Minimal).await?;
+        let ep2 = Endpoint::bind(presets::Minimal).await?;
         let gossip1 = Gossip::builder().spawn(ep1.clone());
         let gossip2 = Gossip::builder().spawn(ep2.clone());
         let router1 = Router::builder(ep1)

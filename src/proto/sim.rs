@@ -8,8 +8,7 @@ use std::{
 
 use bytes::Bytes;
 use n0_future::time::{Duration, Instant};
-use rand::{seq::IteratorRandom, Rng, SeedableRng};
-use rand_chacha::ChaCha12Rng;
+use rand::{rngs::ChaCha12Rng, seq::IteratorRandom, Rng, RngExt, SeedableRng};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, debug_span, info, info_span, trace, warn};
 
@@ -139,7 +138,7 @@ impl<PI, R> Network<PI, R> {
     }
 }
 
-impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng + Clone> Network<PI, R> {
+impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
     /// Inserts a new peer.
     ///
     /// Panics if the peer already exists.
@@ -170,7 +169,7 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng + Clone> Network<PI, 
     }
 }
 
-impl<PI: PeerIdentity + fmt::Display, R: Rng + Clone> Network<PI, R> {
+impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
     /// Drains all queued events.
     pub fn events(&mut self) -> impl Iterator<Item = (PI, TopicId, Event<PI>)> + '_ {
         self.events.drain(..)
@@ -849,7 +848,7 @@ pub struct Simulator {
     /// Configuration of the simulator.
     pub config: SimulatorConfig,
     /// The [`Network`]
-    pub network: Network<PeerId, rand_chacha::ChaCha12Rng>,
+    pub network: Network<PeerId, rand::rngs::ChaCha12Rng>,
     /// List of [`RoundStats`] of all previous rounds.
     round_stats: Vec<RoundStats>,
 }
@@ -862,7 +861,7 @@ impl Simulator {
     ) -> Self {
         let network_config = network_config.into();
         info!("start {simulator_config:?} {network_config:?}");
-        let rng = rand_chacha::ChaCha12Rng::seed_from_u64(simulator_config.rng_seed);
+        let rng = rand::rngs::ChaCha12Rng::seed_from_u64(simulator_config.rng_seed);
         Self {
             network: Network::new(network_config, rng),
             config: simulator_config,

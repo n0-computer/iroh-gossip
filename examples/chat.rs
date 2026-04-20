@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
 
     // parse or generate our secret key
     let secret_key = match args.secret_key {
-        None => SecretKey::generate(&mut rand::rng()),
+        None => SecretKey::generate(),
         Some(key) => key.parse()?,
     };
     println!(
