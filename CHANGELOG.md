@@ -2,6 +2,17 @@
 
 All notable changes to iroh-gossip will be documented in this file.
 
+## [0.98.0](https://github.com/n0-computer/iroh-gossip/compare/v0.97.0..0.98.0) - 2026-04-20
+
+### 🐛 Bug Fixes
+
+- Use `n0_future::task::JoinSet` instead of `tokio::task::JoinSet` in `SendLoop` ([#138](https://github.com/n0-computer/iroh-gossip/issues/138)) - ([0dae56d](https://github.com/n0-computer/iroh-gossip/commit/0dae56de12d229930e72403fc62cd9e9bb99c5ae))
+- Configure git identity in cleanup workflow ([#129](https://github.com/n0-computer/iroh-gossip/issues/129)) - ([a6cfbf7](https://github.com/n0-computer/iroh-gossip/commit/a6cfbf75e9b8f8b0178a3518469c1a3efab27c61))
+
+### Deps
+
+- Update to iroh 0.98 ([#132](https://github.com/n0-computer/iroh-gossip/issues/132)) - ([5076ea7](https://github.com/n0-computer/iroh-gossip/commit/5076ea721c614f508d60104264e78d815f95041c))
+
 ## [0.97.0](https://github.com/n0-computer/iroh-gossip/compare/v0.96.0..0.97.0) - 2026-03-16
 
 ### ⛰️  Features
