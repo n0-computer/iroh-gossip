@@ -419,7 +419,7 @@ mod tests {
         use iroh::{address_lookup::memory::MemoryLookup, protocol::Router, RelayMap};
         use n0_error::{AnyError, Result, StackResultExt, StdResultExt};
         use n0_future::{time::Duration, StreamExt};
-        use rand::rngs::rand_core::SeedableRng;
+        use rand::SeedableRng;
 
         use crate::{
             api::{Event, GossipApi},

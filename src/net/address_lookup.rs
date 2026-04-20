@@ -138,7 +138,7 @@ mod tests {
 
     use iroh::{address_lookup::AddressLookup, EndpointAddr, SecretKey};
     use n0_future::StreamExt;
-    use rand::SeedableRng;
+    use rand::{RngExt, SeedableRng};
 
     use super::{GossipAddressLookup, RetentionOpts};
 

@@ -3,7 +3,7 @@
 use std::collections::{hash_map, HashMap, HashSet};
 
 use n0_future::time::{Duration, Instant};
-use rand::Rng;
+use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use tracing::trace;
 
@@ -161,7 +161,7 @@ pub struct State<PI, R> {
     peer_topics: ConnsMap<PI>,
 }
 
-impl<PI: PeerIdentity, R: Rng + Clone> State<PI, R> {
+impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
     /// Create a new protocol state instance.
     ///
     /// `me` is the [`PeerIdentity`] of the local node, `peer_data` is the initial [`PeerData`]
@@ -252,7 +252,7 @@ impl<PI: PeerIdentity, R: Rng + Clone> State<PI, R> {
                             self.me,
                             Some(self.me_data.clone()),
                             self.config.clone(),
-                            self.rng.clone(),
+                            R::from_rng(&mut self.rng),
                         ));
                     }
                 }

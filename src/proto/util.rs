@@ -8,7 +8,7 @@ use std::{
 use n0_future::time::Instant;
 use rand::{
     seq::{IteratorRandom, SliceRandom},
-    Rng,
+    Rng, RngExt,
 };
 
 /// Implement methods, display, debug and conversion traits for 32 byte identifiers.

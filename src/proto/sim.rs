@@ -8,8 +8,7 @@ use std::{
 
 use bytes::Bytes;
 use n0_future::time::{Duration, Instant};
-use rand::rngs::ChaCha12Rng;
-use rand::{seq::IteratorRandom, Rng, SeedableRng};
+use rand::{rngs::ChaCha12Rng, seq::IteratorRandom, Rng, RngExt, SeedableRng};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, debug_span, info, info_span, trace, warn};
 
@@ -139,7 +138,7 @@ impl<PI, R> Network<PI, R> {
     }
 }
 
-impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng + Clone> Network<PI, R> {
+impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
     /// Inserts a new peer.
     ///
     /// Panics if the peer already exists.
@@ -170,7 +169,7 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng + Clone> Network<PI, 
     }
 }
 
-impl<PI: PeerIdentity + fmt::Display, R: Rng + Clone> Network<PI, R> {
+impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
     /// Drains all queued events.
     pub fn events(&mut self) -> impl Iterator<Item = (PI, TopicId, Event<PI>)> + '_ {
         self.events.drain(..)

@@ -23,7 +23,7 @@ use n0_future::{
     time::Instant,
     Stream, StreamExt as _,
 };
-use rand::{rngs::ThreadRng, SeedableRng};
+use rand::{rngs::StdRng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -276,7 +276,7 @@ impl Gossip {
 struct Actor {
     alpn: Bytes,
     /// Protocol state
-    state: proto::State<PublicKey, ThreadRng>,
+    state: proto::State<PublicKey, StdRng>,
     /// The endpoint through which we dial peers
     endpoint: Endpoint,
     /// Dial machine to connect to peers
@@ -323,7 +323,7 @@ impl Actor {
             peer_id,
             Default::default(),
             config,
-            rand::rngs::ThreadRng::default(),
+            rand::rngs::StdRng::from_rng(&mut rand::rng()),
         );
         let (rpc_tx, rpc_rx) = mpsc::channel(TO_ACTOR_CAP);
         let (local_tx, local_rx) = mpsc::channel(16);
@@ -1082,7 +1082,7 @@ pub(crate) mod tests {
     };
     use n0_error::{AnyError, Result, StdResultExt};
     use n0_tracing_test::traced_test;
-    use rand::CryptoRng;
+    use rand::{CryptoRng, RngExt};
     use tokio::{spawn, time::timeout};
     use tokio_util::sync::CancellationToken;
     use tracing::{info, instrument};
