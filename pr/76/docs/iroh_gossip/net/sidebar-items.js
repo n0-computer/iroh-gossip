@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["GOSSIP_ALPN"],"enum":["Error"],"mod":["handles","util"],"struct":["Builder","Gossip"],"type":["ProtoCommand","ProtoEvent"]};

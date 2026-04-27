@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["DEFAULT_MAX_MESSAGE_SIZE","MIN_MAX_MESSAGE_SIZE"],"enum":["DeliveryScope","Scope"],"mod":["state","topic","util"],"struct":["HyparviewConfig","PeerData","PlumtreeConfig"],"trait":["PeerIdentity"]};
