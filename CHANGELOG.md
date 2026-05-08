@@ -2,6 +2,12 @@
 
 All notable changes to iroh-gossip will be documented in this file.
 
+## [0.99.0](https://github.com/n0-computer/iroh-gossip/compare/v0.98.0..0.99.0) - 2026-05-08
+
+### ⛰️  Features
+
+- [**breaking**] Update iroh and noq to 1.0-rc.0 ([#141](https://github.com/n0-computer/iroh-gossip/issues/141)) - ([8418636](https://github.com/n0-computer/iroh-gossip/commit/8418636b1e353bd28a2227a3d439fc4b509cedf8))
+
 ## [0.98.0](https://github.com/n0-computer/iroh-gossip/compare/v0.97.0..0.98.0) - 2026-04-20
 
 ### 🐛 Bug Fixes
