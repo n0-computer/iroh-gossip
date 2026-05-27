@@ -75,7 +75,7 @@ irpc = { version = "0.15.0", optional = true, default-features = false, features
 n0-error = { version = "=1.0.0-rc.0", features = ["anyhow"] }
 
 # rpc dependencies (optional)
-noq = { version = "=1.0.0-rc.0", optional = true, default-features = false }
+noq = { version = "=1.0.0-rc.1", optional = true, default-features = false }
 
 # test-utils dependencies (optional)
 humantime-serde = { version = "1.1.1", optional = true }
@@ -173,3 +173,8 @@ debug = true
 
 [profile.release]
 debug = true
+
+[patch.crates-io]
+iroh = { git = "https://github.com/n0-computer/iroh", branch = "feat-rc-1" }
+iroh-base = { git = "https://github.com/n0-computer/iroh", branch = "feat-rc-1" }
+irpc = { git = "https://github.com/n0-computer/irpc", branch = "feat-iroh-rc-1" }
