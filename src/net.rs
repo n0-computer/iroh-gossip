@@ -10,7 +10,6 @@ use std::{
 
 use bytes::Bytes;
 use futures_concurrency::stream::{stream_group, StreamGroup};
-use futures_util::FutureExt as _;
 use iroh::{
     endpoint::Connection,
     protocol::{AcceptError, ProtocolHandler},
@@ -624,8 +623,11 @@ impl Actor {
                 }
 
                 if !sender_dead {
-                    let fut =
-                        topic_subscriber_loop(tx, event_sender.subscribe()).map(move |_| topic_id);
+                    let subscriber_fut = topic_subscriber_loop(tx, event_sender.subscribe());
+                    let fut = async move {
+                        subscriber_fut.await;
+                        topic_id
+                    };
                     self.topic_event_forwarders
                         .spawn(fut.instrument(tracing::Span::current()));
                 }
@@ -1124,7 +1126,7 @@ pub(crate) mod tests {
             *step += 1;
             // ignore updates that change our published address. This gives us better control over
             // events since the endpoint it no longer emitting changes
-            let addr_update_stream = &mut futures_lite::stream::pending();
+            let addr_update_stream = &mut n0_future::stream::pending();
             actor.event_loop(addr_update_stream, *step).await
         }
 
@@ -1164,8 +1166,7 @@ pub(crate) mod tests {
                 Actor::new(endpoint, config, metrics.clone(), None, address_lookup);
             let max_message_size = actor.state.max_message_size();
 
-            let _actor_handle =
-                AbortOnDropHandle::new(task::spawn(futures_lite::future::pending()));
+            let _actor_handle = AbortOnDropHandle::new(task::spawn(n0_future::future::pending()));
             let gossip = Self {
                 inner: Inner {
                     api: GossipApi::local(to_actor_tx),

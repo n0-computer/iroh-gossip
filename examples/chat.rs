@@ -7,7 +7,6 @@ use std::{
 
 use bytes::Bytes;
 use clap::Parser;
-use futures_lite::StreamExt;
 use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, EndpointAddr, PublicKey,
     RelayMode, RelayUrl, SecretKey,
@@ -18,7 +17,7 @@ use iroh_gossip::{
     proto::TopicId,
 };
 use n0_error::{bail_any, AnyError, Result, StdResultExt};
-use n0_future::task;
+use n0_future::{task, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_byte_array::ByteArray;
 

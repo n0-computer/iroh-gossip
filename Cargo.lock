@@ -1874,8 +1874,6 @@ dependencies = [
  "derive_more",
  "ed25519-dalek",
  "futures-concurrency",
- "futures-lite",
- "futures-util",
  "hex",
  "humantime-serde",
  "indexmap",

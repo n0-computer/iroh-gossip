@@ -60,9 +60,7 @@ rand = { version = "0.10.1", features = ["std_rng"] }
 serde = { version = "1.0.164", features = ["derive"] }
 
 # net dependencies (optional)
-futures-lite = { version = "2.3", optional = true }
 futures-concurrency = { version = "7.6.1", optional = true }
-futures-util = { version = "0.3.30", optional = true }
 iroh = { version = "=1.0.0-rc.0", default-features = false, optional = true }
 tokio = { version = "1", optional = true, features = ["io-util", "sync"] }
 tokio-util = { version = "0.7.12", optional = true, features = ["codec"] }
@@ -118,11 +116,9 @@ rand = { version = "0.10", features = ["chacha"] }
 default = ["net", "metrics"]
 net = [
     "dep:irpc",
-    "dep:futures-lite",
     "dep:iroh",
     "dep:tokio",
     "dep:tokio-util",
-    "dep:futures-util",
     "dep:futures-concurrency",
 ]
 rpc = [
