@@ -1767,8 +1767,9 @@ dependencies = [
 
 [[package]]
 name = "iroh"
-version = "1.0.0-rc.0"
-source = "git+https://github.com/n0-computer/iroh?branch=feat-rc-1#b37c6edace5eb4ce761e86f38dab6d4bb85b589b"
+version = "1.0.0-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bef865dc2d11a19fe670ff217b68ffc3b511bddf473dc3a3e120090b9f691803"
 dependencies = [
  "axum",
  "backon",
@@ -1819,8 +1820,9 @@ dependencies = [
 
 [[package]]
 name = "iroh-base"
-version = "1.0.0-rc.0"
-source = "git+https://github.com/n0-computer/iroh?branch=feat-rc-1#b37c6edace5eb4ce761e86f38dab6d4bb85b589b"
+version = "1.0.0-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af93d67701c00c504982154569192ad384738c0450ba1196930314b955100552"
 dependencies = [
  "curve25519-dalek",
  "data-encoding",
@@ -1840,8 +1842,9 @@ dependencies = [
 
 [[package]]
 name = "iroh-dns"
-version = "1.0.0-rc.0"
-source = "git+https://github.com/n0-computer/iroh?branch=feat-rc-1#b37c6edace5eb4ce761e86f38dab6d4bb85b589b"
+version = "1.0.0-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de4112c91eb64094d77df9d3112606dcf7ff216421afccd2dc762fda5a7b2879"
 dependencies = [
  "arc-swap",
  "cfg_aliases",
@@ -1937,8 +1940,9 @@ dependencies = [
 
 [[package]]
 name = "iroh-relay"
-version = "1.0.0-rc.0"
-source = "git+https://github.com/n0-computer/iroh?branch=feat-rc-1#b37c6edace5eb4ce761e86f38dab6d4bb85b589b"
+version = "1.0.0-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a70030b9e71c1183bd4f88fbdbebfa1af2a5be549dd6f20a1e8ac3cd0202ee9d"
 dependencies = [
  "ahash",
  "blake3",
@@ -1996,8 +2000,9 @@ dependencies = [
 
 [[package]]
 name = "irpc"
-version = "0.15.0"
-source = "git+https://github.com/n0-computer/irpc?branch=feat-iroh-rc-1#348d64c4d892b11980c070e5729903862d2acfb0"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a05799eb70acd04843c327ef939233ccf80f607d30e9ca94857ac7f3d8f18b46"
 dependencies = [
  "futures-buffered",
  "futures-util",
@@ -2017,8 +2022,9 @@ dependencies = [
 
 [[package]]
 name = "irpc-derive"
-version = "0.15.0"
-source = "git+https://github.com/n0-computer/irpc?branch=feat-iroh-rc-1#348d64c4d892b11980c070e5729903862d2acfb0"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "445d81dbc1eed4dab6379bf7f97d12ac28ce8e6f3f7d6660c9f333b7b5d8d03b"
 dependencies = [
  "proc-macro2",
  "quote",
