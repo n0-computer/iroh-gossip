@@ -2,6 +2,12 @@
 
 All notable changes to iroh-gossip will be documented in this file.
 
+## [0.100.0](https://github.com/n0-computer/iroh-gossip/compare/v0.99.0..0.100.0) - 2026-05-27
+
+### ⛰️  Features
+
+- [**breaking**] Update to iroh@1.0.0-rc.1 ([#144](https://github.com/n0-computer/iroh-gossip/issues/144)) - ([2712675](https://github.com/n0-computer/iroh-gossip/commit/2712675e3623f97f582be98029209ff73f3d5b1a))
+
 ## [0.99.0](https://github.com/n0-computer/iroh-gossip/compare/v0.98.0..0.99.0) - 2026-05-08
 
 ### ⛰️  Features
