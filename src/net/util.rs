@@ -231,7 +231,16 @@ impl SendLoop {
             tokio::select! {
                 biased;
                 _ = &mut closed => break,
-                Some(msg) = self.send_rx.recv() => self.write_message(&msg).await?,
+                msg = self.send_rx.recv() => match msg {
+                    Some(msg) => self.write_message(&msg).await?,
+                    // All senders dropped = the peer was removed from the gossip
+                    // peer map; the send side is done, so break. With the old
+                    // `Some(msg) = recv()` form, a `None` silently DISABLED this
+                    // branch while `closed` stayed pending forever — SendLoop hung,
+                    // send_fut never resolved, connection_loop's select! never fired,
+                    // and the Connection + ConnectionDriver leaked (1 per removed peer).
+                    None => break,
+                },
                 _ = self.finishing.join_next(), if !self.finishing.is_empty() => {}
                 else => break,
             }
