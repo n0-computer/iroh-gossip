@@ -676,6 +676,8 @@ impl<PI: PeerIdentity> State<PI> {
         });
         self.eager_push_peers.remove(&peer);
         self.lazy_push_peers.remove(&peer);
+        // Clear the lazy push queue to prevent lingering peer IDs from leaking memory when a neighbor goes down
+        self.lazy_push_queue.remove(&peer);
     }
 
     fn on_evict_cache_timer(&mut self, now: Instant, io: &mut impl IO<PI>) {
