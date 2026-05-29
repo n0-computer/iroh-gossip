@@ -283,6 +283,10 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
                 if let topic::InEvent::UpdatePeerData(data) = &event {
                     self.me_data = data.clone();
                 }
+                if let topic::InEvent::PeerDisconnected(peer) = &event {
+                    // Prune the peer from the topics tracking index to prevent a persistent memory leak under node churn
+                    self.peer_topics.remove(peer);
+                }
                 for (topic, state) in self.states.iter_mut() {
                     let out = state.handle(event.clone(), now);
                     for event in out {
