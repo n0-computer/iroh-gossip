@@ -441,6 +441,8 @@ impl Actor {
                             self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
                                 .await;
                         }
+                        // Remove from active peers tracking map to reclaim connection resources on dial failure
+                        self.peers.remove(&peer_id);
                     }
                     None => {
                         warn!(peer = %peer_id.fmt_short(), "dial disconnected");
@@ -583,6 +585,8 @@ impl Actor {
                 debug!("active send connection closed, mark peer as disconnected");
                 self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
                     .await;
+                // Discard peer descriptor from tracking map upon connection closure to prevent connection descriptor leak
+                self.peers.remove(&peer_id);
             } else {
                 other_conns.retain(|x| *x != conn.stable_id());
                 debug!("remaining {} other connections", other_conns.len() + 1);
@@ -894,9 +898,15 @@ async fn connection_loop(
     let send_fut = send_loop.run(queue).instrument(error_span!("send"));
     let recv_fut = recv_loop.run().instrument(error_span!("recv"));
 
-    let (send_res, recv_res) = tokio::join!(send_fut, recv_fut);
-    send_res?;
-    recv_res?;
+    tokio::select! {
+        biased;
+        res = send_fut => {
+            res?;
+        }
+        res = recv_fut => {
+            res?;
+        }
+    }
     Ok(())
 }
 
