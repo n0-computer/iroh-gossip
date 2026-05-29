@@ -580,7 +580,11 @@ where
             return;
         }
         if self.passive_is_full() {
-            self.passive_view.remove_random(&mut self.rng);
+            if let Some(evicted_peer) = self.passive_view.remove_random(&mut self.rng) {
+                // Clear metadata and eviction markers to prevent memory leaks from accumulated stale descriptors
+                self.peer_data.remove(&evicted_peer);
+                self.alive_disconnect_peers.remove(&evicted_peer);
+            }
         }
         self.passive_view.insert(peer);
     }
@@ -632,6 +636,9 @@ where
     fn handle_pending_neighbor_timer(&mut self, peer: PI, io: &mut impl IO<PI>) {
         if self.pending_neighbor_requests.remove(&peer) {
             self.passive_view.remove(&peer);
+            // Clear metadata and eviction markers to prevent memory leaks on neighbor handshake timeout
+            self.peer_data.remove(&peer);
+            self.alive_disconnect_peers.remove(&peer);
             self.refill_active_from_passive(&[], io);
         }
     }
@@ -671,6 +678,9 @@ where
                 if !matches!(reason, RemovalReason::ConnectionClosed) {
                     self.alive_disconnect_peers.insert(peer);
                 }
+            } else {
+                // Clear metadata from map for fully discarded peers to prevent persistent memory leak
+                self.peer_data.remove(&peer);
             }
             debug!(other = ?peer, "removed from active view, reason: {reason:?}");
             Some(peer)
