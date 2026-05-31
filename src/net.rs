@@ -441,6 +441,9 @@ impl Actor {
                             self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
                                 .await;
                         }
+                        // Reclaim the peer descriptor on dial failure so it doesn't
+                        // linger in the tracking map (from n0-computer/iroh-gossip#146).
+                        self.peers.remove(&peer_id);
                     }
                     None => {
                         warn!(peer = %peer_id.fmt_short(), "dial disconnected");
@@ -583,6 +586,9 @@ impl Actor {
                 debug!("active send connection closed, mark peer as disconnected");
                 self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
                     .await;
+                // Drop the peer descriptor when its active connection closes so it
+                // doesn't leak in the tracking map (from n0-computer/iroh-gossip#146).
+                self.peers.remove(&peer_id);
             } else {
                 other_conns.retain(|x| *x != conn.stable_id());
                 debug!("remaining {} other connections", other_conns.len() + 1);

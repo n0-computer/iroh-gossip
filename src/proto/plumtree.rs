@@ -676,6 +676,9 @@ impl<PI: PeerIdentity> State<PI> {
         });
         self.eager_push_peers.remove(&peer);
         self.lazy_push_peers.remove(&peer);
+        // Also drop any queued lazy-push IHaves for the downed peer so its entry
+        // doesn't linger in the queue map (from n0-computer/iroh-gossip#146).
+        self.lazy_push_queue.remove(&peer);
     }
 
     fn on_evict_cache_timer(&mut self, now: Instant, io: &mut impl IO<PI>) {
@@ -738,6 +741,30 @@ impl<PI: PeerIdentity> State<PI> {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// Regression for n0-computer/iroh-gossip#146: a downed neighbor must be
+    /// dropped from `lazy_push_queue`, not just from the eager/lazy peer sets.
+    /// Without the prune the queued IHaves linger, leaking one entry per
+    /// rotated neighbor under churn.
+    #[test]
+    fn neighbor_down_prunes_lazy_push_queue() {
+        let mut state = State::new(1u32, Config::default(), 1024);
+        let peer = 2u32;
+        // Seed a queued lazy-push IHave for the peer.
+        state.lazy_push_queue.entry(peer).or_default().push(IHave {
+            id: MessageId::from_content(b"x"),
+            round: Round(1),
+        });
+        assert!(state.lazy_push_queue.contains_key(&peer));
+
+        state.on_neighbor_down(peer);
+
+        assert!(
+            !state.lazy_push_queue.contains_key(&peer),
+            "on_neighbor_down must prune the peer from lazy_push_queue"
+        );
+    }
+
     #[test]
     fn optimize_tree() {
         let mut io = VecDeque::new();
