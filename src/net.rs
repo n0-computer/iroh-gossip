@@ -1544,6 +1544,69 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// Regression test: a [`SendLoop`] must terminate once its send channel is
+    /// closed (all senders dropped), which is how a superseded or disconnected
+    /// connection is signalled — [`PeerState::accept_conn`] drops the old
+    /// connection's `send_tx`, and [`Actor::handle_in_event`] drops it on
+    /// `DisconnectPeer`.
+    ///
+    /// Previously the send loop's `select!` used `Some(msg) = recv()` plus an
+    /// `else => break`. That `else` was dead code: the biased `closed` branch
+    /// stayed enabled-and-pending, so the loop blocked on `closed` forever
+    /// instead of breaking when the channel closed. The connection (and its
+    /// `connection_loop`) then lived until the *peer* closed it — which under
+    /// keep-alive never happened — leaking one connection per churned link.
+    ///
+    /// [`SendLoop`]: util::SendLoop
+    #[tokio::test]
+    #[traced_test]
+    async fn send_loop_terminates_when_send_channel_closed() -> Result {
+        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
+        let (relay_map, relay_url, _guard) =
+            iroh::test_utils::run_relay_server().await.unwrap();
+        let ep1 = create_endpoint(rng, relay_map.clone(), None).await?;
+        let ep2 = create_endpoint(rng, relay_map.clone(), None).await?;
+
+        // Let ep1 resolve ep2's address.
+        let memory_lookup = MemoryLookup::new();
+        memory_lookup.add_endpoint_info(EndpointAddr::new(ep2.id()).with_relay_url(relay_url));
+        ep1.address_lookup()?.add(memory_lookup);
+
+        let ep2_id = ep2.id();
+        // ep2 accepts the connection and holds it open (so the only thing that can
+        // make the send loop exit is the closed send channel, not the peer).
+        let accept_task = task::spawn(async move {
+            if let Some(incoming) = ep2.accept().await {
+                if let Ok(conn) = incoming.await {
+                    conn.closed().await;
+                }
+            }
+        });
+
+        let conn = ep1
+            .connect(ep2_id, GOSSIP_ALPN)
+            .await
+            .std_context("connect")?;
+
+        // A send channel whose only sender is immediately dropped models a
+        // just-superseded connection.
+        let (send_tx, send_rx) = mpsc::channel::<ProtoMessage>(1);
+        drop(send_tx);
+
+        // With the fix this returns promptly; with the bug it blocks on
+        // `conn.closed()` forever and the timeout fires.
+        let mut send_loop = util::SendLoop::new(conn, send_rx, 1024);
+        let res = timeout(Duration::from_secs(5), send_loop.run(vec![])).await;
+        assert!(
+            res.is_ok(),
+            "SendLoop must terminate when its send channel closes (superseded connection)"
+        );
+        res.expect("send loop returned").std_context("send loop run")?;
+
+        accept_task.abort();
+        Ok(())
+    }
+
     /// Test that endpoints can reconnect to each other.
     ///
     /// This test will create two endpoints subscribed to the same topic. The second endpoint will

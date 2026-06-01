@@ -383,3 +383,40 @@ fn track_in_event<PI: Serialize>(event: &InEvent<PI>, metrics: &Metrics) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use n0_future::time::Instant;
+    use rand::{rngs::StdRng, SeedableRng};
+
+    use super::*;
+
+    /// Regression for n0-computer/iroh-gossip#146: a network-level
+    /// `PeerDisconnected` must prune the peer from the top-level `peer_topics`
+    /// index. That index is otherwise never cleared on disconnect, so it leaks
+    /// one entry per rotated peer under churn (it's rebuilt from the next
+    /// message if the peer reconnects).
+    #[test]
+    fn peer_disconnected_prunes_peer_topics() {
+        let mut state: State<u32, StdRng> = State::new(
+            0,
+            PeerData::new(Vec::<u8>::new()),
+            Config::default(),
+            StdRng::seed_from_u64(1),
+        );
+        let peer = 7u32;
+        state.peer_topics.insert(peer, HashSet::default());
+        assert!(state.peer_topics.contains_key(&peer));
+
+        state
+            .handle(InEvent::PeerDisconnected(peer), Instant::now(), None)
+            .for_each(drop);
+
+        assert!(
+            !state.peer_topics.contains_key(&peer),
+            "PeerDisconnected must prune the peer from peer_topics"
+        );
+    }
+}
