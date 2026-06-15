@@ -1079,7 +1079,7 @@
 <a href=#1079 id=1079 data-nosnippet>1079</a>        address_lookup::memory::MemoryLookup,
 <a href=#1080 id=1080 data-nosnippet>1080</a>        endpoint::{presets, BindError},
 <a href=#1081 id=1081 data-nosnippet>1081</a>        protocol::Router,
-<a href=#1082 id=1082 data-nosnippet>1082</a>        tls::CaRootsConfig,
+<a href=#1082 id=1082 data-nosnippet>1082</a>        tls::CaTlsConfig,
 <a href=#1083 id=1083 data-nosnippet>1083</a>        RelayMap, RelayMode, SecretKey,
 <a href=#1084 id=1084 data-nosnippet>1084</a>    };
 <a href=#1085 id=1085 data-nosnippet>1085</a>    <span class="kw">use </span>n0_error::{AnyError, <span class="prelude-ty">Result</span>, StdResultExt};
@@ -1213,7 +1213,7 @@
 <a href=#1213 id=1213 data-nosnippet>1213</a>            .relay_mode(RelayMode::Custom(relay_map))
 <a href=#1214 id=1214 data-nosnippet>1214</a>            .secret_key(SecretKey::from_bytes(<span class="kw-2">&amp;</span>rng.random()))
 <a href=#1215 id=1215 data-nosnippet>1215</a>            .alpns(<span class="macro">vec!</span>[GOSSIP_ALPN.to_vec()])
-<a href=#1216 id=1216 data-nosnippet>1216</a>            .ca_roots_config(CaRootsConfig::insecure_skip_verify())
+<a href=#1216 id=1216 data-nosnippet>1216</a>            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
 <a href=#1217 id=1217 data-nosnippet>1217</a>            .bind()
 <a href=#1218 id=1218 data-nosnippet>1218</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
 <a href=#1219 id=1219 data-nosnippet>1219</a>
@@ -1667,7 +1667,7 @@
 <a href=#1667 id=1667 data-nosnippet>1667</a>            <span class="kw">let </span>ep = Endpoint::builder(presets::Minimal)
 <a href=#1668 id=1668 data-nosnippet>1668</a>                .relay_mode(RelayMode::Custom(relay_map))
 <a href=#1669 id=1669 data-nosnippet>1669</a>                .secret_key(secret_key)
-<a href=#1670 id=1670 data-nosnippet>1670</a>                .ca_roots_config(CaRootsConfig::insecure_skip_verify())
+<a href=#1670 id=1670 data-nosnippet>1670</a>                .ca_tls_config(CaTlsConfig::insecure_skip_verify())
 <a href=#1671 id=1671 data-nosnippet>1671</a>                .bind()
 <a href=#1672 id=1672 data-nosnippet>1672</a>                .<span class="kw">await</span><span class="question-mark">?</span>;
 <a href=#1673 id=1673 data-nosnippet>1673</a>            <span class="kw">let </span>gossip = Gossip::builder().spawn(ep.clone());
