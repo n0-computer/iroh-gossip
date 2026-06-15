@@ -1388,13 +1388,10 @@ pub(crate) mod tests {
         }
     }
 
-    /// Shared body for the two #4325 tests below.
-    ///
-    /// Builds a 3-node localhost gossip mesh where the two leaf nodes dial the seed
-    /// concurrently at startup, and returns whether the mesh finished forming within
-    /// the timeout. When `home_relay` is `Some`, it is configured as the home relay
-    /// of every node and added to each peer's addressing info, so the per-peer path
-    /// set fans each datagram out to both that relay and the working direct path.
+    /// Builds a 3-node localhost gossip mesh (the two leaf nodes dial the seed
+    /// concurrently at startup) and returns whether it formed within the timeout.
+    /// `home_relay`, if set, is every node's home relay and is added to each peer's
+    /// addressing info.
     async fn three_node_concurrent_dial_forms_mesh(home_relay: Option<iroh::RelayUrl>) -> bool {
         async fn build_endpoint(
             rng: &mut rand::rngs::ChaCha12Rng,
@@ -1501,8 +1498,7 @@ pub(crate) mod tests {
         joined
     }
 
-    /// Control for [`gossip_three_node_concurrent_dial_unreachable_relay_freezes`]:
-    /// the very same 3-node concurrent-dial mesh forms fine with no relay.
+    /// Control: the 3-node concurrent-dial mesh forms fine with no relay.
     #[tokio::test]
     #[traced_test]
     async fn gossip_three_node_concurrent_dial_no_relay_forms_mesh() {
@@ -1512,26 +1508,10 @@ pub(crate) mod tests {
         );
     }
 
-    /// Reproduction for iroh issue #4325.
-    ///
-    /// The same 3-node localhost gossip mesh as the control above, except every node
-    /// has an *unreachable* home relay (`https://127.0.0.1:1`). The working direct
-    /// loopback path should make the relay irrelevant, but under iroh `1.0.0` the mesh
-    /// never finishes forming: each datagram fans out to both the dead relay and the
-    /// direct path, the per-peer `RemoteStateActor` inbox (a fixed `mpsc::channel(16)`)
-    /// backs up, and `Sender::poll_send` silently drops the overflow — including QUIC
-    /// handshake Initials — by turning the `try_send` error into `Poll::Ready(Ok(()))`.
-    /// The handshakes then starve to the connect timeout.
-    ///
-    /// Reproduces deterministically on Windows. Marked `#[ignore]` so it does not break
-    /// CI; run it explicitly with:
-    ///
-    /// ```text
-    /// cargo test -p iroh-gossip gossip_three_node_concurrent_dial_unreachable_relay_freezes -- --ignored --nocapture
-    /// ```
-    ///
-    /// Remove `#[ignore]` once the upstream drop/stall is fixed — it then doubles as a
-    /// regression test.
+    /// Reproduction for iroh #4325: the same mesh as the control, but with an
+    /// unreachable home relay (`https://127.0.0.1:1`). The direct loopback path is
+    /// usable, yet under iroh 1.0.0 the mesh never forms and the join starves to the
+    /// connect timeout. `#[ignore]`d so it does not break CI; run with `--ignored`.
     #[tokio::test]
     #[traced_test]
     #[ignore = "reproduces iroh #4325: unreachable home relay starves concurrent-dial handshakes"]
