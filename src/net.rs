@@ -1388,6 +1388,161 @@ pub(crate) mod tests {
         }
     }
 
+    /// Shared body for the two #4325 tests below.
+    ///
+    /// Builds a 3-node localhost gossip mesh where the two leaf nodes dial the seed
+    /// concurrently at startup, and returns whether the mesh finished forming within
+    /// the timeout. When `home_relay` is `Some`, it is configured as the home relay
+    /// of every node and added to each peer's addressing info, so the per-peer path
+    /// set fans each datagram out to both that relay and the working direct path.
+    async fn three_node_concurrent_dial_forms_mesh(home_relay: Option<iroh::RelayUrl>) -> bool {
+        async fn build_endpoint(
+            rng: &mut rand::rngs::ChaCha12Rng,
+            loopback: std::net::SocketAddrV4,
+            home_relay: Option<iroh::RelayUrl>,
+            memory_lookup: MemoryLookup,
+        ) -> Endpoint {
+            let builder = Endpoint::builder(presets::Minimal)
+                .secret_key(SecretKey::from_bytes(&rng.random()))
+                .alpns(vec![GOSSIP_ALPN.to_vec()]);
+            let builder = match home_relay {
+                Some(url) => builder
+                    .relay_mode(RelayMode::Custom(RelayMap::from_iter([url])))
+                    .ca_tls_config(CaTlsConfig::insecure_skip_verify()),
+                None => builder.relay_mode(RelayMode::Disabled),
+            };
+            let ep = builder.bind_addr(loopback).unwrap().bind().await.unwrap();
+            ep.address_lookup()
+                .expect("endpoint is not closed")
+                .add(memory_lookup);
+            ep
+        }
+
+        // Loopback address from the endpoint's bound sockets (avoids relying on
+        // async direct-address discovery), plus the home relay if configured.
+        fn peer_addr(ep: &Endpoint, home_relay: &Option<iroh::RelayUrl>) -> EndpointAddr {
+            let mut addr = EndpointAddr::new(ep.id());
+            if let Some(url) = home_relay {
+                addr = addr.with_relay_url(url.clone());
+            }
+            for socket in ep.bound_sockets() {
+                addr = addr.with_ip_addr(socket);
+            }
+            addr
+        }
+
+        let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(1);
+        let loopback = std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 0);
+        let memory_lookup = MemoryLookup::new();
+
+        let ep1 = build_endpoint(
+            &mut rng,
+            loopback,
+            home_relay.clone(),
+            memory_lookup.clone(),
+        )
+        .await;
+        let ep2 = build_endpoint(
+            &mut rng,
+            loopback,
+            home_relay.clone(),
+            memory_lookup.clone(),
+        )
+        .await;
+        let ep3 = build_endpoint(
+            &mut rng,
+            loopback,
+            home_relay.clone(),
+            memory_lookup.clone(),
+        )
+        .await;
+
+        let go1 = Gossip::builder().spawn(ep1.clone());
+        let go2 = Gossip::builder().spawn(ep2.clone());
+        let go3 = Gossip::builder().spawn(ep3.clone());
+        let pi1 = ep1.id();
+
+        // Publish every endpoint's loopback address into the shared lookup.
+        for ep in [&ep1, &ep2, &ep3] {
+            let addr = peer_addr(ep, &home_relay);
+            assert!(
+                addr.ip_addrs().count() > 0,
+                "endpoint has no direct address: {addr:?}"
+            );
+            memory_lookup.add_endpoint_info(addr);
+        }
+
+        let cancel = CancellationToken::new();
+        let tasks = [
+            spawn(endpoint_loop(ep1.clone(), go1.clone(), cancel.clone())),
+            spawn(endpoint_loop(ep2.clone(), go2.clone(), cancel.clone())),
+            spawn(endpoint_loop(ep3.clone(), go3.clone(), cancel.clone())),
+        ];
+
+        let topic: TopicId = blake3::hash(b"concurrent-dial").into();
+
+        // Both leaf nodes dial the seed concurrently at startup.
+        let joined = timeout(
+            Duration::from_secs(15),
+            [
+                go1.subscribe_and_join(topic, vec![]),
+                go2.subscribe_and_join(topic, vec![pi1]),
+                go3.subscribe_and_join(topic, vec![pi1]),
+            ]
+            .try_join(),
+        )
+        .await
+        .is_ok();
+
+        cancel.cancel();
+        for t in tasks {
+            t.abort();
+        }
+        joined
+    }
+
+    /// Control for [`gossip_three_node_concurrent_dial_unreachable_relay_freezes`]:
+    /// the very same 3-node concurrent-dial mesh forms fine with no relay.
+    #[tokio::test]
+    #[traced_test]
+    async fn gossip_three_node_concurrent_dial_no_relay_forms_mesh() {
+        assert!(
+            three_node_concurrent_dial_forms_mesh(None).await,
+            "control: a 3-node mesh should form over direct loopback paths"
+        );
+    }
+
+    /// Reproduction for iroh issue #4325.
+    ///
+    /// The same 3-node localhost gossip mesh as the control above, except every node
+    /// has an *unreachable* home relay (`https://127.0.0.1:1`). The working direct
+    /// loopback path should make the relay irrelevant, but under iroh `1.0.0` the mesh
+    /// never finishes forming: each datagram fans out to both the dead relay and the
+    /// direct path, the per-peer `RemoteStateActor` inbox (a fixed `mpsc::channel(16)`)
+    /// backs up, and `Sender::poll_send` silently drops the overflow — including QUIC
+    /// handshake Initials — by turning the `try_send` error into `Poll::Ready(Ok(()))`.
+    /// The handshakes then starve to the connect timeout.
+    ///
+    /// Reproduces deterministically on Windows. Marked `#[ignore]` so it does not break
+    /// CI; run it explicitly with:
+    ///
+    /// ```text
+    /// cargo test -p iroh-gossip gossip_three_node_concurrent_dial_unreachable_relay_freezes -- --ignored --nocapture
+    /// ```
+    ///
+    /// Remove `#[ignore]` once the upstream drop/stall is fixed — it then doubles as a
+    /// regression test.
+    #[tokio::test]
+    #[traced_test]
+    #[ignore = "reproduces iroh #4325: unreachable home relay starves concurrent-dial handshakes"]
+    async fn gossip_three_node_concurrent_dial_unreachable_relay_freezes() {
+        let dead_relay: iroh::RelayUrl = "https://127.0.0.1:1".parse().unwrap();
+        assert!(
+            three_node_concurrent_dial_forms_mesh(Some(dead_relay)).await,
+            "an unreachable home relay must not break the working direct path (#4325)"
+        );
+    }
+
     /// Test that when a gossip topic is no longer needed it's actually unsubscribed.
     ///
     /// This test will:
