@@ -580,7 +580,11 @@ where
             return;
         }
         if self.passive_is_full() {
-            self.passive_view.remove_random(&mut self.rng);
+            if let Some(evicted_peer) = self.passive_view.remove_random(&mut self.rng) {
+                // Clear metadata and eviction markers to prevent memory leaks from accumulated stale descriptors
+                self.peer_data.remove(&evicted_peer);
+                self.alive_disconnect_peers.remove(&evicted_peer);
+            }
         }
         self.passive_view.insert(peer);
     }
@@ -632,6 +636,9 @@ where
     fn handle_pending_neighbor_timer(&mut self, peer: PI, io: &mut impl IO<PI>) {
         if self.pending_neighbor_requests.remove(&peer) {
             self.passive_view.remove(&peer);
+            // Clear metadata and eviction markers to prevent memory leaks on neighbor handshake timeout
+            self.peer_data.remove(&peer);
+            self.alive_disconnect_peers.remove(&peer);
             self.refill_active_from_passive(&[], io);
         }
     }
@@ -671,6 +678,9 @@ where
                 if !matches!(reason, RemovalReason::ConnectionClosed) {
                     self.alive_disconnect_peers.insert(peer);
                 }
+            } else {
+                // Clear metadata from map for fully discarded peers to prevent persistent memory leak
+                self.peer_data.remove(&peer);
             }
             debug!(other = ?peer, "removed from active view, reason: {reason:?}");
             Some(peer)
@@ -761,4 +771,82 @@ enum RemovalReason {
     DisconnectReceived { is_alive: bool },
     /// A peer is removed after random selection to make room for a newly joined peer.
     Random,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use rand::{rngs::StdRng, SeedableRng};
+
+    use super::*;
+    use crate::proto::topic::OutEvent as TopicOut;
+
+    fn state() -> State<u32, StdRng> {
+        State::new(0u32, None, Config::default(), StdRng::seed_from_u64(1))
+    }
+
+    // Regressions for n0-computer/iroh-gossip#146: per-peer metadata
+    // (`peer_data`, `alive_disconnect_peers`) must be pruned when a peer leaves,
+    // rather than accumulating as stale state under churn. One test per eviction
+    // path — revert that path's prune and only its test goes red.
+
+    #[test]
+    fn passive_view_eviction_prunes_metadata() {
+        let mut state = state();
+        state.config.passive_view_capacity = 1;
+        let mut io = VecDeque::<TopicOut<u32>>::new();
+        state.add_passive(10, None, &mut io); // passive view now {10}
+        state.peer_data.insert(10, PeerData::new(vec![1]));
+        state.alive_disconnect_peers.insert(10);
+        // Adding another peer evicts the (single) passive peer at random = 10.
+        state.add_passive(11, None, &mut io);
+        assert!(
+            !state.peer_data.contains_key(&10),
+            "passive-view eviction must prune peer_data"
+        );
+        assert!(
+            !state.alive_disconnect_peers.contains(&10),
+            "passive-view eviction must prune alive_disconnect_peers"
+        );
+    }
+
+    #[test]
+    fn pending_neighbor_timeout_prunes_metadata() {
+        let mut state = state();
+        let mut io = VecDeque::<TopicOut<u32>>::new();
+        let peer = 20;
+        state.pending_neighbor_requests.insert(peer);
+        state.passive_view.insert(peer);
+        state.peer_data.insert(peer, PeerData::new(vec![2]));
+        state.alive_disconnect_peers.insert(peer);
+        state.handle_pending_neighbor_timer(peer, &mut io);
+        assert!(
+            !state.peer_data.contains_key(&peer),
+            "pending-neighbor timeout must prune peer_data"
+        );
+        assert!(
+            !state.alive_disconnect_peers.contains(&peer),
+            "pending-neighbor timeout must prune alive_disconnect_peers"
+        );
+    }
+
+    #[test]
+    fn active_view_discard_prunes_metadata() {
+        let mut state = state();
+        let mut io = VecDeque::<TopicOut<u32>>::new();
+        let peer = 30;
+        state.active_view.insert(peer);
+        state.peer_data.insert(peer, PeerData::new(vec![3]));
+        // is_alive=false => not kept as passive => peer_data must be dropped.
+        state.remove_active(
+            &peer,
+            RemovalReason::DisconnectReceived { is_alive: false },
+            &mut io,
+        );
+        assert!(
+            !state.peer_data.contains_key(&peer),
+            "active-view discard (not kept) must prune peer_data"
+        );
+    }
 }
