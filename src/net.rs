@@ -1514,7 +1514,6 @@ pub(crate) mod tests {
     /// connect timeout. `#[ignore]`d so it does not break CI; run with `--ignored`.
     #[tokio::test]
     #[traced_test]
-    #[ignore = "reproduces iroh #4325: unreachable home relay starves concurrent-dial handshakes"]
     async fn gossip_three_node_concurrent_dial_unreachable_relay_freezes() {
         let dead_relay: iroh::RelayUrl = "https://127.0.0.1:1".parse().unwrap();
         assert!(
