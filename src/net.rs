@@ -464,15 +464,45 @@ impl Actor {
             }
             Some(res) = self.connection_tasks.join_next(), if !self.connection_tasks.is_empty() => {
                 trace!(?i, "tick: connection_tasks");
-                let (peer_id, conn, result) = res.expect("connection task panicked");
-                self.handle_connection_task_finished(peer_id, conn, result).await;
+                match res {
+                    Ok((peer_id, conn, result)) => {
+                        self.handle_connection_task_finished(peer_id, conn, result).await;
+                    }
+                    Err(err) if err.is_cancelled() => {
+                        // The task was aborted (e.g. via JoinSet::abort_all
+                        // on actor shutdown, or via a connection task's
+                        // AbortHandle held elsewhere). Continue the
+                        // event loop rather than panicking the actor.
+                        warn!(
+                            ?err,
+                            "connection task cancelled; continuing event loop"
+                        );
+                    }
+                    Err(err) => {
+                        // Genuine task panic — preserve the existing
+                        // panic-on-bug behaviour so it is not silenced.
+                        panic!("connection task panicked: {err}");
+                    }
+                }
             }
             Some(res) = self.topic_event_forwarders.join_next(), if !self.topic_event_forwarders.is_empty() => {
-                let topic_id = res.expect("topic event forwarder panicked");
-                if let Some(state) = self.topics.get_mut(&topic_id) {
-                    if !state.still_needed() {
-                        self.quit_queue.push_back(topic_id);
-                        self.process_quit_queue().await;
+                match res {
+                    Ok(topic_id) => {
+                        if let Some(state) = self.topics.get_mut(&topic_id) {
+                            if !state.still_needed() {
+                                self.quit_queue.push_back(topic_id);
+                                self.process_quit_queue().await;
+                            }
+                        }
+                    }
+                    Err(err) if err.is_cancelled() => {
+                        warn!(
+                            ?err,
+                            "topic event forwarder cancelled; continuing event loop"
+                        );
+                    }
+                    Err(err) => {
+                        panic!("topic event forwarder panicked: {err}");
                     }
                 }
             }
@@ -1972,6 +2002,96 @@ pub(crate) mod tests {
         drop(rx2);
         router1.shutdown().await.std_context("shutdown router1")?;
         router2.shutdown().await.std_context("shutdown router2")?;
+        Ok(())
+    }
+
+    /// Regression test for issue #140.
+    ///
+    /// When a task in `Actor::connection_tasks` ends via
+    /// `JoinError::Cancelled` — possible whenever the task is aborted
+    /// directly (e.g. via the `JoinSet`'s `AbortHandle`) or whenever
+    /// the actor's parent task is cancelled while connection tasks
+    /// are in flight — the previous `.expect("connection task panicked")`
+    /// at the `connection_tasks.join_next()` branch of `Actor::tick`
+    /// panicked the actor task itself. Result: the entire gossip
+    /// subsystem stops processing commands (its `to_actor_rx` has no
+    /// live consumer), so every subsequent `subscribe`, `broadcast`,
+    /// or topic event delivery hangs indefinitely with no diagnostic.
+    ///
+    /// This test injects a pending task into `connection_tasks`,
+    /// aborts it, and drives one `Actor::event_loop` tick. Without
+    /// the fix it panics inside `tick`; with the fix it logs a
+    /// warning and continues.
+    #[tokio::test]
+    #[traced_test]
+    async fn actor_survives_cancelled_connection_task() -> Result {
+        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
+        let ct = CancellationToken::new();
+        let (relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+
+        let (_gossip, actor, _ep_handle) =
+            Gossip::t_new_with_actor(rng, Default::default(), relay_map, &ct).await?;
+        let mut actor = ManualActorLoop::new(actor).await;
+
+        // Inject a pending task into `connection_tasks`. The future
+        // never resolves on its own; aborting forces the JoinSet to
+        // yield `Err(JoinError::Cancelled)` on the next `join_next()`.
+        let handle = actor.connection_tasks.spawn(async {
+            std::future::pending::<(
+                EndpointId,
+                iroh::endpoint::Connection,
+                Result<(), ConnectionLoopError>,
+            )>()
+            .await
+        });
+        handle.abort();
+
+        // Drive one tick under a hard timeout. Without the fix `tick`
+        // panics inside `tokio::select!` when it hits the cancelled
+        // task. With the fix it routes through the new `match` arm,
+        // logs a warning, and returns `true` (actor still running).
+        let still_running = timeout(Duration::from_secs(5), actor.step())
+            .await
+            .std_context("actor.step() should return promptly after cancelled task")?;
+        assert!(
+            still_running,
+            "actor should keep running after a cancelled connection task"
+        );
+
+        ct.cancel();
+        Ok(())
+    }
+
+    /// Regression test for issue #140 — second JoinSet variant.
+    ///
+    /// Same failure mode as `actor_survives_cancelled_connection_task`
+    /// but exercises `Actor::topic_event_forwarders`, which had the
+    /// same `.expect("topic event forwarder panicked")` defect.
+    #[tokio::test]
+    #[traced_test]
+    async fn actor_survives_cancelled_topic_event_forwarder() -> Result {
+        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(2);
+        let ct = CancellationToken::new();
+        let (relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+
+        let (_gossip, actor, _ep_handle) =
+            Gossip::t_new_with_actor(rng, Default::default(), relay_map, &ct).await?;
+        let mut actor = ManualActorLoop::new(actor).await;
+
+        let handle = actor
+            .topic_event_forwarders
+            .spawn(async { std::future::pending::<TopicId>().await });
+        handle.abort();
+
+        let still_running = timeout(Duration::from_secs(5), actor.step())
+            .await
+            .std_context("actor.step() should return promptly after cancelled forwarder")?;
+        assert!(
+            still_running,
+            "actor should keep running after a cancelled topic event forwarder"
+        );
+
+        ct.cancel();
         Ok(())
     }
 }
