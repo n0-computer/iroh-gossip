@@ -441,6 +441,9 @@ impl Actor {
                             self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
                                 .await;
                         }
+                        // Reclaim the peer descriptor on dial failure so it doesn't
+                        // linger in the tracking map (from n0-computer/iroh-gossip#146).
+                        self.peers.remove(&peer_id);
                     }
                     None => {
                         warn!(peer = %peer_id.fmt_short(), "dial disconnected");
@@ -583,6 +586,9 @@ impl Actor {
                 debug!("active send connection closed, mark peer as disconnected");
                 self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
                     .await;
+                // Drop the peer descriptor when its active connection closes so it
+                // doesn't leak in the tracking map (from n0-computer/iroh-gossip#146).
+                self.peers.remove(&peer_id);
             } else {
                 other_conns.retain(|x| *x != conn.stable_id());
                 debug!("remaining {} other connections", other_conns.len() + 1);
@@ -894,9 +900,22 @@ async fn connection_loop(
     let send_fut = send_loop.run(queue).instrument(error_span!("send"));
     let recv_fut = recv_loop.run().instrument(error_span!("recv"));
 
-    let (send_res, recv_res) = tokio::join!(send_fut, recv_fut);
-    send_res?;
-    recv_res?;
+    // Exit as soon as *either* half finishes, rather than waiting for both.
+    // When this connection is superseded by a newer one to the same peer
+    // (`PeerState::accept_conn` drops its `send_tx`), the send loop ends but the
+    // recv loop would otherwise run forever — the peer keeps the connection
+    // alive via keep-alives, so it never idle-times-out and is never closed.
+    // That leaks the whole connection (its driver + transport state) once per
+    // churned connection. Finishing here lets the spawned task complete →
+    // `handle_connection_task_finished` closes the connection → it drains and is
+    // reclaimed. For the *active* connection the send loop never ends (its
+    // sender is held in `PeerState`), so this still exits only when the recv
+    // loop does (peer-initiated close) — unchanged. The dropped future is
+    // cancelled, which is fine: the connection is being torn down regardless.
+    tokio::select! {
+        send_res = send_fut => send_res?,
+        recv_res = recv_fut => recv_res?,
+    }
     Ok(())
 }
 
@@ -1531,6 +1550,69 @@ pub(crate) mod tests {
             .await
             .std_context("wait actor finish")?;
 
+        Ok(())
+    }
+
+    /// Regression test: a [`SendLoop`] must terminate once its send channel is
+    /// closed (all senders dropped), which is how a superseded or disconnected
+    /// connection is signalled — [`PeerState::accept_conn`] drops the old
+    /// connection's `send_tx`, and [`Actor::handle_in_event`] drops it on
+    /// `DisconnectPeer`.
+    ///
+    /// Previously the send loop's `select!` used `Some(msg) = recv()` plus an
+    /// `else => break`. That `else` was dead code: the biased `closed` branch
+    /// stayed enabled-and-pending, so the loop blocked on `closed` forever
+    /// instead of breaking when the channel closed. The connection (and its
+    /// `connection_loop`) then lived until the *peer* closed it — which under
+    /// keep-alive never happened — leaking one connection per churned link.
+    ///
+    /// [`SendLoop`]: util::SendLoop
+    #[tokio::test]
+    #[traced_test]
+    async fn send_loop_terminates_when_send_channel_closed() -> Result {
+        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
+        let (relay_map, relay_url, _guard) =
+            iroh::test_utils::run_relay_server().await.unwrap();
+        let ep1 = create_endpoint(rng, relay_map.clone(), None).await?;
+        let ep2 = create_endpoint(rng, relay_map.clone(), None).await?;
+
+        // Let ep1 resolve ep2's address.
+        let memory_lookup = MemoryLookup::new();
+        memory_lookup.add_endpoint_info(EndpointAddr::new(ep2.id()).with_relay_url(relay_url));
+        ep1.address_lookup()?.add(memory_lookup);
+
+        let ep2_id = ep2.id();
+        // ep2 accepts the connection and holds it open (so the only thing that can
+        // make the send loop exit is the closed send channel, not the peer).
+        let accept_task = task::spawn(async move {
+            if let Some(incoming) = ep2.accept().await {
+                if let Ok(conn) = incoming.await {
+                    conn.closed().await;
+                }
+            }
+        });
+
+        let conn = ep1
+            .connect(ep2_id, GOSSIP_ALPN)
+            .await
+            .std_context("connect")?;
+
+        // A send channel whose only sender is immediately dropped models a
+        // just-superseded connection.
+        let (send_tx, send_rx) = mpsc::channel::<ProtoMessage>(1);
+        drop(send_tx);
+
+        // With the fix this returns promptly; with the bug it blocks on
+        // `conn.closed()` forever and the timeout fires.
+        let mut send_loop = util::SendLoop::new(conn, send_rx, 1024);
+        let res = timeout(Duration::from_secs(5), send_loop.run(vec![])).await;
+        assert!(
+            res.is_ok(),
+            "SendLoop must terminate when its send channel closes (superseded connection)"
+        );
+        res.expect("send loop returned").std_context("send loop run")?;
+
+        accept_task.abort();
         Ok(())
     }
 
