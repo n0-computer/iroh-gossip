@@ -1089,7 +1089,7 @@ pub(crate) mod tests {
         address_lookup::memory::MemoryLookup,
         endpoint::{presets, BindError},
         protocol::Router,
-        tls::CaRootsConfig,
+        tls::CaTlsConfig,
         RelayMap, RelayMode, SecretKey,
     };
     use n0_error::{AnyError, Result, StdResultExt};
@@ -1223,7 +1223,7 @@ pub(crate) mod tests {
             .relay_mode(RelayMode::Custom(relay_map))
             .secret_key(SecretKey::from_bytes(&rng.random()))
             .alpns(vec![GOSSIP_ALPN.to_vec()])
-            .ca_roots_config(CaRootsConfig::insecure_skip_verify())
+            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
             .bind()
             .await?;
 
@@ -1740,7 +1740,7 @@ pub(crate) mod tests {
             let ep = Endpoint::builder(presets::Minimal)
                 .relay_mode(RelayMode::Custom(relay_map))
                 .secret_key(secret_key)
-                .ca_roots_config(CaRootsConfig::insecure_skip_verify())
+                .ca_tls_config(CaTlsConfig::insecure_skip_verify())
                 .bind()
                 .await?;
             let gossip = Gossip::builder().spawn(ep.clone());
