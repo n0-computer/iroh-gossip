@@ -231,7 +231,13 @@ impl SendLoop {
             tokio::select! {
                 biased;
                 _ = &mut closed => break,
-                Some(msg) = self.send_rx.recv() => self.write_message(&msg).await?,
+                msg = self.send_rx.recv() => match msg {
+                    Some(msg) => self.write_message(&msg).await?,
+                    // Dropping the last sender means the actor removed or
+                    // replaced this peer. End the send half so the owning
+                    // connection task can be reaped and fenced by stable id.
+                    None => break,
+                },
                 _ = self.finishing.join_next(), if !self.finishing.is_empty() => {}
                 else => break,
             }

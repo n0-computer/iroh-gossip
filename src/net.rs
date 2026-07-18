@@ -435,9 +435,11 @@ impl Actor {
                     Some(Err(err)) => {
                         warn!(peer = %peer_id.fmt_short(), "dial failed: {err}");
                         self.metrics.actor_tick_dialer_failure.inc();
-                        let peer_state = self.peers.get(&peer_id);
-                        let is_active = matches!(peer_state, Some(PeerState::Active { .. }));
-                        if !is_active {
+                        let should_notify = self
+                            .peers
+                            .get_mut(&peer_id)
+                            .is_some_and(PeerState::dial_failed);
+                        if should_notify {
                             self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
                                 .await;
                         }
@@ -445,6 +447,14 @@ impl Actor {
                     None => {
                         warn!(peer = %peer_id.fmt_short(), "dial disconnected");
                         self.metrics.actor_tick_dialer_failure.inc();
+                        if self
+                            .peers
+                            .get_mut(&peer_id)
+                            .is_some_and(PeerState::dial_failed)
+                        {
+                            self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
+                                .await;
+                        }
                     }
                 }
             }
@@ -573,22 +583,27 @@ impl Actor {
         let reason = conn.close_reason().expect("just closed");
         let error = task_result.err();
         debug!(%reason, ?error, "connection closed");
-        if let Some(PeerState::Active {
-            active_conn_id,
-            other_conns,
-            ..
-        }) = self.peers.get_mut(&peer_id)
-        {
-            if conn.stable_id() == *active_conn_id {
+        let close = self
+            .peers
+            .get_mut(&peer_id)
+            .map(|state| state.connection_closed(conn.stable_id()))
+            .unwrap_or(PeerConnectionClose::AlreadyDisconnected);
+        match close {
+            PeerConnectionClose::Active => {
+                // The network actor owns the sender lifecycle. Remove the matching
+                // generation here even if the protocol state already observed an
+                // earlier disconnect and therefore emits no second DisconnectPeer.
+                self.peers.remove(&peer_id);
                 debug!("active send connection closed, mark peer as disconnected");
                 self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
                     .await;
-            } else {
-                other_conns.retain(|x| *x != conn.stable_id());
-                debug!("remaining {} other connections", other_conns.len() + 1);
             }
-        } else {
-            debug!("peer already marked as disconnected");
+            PeerConnectionClose::Other {
+                remaining_connections,
+            } => debug!("remaining {remaining_connections} other connections"),
+            PeerConnectionClose::AlreadyDisconnected => {
+                debug!("peer already marked as disconnected");
+            }
         }
     }
 
@@ -681,23 +696,18 @@ impl Actor {
             match event {
                 OutEvent::SendMessage(peer_id, message) => {
                     let state = self.peers.entry(peer_id).or_default();
-                    match state {
-                        PeerState::Active { active_send_tx, .. } => {
-                            if let Err(_err) = active_send_tx.send(message).await {
-                                // Removing the peer is handled by the in_event PeerDisconnected sent
-                                // in [`Self::handle_connection_task_finished`].
-                                warn!(
-                                    peer = %peer_id.fmt_short(),
-                                    "failed to send: connection task send loop terminated",
-                                );
-                            }
+                    match state.send_or_queue(message).await {
+                        PeerSendOutcome::Sent | PeerSendOutcome::Queued => {}
+                        PeerSendOutcome::DialQueued => {
+                            debug!(peer = %peer_id.fmt_short(), "start to dial");
+                            self.dialer.queue_dial(peer_id, self.alpn.clone());
                         }
-                        PeerState::Pending { queue } => {
-                            if queue.is_empty() {
-                                debug!(peer = %peer_id.fmt_short(), "start to dial");
-                                self.dialer.queue_dial(peer_id, self.alpn.clone());
-                            }
-                            queue.push(message);
+                        PeerSendOutcome::ReconnectQueued => {
+                            warn!(
+                                peer = %peer_id.fmt_short(),
+                                "connection send loop terminated; requeue message and reconnect",
+                            );
+                            self.dialer.queue_dial(peer_id, self.alpn.clone());
                         }
                     }
                 }
@@ -760,6 +770,7 @@ type ConnId = usize;
 enum PeerState {
     Pending {
         queue: Vec<ProtoMessage>,
+        dial_in_flight: bool,
     },
     Active {
         active_send_tx: mpsc::Sender<ProtoMessage>,
@@ -768,14 +779,82 @@ enum PeerState {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PeerSendOutcome {
+    Sent,
+    Queued,
+    DialQueued,
+    ReconnectQueued,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PeerConnectionClose {
+    Active,
+    Other { remaining_connections: usize },
+    AlreadyDisconnected,
+}
+
 impl PeerState {
+    async fn send_or_queue(&mut self, message: ProtoMessage) -> PeerSendOutcome {
+        match self {
+            PeerState::Active { active_send_tx, .. } => match active_send_tx.send(message).await {
+                Ok(()) => PeerSendOutcome::Sent,
+                Err(err) => {
+                    *self = PeerState::Pending {
+                        queue: vec![err.0],
+                        dial_in_flight: true,
+                    };
+                    PeerSendOutcome::ReconnectQueued
+                }
+            },
+            PeerState::Pending {
+                queue,
+                dial_in_flight,
+            } => {
+                let outcome = if !*dial_in_flight {
+                    *dial_in_flight = true;
+                    PeerSendOutcome::DialQueued
+                } else {
+                    PeerSendOutcome::Queued
+                };
+                queue.push(message);
+                outcome
+            }
+        }
+    }
+
+    fn dial_failed(&mut self) -> bool {
+        match self {
+            PeerState::Pending { dial_in_flight, .. } => {
+                *dial_in_flight = false;
+                true
+            }
+            PeerState::Active { .. } => false,
+        }
+    }
+
+    fn connection_closed(&mut self, conn_id: ConnId) -> PeerConnectionClose {
+        match self {
+            PeerState::Active { active_conn_id, .. } if *active_conn_id == conn_id => {
+                PeerConnectionClose::Active
+            }
+            PeerState::Active { other_conns, .. } => {
+                other_conns.retain(|other| *other != conn_id);
+                PeerConnectionClose::Other {
+                    remaining_connections: other_conns.len() + 1,
+                }
+            }
+            PeerState::Pending { .. } => PeerConnectionClose::AlreadyDisconnected,
+        }
+    }
+
     fn accept_conn(
         &mut self,
         send_tx: mpsc::Sender<ProtoMessage>,
         conn_id: ConnId,
     ) -> Vec<ProtoMessage> {
         match self {
-            PeerState::Pending { queue } => {
+            PeerState::Pending { queue, .. } => {
                 let queue = std::mem::take(queue);
                 *self = PeerState::Active {
                     active_send_tx: send_tx,
@@ -805,7 +884,10 @@ impl PeerState {
 
 impl Default for PeerState {
     fn default() -> Self {
-        PeerState::Pending { queue: Vec::new() }
+        PeerState::Pending {
+            queue: Vec::new(),
+            dial_in_flight: false,
+        }
     }
 }
 
@@ -894,9 +976,15 @@ async fn connection_loop(
     let send_fut = send_loop.run(queue).instrument(error_span!("send"));
     let recv_fut = recv_loop.run().instrument(error_span!("recv"));
 
-    let (send_res, recv_res) = tokio::join!(send_fut, recv_fut);
-    send_res?;
-    recv_res?;
+    tokio::select! {
+        biased;
+        res = send_fut => {
+            res?;
+        }
+        res = recv_fut => {
+            res?;
+        }
+    }
     Ok(())
 }
 
@@ -1091,6 +1179,157 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::api::{ApiError, GossipReceiver, GossipSender};
+
+    fn test_proto_message() -> ProtoMessage {
+        let me = SecretKey::from_bytes(&[1u8; 32]).public();
+        let peer = SecretKey::from_bytes(&[2u8; 32]).public();
+        let topic = TopicId::from_bytes([3u8; 32]);
+        let mut state = proto::State::new(
+            me,
+            PeerData::default(),
+            proto::Config::default(),
+            rand::rngs::ChaCha12Rng::seed_from_u64(4),
+        );
+
+        let message = state
+            .handle(
+                InEvent::Command(topic, ProtoCommand::Join(vec![peer])),
+                Instant::now(),
+                None,
+            )
+            .find_map(|event| match event {
+                OutEvent::SendMessage(target, message) if target == peer => Some(message),
+                _ => None,
+            })
+            .expect("joining a bootstrap peer should emit a protocol message");
+        message
+    }
+
+    #[tokio::test]
+    async fn peer_state_requeues_message_after_active_sender_closes() {
+        let (active_send_tx, active_send_rx) = mpsc::channel(1);
+        drop(active_send_rx);
+        let mut state = PeerState::Active {
+            active_send_tx,
+            active_conn_id: 7,
+            other_conns: Vec::new(),
+        };
+
+        let outcome = state.send_or_queue(test_proto_message()).await;
+
+        assert_eq!(outcome, PeerSendOutcome::ReconnectQueued);
+        let PeerState::Pending { queue, .. } = state else {
+            panic!("a closed active sender must transition back to pending");
+        };
+        assert_eq!(
+            queue.len(),
+            1,
+            "the failed protocol message must be retained"
+        );
+    }
+
+    #[tokio::test]
+    async fn peer_state_retries_after_dial_failure_without_losing_queue() {
+        let mut state = PeerState::default();
+
+        assert_eq!(
+            state.send_or_queue(test_proto_message()).await,
+            PeerSendOutcome::DialQueued,
+        );
+        assert!(state.dial_failed(), "pending dial failure must be handled");
+        assert_eq!(
+            state.send_or_queue(test_proto_message()).await,
+            PeerSendOutcome::DialQueued,
+            "the next protocol intent must retry after addressing becomes available",
+        );
+
+        let PeerState::Pending {
+            queue,
+            dial_in_flight,
+        } = state
+        else {
+            panic!("a failed dial must remain pending until a connection succeeds");
+        };
+        assert_eq!(
+            queue.len(),
+            2,
+            "dial failure must not discard queued messages"
+        );
+        assert!(dial_in_flight, "the retry must own the new dial attempt");
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn connection_loop_reaps_when_send_channel_closes() -> Result {
+        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
+        let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+        let ep1 = create_endpoint(rng, relay_map.clone(), None).await?;
+        let ep2 = create_endpoint(rng, relay_map, None).await?;
+        let ep2_id = ep2.id();
+
+        let memory_lookup = MemoryLookup::new();
+        memory_lookup.add_endpoint_info(EndpointAddr::new(ep2_id).with_relay_url(relay_url));
+        ep1.address_lookup()?.add(memory_lookup);
+
+        let accept_task = task::spawn(async move {
+            let Some(incoming) = ep2.accept().await else {
+                return;
+            };
+            let Ok(connecting) = incoming.accept() else {
+                return;
+            };
+            let Ok(connection) = connecting.await else {
+                return;
+            };
+            connection.closed().await;
+        });
+
+        let conn = ep1.connect(ep2_id, GOSSIP_ALPN).await?;
+        let (send_tx, send_rx) = mpsc::channel::<ProtoMessage>(1);
+        drop(send_tx);
+        let (in_event_tx, _in_event_rx) = mpsc::channel(IN_EVENT_CAP);
+
+        let result = timeout(
+            Duration::from_secs(5),
+            connection_loop(
+                ep2_id,
+                conn.clone(),
+                ConnOrigin::Dial,
+                send_rx,
+                in_event_tx,
+                1024,
+                Vec::new(),
+            ),
+        )
+        .await;
+
+        conn.close(0u32.into(), b"test complete");
+        accept_task.abort();
+        result.expect("connection loop must finish after the send channel closes")?;
+        Ok(())
+    }
+
+    #[test]
+    fn peer_state_connection_close_is_fenced_by_active_connection_id() {
+        let (active_send_tx, _active_send_rx) = mpsc::channel(1);
+        let mut state = PeerState::Active {
+            active_send_tx,
+            active_conn_id: 7,
+            other_conns: vec![5],
+        };
+
+        assert_eq!(
+            state.connection_closed(5),
+            PeerConnectionClose::Other {
+                remaining_connections: 1,
+            }
+        );
+        assert_eq!(
+            state.connection_closed(7),
+            PeerConnectionClose::Active,
+            "only the current sender generation may clear active peer state"
+        );
+    }
 
     struct ManualActorLoop {
         actor: Actor,
