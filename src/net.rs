@@ -95,8 +95,21 @@ impl std::ops::Deref for Gossip {
 
 #[derive(Debug)]
 enum LocalActorMessage {
-    HandleConnection(Connection),
-    Shutdown { reply: oneshot::Sender<()> },
+    HandleConnection {
+        conn: Connection,
+        origin: ConnOrigin,
+    },
+    ReserveExternalConnection {
+        peer_id: EndpointId,
+        reply: oneshot::Sender<()>,
+    },
+    ReleaseExternalConnection {
+        peer_id: EndpointId,
+        reply: oneshot::Sender<()>,
+    },
+    Shutdown {
+        reply: oneshot::Sender<()>,
+    },
 }
 
 #[allow(missing_docs)]
@@ -246,8 +259,54 @@ impl Gossip {
     pub async fn handle_connection(&self, conn: Connection) -> Result<(), Error> {
         self.inner
             .local_tx
-            .send(LocalActorMessage::HandleConnection(conn))
+            .send(LocalActorMessage::HandleConnection {
+                conn,
+                origin: ConnOrigin::Accept,
+            })
             .await?;
+        Ok(())
+    }
+
+    /// Handle an outgoing [`Connection`] established outside the gossip actor.
+    ///
+    /// Use this after [`Self::reserve_external_connection`] succeeds. Recording the
+    /// dial origin lets both peers deterministically keep the same connection when
+    /// they happen to dial each other concurrently.
+    pub async fn handle_dialed_connection(&self, conn: Connection) -> Result<(), Error> {
+        self.inner
+            .local_tx
+            .send(LocalActorMessage::HandleConnection {
+                conn,
+                origin: ConnOrigin::Dial,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Reserves connection ownership for an external dial to `peer_id`.
+    ///
+    /// Call this before publishing new addressing information and starting an external dial.
+    /// Protocol messages remain queued until [`Self::handle_dialed_connection`] consumes the
+    /// reservation or [`Self::release_external_connection`] restores actor-owned dialing when
+    /// the caller does not hand off a newly established connection.
+    pub async fn reserve_external_connection(&self, peer_id: EndpointId) -> Result<(), Error> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.inner
+            .local_tx
+            .send(LocalActorMessage::ReserveExternalConnection { peer_id, reply })
+            .await?;
+        reply_rx.await?;
+        Ok(())
+    }
+
+    /// Releases a previously reserved external connection that was not handed to the actor.
+    pub async fn release_external_connection(&self, peer_id: EndpointId) -> Result<(), Error> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.inner
+            .local_tx
+            .send(LocalActorMessage::ReleaseExternalConnection { peer_id, reply })
+            .await?;
+        reply_rx.await?;
         Ok(())
     }
 
@@ -392,8 +451,24 @@ impl Actor {
                         reply.send(()).ok();
                         return false;
                     },
-                    Some(LocalActorMessage::HandleConnection(conn)) => {
-                        self.handle_connection(conn.remote_id(), ConnOrigin::Accept, conn);
+                    Some(LocalActorMessage::HandleConnection { conn, origin }) => {
+                        let peer_id = conn.remote_id();
+                        if connection_supersedes_actor_dial(self.endpoint.id(), peer_id, origin) {
+                            self.dialer.cancel_dial(peer_id);
+                        }
+                        self.handle_connection(peer_id, origin, conn);
+                    }
+                    Some(LocalActorMessage::ReserveExternalConnection { peer_id, reply }) => {
+                        self.dialer.cancel_dial(peer_id);
+                        self.peers
+                            .entry(peer_id)
+                            .or_default()
+                            .reserve_external_connection();
+                        reply.send(()).ok();
+                    }
+                    Some(LocalActorMessage::ReleaseExternalConnection { peer_id, reply }) => {
+                        self.release_external_connection(peer_id);
+                        reply.send(()).ok();
                     }
                     None => {
                         debug!("all gossip handles dropped, stop gossip actor");
@@ -445,16 +520,10 @@ impl Actor {
                         }
                     }
                     None => {
-                        warn!(peer = %peer_id.fmt_short(), "dial disconnected");
-                        self.metrics.actor_tick_dialer_failure.inc();
-                        if self
-                            .peers
-                            .get_mut(&peer_id)
-                            .is_some_and(PeerState::dial_failed)
-                        {
-                            self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
-                                .await;
-                        }
+                        debug!(
+                            peer = %peer_id.fmt_short(),
+                            "dial cancelled after external connection supplied"
+                        );
                     }
                 }
             }
@@ -535,16 +604,45 @@ impl Actor {
     fn handle_connection(&mut self, peer_id: EndpointId, origin: ConnOrigin, conn: Connection) {
         let (send_tx, send_rx) = mpsc::channel(SEND_QUEUE_CAP);
         let conn_id = conn.stable_id();
+        let preferred_origin = preferred_connection_origin(self.endpoint.id(), peer_id);
 
-        let queue = match self.peers.entry(peer_id) {
-            Entry::Occupied(mut entry) => entry.get_mut().accept_conn(send_tx, conn_id),
+        let admission = match self.peers.entry(peer_id) {
+            Entry::Occupied(mut entry) => {
+                entry
+                    .get_mut()
+                    .admit_conn(send_tx, conn_id, origin, preferred_origin)
+            }
             Entry::Vacant(entry) => {
                 entry.insert(PeerState::Active {
                     active_send_tx: send_tx,
                     active_conn_id: conn_id,
+                    active_origin: origin,
                     other_conns: Vec::new(),
                 });
-                Vec::new()
+                PeerConnectionAdmission::Activate { queue: Vec::new() }
+            }
+        };
+        let queue = match admission {
+            PeerConnectionAdmission::Activate { queue } => queue,
+            PeerConnectionAdmission::AlreadyActive => {
+                debug!(
+                    ?origin,
+                    conn_id,
+                    peer = %peer_id.fmt_short(),
+                    "ignore duplicate handoff of active gossip connection"
+                );
+                return;
+            }
+            PeerConnectionAdmission::Reject => {
+                debug!(
+                    ?origin,
+                    ?preferred_origin,
+                    conn_id,
+                    peer = %peer_id.fmt_short(),
+                    "close redundant gossip connection"
+                );
+                conn.close(0u32.into(), b"redundant gossip connection");
+                return;
             }
         };
 
@@ -742,7 +840,13 @@ impl Actor {
                 OutEvent::DisconnectPeer(peer_id) => {
                     // signal disconnection by dropping the senders to the connection
                     debug!(peer=%peer_id.fmt_short(), "gossip state indicates disconnect: drop peer");
-                    self.peers.remove(&peer_id);
+                    let preserve_reservation = self
+                        .peers
+                        .get_mut(&peer_id)
+                        .is_some_and(PeerState::preserve_external_reservation_after_disconnect);
+                    if !preserve_reservation {
+                        self.peers.remove(&peer_id);
+                    }
                 }
                 OutEvent::PeerData(endpoint_id, data) => match decode_peer_data(&data) {
                     Err(err) => warn!("Failed to decode {data:?} from {endpoint_id}: {err}"),
@@ -762,6 +866,24 @@ impl Actor {
             }
         }
     }
+
+    fn release_external_connection(&mut self, peer_id: EndpointId) {
+        let release = self
+            .peers
+            .get_mut(&peer_id)
+            .map(PeerState::release_external_connection)
+            .unwrap_or(ExternalConnectionRelease::None);
+        match release {
+            ExternalConnectionRelease::Retry => {
+                debug!(peer = %peer_id.fmt_short(), "external dial failed; resume actor-owned dial");
+                self.dialer.queue_dial(peer_id, self.alpn.clone());
+            }
+            ExternalConnectionRelease::Remove => {
+                self.peers.remove(&peer_id);
+            }
+            ExternalConnectionRelease::None => {}
+        }
+    }
 }
 
 type ConnId = usize;
@@ -770,13 +892,21 @@ type ConnId = usize;
 enum PeerState {
     Pending {
         queue: Vec<ProtoMessage>,
-        dial_in_flight: bool,
+        dial_ownership: DialOwnership,
     },
     Active {
         active_send_tx: mpsc::Sender<ProtoMessage>,
         active_conn_id: ConnId,
+        active_origin: ConnOrigin,
         other_conns: Vec<ConnId>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DialOwnership {
+    Idle,
+    Actor,
+    External,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -794,6 +924,20 @@ enum PeerConnectionClose {
     AlreadyDisconnected,
 }
 
+#[derive(Debug)]
+enum PeerConnectionAdmission {
+    Activate { queue: Vec<ProtoMessage> },
+    AlreadyActive,
+    Reject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExternalConnectionRelease {
+    Retry,
+    Remove,
+    None,
+}
+
 impl PeerState {
     async fn send_or_queue(&mut self, message: ProtoMessage) -> PeerSendOutcome {
         match self {
@@ -802,20 +946,21 @@ impl PeerState {
                 Err(err) => {
                     *self = PeerState::Pending {
                         queue: vec![err.0],
-                        dial_in_flight: true,
+                        dial_ownership: DialOwnership::Actor,
                     };
                     PeerSendOutcome::ReconnectQueued
                 }
             },
             PeerState::Pending {
                 queue,
-                dial_in_flight,
+                dial_ownership,
             } => {
-                let outcome = if !*dial_in_flight {
-                    *dial_in_flight = true;
-                    PeerSendOutcome::DialQueued
-                } else {
-                    PeerSendOutcome::Queued
+                let outcome = match dial_ownership {
+                    DialOwnership::Idle => {
+                        *dial_ownership = DialOwnership::Actor;
+                        PeerSendOutcome::DialQueued
+                    }
+                    DialOwnership::Actor | DialOwnership::External => PeerSendOutcome::Queued,
                 };
                 queue.push(message);
                 outcome
@@ -825,11 +970,49 @@ impl PeerState {
 
     fn dial_failed(&mut self) -> bool {
         match self {
-            PeerState::Pending { dial_in_flight, .. } => {
-                *dial_in_flight = false;
+            PeerState::Pending { dial_ownership, .. }
+                if *dial_ownership == DialOwnership::Actor =>
+            {
+                *dial_ownership = DialOwnership::Idle;
                 true
             }
-            PeerState::Active { .. } => false,
+            PeerState::Pending { .. } | PeerState::Active { .. } => false,
+        }
+    }
+
+    fn reserve_external_connection(&mut self) {
+        if let PeerState::Pending { dial_ownership, .. } = self {
+            *dial_ownership = DialOwnership::External;
+        }
+    }
+
+    fn release_external_connection(&mut self) -> ExternalConnectionRelease {
+        match self {
+            PeerState::Pending {
+                queue,
+                dial_ownership: DialOwnership::External,
+            } if queue.is_empty() => ExternalConnectionRelease::Remove,
+            PeerState::Pending {
+                dial_ownership: ownership @ DialOwnership::External,
+                ..
+            } => {
+                *ownership = DialOwnership::Actor;
+                ExternalConnectionRelease::Retry
+            }
+            PeerState::Pending { .. } | PeerState::Active { .. } => ExternalConnectionRelease::None,
+        }
+    }
+
+    fn preserve_external_reservation_after_disconnect(&mut self) -> bool {
+        match self {
+            PeerState::Pending {
+                queue,
+                dial_ownership: DialOwnership::External,
+            } => {
+                queue.clear();
+                true
+            }
+            PeerState::Pending { .. } | PeerState::Active { .. } => false,
         }
     }
 
@@ -848,35 +1031,45 @@ impl PeerState {
         }
     }
 
-    fn accept_conn(
+    fn admit_conn(
         &mut self,
         send_tx: mpsc::Sender<ProtoMessage>,
         conn_id: ConnId,
-    ) -> Vec<ProtoMessage> {
+        origin: ConnOrigin,
+        preferred_origin: ConnOrigin,
+    ) -> PeerConnectionAdmission {
         match self {
             PeerState::Pending { queue, .. } => {
                 let queue = std::mem::take(queue);
                 *self = PeerState::Active {
                     active_send_tx: send_tx,
                     active_conn_id: conn_id,
+                    active_origin: origin,
                     other_conns: Vec::new(),
                 };
-                queue
+                PeerConnectionAdmission::Activate { queue }
             }
             PeerState::Active {
                 active_send_tx,
                 active_conn_id,
+                active_origin,
                 other_conns,
             } => {
-                // We already have an active connection. We keep the old connection intact,
-                // but only use the new connection for sending from now on.
-                // By dropping the `send_tx` of the old connection, the send loop part of
-                // the `connection_loop` of the old connection will terminate, which will also
-                // notify the peer that the old connection may be dropped.
+                if *active_conn_id == conn_id {
+                    return PeerConnectionAdmission::AlreadyActive;
+                }
+                if *active_origin == preferred_origin && origin != preferred_origin {
+                    return PeerConnectionAdmission::Reject;
+                }
+
+                // Both peers prefer the connection initiated by the endpoint with the lower id.
+                // Never downgrade from that preferred origin, but allow a newer connection with
+                // the same origin to replace a stale generation after an endpoint restart.
                 other_conns.push(*active_conn_id);
                 *active_send_tx = send_tx;
                 *active_conn_id = conn_id;
-                Vec::new()
+                *active_origin = origin;
+                PeerConnectionAdmission::Activate { queue: Vec::new() }
             }
         }
     }
@@ -886,7 +1079,7 @@ impl Default for PeerState {
     fn default() -> Self {
         PeerState::Pending {
             queue: Vec::new(),
-            dial_in_flight: false,
+            dial_ownership: DialOwnership::Idle,
         }
     }
 }
@@ -931,6 +1124,22 @@ impl TopicState {
 enum ConnOrigin {
     Accept,
     Dial,
+}
+
+fn preferred_connection_origin(local_id: EndpointId, peer_id: EndpointId) -> ConnOrigin {
+    if local_id < peer_id {
+        ConnOrigin::Dial
+    } else {
+        ConnOrigin::Accept
+    }
+}
+
+fn connection_supersedes_actor_dial(
+    local_id: EndpointId,
+    peer_id: EndpointId,
+    origin: ConnOrigin,
+) -> bool {
+    origin == ConnOrigin::Dial || preferred_connection_origin(local_id, peer_id) == origin
 }
 
 #[allow(missing_docs)]
@@ -1124,8 +1333,18 @@ impl Dialer {
         self.pending_dials.contains_key(&endpoint)
     }
 
+    /// Cancels an actor-owned dial when a connection for the same peer is supplied externally.
+    ///
+    /// Keep the token in `pending_dials` until `next_conn` reaps the task. This both keeps the
+    /// dialer branch enabled and lets cancellation override a completed-but-unconsumed result.
+    fn cancel_dial(&mut self, endpoint_id: EndpointId) {
+        if let Some(cancel) = self.pending_dials.get(&endpoint_id) {
+            cancel.cancel();
+        }
+    }
+
     /// Waits for the next dial operation to complete.
-    /// `None` means disconnected
+    /// `None` means the actor-owned dial was cancelled by an external reservation.
     async fn next_conn(
         &mut self,
     ) -> (
@@ -1137,7 +1356,11 @@ impl Dialer {
                 let (endpoint_id, res) = loop {
                     match self.pending.join_next().await {
                         Some(Ok((endpoint_id, res))) => {
-                            self.pending_dials.remove(&endpoint_id);
+                            let was_cancelled = self
+                                .pending_dials
+                                .remove(&endpoint_id)
+                                .is_some_and(|cancel| cancel.is_cancelled());
+                            let res = if was_cancelled { None } else { res };
                             break (endpoint_id, res);
                         }
                         Some(Err(e)) => {
@@ -1212,6 +1435,7 @@ pub(crate) mod tests {
         let mut state = PeerState::Active {
             active_send_tx,
             active_conn_id: 7,
+            active_origin: ConnOrigin::Dial,
             other_conns: Vec::new(),
         };
 
@@ -1245,7 +1469,7 @@ pub(crate) mod tests {
 
         let PeerState::Pending {
             queue,
-            dial_in_flight,
+            dial_ownership,
         } = state
         else {
             panic!("a failed dial must remain pending until a connection succeeds");
@@ -1255,7 +1479,135 @@ pub(crate) mod tests {
             2,
             "dial failure must not discard queued messages"
         );
-        assert!(dial_in_flight, "the retry must own the new dial attempt");
+        assert_eq!(
+            dial_ownership,
+            DialOwnership::Actor,
+            "the retry must own the new dial attempt"
+        );
+    }
+
+    #[tokio::test]
+    async fn peer_state_releases_unconsumed_external_reservation_to_actor_dial() {
+        let mut state = PeerState::default();
+        assert_eq!(
+            state.send_or_queue(test_proto_message()).await,
+            PeerSendOutcome::DialQueued
+        );
+
+        state.reserve_external_connection();
+        assert!(matches!(
+            state.release_external_connection(),
+            ExternalConnectionRelease::Retry
+        ));
+        let PeerState::Pending {
+            queue,
+            dial_ownership,
+        } = state
+        else {
+            panic!("an unconsumed reservation must restore the pending actor dial");
+        };
+        assert_eq!(queue.len(), 1);
+        assert_eq!(dial_ownership, DialOwnership::Actor);
+    }
+
+    #[test]
+    fn preferred_connection_origin_selects_the_same_physical_dial_on_both_peers() {
+        let first = SecretKey::from_bytes(&[11u8; 32]).public();
+        let second = SecretKey::from_bytes(&[12u8; 32]).public();
+        let (lower, higher) = if first < second {
+            (first, second)
+        } else {
+            (second, first)
+        };
+
+        assert_eq!(preferred_connection_origin(lower, higher), ConnOrigin::Dial);
+        assert_eq!(
+            preferred_connection_origin(higher, lower),
+            ConnOrigin::Accept
+        );
+    }
+
+    #[test]
+    fn non_preferred_incoming_connection_keeps_preferred_actor_dial_alive() {
+        let first = SecretKey::from_bytes(&[11u8; 32]).public();
+        let second = SecretKey::from_bytes(&[12u8; 32]).public();
+        let (lower, higher) = if first < second {
+            (first, second)
+        } else {
+            (second, first)
+        };
+
+        assert!(!connection_supersedes_actor_dial(
+            lower,
+            higher,
+            ConnOrigin::Accept
+        ));
+        assert!(connection_supersedes_actor_dial(
+            higher,
+            lower,
+            ConnOrigin::Accept
+        ));
+        assert!(connection_supersedes_actor_dial(
+            higher,
+            lower,
+            ConnOrigin::Dial
+        ));
+    }
+
+    #[test]
+    fn peer_state_converges_on_preferred_origin_and_accepts_new_generation() {
+        let (active_send_tx, _active_send_rx) = mpsc::channel(1);
+        let mut state = PeerState::Active {
+            active_send_tx,
+            active_conn_id: 7,
+            active_origin: ConnOrigin::Accept,
+            other_conns: Vec::new(),
+        };
+        let (preferred_send_tx, _preferred_send_rx) = mpsc::channel(1);
+
+        assert!(matches!(
+            state.admit_conn(preferred_send_tx, 8, ConnOrigin::Dial, ConnOrigin::Dial),
+            PeerConnectionAdmission::Activate { queue } if queue.is_empty()
+        ));
+        let PeerState::Active {
+            active_conn_id,
+            active_origin,
+            other_conns,
+            ..
+        } = &state
+        else {
+            panic!("the preferred connection must become active");
+        };
+        assert_eq!(*active_conn_id, 8);
+        assert_eq!(*active_origin, ConnOrigin::Dial);
+        assert_eq!(other_conns, &[7]);
+
+        let (redundant_send_tx, _redundant_send_rx) = mpsc::channel(1);
+        assert!(matches!(
+            state.admit_conn(redundant_send_tx, 9, ConnOrigin::Accept, ConnOrigin::Dial),
+            PeerConnectionAdmission::Reject
+        ));
+        let (duplicate_send_tx, _duplicate_send_rx) = mpsc::channel(1);
+        assert!(matches!(
+            state.admit_conn(duplicate_send_tx, 8, ConnOrigin::Dial, ConnOrigin::Dial),
+            PeerConnectionAdmission::AlreadyActive
+        ));
+
+        let (restart_send_tx, _restart_send_rx) = mpsc::channel(1);
+        assert!(matches!(
+            state.admit_conn(restart_send_tx, 10, ConnOrigin::Dial, ConnOrigin::Dial),
+            PeerConnectionAdmission::Activate { queue } if queue.is_empty()
+        ));
+        let PeerState::Active {
+            active_conn_id,
+            active_origin,
+            ..
+        } = state
+        else {
+            panic!("a newer preferred-origin generation must remain active");
+        };
+        assert_eq!(active_conn_id, 10);
+        assert_eq!(active_origin, ConnOrigin::Dial);
     }
 
     #[tokio::test]
@@ -1315,6 +1667,7 @@ pub(crate) mod tests {
         let mut state = PeerState::Active {
             active_send_tx,
             active_conn_id: 7,
+            active_origin: ConnOrigin::Dial,
             other_conns: vec![5],
         };
 
