@@ -136,15 +136,18 @@ gossip transport boundary and are proven through their own intent/ACK ledgers.
 - Unexpected disconnect cleanup: https://github.com/n0-computer/iroh-gossip/pull/117
 - Connection-task leak report: https://github.com/n0-computer/iroh-gossip/issues/145
 - Open churn cleanup PR: https://github.com/n0-computer/iroh-gossip/pull/146
+- Related open churn cleanup PR: https://github.com/n0-computer/iroh-gossip/pull/147
 - Current upstream network actor:
   https://github.com/n0-computer/iroh-gossip/blob/main/src/net.rs
 
 PR #43 and #117 are already present in `v0.101.0`; neither handles a failed
 `active_send_tx.send(...)` or separates pending queue data from dial ownership.
-PR #146 is still open. This patch ports only its SendLoop/connection-task reaping
-portion; it deliberately does not copy its dial-failure peer deletion because
-that would discard the pending queue before a later route/intention can retry.
-As of 2026-07-17, upstream `main` still has the affected paths.
+PRs #146 and #147 are still open. This patch ports only the SendLoop/connection-task
+reaping portion; it deliberately does not copy #146's dial-failure peer deletion
+because that would discard the pending queue before a later route/intention can
+retry. As verified on 2026-07-25, upstream `main` remains
+`2ce78afe09d89d41d123f28eac19bdc831609cc8` (`v0.101.0`) and still has the
+affected paths.
 
 This local patch is not a substitute for an upstream PR. Before removing it,
 an upstream release must provide all observable guarantees: the current failed
