@@ -1,6 +1,8 @@
 [advisories]
 ignore = [
     "RUSTSEC-2024-0436",
+    "RUSTSEC-2026-0194",        # netdev unaffected
+    "RUSTSEC-2026-0195",        # netdev unaffected
 ]
 
 [bans]
