@@ -174,7 +174,7 @@ fn run_and_save_simulation(
         let path = out_dir.as_ref().join(format!("{label}.config.toml"));
         let encoded = toml::to_string(&scenario).std_context("encode scenario")?;
         std::fs::write(&path, encoded)
-            .with_std_context(|_| format!("write scenario {}", &path.display()))?;
+            .with_std_context(|_| format!("write scenario {}", path.display()))?;
     }
 
     let result = run_simulation(seeds, scenario);
