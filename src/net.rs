@@ -1562,8 +1562,7 @@ pub(crate) mod tests {
     #[traced_test]
     async fn send_loop_terminates_when_send_channel_closed() -> Result {
         let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
-        let (relay_map, relay_url, _guard) =
-            iroh::test_utils::run_relay_server().await.unwrap();
+        let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
         let ep1 = create_endpoint(rng, relay_map.clone(), None).await?;
         let ep2 = create_endpoint(rng, relay_map.clone(), None).await?;
 
@@ -1601,7 +1600,8 @@ pub(crate) mod tests {
             res.is_ok(),
             "SendLoop must terminate when its send channel closes (superseded connection)"
         );
-        res.expect("send loop returned").std_context("send loop run")?;
+        res.expect("send loop returned")
+            .std_context("send loop run")?;
 
         accept_task.abort();
         Ok(())
