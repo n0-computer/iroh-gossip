@@ -47,7 +47,12 @@ derive_more = { version = "2.0.1", features = [
 hex = "0.4.3"
 indexmap = "2.0"
 iroh-metrics = { version = "1.0.1", default-features = false }
-iroh-base = { version = "1", default-features = false, features = ["key"] }
+# FORK PIN: fofoca-network/iroh, not crates.io. This crate sits between fofoca
+# and iroh; naming crates.io here put a second iroh in the graph, at which point
+# types crossing the gossip/endpoint boundary stopped unifying (E0308). Only a
+# consumer's [patch.crates-io] could otherwise reconcile it, and that is not
+# inherited across workspaces -- so every consumer had to restate it.
+iroh-base = { version = "1", git = "https://github.com/fofoca-network/iroh", rev = "a1c166834f5c16fd266089bb8516a5a577b48c74", default-features = false, features = ["key"] }
 n0-future = "0.3"
 postcard = { version = "1", default-features = false, features = [
     "alloc",
@@ -59,7 +64,8 @@ serde = { version = "1.0.164", features = ["derive"] }
 
 # net dependencies (optional)
 futures-concurrency = { version = "7.6.1", optional = true }
-iroh = { version = "1", default-features = false, optional = true }
+# FORK PIN -- see the iroh-base note above.
+iroh = { version = "1", git = "https://github.com/fofoca-network/iroh", rev = "a1c166834f5c16fd266089bb8516a5a577b48c74", default-features = false, optional = true }
 tokio = { version = "1", optional = true, features = ["io-util", "sync"] }
 tokio-util = { version = "0.7.12", optional = true, features = ["codec"] }
 tracing = "0.1"
@@ -98,7 +104,9 @@ tokio = { version = "1", features = [
 ] }
 clap = { version = "4", features = ["derive"] }
 humantime-serde = { version = "1.1.1" }
-iroh = { version = "1", default-features = false, features = [
+# FORK PIN -- see the iroh-base note above. The dev-dep must match the normal
+# one, or the test binaries link a different iroh than the library.
+iroh = { version = "1", git = "https://github.com/fofoca-network/iroh", rev = "a1c166834f5c16fd266089bb8516a5a577b48c74", default-features = false, features = [
     "metrics",
     "test-utils",
     "tls-ring"
