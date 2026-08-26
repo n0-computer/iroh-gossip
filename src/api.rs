@@ -15,6 +15,7 @@ use n0_error::{e, stack_error};
 use n0_future::{Stream, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
+pub use crate::proto::NeighborDownReason;
 use crate::proto::{DeliveryScope, TopicId};
 
 /// Default channel capacity for topic subscription channels (one per topic)
@@ -319,8 +320,8 @@ impl Stream for GossipReceiver {
                 Event::NeighborUp(endpoint_id) => {
                     self.neighbors.insert(*endpoint_id);
                 }
-                Event::NeighborDown(endpoint_id) => {
-                    self.neighbors.remove(endpoint_id);
+                Event::NeighborDown { neighbor, .. } => {
+                    self.neighbors.remove(neighbor);
                 }
                 _ => {}
             }
@@ -336,8 +337,13 @@ impl Stream for GossipReceiver {
 pub enum Event {
     /// We have a new, direct neighbor in the swarm membership layer for this topic.
     NeighborUp(EndpointId),
-    /// We dropped direct neighbor in the swarm membership layer for this topic.
-    NeighborDown(EndpointId),
+    /// We dropped a direct neighbor in the swarm membership layer for this topic.
+    NeighborDown {
+        /// The removed neighbor.
+        neighbor: EndpointId,
+        /// Why the neighbor was removed.
+        reason: NeighborDownReason,
+    },
     /// We received a gossip message for this topic.
     Received(Message),
     /// We missed some messages because our [`GossipReceiver`] was not progressing fast enough.
@@ -348,7 +354,9 @@ impl From<crate::proto::Event<EndpointId>> for Event {
     fn from(event: crate::proto::Event<EndpointId>) -> Self {
         match event {
             crate::proto::Event::NeighborUp(endpoint_id) => Self::NeighborUp(endpoint_id),
-            crate::proto::Event::NeighborDown(endpoint_id) => Self::NeighborDown(endpoint_id),
+            crate::proto::Event::NeighborDown { neighbor, reason } => {
+                Self::NeighborDown { neighbor, reason }
+            }
             crate::proto::Event::Received(message) => Self::Received(Message {
                 content: message.content,
                 scope: message.scope,

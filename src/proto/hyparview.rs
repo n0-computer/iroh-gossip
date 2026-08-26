@@ -14,7 +14,7 @@ use rand::{rngs::ThreadRng, Rng};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use super::{util::IndexSet, PeerData, PeerIdentity, PeerInfo, IO};
+use super::{util::IndexSet, NeighborDownReason, PeerData, PeerIdentity, PeerInfo, IO};
 
 /// Input event for HyParView
 #[derive(Debug)]
@@ -54,7 +54,10 @@ pub enum Event<PI> {
     /// A peer was added to our set of active connections.
     NeighborUp(PI),
     /// A peer was removed from our set of active connections.
-    NeighborDown(PI),
+    NeighborDown {
+        peer: PI,
+        reason: NeighborDownReason,
+    },
 }
 
 /// Kinds of timers HyParView needs to schedule.
@@ -643,7 +646,16 @@ where
         io: &mut impl IO<PI>,
     ) -> Option<PI> {
         if let Some(peer) = self.active_view.remove_index(peer_index) {
-            io.push(OutEvent::EmitEvent(Event::NeighborDown(peer)));
+            let event_reason = match reason {
+                RemovalReason::ConnectionClosed => NeighborDownReason::ConnectionLost,
+                RemovalReason::DisconnectReceived { .. } | RemovalReason::Random => {
+                    NeighborDownReason::Graceful
+                }
+            };
+            io.push(OutEvent::EmitEvent(Event::NeighborDown {
+                peer,
+                reason: event_reason,
+            }));
 
             match reason {
                 // send a disconnect message, then close connection.
