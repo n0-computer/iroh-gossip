@@ -716,7 +716,7 @@ impl Actor {
                         ProtoEvent::NeighborUp(neighbor) => {
                             neighbors.insert(*neighbor);
                         }
-                        ProtoEvent::NeighborDown(neighbor) => {
+                        ProtoEvent::NeighborDown { neighbor, .. } => {
                             neighbors.remove(neighbor);
                         }
                         _ => {}
@@ -1609,7 +1609,13 @@ pub(crate) mod tests {
         let ev = timeout(conn_timeout, sub.try_next())
             .await
             .std_context("wait neighbor down")??;
-        assert_eq!(ev, Some(Event::NeighborDown(endpoint_id2)));
+        assert_eq!(
+            ev,
+            Some(Event::NeighborDown {
+                neighbor: endpoint_id2,
+                reason: crate::api::NeighborDownReason::Graceful,
+            })
+        );
         tracing::info!("endpoint 2 left");
 
         // signal endpoint_2 to subscribe again

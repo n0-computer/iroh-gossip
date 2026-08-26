@@ -71,6 +71,15 @@ pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 4096;
 /// The minimum allowed value for [`Config::max_message_size`].
 pub const MIN_MAX_MESSAGE_SIZE: usize = 512;
 
+/// Why a direct neighbor was removed from the swarm membership layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum NeighborDownReason {
+    /// The neighbor was removed through an intentional protocol action.
+    Graceful,
+    /// The underlying connection was lost without a protocol disconnect.
+    ConnectionLost,
+}
+
 /// The identifier for a peer.
 ///
 /// The protocol implementation is generic over this trait. When implementing the protocol,
@@ -133,7 +142,7 @@ mod test {
     use n0_tracing_test::traced_test;
     use rand::{rngs::ChaCha12Rng, SeedableRng};
 
-    use super::{Command, Config, Event};
+    use super::{Command, Config, Event, NeighborDownReason};
     use crate::proto::{
         sim::{LatencyConfig, Network, NetworkConfig},
         Scope, TopicId,
@@ -192,14 +201,42 @@ mod test {
         let expected1 = sort(vec![
             (3, t, Event::NeighborUp(0)),
             (0, t, Event::NeighborUp(3)),
-            (0, t, Event::NeighborDown(1)),
-            (1, t, Event::NeighborDown(0)),
+            (
+                0,
+                t,
+                Event::NeighborDown {
+                    neighbor: 1,
+                    reason: NeighborDownReason::Graceful,
+                },
+            ),
+            (
+                1,
+                t,
+                Event::NeighborDown {
+                    neighbor: 0,
+                    reason: NeighborDownReason::Graceful,
+                },
+            ),
         ]);
         let expected2 = sort(vec![
             (3, t, Event::NeighborUp(0)),
             (0, t, Event::NeighborUp(3)),
-            (0, t, Event::NeighborDown(2)),
-            (2, t, Event::NeighborDown(0)),
+            (
+                0,
+                t,
+                Event::NeighborDown {
+                    neighbor: 2,
+                    reason: NeighborDownReason::Graceful,
+                },
+            ),
+            (
+                2,
+                t,
+                Event::NeighborDown {
+                    neighbor: 0,
+                    reason: NeighborDownReason::Graceful,
+                },
+            ),
         ]);
         assert!((actual == expected1) || (actual == expected2));
 
@@ -210,6 +247,55 @@ mod test {
             assert_eq!(network.conns(), vec![(0, 1), (0, 3), (1, 2)]);
         }
         assert!(network.check_synchronicity());
+    }
+
+    #[test]
+    #[traced_test]
+    fn neighbor_down_reasons() {
+        let rng = ChaCha12Rng::seed_from_u64(0);
+        let network_config = NetworkConfig {
+            proto: Config::default(),
+            latency: LatencyConfig::default_static(),
+        };
+        let mut network = Network::new(network_config, rng);
+        for i in 0..3 {
+            network.insert(i);
+        }
+
+        let t: TopicId = [0u8; 32].into();
+        network.command(1, t, Command::Join(vec![]));
+        network.command(2, t, Command::Join(vec![]));
+        network.command(0, t, Command::Join(vec![1, 2]));
+        network.run_trips(3);
+        let _ = network.events();
+
+        network.command(1, t, Command::Quit);
+        network.run_trips(2);
+        assert_eq!(
+            network.events_sorted(),
+            vec![(
+                0,
+                t,
+                Event::NeighborDown {
+                    neighbor: 1,
+                    reason: NeighborDownReason::Graceful,
+                },
+            )]
+        );
+
+        network.remove(&2);
+        network.run_trips(2);
+        assert_eq!(
+            network.events_sorted(),
+            vec![(
+                0,
+                t,
+                Event::NeighborDown {
+                    neighbor: 2,
+                    reason: NeighborDownReason::ConnectionLost,
+                },
+            )]
+        );
     }
 
     #[test]
