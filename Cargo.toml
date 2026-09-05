@@ -13,7 +13,14 @@ resolver = "2"
 rust-version = "1.91"
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+# RAFKA LOCAL DIVERGENCE (2026-09-05, Luke ruling) — DROP THIS WHEN RETURNING TO UPSTREAM.
+# Upstream declares `crate-type = ["cdylib", "rlib"]` for wasm32 builds. rafka never builds
+# wasm32 and links only the rlib half (node gossip is compiled statically into every node
+# binary: ldd shows 0 iroh shared objects, nm shows the iroh_gossip symbols inside). The
+# cdylib half costs a dynamic link per build and makes sccache refuse the compile
+# ("Non-cacheable reasons: crate-type"). No symbol, API or runtime behaviour changes.
+# upstream: crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [lints.rust]
 missing_debug_implementations = "warn"
