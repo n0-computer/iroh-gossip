@@ -179,6 +179,7 @@ impl Gossip {
     ///
     /// Make sure to check the ALPN protocol yourself before passing the connection.
     pub async fn handle_connection(&self, connection: Connection) -> Result<(), ActorStoppedError> {
+        self.0.metrics.peers_accepted.inc();
         self.0
             .pool
             .handle_connection(connection)
@@ -885,6 +886,19 @@ impl TopicActor {
 }
 
 async fn connect(
+    shared: &Shared,
+    remote: EndpointId,
+    topic: TopicId,
+) -> n0_error::Result<Guarded<GossipSender>> {
+    let res = connect_inner(shared, remote, topic).await;
+    match &res {
+        Ok(_) => shared.metrics.peers_dialed_success.inc(),
+        Err(_) => shared.metrics.peers_dialed_failure.inc(),
+    };
+    res
+}
+
+async fn connect_inner(
     shared: &Shared,
     remote: EndpointId,
     topic: TopicId,

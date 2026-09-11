@@ -37,15 +37,18 @@ pub struct Metrics {
     pub msgs_broadcast_swarm: Counter,
     /// Number of messages we broadcasted to direct neighbors
     pub msgs_broadcast_neighbors: Counter,
-    /// Number of topcis we joined.
+    /// Number of topics we joined.
     pub topics_joined: Counter,
-    /// Number of topcis we left.
+    /// Number of topics we left.
     pub topics_quit: Counter,
-    /// Number of times we successfully dialed a remote node.
+    /// Number of times a topic obtained a connection to a remote endpoint.
+    ///
+    /// Counted per topic, not per connection: the pool may serve several topics
+    /// from one connection, and each of those counts here.
     pub peers_dialed_success: Counter,
-    /// Number of times we failed to dial a remote node.
+    /// Number of times a topic failed to obtain a connection to a remote endpoint.
     pub peers_dialed_failure: Counter,
-    /// Number of times we accepted a connection from a remote node.
+    /// Number of connections accepted from a remote endpoint.
     pub peers_accepted: Counter,
     /// Number of times the main actor loop ticked
     pub actor_tick_main: Counter,
