@@ -289,6 +289,12 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
                         handle_out_event(*topic, event, &mut self.peer_topics, &mut self.outbox);
                     }
                 }
+                // A peer that sent us a message without joining a view is never
+                // pruned by `handle_out_event`. Prune after the states ran: they
+                // emit `DisconnectPeer` through this index.
+                if let topic::InEvent::PeerDisconnected(peer) = &event {
+                    self.peer_topics.remove(peer);
+                }
             }
         }
 

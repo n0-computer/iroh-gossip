@@ -676,6 +676,9 @@ impl<PI: PeerIdentity> State<PI> {
         });
         self.eager_push_peers.remove(&peer);
         self.lazy_push_peers.remove(&peer);
+        // The dispatch timer would otherwise send these, and the network layer
+        // dials a peer it has no connection to in order to deliver them.
+        self.lazy_push_queue.remove(&peer);
     }
 
     fn on_evict_cache_timer(&mut self, now: Instant, io: &mut impl IO<PI>) {

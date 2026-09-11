@@ -582,9 +582,26 @@ where
             return;
         }
         if self.passive_is_full() {
-            self.passive_view.remove_random(&mut self.rng);
+            if let Some(evicted) = self.passive_view.remove_random(&mut self.rng) {
+                self.forget_peer(&evicted);
+            }
         }
         self.passive_view.insert(peer);
+    }
+
+    /// Drops the metadata we hold for a peer, unless it is still in a view.
+    ///
+    /// Peers leave a view from several places, and every one of them left
+    /// `peer_data` and `alive_disconnect_peers` behind, so both grew with every
+    /// peer ever seen. The guard covers callers that cannot tell: a neighbor
+    /// request can time out after the peer joined the active view by another
+    /// route, and its data is still in use there.
+    fn forget_peer(&mut self, peer: &PI) {
+        if self.active_view.contains(peer) || self.passive_view.contains(peer) {
+            return;
+        }
+        self.peer_data.remove(peer);
+        self.alive_disconnect_peers.remove(peer);
     }
 
     /// Remove a peer from the active view.
@@ -634,6 +651,7 @@ where
     fn handle_pending_neighbor_timer(&mut self, peer: PI, io: &mut impl IO<PI>) {
         if self.pending_neighbor_requests.remove(&peer) {
             self.passive_view.remove(&peer);
+            self.forget_peer(&peer);
             self.refill_active_from_passive(&[], io);
         }
     }
@@ -673,6 +691,8 @@ where
                 if !matches!(reason, RemovalReason::ConnectionClosed) {
                     self.alive_disconnect_peers.insert(peer);
                 }
+            } else {
+                self.forget_peer(&peer);
             }
             debug!(other = ?peer, "removed from active view, reason: {reason:?}");
             Some(peer)
