@@ -289,7 +289,7 @@ where
         }
 
         // this will only happen on the first call
-        if !self.shuffle_scheduled {
+        if !self.shuffle_scheduled && !self.active_view.is_empty() {
             io.push(OutEvent::ScheduleTimer(
                 self.config.shuffle_interval,
                 Timer::DoShuffle,
@@ -554,11 +554,13 @@ where
                 ttl: self.config.shuffle_random_walk_length,
             };
             io.push(OutEvent::SendMessage(*node, Message::Shuffle(message)));
+            io.push(OutEvent::ScheduleTimer(
+                self.config.shuffle_interval,
+                Timer::DoShuffle,
+            ));
+        } else {
+            self.shuffle_scheduled = false;
         }
-        io.push(OutEvent::ScheduleTimer(
-            self.config.shuffle_interval,
-            Timer::DoShuffle,
-        ));
     }
 
     fn passive_is_full(&self) -> bool {
