@@ -438,6 +438,10 @@ impl Actor {
                         let peer_state = self.peers.get(&peer_id);
                         let is_active = matches!(peer_state, Some(PeerState::Active { .. }));
                         if !is_active {
+                            // A `Pending` entry only dials when its queue is empty, and the
+                            // failed dial left the queue full. Drop the entry so that the
+                            // next send to this peer dials again.
+                            self.peers.remove(&peer_id);
                             self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
                                 .await;
                         }
@@ -1713,6 +1717,62 @@ pub(crate) mod tests {
             .await
             .std_context("wait gossip2 task")?
             .std_context("join gossip2 task")??;
+
+        Result::Ok(())
+    }
+
+    /// A dial that fails while the peer is still `Pending` must not wedge the
+    /// peer: once it becomes reachable, the next send to it must dial again.
+    #[tokio::test]
+    #[traced_test]
+    async fn redial_after_failed_dial() -> Result {
+        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
+        let ct = CancellationToken::new();
+        let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+
+        let (go1, ep1, ep1_handle, _test_actor_handle1) =
+            Gossip::t_new(rng, Default::default(), relay_map.clone(), &ct).await?;
+        let (go2, ep2, ep2_handle, _test_actor_handle2) =
+            Gossip::t_new(rng, Default::default(), relay_map, &ct).await?;
+        let endpoint_id2 = ep2.id();
+
+        // endpoint 1 has no address for endpoint 2 yet, so the bootstrap dial fails.
+        let memory_lookup = MemoryLookup::new();
+        ep1.address_lookup()?.add(memory_lookup.clone());
+
+        let topic: TopicId = blake3::hash(b"redial_after_failed_dial").into();
+        let _sub2 = go2.subscribe(topic, Vec::new()).await?;
+        let sub1 = go1.subscribe(topic, vec![endpoint_id2]).await?;
+        let (sender1, mut receiver1) = sub1.split();
+
+        let metrics = go1.metrics().clone();
+        timeout(Duration::from_secs(20), async {
+            while metrics.actor_tick_dialer_failure.get() == 0 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .std_context("wait dial failure")?;
+        tracing::info!("bootstrap dial failed, endpoint 2 becomes reachable now");
+
+        memory_lookup.add_endpoint_info(EndpointAddr::new(endpoint_id2).with_relay_url(relay_url));
+        sender1.join_peers(vec![endpoint_id2]).await?;
+
+        let ev = timeout(Duration::from_secs(5), receiver1.try_next())
+            .await
+            .std_context("wait neighbor up after redial")??;
+        assert_eq!(ev, Some(Event::NeighborUp(endpoint_id2)));
+
+        ct.cancel();
+        let wait = Duration::from_secs(2);
+        timeout(wait, ep1_handle)
+            .await
+            .std_context("wait endpoint1 task")?
+            .std_context("join endpoint1 task")??;
+        timeout(wait, ep2_handle)
+            .await
+            .std_context("wait endpoint2 task")?
+            .std_context("join endpoint2 task")??;
 
         Result::Ok(())
     }
