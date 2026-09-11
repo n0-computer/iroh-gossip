@@ -117,7 +117,11 @@ impl PostcardCodec<RecvStream> {
     async fn recv<T: DeserializeOwned>(&mut self) -> Result<Option<T>> {
         let len = match self.inner.read_u32().await {
             Ok(len) => len as usize,
-            Err(err) if err.kind() == std::io::ErrorKind::NotConnected => return Ok(None),
+            // A cleanly finished stream reads as EOF. `NotConnected`, which this
+            // used to match on, is what quinn maps a *lost* connection to -- so
+            // the two cases were the wrong way round: every normal stream close
+            // was reported as an error, and a connection loss as a clean end.
+            Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
             Err(err) => return Err(err.into()),
         };
         ensure_any!(
@@ -129,5 +133,68 @@ impl PostcardCodec<RecvStream> {
         self.inner.read_exact(&mut self.buf[..len]).await.anyerr()?;
         let item = postcard::from_bytes(&self.buf[..len]).anyerr()?;
         Ok(Some(item))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use iroh::{endpoint::presets, Endpoint};
+    use n0_error::{Result, StdResultExt};
+    use n0_tracing_test::traced_test;
+
+    use super::*;
+
+    const TEST_ALPN: &[u8] = b"iroh-gossip/net-proto-test/0";
+
+    /// Returns the two ends of one connection, plus the endpoints to keep alive.
+    ///
+    /// Dropping an endpoint closes its connections, so they have to outlive the
+    /// test body.
+    async fn connected_pair() -> Result<(Connection, Connection, (Endpoint, Endpoint))> {
+        let server = Endpoint::builder(presets::Minimal)
+            .alpns(vec![TEST_ALPN.to_vec()])
+            .bind()
+            .await?;
+        let addr = server.addr();
+        let client = Endpoint::bind(presets::Minimal).await?;
+
+        let accept = n0_future::task::spawn({
+            let server = server.clone();
+            async move {
+                let incoming = server.accept().await.expect("endpoint closed");
+                incoming.await.expect("accept failed")
+            }
+        });
+        let out = client
+            .connect(addr, TEST_ALPN)
+            .await
+            .std_context("connect")?;
+        let inc = accept.await.std_context("accept task")?;
+        Ok((out, inc, (client, server)))
+    }
+
+    /// A cleanly finished stream must read as end of stream, not as an error.
+    ///
+    /// The two are handled differently one layer up: a clean end is an expected
+    /// peer going away, an error is worth a warning. Matching on the wrong
+    /// `ErrorKind` swapped them, so ordinary shutdowns were logged as failures.
+    #[tokio::test]
+    #[traced_test]
+    async fn clean_stream_end_reads_as_end_of_stream() -> Result {
+        let (out, inc, _endpoints) = connected_pair().await?;
+        let topic_id = TopicId::from([7u8; 32]);
+
+        let mut tx = GossipSender::init(&out, topic_id, 1024).await?;
+        let mut rx = GossipReceiver::accept(&inc, 1024)
+            .await?
+            .expect("stream was opened");
+        assert_eq!(rx.topic_id(), topic_id);
+
+        tx.send.inner.finish().std_context("finish")?;
+        assert!(
+            rx.recv().await?.is_none(),
+            "a cleanly finished stream was reported as an error"
+        );
+        Ok(())
     }
 }
