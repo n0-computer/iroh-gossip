@@ -326,13 +326,13 @@ fn handle_out_event<PI: PeerIdentity>(
             outbox.push(OutEvent::ScheduleTimer(delay, Timer { topic, timer }))
         }
         topic::OutEvent::DisconnectPeer(peer) => {
-            let empty = conns
-                .get_mut(&peer)
-                .map(|list| list.remove(&topic) || list.is_empty())
-                .unwrap_or(false);
-            if empty {
-                conns.remove(&peer);
-                outbox.push(OutEvent::DisconnectPeer(peer));
+            // The connection is shared by every topic that uses the peer.
+            if let Some(topics) = conns.get_mut(&peer) {
+                topics.remove(&topic);
+                if topics.is_empty() {
+                    conns.remove(&peer);
+                    outbox.push(OutEvent::DisconnectPeer(peer));
+                }
             }
         }
         topic::OutEvent::PeerData(peer, data) => outbox.push(OutEvent::PeerData(peer, data)),
@@ -425,5 +425,27 @@ mod tests {
         handle(&mut state, InEvent::PeerDisconnected(peer));
 
         assert!(!state.peer_topics.contains_key(&peer));
+    }
+
+    /// Leaving one topic must not disconnect a peer another topic still uses.
+    #[test]
+    fn disconnect_peer_waits_for_the_last_topic() {
+        let topic_a: TopicId = [1u8; 32].into();
+        let topic_b: TopicId = [2u8; 32].into();
+        let peer = 1u32;
+        let mut conns = ConnsMap::from([(peer, HashSet::from([topic_a, topic_b]))]);
+        let mut outbox = Outbox::new();
+
+        let event = topic::OutEvent::DisconnectPeer(peer);
+        handle_out_event(topic_a, event, &mut conns, &mut outbox);
+        assert!(
+            outbox.is_empty(),
+            "disconnected while topic_b still uses the peer"
+        );
+
+        let event = topic::OutEvent::DisconnectPeer(peer);
+        handle_out_event(topic_b, event, &mut conns, &mut outbox);
+        assert!(matches!(outbox[..], [OutEvent::DisconnectPeer(p)] if p == peer));
+        assert!(!conns.contains_key(&peer));
     }
 }
