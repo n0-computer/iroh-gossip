@@ -438,10 +438,6 @@ impl Actor {
                         let peer_state = self.peers.get(&peer_id);
                         let is_active = matches!(peer_state, Some(PeerState::Active { .. }));
                         if !is_active {
-                            // A `Pending` entry only dials when its queue is empty, and the
-                            // failed dial left the queue full. Drop the entry so that the
-                            // next send to this peer dials again.
-                            self.peers.remove(&peer_id);
                             self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
                                 .await;
                         }
@@ -711,10 +707,17 @@ impl Actor {
                             }
                         }
                         PeerState::Pending { queue } => {
-                            if queue.is_empty() {
+                            // Dial on every send, not only when the queue is empty. A
+                            // failed dial leaves the queue non-empty, which used to mean
+                            // no later send ever dialed again. `Dialer::queue_dial`
+                            // already returns early while a dial for this peer is in
+                            // flight, so it is the correct guard; the queue is not. And
+                            // keeping the entry keeps the queue, so an inbound connection
+                            // can still flush it via `accept_conn`.
+                            if !self.dialer.is_pending(peer_id) {
                                 debug!(peer = %peer_id.fmt_short(), "start to dial");
-                                self.dialer.queue_dial(peer_id, self.alpn.clone());
                             }
+                            self.dialer.queue_dial(peer_id, self.alpn.clone());
                             queue.push(message);
                         }
                     }
@@ -1876,6 +1879,85 @@ pub(crate) mod tests {
             .await
             .std_context("wait endpoint2 task")?
             .std_context("join endpoint2 task")??;
+
+        Result::Ok(())
+    }
+
+    /// A `Join` queued behind a failed dial must survive, so an inbound
+    /// connection from that peer can still flush it.
+    ///
+    /// Regression test for the first fix attempt (0ecff17), which removed the
+    /// whole `Pending` entry on dial failure and so discarded the queued
+    /// `Join`. A peer that sends `Join` once and is then connected TO lost that
+    /// `Join` for good and never meshed. `PeerState::accept_conn` is the rescue
+    /// path, and it can only flush a queue that still exists.
+    ///
+    /// `b` joins with no bootstrap peers, so it sends no `Join` of its own:
+    /// the only `Join` in this test is the one `a` queues, which makes the
+    /// queue's survival the single thing under test. hyparview never re-issues
+    /// a `Join` on its own (its timers are `DoShuffle` and
+    /// `PendingNeighborRequest`), so nothing else can form this mesh.
+    #[tokio::test]
+    #[traced_test]
+    async fn queued_join_survives_failed_dial_for_inbound_flush() -> Result {
+        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
+        let ct = CancellationToken::new();
+        let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+
+        let (go_a, ep_a, ep_a_handle, _actor_a) =
+            Gossip::t_new(rng, Default::default(), relay_map.clone(), &ct).await?;
+        let (go_b, ep_b, ep_b_handle, _actor_b) =
+            Gossip::t_new(rng, Default::default(), relay_map, &ct).await?;
+        let id_a = ep_a.id();
+        let id_b = ep_b.id();
+
+        // `b` can resolve `a`, but `a` has no address for `b`, so `a`'s
+        // bootstrap dial fails immediately.
+        let lookup_b = MemoryLookup::new();
+        lookup_b.add_endpoint_info(EndpointAddr::new(id_a).with_relay_url(relay_url));
+        ep_b.address_lookup()?.add(lookup_b);
+
+        let topic: TopicId = blake3::hash(b"queued_join_survives_failed_dial").into();
+
+        // No bootstrap peers: `b` sends no `Join`.
+        let _sub_b = go_b.subscribe(topic, Vec::new()).await?;
+
+        let sub_a = go_a.subscribe(topic, vec![id_b]).await?;
+        let (_sender_a, mut receiver_a) = sub_a.split();
+
+        let metrics_a = go_a.metrics().clone();
+        timeout(Duration::from_secs(20), async {
+            while metrics_a.actor_tick_dialer_failure.get() == 0 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .std_context("wait dial failure")?;
+        tracing::info!("a's bootstrap dial failed; b now connects inbound");
+
+        // The rescue path: `b` dials `a`, `a` accepts, and `accept_conn` must
+        // flush the `Join` still queued for `b`.
+        let conn = ep_b
+            .connect(id_a, GOSSIP_ALPN)
+            .await
+            .std_context("b connects to a")?;
+        go_b.handle_connection(conn).await?;
+
+        let ev = timeout(Duration::from_secs(5), receiver_a.try_next())
+            .await
+            .std_context("wait neighbor up from the flushed join")??;
+        assert_eq!(ev, Some(Event::NeighborUp(id_b)));
+
+        ct.cancel();
+        let wait = Duration::from_secs(2);
+        timeout(wait, ep_a_handle)
+            .await
+            .std_context("wait endpoint a task")?
+            .std_context("join endpoint a task")??;
+        timeout(wait, ep_b_handle)
+            .await
+            .std_context("wait endpoint b task")?
+            .std_context("join endpoint b task")??;
 
         Result::Ok(())
     }
