@@ -36,11 +36,14 @@ impl GossipSender {
         self.send.send(&msg).await
     }
 
+    /// Resolves when the peer stops reading this stream.
+    ///
+    /// `SendStream::stopped` already returns an owned future, so this does not
+    /// need a task to detach it from the borrow.
     pub(crate) fn closed(&self) -> impl Future<Output = ()> + Send + Sync + 'static + use<> {
         let stopped = self.send.inner.stopped();
-        let t = tokio::spawn(stopped);
         async move {
-            t.await.expect("panicked").ok();
+            stopped.await.ok();
         }
     }
 }
