@@ -288,7 +288,10 @@ where
             InEvent::Quit => self.handle_quit(io),
         }
 
-        // this will only happen on the first call
+        // Arms the shuffle timer once we have someone to shuffle with, and
+        // re-arms it whenever the active view refills after emptying out. A node
+        // with no peers has nothing to shuffle, so it must not keep the timer
+        // alive; see `handle_shuffle_timer`, which clears the flag again.
         if !self.shuffle_scheduled && !self.active_view.is_empty() {
             io.push(OutEvent::ScheduleTimer(
                 self.config.shuffle_interval,
