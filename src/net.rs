@@ -24,16 +24,13 @@ use n0_error::{anyerr, stack_error};
 use n0_future::{
     boxed::BoxFuture,
     stream::Boxed as BoxStream,
-    task::{self, AbortOnDropHandle},
+    task::{self, AbortOnDropHandle, JoinSet},
     time::Instant,
     FuturesUnordered, MergeUnbounded, Stream, StreamExt,
 };
 use n0_watcher::{Direct, Watchable, Watcher};
 use rand::rngs::StdRng;
-use tokio::{
-    sync::{broadcast, mpsc},
-    task::JoinSet,
-};
+use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error_span, instrument, trace, warn, Instrument};
 
 use self::{
@@ -231,6 +228,14 @@ impl Gossip {
 #[stack_error(derive)]
 pub struct ActorStoppedError;
 
+/// Error emitted when a topic actor stopped.
+///
+/// Deliberately carries no payload: nothing needs the message back, and a
+/// `SendError<TopicMessage>` would make every `Result` in the send path 152
+/// bytes wide.
+#[stack_error(derive)]
+struct TopicActorStoppedError;
+
 #[derive(strum::Display)]
 enum TopicMessage {
     ApiJoin(ApiJoinRequest),
@@ -377,12 +382,7 @@ impl Actor {
     }
 
     async fn run(mut self) {
-        loop {
-            match self.tick().await {
-                ControlFlow::Continue(()) => {}
-                ControlFlow::Break(()) => break,
-            }
-        }
+        while let ControlFlow::Continue(()) = self.tick().await {}
     }
 
     #[cfg(test)]
@@ -518,8 +518,8 @@ impl TopicHandle {
         (handle, actor)
     }
 
-    async fn send(&self, msg: TopicMessage) -> Result<(), mpsc::error::SendError<TopicMessage>> {
-        self.tx.send(msg).await
+    async fn send(&self, msg: TopicMessage) -> Result<(), TopicActorStoppedError> {
+        self.tx.send(msg).await.map_err(|_| TopicActorStoppedError)
     }
 
     #[cfg(test)]
@@ -665,7 +665,7 @@ impl TopicActor {
                 debug!(remote=%remote.fmt_short(), "remote conneected");
                 // Replace our sender if this a new connection.
                 if let Some(SendQueue::Active(sender)) = self.remote_senders.get_mut(&remote) {
-                    if !stream.is_same_conn(&sender.conn()) {
+                    if !stream.is_same_conn(sender.conn()) {
                         debug!(remote=%remote.fmt_short(), "renew sender (used prev conn)");
                         // Removing the sender will trigger a "reconnect" on next send, which will
                         // then create a new sender on the new connection.
