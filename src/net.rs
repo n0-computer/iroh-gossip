@@ -585,6 +585,20 @@ impl Actor {
         {
             if conn.stable_id() == *active_conn_id {
                 debug!("active send connection closed, mark peer as disconnected");
+                // fofoca patch (pre-handshake wedge): drop the peer entry here
+                // rather than waiting for the proto to emit `DisconnectPeer`.
+                // A connection that died before the gossip handshake never
+                // became a proto neighbor, so the proto has nothing to
+                // disconnect and never emits it — and the dead `Active` entry
+                // then swallowed every later send to that peer ("failed to
+                // send: connection task send loop terminated", forever)
+                // instead of letting the next send re-dial. Observed against
+                // an accept gate that holds and then refuses relay-only
+                // connections. The entry's sender died with the connection
+                // and `other_conns` senders were already dropped on
+                // replacement, so nothing usable is discarded; their tasks
+                // land in the "already marked as disconnected" branch.
+                self.peers.remove(&peer_id);
                 self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
                     .await;
             } else {
@@ -1759,6 +1773,95 @@ pub(crate) mod tests {
         sender1.join_peers(vec![endpoint_id2]).await?;
 
         let ev = timeout(Duration::from_secs(5), receiver1.try_next())
+            .await
+            .std_context("wait neighbor up after redial")??;
+        assert_eq!(ev, Some(Event::NeighborUp(endpoint_id2)));
+
+        ct.cancel();
+        let wait = Duration::from_secs(2);
+        timeout(wait, ep1_handle)
+            .await
+            .std_context("wait endpoint1 task")?
+            .std_context("join endpoint1 task")??;
+        timeout(wait, ep2_handle)
+            .await
+            .std_context("wait endpoint2 task")?
+            .std_context("join endpoint2 task")??;
+
+        Result::Ok(())
+    }
+
+    /// A connection that dies before the gossip handshake never made the peer a
+    /// proto neighbor, so the proto never asks to disconnect it. The dead `Active`
+    /// entry must not swallow every later send: the next send must dial again.
+    #[tokio::test]
+    #[traced_test]
+    async fn redial_after_connection_dies_before_handshake() -> Result {
+        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
+        let ct = CancellationToken::new();
+        let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+
+        let (go1, ep1, ep1_handle, _test_actor_handle1) =
+            Gossip::t_new(rng, Default::default(), relay_map.clone(), &ct).await?;
+        let ep2 = create_endpoint(rng, relay_map, None).await?;
+        let go2 = Gossip::builder().spawn(ep2.clone());
+        let endpoint_id2 = ep2.id();
+
+        // endpoint 2 closes the first connection as soon as endpoint 1 starts to send
+        // on it, and hands every later connection to its gossip.
+        let ct2 = ct.child_token();
+        let go2_accept = go2.clone();
+        let ep2_accept = ep2.clone();
+        let ep2_handle = task::spawn(async move {
+            let mut first = true;
+            loop {
+                let incoming = tokio::select! {
+                    biased;
+                    _ = ct2.cancelled() => break,
+                    incoming = ep2_accept.accept() => match incoming {
+                        None => break,
+                        Some(incoming) => incoming,
+                    },
+                };
+                let conn = incoming
+                    .accept()
+                    .std_context("accept incoming")?
+                    .await
+                    .std_context("await incoming connection")?;
+                if first {
+                    first = false;
+                    let mut stream = conn.accept_uni().await.std_context("accept uni")?;
+                    let mut buf = [0u8; 1];
+                    stream.read(&mut buf).await.std_context("read first byte")?;
+                    tracing::info!("closing the first connection before the gossip handshake");
+                    conn.close(1u32.into(), b"refused");
+                } else {
+                    go2_accept.handle_connection(conn).await?;
+                }
+            }
+            Result::<(), AnyError>::Ok(())
+        });
+
+        let memory_lookup = MemoryLookup::new();
+        memory_lookup.add_endpoint_info(EndpointAddr::new(endpoint_id2).with_relay_url(relay_url));
+        ep1.address_lookup()?.add(memory_lookup);
+
+        let topic: TopicId = blake3::hash(b"redial_after_connection_dies_before_handshake").into();
+        let _sub2 = go2.subscribe(topic, Vec::new()).await?;
+        let sub1 = go1.subscribe(topic, vec![endpoint_id2]).await?;
+        let (sender1, mut receiver1) = sub1.split();
+
+        // A join sent before the actor notices the dead connection is lost with it,
+        // so the join is repeated until a neighbor comes up.
+        let joined = async {
+            loop {
+                sender1.join_peers(vec![endpoint_id2]).await?;
+                if let Ok(ev) = timeout(Duration::from_millis(200), receiver1.try_next()).await {
+                    break ev;
+                }
+            }
+        };
+        let ev = timeout(Duration::from_secs(5), joined)
             .await
             .std_context("wait neighbor up after redial")??;
         assert_eq!(ev, Some(Event::NeighborUp(endpoint_id2)));
