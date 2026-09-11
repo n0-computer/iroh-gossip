@@ -289,6 +289,15 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
                         handle_out_event(*topic, event, &mut self.peer_topics, &mut self.outbox);
                     }
                 }
+                // `handle_out_event` removes a peer from `peer_topics` only when a
+                // topic disconnects it, and topics only disconnect neighbors. A
+                // peer that just relayed a shuffle or a forward join to us would
+                // stay forever. Remove it after the topics handled the event:
+                // `handle_out_event` needs the entry to tell whether this was the
+                // peer's last topic.
+                if let topic::InEvent::PeerDisconnected(peer) = &event {
+                    self.peer_topics.remove(peer);
+                }
             }
         }
 
@@ -377,5 +386,44 @@ fn track_in_event<PI: Serialize>(event: &InEvent<PI>, metrics: &Metrics) {
                     .inc_by(message.size().unwrap_or(0) as u64);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rand::rngs::StdRng;
+
+    use super::*;
+    use crate::proto::plumtree;
+
+    fn handle(state: &mut State<u32, StdRng>, event: InEvent<u32>) {
+        state.handle(event, Instant::now(), None).for_each(drop);
+    }
+
+    /// A peer that never became a neighbor is removed from `peer_topics`.
+    ///
+    /// Such a peer only relayed a message to us. No topic disconnects it, so
+    /// nothing else removes the entry.
+    #[test]
+    fn peer_disconnected_prunes_peer_topics() {
+        let mut state = State::new(
+            0u32,
+            PeerData::default(),
+            Config::default(),
+            StdRng::seed_from_u64(1),
+        );
+        let topic: TopicId = [0u8; 32].into();
+        let peer = 1u32;
+        handle(&mut state, InEvent::Command(topic, Command::Join(vec![])));
+        let message = Message {
+            topic,
+            message: topic::Message::Gossip(plumtree::Message::Prune),
+        };
+        handle(&mut state, InEvent::RecvMessage(peer, message));
+        assert!(state.peer_topics.contains_key(&peer));
+
+        handle(&mut state, InEvent::PeerDisconnected(peer));
+
+        assert!(!state.peer_topics.contains_key(&peer));
     }
 }
