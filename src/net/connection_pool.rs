@@ -33,6 +33,9 @@ use tokio::{
 };
 use tracing::{debug, error, error_span, trace, Instrument};
 
+/// Close reason for a connection that was replaced by a newer one from the same peer.
+pub(crate) const CLOSE_SUPERSEDED: &[u8] = b"superseded";
+
 pub type OnConnected =
     Arc<dyn Fn(&Endpoint, Connection) -> n0_future::future::Boxed<io::Result<()>> + Send + Sync>;
 
@@ -271,10 +274,24 @@ impl Context {
                                 conn_close.as_mut().set_future({
                                     closed(conn.clone())
                                 });
+                                let new_id = conn.stable_id();
                                 let old_conn = std::mem::replace(&mut state, Ok(conn));
-                                // TODO: What do we do with the old conn here?
-                                // We don't want to close it because it might be actively used.
-                                // We just drop our reference for now.
+                                // Close the connection we just replaced. Nothing watches it
+                                // anymore once `conn_close` points at the new one, and
+                                // keep-alives stop the peer from ever closing it for us, so
+                                // leaving it open leaks the connection along with whatever
+                                // `on_connected` spawned for it. A peer that opened a new
+                                // connection is not servicing the old one either, so there is
+                                // nothing to preserve by keeping it.
+                                if let Ok(old_conn) = &old_conn {
+                                    if old_conn.stable_id() != new_id {
+                                        debug!(
+                                            conn_id = old_conn.stable_id(),
+                                            "closing superseded connection"
+                                        );
+                                        old_conn.close(0u32.into(), CLOSE_SUPERSEDED);
+                                    }
+                                }
                                 drop(old_conn);
                             }
                             match &state {
@@ -629,5 +646,93 @@ impl Drop for OneConnection {
         if self.inner.count.fetch_sub(1, Ordering::SeqCst) == 1 {
             self.inner.notify.notify_waiters();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use iroh::{endpoint::presets, Endpoint};
+    use n0_error::{Result, StdResultExt};
+    use n0_future::{task::AbortOnDropHandle, time::timeout};
+    use n0_tracing_test::traced_test;
+    use tokio::sync::mpsc;
+
+    use super::*;
+
+    const TEST_ALPN: &[u8] = b"iroh-gossip/pool-test/0";
+
+    /// A connection replaced by a newer one from the same peer must be closed.
+    ///
+    /// Once `conn_close` points at the new connection nothing watches the old one,
+    /// and keep-alives stop the peer from closing it for us, so leaving it open
+    /// leaks the connection and anything `on_connected` spawned for it.
+    #[tokio::test]
+    #[traced_test]
+    async fn superseded_connection_is_closed() -> Result {
+        let server = Endpoint::builder(presets::Minimal)
+            .alpns(vec![TEST_ALPN.to_vec()])
+            .bind()
+            .await?;
+        let server_addr = server.addr();
+        let client = Endpoint::bind(presets::Minimal).await?;
+
+        // A long idle timeout, so that an idle shutdown cannot be what closes the
+        // connection instead.
+        let options = Options {
+            idle_timeout: Duration::from_secs(60),
+            ..Default::default()
+        };
+        let pool = ConnectionPool::new(server.clone(), TEST_ALPN, options);
+
+        // Hold on to the `ConnectionRef`s, so the pool never considers itself idle.
+        let (accepted_tx, mut accepted_rx) = mpsc::channel(4);
+        let accept = AbortOnDropHandle::new(n0_future::task::spawn(async move {
+            let mut refs = Vec::new();
+            while let Some(incoming) = server.accept().await {
+                let Ok(conn) = incoming.await else { continue };
+                refs.push(pool.handle_connection(conn).await);
+                accepted_tx.send(()).await.ok();
+            }
+        }));
+
+        let first = client
+            .connect(server_addr.clone(), TEST_ALPN)
+            .await
+            .std_context("connect first")?;
+        // The pool must have taken the first connection before the second arrives,
+        // otherwise there is nothing to supersede.
+        accepted_rx.recv().await.expect("accept loop stopped");
+
+        let second = client
+            .connect(server_addr, TEST_ALPN)
+            .await
+            .std_context("connect second")?;
+        accepted_rx.recv().await.expect("accept loop stopped");
+        assert_ne!(
+            first.stable_id(),
+            second.stable_id(),
+            "the client reused the connection, nothing was superseded"
+        );
+
+        let err = timeout(Duration::from_secs(10), first.closed())
+            .await
+            .std_context("superseded connection was not closed")?;
+        assert!(
+            matches!(
+                &err,
+                iroh::endpoint::ConnectionError::ApplicationClosed(frame)
+                    if frame.reason == CLOSE_SUPERSEDED
+            ),
+            "closed for the wrong reason: {err:?}"
+        );
+
+        // The replacement must still be usable.
+        assert!(
+            second.close_reason().is_none(),
+            "the new connection was closed"
+        );
+
+        drop(accept);
+        Ok(())
     }
 }
