@@ -580,9 +580,25 @@ where
             return;
         }
         if self.passive_is_full() {
-            self.passive_view.remove_random(&mut self.rng);
+            if let Some(evicted) = self.passive_view.remove_random(&mut self.rng) {
+                self.forget_peer(&evicted);
+            }
         }
         self.passive_view.insert(peer);
+    }
+
+    /// Drops the metadata we hold for a peer, unless it is still in a view.
+    ///
+    /// `peer_data` and `alive_disconnect_peers` describe peers in a view, so
+    /// every path out of a view has to clear them. The membership check is for
+    /// callers that cannot tell: a neighbor request can time out after the peer
+    /// joined the active view through a forwarded join.
+    fn forget_peer(&mut self, peer: &PI) {
+        if self.active_view.contains(peer) || self.passive_view.contains(peer) {
+            return;
+        }
+        self.peer_data.remove(peer);
+        self.alive_disconnect_peers.remove(peer);
     }
 
     /// Remove a peer from the active view.
@@ -632,6 +648,7 @@ where
     fn handle_pending_neighbor_timer(&mut self, peer: PI, io: &mut impl IO<PI>) {
         if self.pending_neighbor_requests.remove(&peer) {
             self.passive_view.remove(&peer);
+            self.forget_peer(&peer);
             self.refill_active_from_passive(&[], io);
         }
     }
@@ -671,6 +688,8 @@ where
                 if !matches!(reason, RemovalReason::ConnectionClosed) {
                     self.alive_disconnect_peers.insert(peer);
                 }
+            } else {
+                self.forget_peer(&peer);
             }
             debug!(other = ?peer, "removed from active view, reason: {reason:?}");
             Some(peer)
@@ -761,4 +780,91 @@ enum RemovalReason {
     DisconnectReceived { is_alive: bool },
     /// A peer is removed after random selection to make room for a newly joined peer.
     Random,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use rand::{rngs::StdRng, SeedableRng};
+
+    use super::*;
+    use crate::proto::topic::OutEvent as TopicOut;
+
+    type Io = VecDeque<TopicOut<u32>>;
+
+    fn new_state() -> State<u32, StdRng> {
+        State::new(0, None, Config::default(), StdRng::seed_from_u64(1))
+    }
+
+    /// Seeds the metadata a peer accumulates while it is known to us.
+    fn seed_metadata(state: &mut State<u32, StdRng>, peer: u32) {
+        state.peer_data.insert(peer, PeerData::new(vec![1]));
+        state.alive_disconnect_peers.insert(peer);
+    }
+
+    fn has_metadata(state: &State<u32, StdRng>, peer: u32) -> bool {
+        state.peer_data.contains_key(&peer) || state.alive_disconnect_peers.contains(&peer)
+    }
+
+    #[test]
+    fn passive_eviction_forgets_peer() {
+        let mut state = new_state();
+        state.config.passive_view_capacity = 1;
+        let io = &mut Io::new();
+        state.add_passive(1, None, io);
+        seed_metadata(&mut state, 1);
+
+        // The passive view is full, so peer 1 is the one evicted to make room.
+        state.add_passive(2, None, io);
+
+        assert!(!has_metadata(&state, 1));
+    }
+
+    #[test]
+    fn active_discard_forgets_peer() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.active_view.insert(1);
+        seed_metadata(&mut state, 1);
+
+        // A peer that is not alive is dropped rather than kept as passive.
+        let reason = RemovalReason::DisconnectReceived { is_alive: false };
+        state.remove_active(&1, reason, io);
+
+        assert!(!has_metadata(&state, 1));
+    }
+
+    #[test]
+    fn neighbor_request_timeout_forgets_peer() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.pending_neighbor_requests.insert(1);
+        state.passive_view.insert(1);
+        seed_metadata(&mut state, 1);
+
+        state.handle(InEvent::TimerExpired(Timer::PendingNeighborRequest(1)), io);
+
+        assert!(!has_metadata(&state, 1));
+    }
+
+    /// A timed-out neighbor request does not drop the data of an active peer.
+    ///
+    /// The request can time out after the peer joined the active view through
+    /// a forwarded join, where its data is still in use.
+    #[test]
+    fn neighbor_request_timeout_keeps_active_peer() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.pending_neighbor_requests.insert(1);
+        state.active_view.insert(1);
+        state.peer_data.insert(1, PeerData::new(vec![1]));
+
+        state.handle(InEvent::TimerExpired(Timer::PendingNeighborRequest(1)), io);
+
+        assert!(
+            state.peer_data.contains_key(&1),
+            "data of an active peer was dropped"
+        );
+    }
 }
