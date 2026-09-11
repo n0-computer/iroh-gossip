@@ -20,7 +20,7 @@ use n0_future::{
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    sync::mpsc,
+    sync::{mpsc, oneshot},
 };
 use tracing::{debug, trace, Instrument};
 
@@ -88,6 +88,27 @@ impl StreamHeader {
     }
 }
 
+/// Time we wait for the peer to acknowledge our finished streams before we
+/// give up on them.
+///
+/// The send loop returns only after this wait, and the connection is closed
+/// only after the send loop returned, so everything we wrote is acknowledged
+/// by the peer's QUIC stack before we close. A peer that does not acknowledge
+/// within this time is stalled, and the message it did not acknowledge is
+/// lost with the connection.
+pub(crate) const STREAM_FINISH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Time a connection we stopped sending on stays open without a stream from
+/// the peer before we close it.
+///
+/// A peer opens its streams lazily, so right after our send loop ends we
+/// cannot tell a peer that is about to use this connection from one that is
+/// done with it. The grace covers the first case, at the cost of keeping a
+/// retired connection for this long. It matches [`STREAM_FINISH_TIMEOUT`]:
+/// a peer that takes longer than that to open a stream is one we would also
+/// have given up waiting for.
+pub(crate) const IDLE_GRACE: Duration = STREAM_FINISH_TIMEOUT;
+
 pub(crate) struct RecvLoop {
     remote_endpoint_id: EndpointId,
     conn: Connection,
@@ -110,15 +131,37 @@ impl RecvLoop {
         }
     }
 
-    pub(crate) async fn run(&mut self) -> Result<(), ReadError> {
+    /// Reads messages until the connection is done.
+    ///
+    /// That is when the peer closes it, or when our send loop has ended, for
+    /// whatever reason, and the peer has kept no stream open for [`IDLE_GRACE`].
+    ///
+    /// The peer may still use a connection we stopped sending on. When two peers
+    /// dial each other at once, each side keeps the connection it saw last as
+    /// its primary, and the two may disagree. Each side then receives on the
+    /// connection the other side stopped sending on.
+    pub(crate) async fn run(&mut self, send_done: oneshot::Receiver<()>) -> Result<(), ReadError> {
         let mut read_futures = FuturesUnordered::new();
         let mut conn_is_closed = false;
+        let mut send_is_done = false;
         let closed = self.conn.closed();
         tokio::pin!(closed);
+        tokio::pin!(send_done);
+        // Reset whenever our send loop has ended and no stream is open.
+        let idle = sleep_until(Instant::now());
+        tokio::pin!(idle);
         while !conn_is_closed || !read_futures.is_empty() {
             tokio::select! {
                 _ = &mut closed, if !conn_is_closed => {
                     conn_is_closed = true;
+                }
+                _ = &mut send_done, if !send_is_done => {
+                    send_is_done = true;
+                    idle.as_mut().reset(Instant::now() + IDLE_GRACE);
+                }
+                _ = &mut idle, if send_is_done && read_futures.is_empty() && !conn_is_closed => {
+                    debug!("no stream open since our send loop ended, close connection");
+                    break;
                 }
                 stream = self.conn.accept_uni(), if !conn_is_closed => {
                     let stream = match stream {
@@ -133,22 +176,19 @@ impl RecvLoop {
                     read_futures.push(state.next());
                 }
                 Some(res) = read_futures.next(), if !read_futures.is_empty() => {
-                    let (state, msg) = match res {
-                        Ok((state, msg)) => (state, msg),
-                        Err(err) => {
-                            debug!("recv stream closed with error: {err:#}");
-                            continue;
-                        }
-                    };
-                    match msg {
-                        None => debug!(topic=%state.header.topic_id.fmt_short(), "stream closed"),
-                        Some(msg) => {
+                    match res {
+                        Ok((state, Some(msg))) => {
                             if self.in_event_tx.send(InEvent::RecvMessage(self.remote_endpoint_id, msg)).await.is_err() {
                                 debug!("stop recv loop: actor closed");
                                 break;
                             }
                             read_futures.push(state.next());
                         }
+                        Ok((state, None)) => debug!(topic=%state.header.topic_id.fmt_short(), "stream closed"),
+                        Err(err) => debug!("recv stream closed with error: {err:#}"),
+                    }
+                    if send_is_done && read_futures.is_empty() {
+                        idle.as_mut().reset(Instant::now() + IDLE_GRACE);
                     }
                 }
             }
@@ -231,9 +271,12 @@ impl SendLoop {
             tokio::select! {
                 biased;
                 _ = &mut closed => break,
-                Some(msg) = self.send_rx.recv() => self.write_message(&msg).await?,
+                msg = self.send_rx.recv() => match msg {
+                    Some(msg) => self.write_message(&msg).await?,
+                    // The actor dropped the sender: nothing more goes out on this connection.
+                    None => break,
+                },
                 _ = self.finishing.join_next(), if !self.finishing.is_empty() => {}
-                else => break,
             }
         }
 
@@ -254,7 +297,7 @@ impl SendLoop {
                 self.finishing.len()
             );
             // Wait for the remote to acknowledge all streams are finished.
-            if let Err(_elapsed) = n0_future::time::timeout(Duration::from_secs(5), async move {
+            if let Err(_elapsed) = n0_future::time::timeout(STREAM_FINISH_TIMEOUT, async move {
                 while self.finishing.join_next().await.is_some() {}
             })
             .await
