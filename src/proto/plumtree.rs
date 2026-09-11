@@ -738,6 +738,28 @@ impl<PI: PeerIdentity> State<PI> {
 #[cfg(test)]
 mod test {
     use super::*;
+    /// Announcements queued for a neighbor that then goes down must not be sent.
+    #[test]
+    fn neighbor_down_drops_queued_ihaves() {
+        let mut io = VecDeque::new();
+        let mut state = State::new(1u32, Config::default(), 1024);
+        let now = Instant::now();
+
+        // Peer 2 joins and prunes us, which makes it a lazy peer, so broadcasting
+        // queues an IHave for it rather than sending the content.
+        state.handle(InEvent::NeighborUp(2), now, &mut io);
+        state.handle(InEvent::RecvMessage(2, Message::Prune), now, &mut io);
+        let content: Bytes = b"hi".to_vec().into();
+        state.handle(InEvent::Broadcast(content, Scope::Swarm), now, &mut io);
+        assert!(state.lazy_push_queue.contains_key(&2));
+
+        state.handle(InEvent::NeighborDown(2), now, &mut io);
+        io.clear();
+        state.handle(InEvent::TimerExpired(Timer::DispatchLazyPush), now, &mut io);
+
+        assert_eq!(io, VecDeque::new(), "sent to a peer that went down");
+    }
+
     #[test]
     fn optimize_tree() {
         let mut io = VecDeque::new();

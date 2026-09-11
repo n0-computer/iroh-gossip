@@ -379,3 +379,44 @@ fn track_in_event<PI: Serialize>(event: &InEvent<PI>, metrics: &Metrics) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use rand::rngs::StdRng;
+
+    use super::*;
+    use crate::proto::plumtree;
+
+    /// A peer that sends a message without joining a view is tracked in
+    /// `peer_topics` but in no topic state, so only this prune removes it.
+    #[test]
+    fn peer_disconnected_prunes_peer_topics() {
+        let now = Instant::now();
+        let mut state = State::new(
+            0u32,
+            PeerData::default(),
+            Config::default(),
+            StdRng::seed_from_u64(1),
+        );
+        let topic: TopicId = [0u8; 32].into();
+        let peer = 1u32;
+
+        state
+            .handle(InEvent::Command(topic, Command::Join(vec![])), now, None)
+            .for_each(drop);
+        let message = Message {
+            topic,
+            message: topic::Message::Gossip(plumtree::Message::Prune),
+        };
+        state
+            .handle(InEvent::RecvMessage(peer, message), now, None)
+            .for_each(drop);
+        assert!(state.peer_topics.contains_key(&peer));
+
+        state
+            .handle(InEvent::PeerDisconnected(peer), now, None)
+            .for_each(drop);
+
+        assert!(!state.peer_topics.contains_key(&peer));
+    }
+}
