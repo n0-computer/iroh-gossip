@@ -257,7 +257,23 @@ struct TopicMap(Arc<Mutex<TopicMapInner>>);
 struct TopicMapInner {
     topics: HashMap<TopicId, TopicHandle>,
     tasks: JoinSet<TopicActor>,
+    /// Streams that arrived for a topic we had not joined yet.
+    ///
+    /// Two peers joining the same topic at the same time will each open a
+    /// stream before the other has processed its own local join, so a stream
+    /// for an unjoined topic is expected and not an error. Resetting it would
+    /// make the sender's `GossipSender` fail and drop us as a peer just as we
+    /// were about to become interested, which for a node bootstrapping off a
+    /// single seed can mean never joining at all.
+    ///
+    /// Bounded, and oldest-first: a peer can open streams for topics we never
+    /// join, and nothing else ever removes these.
+    pending: VecDeque<(TopicId, EndpointId, GossipReceiver)>,
 }
+
+/// How many streams for unjoined topics to hold on to. See
+/// [`TopicMapInner::pending`].
+const MAX_PENDING_STREAMS: usize = 32;
 
 impl TopicMap {
     /// Returns a sender for `topic_id`, starting the topic actor if the topic is
@@ -267,6 +283,17 @@ impl TopicMap {
     /// the caller has sent; see [`WeakTopicMap::try_quit`].
     fn get_or_init(&self, topic_id: TopicId, shared: &Arc<Shared>) -> TopicSender {
         let mut inner = self.0.lock().expect("poisoned");
+        // Take the streams that were parked for this topic, leaving the rest.
+        let mut pending = Vec::new();
+        let mut rest = VecDeque::with_capacity(inner.pending.len());
+        while let Some(entry) = inner.pending.pop_front() {
+            if entry.0 == topic_id {
+                pending.push((entry.1, entry.2));
+            } else {
+                rest.push_back(entry);
+            }
+        }
+        inner.pending = rest;
         match inner.topics.entry(topic_id) {
             hash_map::Entry::Occupied(entry) => entry.get().sender(),
             hash_map::Entry::Vacant(entry) => {
@@ -274,6 +301,7 @@ impl TopicMap {
                     topic_id,
                     shared.clone(),
                     WeakTopicMap(Arc::downgrade(&self.0)),
+                    pending,
                 );
                 let sender = entry.insert(handle).sender();
                 inner.tasks.spawn(
@@ -290,6 +318,26 @@ impl TopicMap {
     fn get(&self, topic_id: &TopicId) -> Option<TopicSender> {
         let inner = self.0.lock().expect("poisoned");
         inner.topics.get(topic_id).map(TopicHandle::sender)
+    }
+
+    /// Holds on to a stream for a topic that is not joined yet.
+    ///
+    /// It is handed to the topic actor if and when the topic is joined; see
+    /// [`TopicMapInner::pending`].
+    fn park_stream(&self, topic_id: TopicId, remote: EndpointId, stream: GossipReceiver) {
+        let mut inner = self.0.lock().expect("poisoned");
+        while inner.pending.len() >= MAX_PENDING_STREAMS {
+            let (topic_id, remote, _stream) = inner.pending.pop_front().expect("non-empty");
+            debug!(topic=%topic_id.fmt_short(), remote=%remote.fmt_short(),
+                   "dropping parked stream: too many");
+        }
+        inner.pending.push_back((topic_id, remote, stream));
+    }
+
+    /// Number of streams held for topics that are not joined.
+    #[cfg(test)]
+    fn pending_len(&self) -> usize {
+        self.0.lock().expect("poisoned").pending.len()
     }
 
     /// Number of topics the map will currently route messages to.
@@ -534,15 +582,16 @@ async fn accept_loop(topics: TopicMap, conn: Connection, max_message_size: usize
         };
 
         let topic_id = stream.topic_id();
+        let remote = conn.remote_id();
         let Some(topic) = topics.get(&topic_id) else {
-            debug!(topic=%topic_id.fmt_short(), "dropping stream for a topic we have not joined");
+            debug!(topic=%topic_id.fmt_short(), "parking stream for a topic we have not joined");
+            topics.park_stream(topic_id, remote, stream);
             continue;
         };
-        let msg = TopicMessage::RemoteStream {
-            remote: conn.remote_id(),
-            stream,
-        };
-        topic.send(msg).await.ok();
+        topic
+            .send(TopicMessage::RemoteStream { remote, stream })
+            .await
+            .ok();
     }
 }
 
@@ -559,7 +608,12 @@ struct TopicHandle {
 }
 
 impl TopicHandle {
-    fn new(topic_id: TopicId, shared: Arc<Shared>, topics: WeakTopicMap) -> (Self, TopicActor) {
+    fn new(
+        topic_id: TopicId,
+        shared: Arc<Shared>,
+        topics: WeakTopicMap,
+        parked_streams: Vec<(EndpointId, GossipReceiver)>,
+    ) -> (Self, TopicActor) {
         let (tx, rx) = mpsc::channel(16);
         let state = State::new(shared.me, None, shared.config.clone());
         #[cfg(test)]
@@ -569,6 +623,7 @@ impl TopicHandle {
         let actor = TopicActor {
             topic_id,
             topics,
+            parked_streams,
             shared,
             state,
             rx,
@@ -623,6 +678,11 @@ impl TopicSender {
 struct TopicActor {
     topic_id: TopicId,
     topics: WeakTopicMap,
+    /// Streams that arrived for this topic before it was joined.
+    ///
+    /// Registered once the join has been processed, so that they behave exactly
+    /// like a stream arriving a moment later.
+    parked_streams: Vec<(EndpointId, GossipReceiver)>,
     shared: Arc<Shared>,
 
     // -- state
@@ -764,19 +824,7 @@ impl TopicActor {
     async fn handle_actor_message(&mut self, msg: TopicMessage) {
         match msg {
             TopicMessage::RemoteStream { remote, stream } => {
-                debug!(remote=%remote.fmt_short(), "remote conneected");
-                // Replace our sender if this a new connection.
-                if let Some(SendQueue::Active(sender)) = self.remote_senders.get_mut(&remote) {
-                    if !stream.is_same_conn(sender.conn()) {
-                        debug!(remote=%remote.fmt_short(), "renew sender (used prev conn)");
-                        // Removing the sender will trigger a "reconnect" on next send, which will
-                        // then create a new sender on the new connection.
-                        self.remote_senders.remove(&remote);
-                    }
-                }
-                // We keep old receivers to fully drain them and just add our new receiver.
-                self.remote_receivers
-                    .push(Box::pin(into_stream(stream).map(move |msg| (remote, msg))));
+                self.register_remote_stream(remote, stream);
             }
             TopicMessage::ApiJoin(req) => {
                 self.init = true;
@@ -791,8 +839,30 @@ impl TopicActor {
                     inner.bootstrap.into_iter().collect(),
                 )))
                 .await;
+                // Streams a peer opened before we got here. Registered after the
+                // join so they behave like a stream arriving a moment from now.
+                for (remote, stream) in std::mem::take(&mut self.parked_streams) {
+                    debug!(remote=%remote.fmt_short(), "registering parked stream");
+                    self.register_remote_stream(remote, stream);
+                }
             }
         }
+    }
+
+    fn register_remote_stream(&mut self, remote: EndpointId, stream: GossipReceiver) {
+        debug!(remote=%remote.fmt_short(), "remote connected");
+        // Replace our sender if this a new connection.
+        if let Some(SendQueue::Active(sender)) = self.remote_senders.get_mut(&remote) {
+            if !stream.is_same_conn(sender.conn()) {
+                debug!(remote=%remote.fmt_short(), "renew sender (used prev conn)");
+                // Removing the sender will trigger a "reconnect" on next send, which will
+                // then create a new sender on the new connection.
+                self.remote_senders.remove(&remote);
+            }
+        }
+        // We keep old receivers to fully drain them and just add our new receiver.
+        self.remote_receivers
+            .push(Box::pin(into_stream(stream).map(move |msg| (remote, msg))));
     }
 
     async fn handle_remote_message(
@@ -1489,6 +1559,62 @@ pub(crate) mod tests {
             .broadcast(b"ping".to_vec().into())
             .await
             .std_context("broadcast on the re-joined topic")?;
+
+        ct.cancel();
+        Ok(())
+    }
+
+    /// A stream for a topic we have not joined must be parked, not reset.
+    ///
+    /// Two peers joining the same topic at once each open a stream before the
+    /// other has processed its own join. Resetting the stream fails the
+    /// sender's `GossipSender`, which drops us as a peer just as we were about
+    /// to become interested -- and a node bootstrapping off a single seed may
+    /// then never join at all.
+    #[tokio::test]
+    #[traced_test]
+    async fn streams_for_unjoined_topics_are_parked() -> Result {
+        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
+        let ct = CancellationToken::new();
+        let (relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+
+        // Our main actor is stepped by hand, so we have not joined the topic
+        // when the stream arrives.
+        let (gossip, mut actor, _router) =
+            Gossip::t_new_with_actor(rng, Default::default(), relay_map.clone(), &ct).await?;
+        let our_addr = actor.endpoint().addr();
+        let topic_id = TopicId::from([3u8; 32]);
+
+        // The other side joins the topic with us as its bootstrap peer, which
+        // opens a stream for the topic.
+        let sender_ep = create_endpoint(rng, relay_map, None).await?;
+        let lookup = MemoryLookup::new();
+        lookup.add_endpoint_info(our_addr.clone());
+        sender_ep.address_lookup()?.add(lookup);
+        let sender = Gossip::builder().spawn(sender_ep.clone());
+        let _sender_router = Router::builder(sender_ep)
+            .accept(GOSSIP_ALPN, sender.clone())
+            .spawn();
+        let _sender_topic = sender.subscribe(topic_id, vec![our_addr.id]).await?;
+
+        timeout(Duration::from_secs(10), async {
+            while actor.topics.pending_len() == 0 {
+                n0_future::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .std_context("no stream was parked")?;
+        assert_eq!(actor.topics.len(), 0, "the topic was joined on our behalf");
+
+        // Joining now has to pick the parked stream up.
+        let _topic = gossip.subscribe(topic_id, vec![]).await?;
+        actor.steps(1).await?;
+        assert_eq!(actor.topics.len(), 1, "the topic actor did not start");
+        assert_eq!(
+            actor.topics.pending_len(),
+            0,
+            "the parked stream was left behind"
+        );
 
         ct.cancel();
         Ok(())
