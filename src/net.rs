@@ -506,17 +506,6 @@ impl Actor {
         self.run().await
     }
 
-    #[cfg(test)]
-    #[instrument("gossip", skip_all, fields(me=%self.shared.me.fmt_short()))]
-    pub(crate) async fn steps(&mut self, n: usize) -> Result<(), ActorStoppedError> {
-        for _ in 0..n {
-            if self.tick().await == ControlFlow::Break(()) {
-                return Err(ActorStoppedError);
-            }
-        }
-        Ok(())
-    }
-
     async fn tick(&mut self) -> ControlFlow<(), ()> {
         self.shared.metrics.actor_tick_main.inc();
         tokio::select! {
@@ -1096,7 +1085,7 @@ pub(crate) mod tests {
         tls::CaTlsConfig,
         RelayMap, RelayMode, SecretKey,
     };
-    use n0_error::{AnyError, Result, StdResultExt};
+    use n0_error::{ensure_any, AnyError, Result, StdResultExt};
     use n0_tracing_test::traced_test;
     use rand::{CryptoRng, RngExt, SeedableRng};
     use tokio::{spawn, time::timeout};
@@ -1108,6 +1097,93 @@ pub(crate) mod tests {
         api::{ApiError, Event, GossipReceiver, GossipSender},
         ALPN,
     };
+
+    /// How long a [`ManualActor`] waits for the next unit of work before
+    /// concluding there is none.
+    ///
+    /// Also the window in which the tasks the actor spawned -- topic actors,
+    /// accept loops -- get to run, since the actor is only driven while a test
+    /// awaits it.
+    const SETTLE: Duration = Duration::from_millis(50);
+
+    /// How long [`ManualActor::until`] keeps trying.
+    const PATIENCE: Duration = Duration::from_secs(10);
+
+    /// A gossip [`Actor`] driven by the test instead of by a task.
+    ///
+    /// Stepping the actor by hand is what makes the ordering between the actor,
+    /// its topic actors and the API observable. Prefer [`Self::until`] over
+    /// counting steps: a test that asks for more steps than there is work
+    /// blocks forever, and one that asks for fewer leaves work behind, and
+    /// neither count is something a test should have to know.
+    #[derive(derive_more::Deref, derive_more::DerefMut)]
+    pub(super) struct ManualActor(Actor);
+
+    impl ManualActor {
+        /// Handles one unit of work. Returns `false` if the actor stopped.
+        ///
+        /// Returns `true` without doing anything if nothing was ready within
+        /// [`SETTLE`].
+        async fn step(&mut self) -> bool {
+            match n0_future::time::timeout(SETTLE, self.0.tick()).await {
+                Ok(ControlFlow::Continue(())) | Err(_) => true,
+                Ok(ControlFlow::Break(())) => false,
+            }
+        }
+
+        /// Lets the tasks the actor spawned run, with the actor itself paused.
+        ///
+        /// Some orderings are only observable this way. Stepping the actor lets
+        /// it reap a finished topic actor, so a test about the window *before*
+        /// that reaping must not step it.
+        async fn pause(&self) {
+            n0_future::time::sleep(SETTLE).await;
+        }
+
+        /// Steps until nothing more is ready.
+        async fn settle(&mut self) {
+            while n0_future::time::timeout(SETTLE, self.0.tick())
+                .await
+                .is_ok_and(|flow| flow.is_continue())
+            {}
+        }
+
+        /// Steps until `cond` holds.
+        ///
+        /// `what` is used in the failure message, phrased as the thing that did
+        /// not happen: "the topic actor to start".
+        async fn until(&mut self, what: &str, mut cond: impl FnMut(&Actor) -> bool) -> Result {
+            let deadline = Instant::now() + PATIENCE;
+            while !cond(&self.0) {
+                ensure_any!(Instant::now() < deadline, "timed out waiting for {what}");
+                ensure_any!(self.step().await, "actor stopped while waiting for {what}");
+            }
+            Ok(())
+        }
+
+        async fn finish(self) {
+            self.0.finish().await
+        }
+    }
+
+    /// Spawns a gossip instance on its own endpoint, with a router accepting on
+    /// [`GOSSIP_ALPN`] and `reachable` resolvable.
+    async fn spawn_node(
+        rng: &mut rand::rngs::ChaCha12Rng,
+        relay_map: RelayMap,
+        reachable: impl IntoIterator<Item = EndpointAddr>,
+    ) -> Result<(Gossip, Router)> {
+        let lookup = MemoryLookup::new();
+        for addr in reachable {
+            lookup.add_endpoint_info(addr);
+        }
+        let endpoint = create_endpoint(rng, relay_map, Some(lookup)).await?;
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let router = Router::builder(endpoint)
+            .accept(GOSSIP_ALPN, gossip.clone())
+            .spawn();
+        Ok((gossip, router))
+    }
 
     impl Gossip {
         pub(super) async fn t_new<'a>(
@@ -1125,8 +1201,12 @@ pub(crate) mod tests {
                 Gossip::t_new_with_actor(rng, config, relay_map, cancel).await?;
             let ep = actor.endpoint().clone();
             let me = ep.id().fmt_short();
-            let actor_handle =
-                task::spawn(actor.run().instrument(tracing::error_span!("gossip", %me)));
+            let actor_handle = task::spawn(
+                actor
+                    .0
+                    .run()
+                    .instrument(tracing::error_span!("gossip", %me)),
+            );
             Ok((gossip, ep, ep_handle, AbortOnDropHandle::new(actor_handle)))
         }
         pub(super) async fn t_new_with_actor<'a>(
@@ -1134,7 +1214,7 @@ pub(crate) mod tests {
             config: proto::Config,
             relay_map: RelayMap,
             cancel: &'a CancellationToken,
-        ) -> n0_error::Result<(Self, Actor, impl Future<Output = ()> + use<'a>)> {
+        ) -> n0_error::Result<(Self, ManualActor, impl Future<Output = ()> + use<'a>)> {
             let endpoint = Endpoint::builder(presets::Minimal)
                 .relay_mode(RelayMode::Custom(relay_map))
                 .secret_key(SecretKey::from_bytes(&rng.random()))
@@ -1157,7 +1237,7 @@ pub(crate) mod tests {
             let router_fut = async move {
                 router_task.await.expect("router task panicked");
             };
-            Ok((gossip, actor, router_fut))
+            Ok((gossip, ManualActor(actor), router_fut))
         }
     }
 
@@ -1455,17 +1535,19 @@ pub(crate) mod tests {
         let go1_handle = task::spawn(go1_task);
 
         // advance and check that the topic is now subscribed
-        actor.steps(1).await?; // api_rx subscribe;
+        actor
+            .until("the topic to be joined", |actor| {
+                actor.topics.joined(&topic) == Some(true)
+            })
+            .await?;
         go1_joined_rx.recv().await.unwrap();
-        tracing::info!("subscribe and join done, should be joined");
-        assert_eq!(actor.topics.joined(&topic), Some(true));
 
         // signal the second subscribe, we should remain subscribed
         go1_resubscribe_tx
             .send(())
             .await
             .std_context("signal additional subscribe")?;
-        actor.steps(1).await?; // api_rx subscribe;
+        actor.settle().await;
         assert_eq!(actor.topics.joined(&topic), Some(true));
 
         // signal to drop the second handle, the topic should no longer be subscribed
@@ -1473,8 +1555,11 @@ pub(crate) mod tests {
             .send(())
             .await
             .std_context("signal drop handles")?;
-        actor.steps(1).await?; // topic task finished
-        assert_eq!(actor.topics.joined(&topic), None);
+        actor
+            .until("the topic to be dropped", |actor| {
+                actor.topics.joined(&topic).is_none()
+            })
+            .await?;
 
         // cleanup and ensure everything went as expected
         ct.cancel();
@@ -1521,12 +1606,12 @@ pub(crate) mod tests {
         let topic_id = TopicId::from([1u8; 32]);
 
         let topic = gossip.subscribe(topic_id, vec![]).await?;
-        actor.steps(1).await?;
-        tokio::task::yield_now().await;
-        assert_eq!(actor.topics.len(), 1, "the topic actor did not start");
+        actor
+            .until("the topic actor to start", |actor| actor.topics.len() == 1)
+            .await?;
 
         drop(topic);
-        n0_future::time::sleep(Duration::from_millis(50)).await;
+        actor.pause().await;
         assert_eq!(
             actor.topics.len(),
             0,
@@ -1535,11 +1620,11 @@ pub(crate) mod tests {
 
         // A join landing in what used to be the gap is served by a fresh actor.
         let mut topic = gossip.subscribe(topic_id, vec![]).await?;
-        // Two units of work are pending: the api message, and reaping the
-        // stopped actor. Their order is up to `select!`, and must not matter.
-        actor.steps(2).await?;
-        tokio::task::yield_now().await;
-        assert_eq!(actor.topics.len(), 1, "the second join was dropped");
+        actor
+            .until("the second join to be served", |actor| {
+                actor.topics.len() == 1
+            })
+            .await?;
         topic
             .broadcast(b"ping".to_vec().into())
             .await
@@ -1572,34 +1657,24 @@ pub(crate) mod tests {
 
         // The other side joins the topic with us as its bootstrap peer, which
         // opens a stream for the topic.
-        let sender_ep = create_endpoint(rng, relay_map, None).await?;
-        let lookup = MemoryLookup::new();
-        lookup.add_endpoint_info(our_addr.clone());
-        sender_ep.address_lookup()?.add(lookup);
-        let sender = Gossip::builder().spawn(sender_ep.clone());
-        let _sender_router = Router::builder(sender_ep)
-            .accept(GOSSIP_ALPN, sender.clone())
-            .spawn();
+        let (sender, _sender_router) = spawn_node(rng, relay_map, [our_addr.clone()]).await?;
         let _sender_topic = sender.subscribe(topic_id, vec![our_addr.id]).await?;
 
-        timeout(Duration::from_secs(10), async {
-            while actor.topics.parked_len() == 0 {
-                n0_future::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .std_context("no stream was parked")?;
+        actor
+            .until("a stream to be parked", |actor| {
+                actor.topics.parked_len() == 1
+            })
+            .await?;
         assert_eq!(actor.topics.len(), 0, "the topic was joined on our behalf");
 
         // Joining now has to pick the parked stream up.
         let _topic = gossip.subscribe(topic_id, vec![]).await?;
-        actor.steps(1).await?;
+        actor
+            .until("the parked stream to be used", |actor| {
+                actor.topics.parked_len() == 0
+            })
+            .await?;
         assert_eq!(actor.topics.len(), 1, "the topic actor did not start");
-        assert_eq!(
-            actor.topics.parked_len(),
-            0,
-            "the parked stream was left behind"
-        );
 
         ct.cancel();
         Ok(())
