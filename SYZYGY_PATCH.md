@@ -58,6 +58,13 @@ failures:
     Remaining topics keep their eager membership while their final disconnect
     messages lose the registered connection; subsequent broadcasts accumulate in
     a new `Pending` queue and are replayed when the peer reconnects.
+14. An explicit `Join` can be silenced by an older pending `Neighbor` request.
+    One side may consume a `Neighbor` as a reply and stop responding while the
+    other side retains its pending flag. If only the first side observes a
+    connection replacement as `PeerDisconnected`, its rejoin reaches a peer
+    that is still active and pending. `send_neighbor` suppresses the response,
+    leaving the rejoining side without `NeighborUp`. This Join path has no
+    pending-request timer, so additional Join attempts cannot repair it.
 
 The observed failure starts with `No addressing information available`. The
 first dial fails, the queue remains non-empty, and later join/repair intents no
@@ -92,6 +99,11 @@ would hide the broken state machine and create competing connection owners.
   network-level `DisconnectPeer` only when that set is empty. Other topics keep
   using the same connection and can deliver their own final disconnect messages.
   A network-level disconnect still retires every topic's membership.
+- Treat an explicit `Join` as a new handshake: clear that peer's old pending
+  Neighbor request before the existing `add_active` path sends its response.
+  Keep active-view membership and normal Neighbor reply suppression unchanged,
+  so repeated or simultaneous joins do not emit duplicate `NeighborUp` events
+  or create an unbounded reply exchange.
 - Tag connection input with its stable connection id and accept it while the
   peer has a live active sender and the id is registered as either its active
   connection or one of `other_conns`. Sender handoff preserves valid queued
@@ -145,6 +157,7 @@ Active + SendError(message)      -> Pending + immediate PeerDisconnected
 Established membership down      -> discard retired outputs and Pending messages
 Unestablished first Join failed  -> retain Pending(Actor, [Join]) + queue_dial
 NeighborDown                     -> remove pending lazy announcements for that peer
+Explicit Join with old pending   -> renew Neighbor handshake without duplicate membership
 Topic quit with other topics     -> retain shared connection for remaining topics
 Last topic quit                  -> send its final message, then disconnect peer
 Registered input during handoff  -> finish the handshake using the new sender
@@ -174,6 +187,23 @@ broadcasts after a peer leaves all topics cannot create a replay queue. Tests
 live in `src/net/tests/disconnect.rs`, `src/proto/plumtree/test/disconnect.rs`,
 and `src/proto/state/tests.rs`.
 
+The owner-topic rejoin regression is in the Syzygy consumer's
+`crates/infra/syzygy-net-trust-domain/src/tests/gossip_owner_rejoin.rs`. It routes
+real `proto::topic::State` messages through two peers at fixed time, including
+repeated and simultaneous joins and a one-sided disconnect. It checks restored
+`NeighborUp`, the actual inbound readiness handler, and fresh broadcast delivery
+without network timing, retries, or access to private protocol state. Run it with
+`cargo test -p syzygy-net-trust-domain tests::gossip_owner_rejoin`, then rerun
+`catchup_recent_headers_materializes_existing_pending_realtime_deferred_files`
+in `syzygy-node` against this patch.
+
+On 2026-09-15 the consumer's nine-test regression group passed, including all
+three owner rejoin cases, deferred-file catch-up, and pairing commit retry.
+The refreshed isolated harness retained the root dependency pins and passed
+all 50 Gossip library tests and `clippy --all-targets -- -D warnings` on
+`aarch64-apple-darwin`. These results do not imply a new cross-platform or
+live multi-device validation run.
+
 The following results predate these additional disconnect regressions:
 
 - Patch crate: 28 unit tests, four simulation integration tests, and one
@@ -193,6 +223,8 @@ The following results predate these additional disconnect regressions:
 
 - Reconnect groundwork: https://github.com/n0-computer/iroh-gossip/pull/43
 - Unexpected disconnect cleanup: https://github.com/n0-computer/iroh-gossip/pull/117
+- Pending Neighbor implementation at the pinned base:
+  https://github.com/n0-computer/iroh-gossip/blob/2ce78afe09d89d41d123f28eac19bdc831609cc8/src/proto/hyparview.rs
 - Connection-task leak report: https://github.com/n0-computer/iroh-gossip/issues/145
 - Open churn cleanup PR: https://github.com/n0-computer/iroh-gossip/pull/146
 - Related open churn cleanup PR: https://github.com/n0-computer/iroh-gossip/pull/147
@@ -213,6 +245,7 @@ an upstream release must provide all observable guarantees: unfinished initial
 connection intents survive a failed send, established disconnects retire pending
 and lazy output, valid input survives sender handoff while retired connection
 input cannot recreate membership,
+explicit Join renews a stale pending Neighbor handshake after a one-sided disconnect,
 quitting one topic preserves a connection needed by another topic,
 failed dial releases explicit ownership, an externally supplied
 connection cancels its same-peer pending dial, reused sessions release unconsumed
