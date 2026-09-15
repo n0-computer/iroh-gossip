@@ -3,6 +3,7 @@
 use std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
     net::SocketAddr,
+    panic::AssertUnwindSafe,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -20,11 +21,11 @@ use n0_error::{e, stack_error};
 use n0_future::{
     task::{self, AbortOnDropHandle, JoinSet},
     time::Instant,
-    Stream, StreamExt as _,
+    FutureExt as _, Stream, StreamExt as _,
 };
 use rand::{rngs::StdRng, SeedableRng};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, error_span, trace, warn, Instrument};
 
@@ -62,6 +63,13 @@ type InEvent = proto::InEvent<PublicKey>;
 type OutEvent = proto::OutEvent<PublicKey>;
 type Timer = proto::Timer<PublicKey>;
 type ProtoMessage = proto::Message<PublicKey>;
+
+#[derive(Debug)]
+pub(crate) struct ConnectionMessage {
+    peer_id: EndpointId,
+    conn_id: ConnId,
+    message: ProtoMessage,
+}
 
 /// Publish and subscribe on gossiping topics.
 ///
@@ -130,11 +138,14 @@ impl From<oneshot::error::RecvError> for Error {
     }
 }
 
-#[derive(Debug)]
+#[derive(derive_more::Debug)]
 pub(crate) struct Inner {
     api: GossipApi,
     local_tx: mpsc::Sender<LocalActorMessage>,
-    _actor_handle: AbortOnDropHandle<()>,
+    actor_handle: Mutex<Option<AbortOnDropHandle<()>>>,
+    // Keep the actor available for cleanup even if its task is cancelled or panics.
+    #[debug(skip)]
+    actor: Arc<Mutex<Option<Actor>>>,
     max_message_size: usize,
     metrics: Arc<Metrics>,
 }
@@ -216,7 +227,9 @@ impl Builder {
         let me = actor.endpoint.id().fmt_short();
         let max_message_size = actor.state.max_message_size();
 
-        let actor_handle = task::spawn(actor.run().instrument(error_span!("gossip", %me)));
+        let actor = Arc::new(Mutex::new(Some(actor)));
+        let actor_handle =
+            task::spawn(Actor::run(actor.clone()).instrument(error_span!("gossip", %me)));
 
         let api = GossipApi::local(rpc_tx);
 
@@ -224,7 +237,8 @@ impl Builder {
             inner: Inner {
                 api,
                 local_tx,
-                _actor_handle: AbortOnDropHandle::new(actor_handle),
+                actor_handle: Mutex::new(Some(AbortOnDropHandle::new(actor_handle))),
+                actor,
                 max_message_size,
                 metrics,
             }
@@ -314,14 +328,50 @@ impl Gossip {
     ///
     /// This leaves all topics, sending `Disconnect` messages to peers, and then
     /// stops the gossip actor loop and drops all state and connections.
+    /// On native platforms, the actor and its connection, forwarding, and dial
+    /// tasks are joined before this returns, including when the request fails.
     pub async fn shutdown(&self) -> Result<(), Error> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.inner
-            .local_tx
-            .send(LocalActorMessage::Shutdown { reply })
-            .await?;
-        reply_rx.await?;
-        Ok(())
+        // Borrow the handle until it finishes: cancelling this waiter must not
+        // abort the actor or remove the only handle another waiter can join.
+        let mut actor_handle = self.inner.actor_handle.lock().await;
+        let request = async {
+            let (reply, reply_rx) = oneshot::channel();
+            self.inner
+                .local_tx
+                .send(LocalActorMessage::Shutdown { reply })
+                .await?;
+            reply_rx.await?;
+            Ok::<_, Error>(())
+        };
+        tokio::pin!(request);
+        let (request_result, task_result) = if let Some(handle) = actor_handle.as_mut() {
+            // An abnormal task exit can leave the actor's receiver alive in
+            // `Inner`, so neither sending nor receiving the RPC may finish.
+            let results = tokio::select! {
+                biased;
+                result = &mut request => (Some(result), (&mut *handle).await),
+                result = &mut *handle => (None, result),
+            };
+            *actor_handle = None;
+            results
+        } else {
+            (Some(Err(e!(Error::ActorDropped))), Ok(()))
+        };
+
+        // A panic or cancellation outside the event loop must not strand the
+        // actor's children. Keep its owner in place across this await as well.
+        let mut actor = self.inner.actor.lock().await;
+        if let Some(actor) = actor.as_mut() {
+            actor.shutdown_tasks().await;
+        }
+        drop(actor.take());
+        // Joining may win the select just after a successful reply is sent.
+        // With the actor dropped, a pending request now resolves in every case.
+        let request_result = match request_result {
+            Some(result) => result,
+            None => request.await,
+        };
+        request_result.and(task_result.map_err(|_| e!(Error::ActorDropped)))
     }
 
     /// Returns the metrics tracked for this gossip instance.
@@ -342,10 +392,11 @@ struct Actor {
     /// Input messages to the actor
     rpc_rx: mpsc::Receiver<RpcMessage>,
     local_rx: mpsc::Receiver<LocalActorMessage>,
+    shutdown_reply: Option<oneshot::Sender<()>>,
     /// Sender for the state input (cloned into the connection loops)
-    in_event_tx: mpsc::Sender<InEvent>,
+    in_event_tx: mpsc::Sender<ConnectionMessage>,
     /// Input events to the state (emitted from the connection loops)
-    in_event_rx: mpsc::Receiver<InEvent>,
+    in_event_rx: mpsc::Receiver<ConnectionMessage>,
     /// Queued timers
     timers: Timers<Timer>,
     /// Map of topics to their state.
@@ -403,6 +454,7 @@ impl Actor {
             connection_tasks: Default::default(),
             metrics,
             local_rx,
+            shutdown_reply: None,
             topic_event_forwarders: Default::default(),
             address_lookup,
         };
@@ -410,13 +462,43 @@ impl Actor {
         (actor, rpc_tx, local_tx)
     }
 
-    pub async fn run(mut self) {
-        let mut addr_update_stream = self.setup().await;
+    async fn run(owner: Arc<Mutex<Option<Self>>>) {
+        let mut owner = owner.lock().await;
+        let actor = owner
+            .as_mut()
+            .expect("actor is present until its task exits");
+        // The future only borrows the actor. Unwinding the loop must leave all
+        // three task sets available so they can be cancelled and joined.
+        let result = AssertUnwindSafe(async {
+            let mut addr_update_stream = actor.setup().await;
+            let mut i = 0;
+            while actor.event_loop(&mut addr_update_stream, i).await {
+                i += 1;
+            }
+        })
+        .catch_unwind()
+        .await;
 
-        let mut i = 0;
-        while self.event_loop(&mut addr_update_stream, i).await {
-            i += 1;
+        actor.shutdown_tasks().await;
+        let reply = actor.shutdown_reply.take();
+        drop(owner.take());
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
         }
+        if let Some(reply) = reply {
+            reply.send(()).ok();
+        }
+    }
+
+    async fn shutdown_tasks(&mut self) {
+        // Cancel every group before waiting for any one of them. Joining errors
+        // in one group must not prevent cleanup of the remaining groups.
+        self.connection_tasks.abort_all();
+        self.topic_event_forwarders.abort_all();
+        self.dialer.pending.abort_all();
+        self.connection_tasks.shutdown().await;
+        self.topic_event_forwarders.shutdown().await;
+        self.dialer.pending.shutdown().await;
     }
 
     /// Performs the initial actor setup to run the [`Actor::event_loop`].
@@ -444,11 +526,11 @@ impl Actor {
             conn = self.local_rx.recv() => {
                 match conn {
                     Some(LocalActorMessage::Shutdown { reply }) => {
+                        self.shutdown_reply = Some(reply);
                         debug!("received shutdown message, quit all topics");
                         self.quit_queue.extend(self.topics.keys().copied());
                         self.process_quit_queue().await;
                         debug!("all topics quit, stop gossip actor");
-                        reply.send(()).ok();
                         return false;
                     },
                     Some(LocalActorMessage::HandleConnection { conn, origin }) => {
@@ -530,8 +612,19 @@ impl Actor {
             event = self.in_event_rx.recv() => {
                 trace!(?i, "tick: in_event_rx");
                 self.metrics.actor_tick_in_event_rx.inc();
-                let event = event.expect("unreachable: in_event_tx is never dropped before receiver");
-                self.handle_in_event(event, Instant::now()).await;
+                let ConnectionMessage { peer_id, conn_id, message } =
+                    event.expect("unreachable: in_event_tx is never dropped before receiver");
+                // Sender handoff can leave valid input (such as a Neighbor reply)
+                // on another registered connection. Keep accepting those frames
+                // while the peer is live; retirement removes its connection ids.
+                if matches!(self.peers.get(&peer_id), Some(PeerState::Active {
+                    active_conn_id, active_send_tx, other_conns, ..
+                }) if !active_send_tx.is_closed()
+                    && (*active_conn_id == conn_id || other_conns.contains(&conn_id))) {
+                    self.handle_in_event(InEvent::RecvMessage(peer_id, message), Instant::now()).await;
+                } else {
+                    debug!(peer = %peer_id.fmt_short(), conn_id, "drop frame from retired gossip connection");
+                }
             }
             _ = self.timers.wait_next() => {
                 trace!(?i, "tick: timers");
@@ -784,8 +877,9 @@ impl Actor {
         } else {
             debug!(?event, "handle in_event");
         };
-        let out = self.state.handle(event, now, Some(&self.metrics));
-        for event in out {
+        let mut out: VecDeque<_> = self.state.handle(event, now, Some(&self.metrics)).collect();
+        let mut reconnects = HashSet::new();
+        while let Some(event) = out.pop_front() {
             if matches!(event, OutEvent::ScheduleTimer(_, _)) {
                 trace!(?event, "handle out_event");
             } else {
@@ -803,9 +897,20 @@ impl Actor {
                         PeerSendOutcome::ReconnectQueued => {
                             warn!(
                                 peer = %peer_id.fmt_short(),
-                                "connection send loop terminated; requeue message and reconnect",
+                                "connection send loop terminated; retire protocol connection",
                             );
-                            self.dialer.queue_dial(peer_id, self.alpn.clone());
+                            reconnects.insert(peer_id);
+                            // The remaining outputs were produced before the
+                            // disconnect. They must not repopulate the old queue.
+                            out.retain(|event| {
+                                !matches!(event,
+                                OutEvent::SendMessage(peer, _) if *peer == peer_id)
+                            });
+                            out.extend(self.state.handle(
+                                InEvent::PeerDisconnected(peer_id),
+                                now,
+                                Some(&self.metrics),
+                            ));
                         }
                     }
                 }
@@ -865,6 +970,20 @@ impl Actor {
                 },
             }
         }
+        for peer_id in reconnects {
+            // An established peer is removed by DisconnectPeer above. A failed
+            // first Join has no membership to retire: retain that pending intent
+            // and its original dial ownership until it can establish a link.
+            if matches!(
+                self.peers.get(&peer_id),
+                Some(PeerState::Pending {
+                    dial_ownership: DialOwnership::Actor,
+                    ..
+                })
+            ) {
+                self.dialer.queue_dial(peer_id, self.alpn.clone());
+            }
+        }
     }
 
     fn release_external_connection(&mut self, peer_id: EndpointId) {
@@ -898,6 +1017,7 @@ enum PeerState {
         active_send_tx: mpsc::Sender<ProtoMessage>,
         active_conn_id: ConnId,
         active_origin: ConnOrigin,
+        // Registered receive connections retained until sender handoff finishes.
         other_conns: Vec<ConnId>,
     },
 }
@@ -1173,7 +1293,7 @@ async fn connection_loop(
     conn: Connection,
     origin: ConnOrigin,
     send_rx: mpsc::Receiver<ProtoMessage>,
-    in_event_tx: mpsc::Sender<InEvent>,
+    in_event_tx: mpsc::Sender<ConnectionMessage>,
     max_message_size: usize,
     queue: Vec<ProtoMessage>,
 ) -> Result<(), ConnectionLoopError> {
@@ -1402,6 +1522,12 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::api::{ApiError, GossipReceiver, GossipSender};
+
+    #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+    mod shutdown;
+
+    #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+    mod disconnect;
 
     fn test_proto_message() -> ProtoMessage {
         let me = SecretKey::from_bytes(&[1u8; 32]).public();
@@ -1730,6 +1856,7 @@ pub(crate) mod tests {
 
         async fn finish(mut self) {
             while self.step().await {}
+            self.actor.shutdown_tasks().await;
         }
     }
 
@@ -1738,8 +1865,8 @@ pub(crate) mod tests {
         ///
         /// This creates the endpoint and spawns the endpoint loop as well. The handle for the
         /// endpoing task is returned along the gossip instance and actor. Since the actor is not
-        /// actually spawned as [`Builder::spawn`] would, the gossip instance will have a
-        /// handle to a dummy task instead.
+        /// actually spawned as [`Builder::spawn`] would, its caller owns and drives the
+        /// actor until [`ManualActorLoop::finish`]; no dummy task is spawned.
         async fn t_new_with_actor(
             rng: &mut rand::rngs::ChaCha12Rng,
             config: proto::Config,
@@ -1758,12 +1885,12 @@ pub(crate) mod tests {
                 Actor::new(endpoint, config, metrics.clone(), None, address_lookup);
             let max_message_size = actor.state.max_message_size();
 
-            let _actor_handle = AbortOnDropHandle::new(task::spawn(n0_future::future::pending()));
             let gossip = Self {
                 inner: Inner {
                     api: GossipApi::local(to_actor_tx),
                     local_tx: conn_tx,
-                    _actor_handle,
+                    actor_handle: Mutex::new(None),
+                    actor: Arc::new(Mutex::new(None)),
                     max_message_size,
                     metrics,
                 }
@@ -1785,14 +1912,17 @@ pub(crate) mod tests {
             config: proto::Config,
             relay_map: RelayMap,
             cancel: &CancellationToken,
-        ) -> Result<(Self, Endpoint, EndpointHandle, impl Drop + use<>), BindError> {
+        ) -> Result<(Self, Endpoint, EndpointHandle), BindError> {
             let (g, actor, ep_handle) =
                 Gossip::t_new_with_actor(rng, config, relay_map, cancel).await?;
             let ep = actor.endpoint.clone();
             let me = ep.id().fmt_short();
-            let actor_handle =
-                task::spawn(actor.run().instrument(tracing::error_span!("gossip", %me)));
-            Ok((g, ep, ep_handle, AbortOnDropHandle::new(actor_handle)))
+            *g.inner.actor.lock().await = Some(actor);
+            let actor_handle = task::spawn(
+                Actor::run(g.inner.actor.clone()).instrument(tracing::error_span!("gossip", %me)),
+            );
+            *g.inner.actor_handle.lock().await = Some(AbortOnDropHandle::new(actor_handle));
+            Ok((g, ep, ep_handle))
         }
     }
 
@@ -2002,8 +2132,7 @@ pub(crate) mod tests {
         let mut actor = ManualActorLoop::new(actor).await;
 
         // create the second endpoint with the usual actor loop
-        let (go2, ep2, ep2_handle, _test_actor_handle) =
-            Gossip::t_new(rng, Default::default(), relay_map, &ct).await?;
+        let (go2, ep2, ep2_handle) = Gossip::t_new(rng, Default::default(), relay_map, &ct).await?;
 
         let endpoint_id1 = actor.endpoint.id();
         let endpoint_id2 = ep2.id();
@@ -2139,11 +2268,10 @@ pub(crate) mod tests {
         let ct = CancellationToken::new();
         let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
 
-        let (go1, ep1, ep1_handle, _test_actor_handle1) =
+        let (go1, ep1, ep1_handle) =
             Gossip::t_new(rng, Default::default(), relay_map.clone(), &ct).await?;
 
-        let (go2, ep2, ep2_handle, _test_actor_handle2) =
-            Gossip::t_new(rng, Default::default(), relay_map, &ct).await?;
+        let (go2, ep2, ep2_handle) = Gossip::t_new(rng, Default::default(), relay_map, &ct).await?;
 
         let endpoint_id1 = ep1.id();
         let endpoint_id2 = ep2.id();

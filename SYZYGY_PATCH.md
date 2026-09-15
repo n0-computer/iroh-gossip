@@ -4,7 +4,8 @@ Base: `iroh-gossip v0.101.0` (`2ce78afe09d89d41d123f28eac19bdc831609cc8`).
 
 ## Problem
 
-`iroh-gossip` 0.101.0 has nine coupled ownership failures in its network actor:
+The network actor and broadcast protocol have coupled connection ownership
+failures:
 
 1. `Pending.queue.is_empty()` is used as an implicit "dial in flight" flag.
    After a dial fails, the queued protocol message remains, so a later protocol
@@ -37,7 +38,26 @@ Base: `iroh-gossip v0.101.0` (`2ce78afe09d89d41d123f28eac19bdc831609cc8`).
 9. Incoming connections unconditionally cancel the same-peer actor dial. When
    both peers dial concurrently, each side can accept the other peer's
    non-preferred connection and cancel the local preferred connection, causing
-   the two physical connections to be closed from opposite ends.
+    the two physical connections to be closed from opposite ends.
+10. Recovering a failed active send into `Pending` hides the terminated active
+    connection from its later task completion. Without an immediate
+    `PeerDisconnected`, the protocol continues broadcasting to that retired
+    neighbor and the pending queue grows until a replacement connection drains it.
+11. `NeighborDown` removes eager/lazy membership but leaves that peer's scheduled
+    lazy announcements. A later dispatch can recreate its pending connection and
+    advertise cached messages from the retired membership.
+12. Connection receive loops enqueue protocol input without a stable connection
+    id. Frames already queued by a retired connection can therefore restore
+    membership or trigger cached replies after its cleanup. Replacing the active
+    sender alone is not retirement: the old receive loop and its queued Neighbor
+    reply remain valid during the handoff. An active-sender-only input gate drops
+    that reply and can prevent the topic handshake from completing.
+13. A peer connection is shared by all its topics, but the protocol's disconnect
+    reducer treats a successful `HashSet::remove(topic)` as if no topics remain.
+    The first topic quit therefore closes the shared connection prematurely.
+    Remaining topics keep their eager membership while their final disconnect
+    messages lose the registered connection; subsequent broadcasts accumulate in
+    a new `Pending` queue and are replayed when the peer reconnects.
 
 The observed failure starts with `No addressing information available`. The
 first dial fails, the queue remains non-empty, and later join/repair intents no
@@ -58,8 +78,26 @@ would hide the broken state machine and create competing connection owners.
   the queue. The next protocol intent can start a new dial without a busy retry
   loop. If the protocol state subsequently emits `DisconnectPeer`, its obsolete
   messages are intentionally discarded with that peer state.
-- Recover the message from `mpsc::SendError`, transition `Active -> Pending`,
-  retain that returned message, and queue one reconnect attempt.
+- Recover the message from `mpsc::SendError`, transition `Active -> Pending`, and
+  immediately notify the protocol of the disconnect before processing another
+  actor input. Discard remaining same-peer outputs from the retired event batch.
+  An established membership's `DisconnectPeer` removes its obsolete pending
+  messages. A first Join that has not established membership retains its pending
+  intent and queues one reconnect attempt, preserving initial dial recovery.
+- Remove the departing peer's queued lazy announcements on `NeighborDown`.
+  Other peers' announcements and the shared message cache remain available for
+  normal Graft recovery. `NeighborUp` enables future broadcasts without replaying
+  the disconnected interval.
+- Remove only the departing topic from the shared peer's topic set and emit a
+  network-level `DisconnectPeer` only when that set is empty. Other topics keep
+  using the same connection and can deliver their own final disconnect messages.
+  A network-level disconnect still retires every topic's membership.
+- Tag connection input with its stable connection id and accept it while the
+  peer has a live active sender and the id is registered as either its active
+  connection or one of `other_conns`. Sender handoff preserves valid queued
+  input from those other receive loops. Completing a connection removes its id;
+  retiring the peer removes all its ids, so their delayed frames cannot restore
+  membership after a disconnect or leak into a newly connected peer state.
 - Classify connection completion by stable connection id. A matching active
   generation is removed before notifying the protocol state; an older
   connection only leaves `other_conns` and cannot clear the replacement sender.
@@ -103,19 +141,40 @@ External connection reused       -> release reservation; Active unchanged or Pen
 Non-preferred incoming Accept    -> activate fallback + keep preferred actor dial
 Preferred incoming Accept        -> activate connection + cancel actor dial
 Concurrent Dial + Accept         -> both peers retain lower-endpoint-initiated connection
-Active + SendError(message)      -> Pending(Actor, [message]) + queue_dial
+Active + SendError(message)      -> Pending + immediate PeerDisconnected
+Established membership down      -> discard retired outputs and Pending messages
+Unestablished first Join failed  -> retain Pending(Actor, [Join]) + queue_dial
+NeighborDown                     -> remove pending lazy announcements for that peer
+Topic quit with other topics     -> retain shared connection for remaining topics
+Last topic quit                  -> send its final message, then disconnect peer
+Registered input during handoff  -> finish the handshake using the new sender
+Retired connection input         -> discard without changing protocol membership
 Last sender dropped              -> end SendLoop + reap connection task
 Matching active close            -> remove active generation + PeerDisconnected
 Stale connection close           -> retain the current active generation
 ```
 
-This patch preserves the specific message returned by `SendError`; it does not
-change iroh-gossip into a lossless transport. Messages already accepted by the
-bounded Tokio channel remain subject to its best-effort disconnection semantics.
+This patch preserves unfinished initial connection intents; it does not replay
+messages owned by a disconnected established membership or change iroh-gossip
+into a lossless transport. Messages already accepted by the bounded Tokio channel
+remain subject to its best-effort disconnection semantics.
 Syzygy's durable Trust Domain and history-sync guarantees remain above this
 gossip transport boundary and are proven through their own intent/ACK ledgers.
 
 ## Verification
+
+The September disconnect regressions exercise immediate actor retirement,
+offline broadcasts followed by rejoin, retained first-Join dial ownership,
+external reservations, queued Neighbor replies during sender handoff, rejection
+of completed connections and retired input after reconnect, lazy announcement
+cleanup, retained live-peer Graft recovery, and shared connections across topics.
+The multi-topic regressions check continued delivery after one topic quits,
+last-topic cleanup, network-wide membership retirement, and that offline
+broadcasts after a peer leaves all topics cannot create a replay queue. Tests
+live in `src/net/tests/disconnect.rs`, `src/proto/plumtree/test/disconnect.rs`,
+and `src/proto/state/tests.rs`.
+
+The following results predate these additional disconnect regressions:
 
 - Patch crate: 28 unit tests, four simulation integration tests, and one
   doctest pass.
@@ -150,8 +209,12 @@ retry. As verified on 2026-07-25, upstream `main` remains
 affected paths.
 
 This local patch is not a substitute for an upstream PR. Before removing it,
-an upstream release must provide all observable guarantees: the current failed
-send is retained, failed dial releases explicit ownership, an externally supplied
+an upstream release must provide all observable guarantees: unfinished initial
+connection intents survive a failed send, established disconnects retire pending
+and lazy output, valid input survives sender handoff while retired connection
+input cannot recreate membership,
+quitting one topic preserves a connection needed by another topic,
+failed dial releases explicit ownership, an externally supplied
 connection cancels its same-peer pending dial, reused sessions release unconsumed
 reservations, simultaneous dials converge on one connection, superseded connection
 loops are reaped, and stale completion cannot clear a newer sender. Then remove
