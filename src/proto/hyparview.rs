@@ -378,6 +378,10 @@ where
     }
 
     fn on_join(&mut self, peer: PI, data: Option<PeerData>, io: &mut impl IO<PI>) {
+        // An explicit Join starts a new handshake, even if a previous Neighbor reply
+        // is still pending. The remote may have lost its membership without us
+        // observing a disconnect, so the old request must not suppress our reply.
+        self.pending_neighbor_requests.remove(&peer);
         // "A node that receives a join request will start by adding the new
         // node to its active view, even if it has to drop a random node from it. (6)"
         self.add_active(peer, data.clone(), Priority::High, true, io);

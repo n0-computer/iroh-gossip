@@ -24,7 +24,7 @@ use tokio::{
 };
 use tracing::{debug, trace, Instrument};
 
-use super::{InEvent, ProtoMessage};
+use super::{ConnectionMessage, ProtoMessage};
 use crate::proto::{util::TimerMap, TopicId};
 
 /// Errors related to message writing
@@ -92,14 +92,14 @@ pub(crate) struct RecvLoop {
     remote_endpoint_id: EndpointId,
     conn: Connection,
     max_message_size: usize,
-    in_event_tx: mpsc::Sender<InEvent>,
+    in_event_tx: mpsc::Sender<ConnectionMessage>,
 }
 
 impl RecvLoop {
     pub(crate) fn new(
         remote_endpoint_id: EndpointId,
         conn: Connection,
-        in_event_tx: mpsc::Sender<InEvent>,
+        in_event_tx: mpsc::Sender<ConnectionMessage>,
         max_message_size: usize,
     ) -> Self {
         Self {
@@ -143,7 +143,11 @@ impl RecvLoop {
                     match msg {
                         None => debug!(topic=%state.header.topic_id.fmt_short(), "stream closed"),
                         Some(msg) => {
-                            if self.in_event_tx.send(InEvent::RecvMessage(self.remote_endpoint_id, msg)).await.is_err() {
+                            if self.in_event_tx.send(ConnectionMessage {
+                                peer_id: self.remote_endpoint_id,
+                                conn_id: self.conn.stable_id(),
+                                message: msg,
+                            }).await.is_err() {
                                 debug!("stop recv loop: actor closed");
                                 break;
                             }
@@ -231,7 +235,13 @@ impl SendLoop {
             tokio::select! {
                 biased;
                 _ = &mut closed => break,
-                Some(msg) = self.send_rx.recv() => self.write_message(&msg).await?,
+                msg = self.send_rx.recv() => match msg {
+                    Some(msg) => self.write_message(&msg).await?,
+                    // Dropping the last sender means the actor removed or
+                    // replaced this peer. End the send half so the owning
+                    // connection task can be reaped and fenced by stable id.
+                    None => break,
+                },
                 _ = self.finishing.join_next(), if !self.finishing.is_empty() => {}
                 else => break,
             }

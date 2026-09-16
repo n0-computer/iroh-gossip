@@ -676,6 +676,9 @@ impl<PI: PeerIdentity> State<PI> {
         });
         self.eager_push_peers.remove(&peer);
         self.lazy_push_peers.remove(&peer);
+        // An already scheduled dispatch must not reconnect this retired peer
+        // to advertise cached messages from its previous membership.
+        self.lazy_push_queue.remove(&peer);
     }
 
     fn on_evict_cache_timer(&mut self, now: Instant, io: &mut impl IO<PI>) {
@@ -738,6 +741,8 @@ impl<PI: PeerIdentity> State<PI> {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    mod disconnect;
     #[test]
     fn optimize_tree() {
         let mut io = VecDeque::new();

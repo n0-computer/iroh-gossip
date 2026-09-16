@@ -317,9 +317,13 @@ fn handle_out_event<PI: PeerIdentity>(
             outbox.push(OutEvent::ScheduleTimer(delay, Timer { topic, timer }))
         }
         topic::OutEvent::DisconnectPeer(peer) => {
+            // The transport is shared: removing one topic may leave other owners.
             let empty = conns
                 .get_mut(&peer)
-                .map(|list| list.remove(&topic) || list.is_empty())
+                .map(|list| {
+                    list.remove(&topic);
+                    list.is_empty()
+                })
                 .unwrap_or(false);
             if empty {
                 conns.remove(&peer);
@@ -379,3 +383,6 @@ fn track_in_event<PI: Serialize>(event: &InEvent<PI>, metrics: &Metrics) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
