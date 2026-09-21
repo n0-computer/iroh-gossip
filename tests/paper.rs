@@ -19,6 +19,10 @@
 //! crowd hitting one bootstrap peer but not of the papers' setup; the `big_*`
 //! tests in `tests/sim.rs` cover it.
 //!
+//! Every test also checks the invariants each peer's state must hold, like
+//! broadcast peers being a subset of the active view, after bootstrap and after
+//! every round (see `Network::check_invariants`).
+//!
 //! A claim this implementation does not yet meet on every seed is marked
 //! `#[ignore]` with the reason, rather than asserted at a weaker level, so the
 //! commit that makes it hold shows up as the removal of that line.
@@ -726,6 +730,7 @@ fn plumtree_delivery_is_total_with_concurrent_senders() {
                 })
                 .collect();
             let missed = sim.gossip_round(messages);
+            assert_invariants(&sim);
             assert_eq!(
                 missed, 0,
                 "seed {seed}, round {round}: {missed} deliveries missing"
@@ -941,6 +946,7 @@ fn swarm_with(peers: usize, seed: u64, network: impl Into<NetworkConfig>) -> Sim
 fn swarm_from(config: SimulatorConfig, network: impl Into<NetworkConfig>) -> Simulator {
     let mut sim = Simulator::new(config, network);
     sim.bootstrap(BootstrapMode::Sequential);
+    assert_invariants(&sim);
     sim
 }
 
@@ -993,11 +999,13 @@ fn remove_peers_except(sim: &mut Simulator, count: usize, keep: u64) {
 fn run_membership_cycles(sim: &mut Simulator, cycles: u32) {
     let cycle = Config::default().membership.shuffle_interval;
     sim.network.run_duration(cycle * cycles);
+    assert_invariants(sim);
 }
 
 /// Runs the simulation long enough for the membership layer to settle.
 fn heal(sim: &mut Simulator) {
     sim.network.run_trips(50);
+    assert_invariants(sim);
 }
 
 /// Runs round trips until the overlay is whole, and returns how many it took.
@@ -1025,7 +1033,15 @@ fn broadcast_from(sim: &mut Simulator, sender: u64) -> RoundStats {
     let round = sim.round_stats().len();
     let message = format!("m{round}").into_bytes().into();
     sim.gossip_round(vec![(sender, message)]);
+    assert_invariants(sim);
     sim.round_stats()[round].clone()
+}
+
+/// Panics if any peer's state breaks an invariant it must hold at all times.
+fn assert_invariants(sim: &Simulator) {
+    if let Err(violation) = sim.network.check_invariants() {
+        panic!("invariant broken: {violation}");
+    }
 }
 
 /// Returns the percentage of intended recipients that got the message.
