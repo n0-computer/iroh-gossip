@@ -759,7 +759,7 @@ impl TopicActor {
     /// The current task's entry is removed before the protocol hears of the
     /// disconnect, so that whatever the protocol sends in response -- a retried
     /// join, say -- starts a fresh task rather than queueing behind a dead one.
-    fn handle_sender_exit(&mut self, remote: EndpointId, id: SenderId, exit: SenderExit) {
+    fn handle_sender_exit(&mut self, remote: EndpointId, id: task::Id, exit: SenderExit) {
         if !self.senders.remove_if_current(remote, id) {
             trace!(remote=%remote.fmt_short(), ?exit, "replaced sender ended");
             return;
@@ -900,11 +900,6 @@ async fn forward_events(
     }
 }
 
-/// Identifies one send task a topic actor started, among all it ever starts
-/// for any peer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SenderId(u64);
-
 /// How many messages may wait for one peer's send task before the peer counts
 /// as not keeping up.
 const SEND_QUEUE_CAP: usize = 64;
@@ -919,7 +914,9 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// Dropping it closes the queue and starts the task's `DRAIN_TIMEOUT`.
 #[derive(Debug)]
 struct PeerSender {
-    id: SenderId,
+    /// The send task's id, which tells its exit apart from those of tasks it
+    /// replaced.
+    id: task::Id,
     queue: mpsc::Sender<ProtoMessage>,
     /// Dropped with the handle, which tells the task to wrap up.
     _closing: oneshot::Sender<()>,
@@ -929,8 +926,7 @@ struct PeerSender {
 #[derive(Debug, Default)]
 struct PeerSenders {
     current: HashMap<EndpointId, PeerSender>,
-    tasks: JoinSet<(EndpointId, SenderId, SenderExit)>,
-    next_id: u64,
+    tasks: JoinSet<(EndpointId, SenderExit)>,
 }
 
 impl PeerSenders {
@@ -948,14 +944,15 @@ impl PeerSenders {
         message: ProtoMessage,
     ) -> bool {
         let sender = self.current.entry(remote).or_insert_with(|| {
-            let id = SenderId(self.next_id);
-            self.next_id += 1;
             let (queue, rx) = mpsc::channel(SEND_QUEUE_CAP);
             let (closing, closed) = oneshot::channel();
-            self.tasks.spawn(
-                run_sender(shared.clone(), remote, topic, id, rx, closed)
-                    .instrument(error_span!("send", remote=%remote.fmt_short())),
-            );
+            let id = self
+                .tasks
+                .spawn(
+                    run_sender(shared.clone(), remote, topic, rx, closed)
+                        .instrument(error_span!("send", remote=%remote.fmt_short())),
+                )
+                .id();
             PeerSender {
                 id,
                 queue,
@@ -986,7 +983,7 @@ impl PeerSenders {
 
     /// Lets go of `remote`'s send task if `id` is the current one, and returns
     /// whether it was.
-    fn remove_if_current(&mut self, remote: EndpointId, id: SenderId) -> bool {
+    fn remove_if_current(&mut self, remote: EndpointId, id: task::Id) -> bool {
         let current = matches!(self.current.get(&remote), Some(sender) if sender.id == id);
         if current {
             self.current.remove(&remote);
@@ -995,12 +992,12 @@ impl PeerSenders {
     }
 
     /// Waits for a send task to end. Pending while there are none.
-    async fn next_exit(&mut self) -> (EndpointId, SenderId, SenderExit) {
+    async fn next_exit(&mut self) -> (EndpointId, task::Id, SenderExit) {
         loop {
-            match self.tasks.join_next().await {
+            match self.tasks.join_next_with_id().await {
                 Some(res) => {
-                    if let Some(exit) = join_result(res) {
-                        return exit;
+                    if let Some((id, (remote, exit))) = join_result(res) {
+                        return (remote, id, exit);
                     }
                 }
                 None => std::future::pending().await,
@@ -1097,10 +1094,9 @@ async fn run_sender(
     shared: Arc<Shared>,
     remote: EndpointId,
     topic: TopicId,
-    id: SenderId,
     mut queue: mpsc::Receiver<ProtoMessage>,
     closing: oneshot::Receiver<()>,
-) -> (EndpointId, SenderId, SenderExit) {
+) -> (EndpointId, SenderExit) {
     let drain_timeout = async {
         closing.await.ok();
         n0_future::time::sleep(DRAIN_TIMEOUT).await;
@@ -1109,7 +1105,7 @@ async fn run_sender(
         exit = deliver(&shared, remote, topic, &mut queue) => exit,
         _ = drain_timeout => SenderExit::DrainTimedOut,
     };
-    (remote, id, exit)
+    (remote, exit)
 }
 
 async fn deliver(
@@ -1153,9 +1149,7 @@ async fn deliver(
 ///
 /// Returns `None` for a task that was aborted, which only happens when the
 /// topic actor itself is dropped.
-fn join_result(
-    res: Result<(EndpointId, SenderId, SenderExit), task::JoinError>,
-) -> Option<(EndpointId, SenderId, SenderExit)> {
+fn join_result<T>(res: Result<T, task::JoinError>) -> Option<T> {
     match res {
         Ok(exit) => Some(exit),
         Err(err) => match err.try_into_panic() {
@@ -1314,7 +1308,7 @@ pub(crate) mod tests {
         }
 
         /// The id of the peer's current send task, if there is one.
-        fn sender_id(&self) -> Option<SenderId> {
+        fn sender_id(&self) -> Option<task::Id> {
             self.topic.senders.current.get(&self.peer_id).map(|s| s.id)
         }
 
@@ -2034,12 +2028,9 @@ pub(crate) mod tests {
         let second = f.sender_id().expect("a send task started");
         assert_ne!(first, second);
 
-        let (remote, id, exit) =
-            timeout(Duration::from_secs(10), f.topic.senders.tasks.join_next())
-                .await
-                .std_context("the dropped task never ended")?
-                .and_then(join_result)
-                .expect("a send task ended");
+        let (remote, id, exit) = timeout(Duration::from_secs(10), f.topic.senders.next_exit())
+            .await
+            .std_context("the dropped task never ended")?;
         assert_eq!(id, first, "the replacement ended first: {exit:?}");
         f.topic.handle_sender_exit(remote, id, exit);
         assert_eq!(
@@ -2088,11 +2079,9 @@ pub(crate) mod tests {
 
         f.join_peer();
         f.topic.senders.current.remove(&f.peer_id);
-        let (_, _, exit) = timeout(DRAIN_TIMEOUT * 2, f.topic.senders.tasks.join_next())
+        let (_, _, exit) = timeout(DRAIN_TIMEOUT * 2, f.topic.senders.next_exit())
             .await
-            .std_context("the dropped task never ended")?
-            .and_then(join_result)
-            .expect("a send task ended");
+            .std_context("the dropped task never ended")?;
         assert!(
             matches!(exit, SenderExit::Finished),
             "expected the queue to be delivered, got {exit:?}"
@@ -2152,7 +2141,7 @@ pub(crate) mod tests {
         let (queue, _unread) = mpsc::channel(SEND_QUEUE_CAP);
         let (closing, _closed) = oneshot::channel();
         let stuck = PeerSender {
-            id: SenderId(u64::MAX),
+            id: f.topic.senders.tasks.spawn(std::future::pending()).id(),
             queue,
             _closing: closing,
         };
