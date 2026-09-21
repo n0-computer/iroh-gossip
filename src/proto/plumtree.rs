@@ -127,6 +127,7 @@ impl<PI> GossipEvent<PI> {
 pub struct Round(u16);
 
 impl Round {
+    /// Returns the round to forward a message with, one hop higher.
     pub fn next(&self) -> Round {
         Round(self.0 + 1)
     }
