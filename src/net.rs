@@ -27,7 +27,7 @@ use n0_future::{
     time::Instant,
     MergeUnbounded, Stream, StreamExt,
 };
-use n0_watcher::{Direct, Watchable, Watcher};
+use n0_watcher::{Watchable, Watcher};
 use rand::rngs::StdRng;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error_span, trace, warn, Instrument};
@@ -657,7 +657,7 @@ impl TopicHandle {
         let state = State::new(shared.me, None, shared.config.clone());
         #[cfg(test)]
         let joined = Arc::new(AtomicBool::new(false));
-        let peer_data = shared.our_peer_data.watch();
+        let peer_data = Box::pin(shared.our_peer_data.watch().stream());
         let (forward_event_tx, _) = broadcast::channel(512);
         let actor = TopicActor {
             topic_id,
@@ -709,7 +709,7 @@ struct TopicActor {
     joined: Arc<AtomicBool>,
 
     // -- senders and receivers
-    peer_data: Direct<PeerData>,
+    peer_data: BoxStream<PeerData>,
     rx: mpsc::Receiver<TopicMessage>,
     remote_senders: HashMap<EndpointId, PeerSender>,
     remote_receivers: MergeUnbounded<RemoteRecvStream>,
@@ -727,94 +727,101 @@ impl TopicActor {
     /// read from it, so its order relative to the joins does not matter: every
     /// join in `initial` is processed before the first message is read.
     ///
-    /// Stops by closing the inbox and draining it until `recv` returns `None`,
-    /// which tokio only does once no permit taken before the close is still
-    /// outstanding. Everything that was sent to the actor is therefore either
-    /// handled or returned in [`TopicExit::leftovers`], and every send after the
-    /// close fails and gives its message back to the [`TopicMap`].
+    /// Then leaves the topic through [`Self::leave`].
     async fn run(mut self, initial: Vec<TopicMessage>) -> TopicExit {
         self.shared.metrics.topics_joined.inc();
         for msg in initial {
             self.handle_actor_message(msg);
         }
-        let peer_data = self.peer_data.clone().stream();
-        tokio::pin!(peer_data);
-        loop {
-            // trace!("wait for tick");
-            tokio::select! {
-                msg = self.rx.recv() => match msg {
-                    Some(msg) => {
-                        trace!("tick: actor_rx {msg}");
-                        self.handle_actor_message(msg);
-                    }
-                    // The owner let go of us: gossip is shutting down.
-                    None => {
-                        debug!("closing topic: gossip is shutting down");
-                        break;
-                    }
-                },
-                Some(message) = self.api_receivers.next(), if !self.api_receivers.is_empty() => {
-                    let message = match message {
-                        Ok(message) => message,
-                        Err(err) => {
-                            trace!("tick: api receiver closed {err:#}");
-                            continue;
-                        }
-                    };
-                    trace!("tick: api message {message}");
-                    self.handle_in_event(InEvent::Command(message.into()));
-                }
-                Some((remote, message)) = self.remote_receivers.next(), if !self.remote_receivers.is_empty() => {
-                    trace!(remote=%remote.fmt_short(), msg=?message, "tick: recv from remote");
-                    self.handle_remote_message(remote, message);
-                }
-                Some(data) = peer_data.next() => {
-                    trace!("tick: peer_data");
-                    self.handle_in_event(InEvent::UpdatePeerData(data));
-                }
-                _ = self.timers.wait_next() => {
-                    trace!("tick: timers");
-                    let now = Instant::now();
-                    while let Some((_instant, timer)) = self.timers.pop_before(now) {
-                        self.handle_in_event(InEvent::TimerExpired(timer));
-                    }
-                }
-                _ = self.api_send_tasks.join_next(), if !self.api_send_tasks.is_empty() => {
-                    trace!(remaining=self.api_send_tasks.len(), "tick: api sender finished");
-                }
-                Some(res) = self.send_tasks.join_next(), if !self.send_tasks.is_empty() => {
-                    if let Some((remote, id, exit)) = join_result(res) {
-                        self.handle_sender_exit(remote, id, exit);
-                    }
-                }
-                else => break,
-            }
+        while let ControlFlow::Continue(()) = self.tick().await {}
+        self.leave().await
+    }
 
-            if !self.drop_peers_queue.is_empty() {
-                trace!(len = self.drop_peers_queue.len(), "process peer drop queue");
+    /// Waits for the next event and handles it.
+    ///
+    /// Returns `Break` once the actor should leave the topic: it has no
+    /// subscribers left, or the gossip actor let go of it.
+    async fn tick(&mut self) -> ControlFlow<()> {
+        tokio::select! {
+            msg = self.rx.recv() => match msg {
+                Some(msg) => {
+                    trace!("tick: actor_rx {msg}");
+                    self.handle_actor_message(msg);
+                }
+                // The owner let go of us: gossip is shutting down.
+                None => {
+                    debug!("closing topic: gossip is shutting down");
+                    return ControlFlow::Break(());
+                }
+            },
+            Some(message) = self.api_receivers.next(), if !self.api_receivers.is_empty() => {
+                match message {
+                    Ok(message) => {
+                        trace!("tick: api message {message}");
+                        self.handle_in_event(InEvent::Command(message.into()));
+                    }
+                    Err(err) => trace!("tick: api receiver closed {err:#}"),
+                }
+            }
+            Some((remote, message)) = self.remote_receivers.next(), if !self.remote_receivers.is_empty() => {
+                trace!(remote=%remote.fmt_short(), msg=?message, "tick: recv from remote");
+                self.handle_remote_message(remote, message);
+            }
+            Some(data) = self.peer_data.next() => {
+                trace!("tick: peer_data");
+                self.handle_in_event(InEvent::UpdatePeerData(data));
+            }
+            _ = self.timers.wait_next() => {
+                trace!("tick: timers");
                 let now = Instant::now();
-                for peer in self.drop_peers_queue.drain() {
-                    self.out_events
-                        .extend(self.state.handle(InEvent::PeerDisconnected(peer), now));
+                while let Some((_instant, timer)) = self.timers.pop_before(now) {
+                    self.handle_in_event(InEvent::TimerExpired(timer));
                 }
-                self.process_out_events(now);
             }
-
-            if self.init && self.api_receivers.is_empty() && self.api_send_tasks.is_empty() {
-                debug!("closing topic: all subscribers dropped");
-                break;
+            _ = self.api_send_tasks.join_next(), if !self.api_send_tasks.is_empty() => {
+                trace!(remaining=self.api_send_tasks.len(), "tick: api sender finished");
             }
+            Some(res) = self.send_tasks.join_next(), if !self.send_tasks.is_empty() => {
+                if let Some((remote, id, exit)) = join_result(res) {
+                    self.handle_sender_exit(remote, id, exit);
+                }
+            }
+            else => return ControlFlow::Break(()),
         }
 
+        if !self.drop_peers_queue.is_empty() {
+            trace!(len = self.drop_peers_queue.len(), "process peer drop queue");
+            let now = Instant::now();
+            for peer in self.drop_peers_queue.drain() {
+                self.out_events
+                    .extend(self.state.handle(InEvent::PeerDisconnected(peer), now));
+            }
+            self.process_out_events(now);
+        }
+
+        if self.init && self.api_receivers.is_empty() && self.api_send_tasks.is_empty() {
+            debug!("closing topic: all subscribers dropped");
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// Leaves the topic and hands back what was left in the inbox.
+    ///
+    /// Closes the inbox and drains it until `recv` returns `None`, which tokio
+    /// only does once no permit taken before the close is still outstanding, so
+    /// every message sent to the actor is either handled or returned. Then runs
+    /// the protocol's `Quit` and waits for the send tasks to write what is
+    /// queued -- the `Disconnect`s `Quit` just produced -- so they are out before
+    /// a successor can start. Each task gets at most `DRAIN_TIMEOUT` once its
+    /// sender is dropped.
+    async fn leave(mut self) -> TopicExit {
         self.rx.close();
         let mut leftovers = Vec::new();
         while let Some(msg) = self.rx.recv().await {
             leftovers.push(msg);
         }
         self.handle_in_event(InEvent::Command(Command::Quit));
-        // Let the send tasks write what is queued -- the `Disconnect`s `Quit`
-        // just produced -- before a successor can start. Each gets at most
-        // `DRAIN_TIMEOUT` once its sender is dropped.
         self.remote_senders.clear();
         while let Some(res) = self.send_tasks.join_next().await {
             join_result(res);
@@ -2103,6 +2110,40 @@ pub(crate) mod tests {
             matches!(exit, SenderExit::Finished),
             "expected the queue to be delivered, got {exit:?}"
         );
+        ct.cancel();
+        Ok(())
+    }
+
+    /// Leaving a topic delivers what is queued for its peers before it returns.
+    ///
+    /// That is how a topic's `Disconnect`s reach its neighbors before a
+    /// successor can start, and before shutdown lets the endpoint close.
+    #[tokio::test]
+    #[traced_test]
+    async fn leaving_delivers_queued_messages() -> Result {
+        let ct = CancellationToken::new();
+        let (relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+        let mut f = DialFixture::new(relay_map, &ct).await?;
+        let mut peer_topic = f.peer.subscribe(f.topic_id, vec![]).await?;
+
+        // A join is queued for the peer, whose send task is still dialing.
+        f.join_peer();
+        let me = f.me;
+        timeout(DRAIN_TIMEOUT * 2, f.topic.leave())
+            .await
+            .std_context("leaving did not finish")?;
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                match peer_topic.try_next().await {
+                    Ok(Some(Event::NeighborUp(id))) if id == me => return,
+                    Ok(Some(_)) => {}
+                    other => panic!("peer topic ended: {other:?}"),
+                }
+            }
+        })
+        .await
+        .std_context("the queued join was not delivered")?;
         ct.cancel();
         Ok(())
     }
