@@ -344,12 +344,18 @@ where
 
     /// A connection was closed by the peer.
     fn handle_connection_closed(&mut self, peer: PI, io: &mut impl IO<PI>) {
-        self.pending_neighbor_requests.remove(&peer);
+        let was_pending = self.pending_neighbor_requests.remove(&peer);
         if self.active_view.contains(&peer) {
             self.remove_active(&peer, RemovalReason::ConnectionClosed, io);
         } else if !self.alive_disconnect_peers.remove(&peer) {
             self.passive_view.remove(&peer);
             self.peer_data.remove(&peer);
+            // "If the connection fails to establish, node q is considered failed
+            // and removed from p's passive view; another node q' is selected at
+            // random and a new attempt is made." (4.3)
+            if was_pending {
+                self.refill_active_from_passive(&[], io);
+            }
         }
     }
 
@@ -761,4 +767,78 @@ enum RemovalReason {
     DisconnectReceived { is_alive: bool },
     /// A peer is removed after random selection to make room for a newly joined peer.
     Random,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use rand::{rngs::ChaCha12Rng, SeedableRng};
+
+    use super::*;
+    use crate::proto::topic::{Message as TopicMessage, OutEvent as TopicOut};
+
+    /// Our own id in these tests. Peers are numbered from 1.
+    const ME: u64 = 0;
+
+    fn state(config: Config) -> State<u64, ChaCha12Rng> {
+        State::new(ME, None, config, ChaCha12Rng::seed_from_u64(0))
+    }
+
+    /// Drives the state with one event and returns what it emitted.
+    fn handle(state: &mut State<u64, ChaCha12Rng>, event: InEvent<u64>) -> Vec<TopicOut<u64>> {
+        let mut io: VecDeque<TopicOut<u64>> = VecDeque::new();
+        state.handle(event, &mut io);
+        io.into_iter().collect()
+    }
+
+    /// Returns the peers a `Neighbor` request was sent to.
+    fn neighbor_requests(out: &[TopicOut<u64>]) -> Vec<u64> {
+        out.iter()
+            .filter_map(|event| match event {
+                TopicOut::SendMessage(peer, TopicMessage::Swarm(Message::Neighbor(_))) => {
+                    Some(*peer)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Puts `peers` in the passive view, the way a shuffle reply would.
+    fn learn_passive(state: &mut State<u64, ChaCha12Rng>, peers: impl IntoIterator<Item = u64>) {
+        let nodes = peers.into_iter().map(|id| (id, None).into()).collect();
+        handle(
+            state,
+            InEvent::RecvMessage(99, Message::ShuffleReply(ShuffleReply { nodes })),
+        );
+    }
+
+    /// A neighbor request whose connection fails moves on to another passive
+    /// peer.
+    ///
+    /// HyParView 4.3: "If the connection fails to establish, node q is
+    /// considered failed and removed from p's passive view; another node q' is
+    /// selected at random and a new attempt is made." A failed connection used
+    /// to end the refill, leaving the node short of neighbors until something
+    /// else started another.
+    #[test]
+    fn a_failed_neighbor_request_moves_on_to_another_passive_peer() {
+        let mut state = state(Config::default());
+        learn_passive(&mut state, 10..20);
+        let unreachable = *state
+            .pending_neighbor_requests
+            .iter()
+            .next()
+            .expect("learning passive peers with no neighbors starts a refill");
+
+        let out = handle(&mut state, InEvent::PeerDisconnected(unreachable));
+
+        let next = neighbor_requests(&out);
+        assert_eq!(next.len(), 1, "the refill should move on: {out:?}");
+        assert_ne!(next[0], unreachable, "it should try someone else");
+        assert!(
+            !state.passive_view.contains(&unreachable),
+            "an unreachable peer should leave the passive view"
+        );
+    }
 }

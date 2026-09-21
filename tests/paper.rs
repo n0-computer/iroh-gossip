@@ -422,7 +422,6 @@ fn hyparview_survives_massive_simultaneous_failure() {
 /// among the next round's failures has no address left that reaches the swarm,
 /// which no protocol can repair.
 #[test]
-#[ignore = "fails on some seeds: a peer that loses every neighbor is never reconnected"]
 fn hyparview_survives_continuous_churn() {
     const PEERS: usize = 300;
     /// Peers replaced per round, five percent of the swarm.
