@@ -20,11 +20,13 @@ impl From<EndpointAddr> for AddrInfo {
 }
 
 impl AddrInfo {
+    /// Encodes the addresses as the peer data we announce to peers.
     pub(crate) fn encode(&self) -> PeerData {
         let bytes = postcard::to_stdvec(self).expect("serializing AddrInfo may not fail");
         PeerData::new(bytes)
     }
 
+    /// Decodes the addresses a peer announced, treating empty data as none.
     pub(crate) fn decode(peer_data: &PeerData) -> Result<AddrInfo, postcard::Error> {
         let bytes = peer_data.as_bytes();
         if bytes.is_empty() {
@@ -34,6 +36,7 @@ impl AddrInfo {
         Ok(info)
     }
 
+    /// Returns the address of `endpoint_id` made from these addresses.
     pub(crate) fn into_endpoint_addr(self, endpoint_id: EndpointId) -> EndpointAddr {
         EndpointAddr {
             id: endpoint_id,

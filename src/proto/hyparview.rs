@@ -926,8 +926,10 @@ mod tests {
         assert!(!knows(&state, 1));
     }
 
-    /// A neighbor request can time out after the peer joined the active view
-    /// through another message, where we still need its data.
+    /// A timed-out neighbor request keeps the data of a peer that is active.
+    ///
+    /// The request can time out after the peer joined the active view through
+    /// another message, where we still need its data.
     #[test]
     fn neighbor_request_timeout_keeps_active_peer() {
         let mut state = state();

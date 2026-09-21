@@ -393,8 +393,10 @@ mod tests {
     use super::*;
     use crate::proto::plumtree;
 
-    /// A peer that sends a message without joining a view is tracked in
-    /// `peer_topics` but in no topic state, so only this prune removes it.
+    /// A peer that only sent us a message is pruned when it disconnects.
+    ///
+    /// Such a peer is tracked in `peer_topics` but in no topic state, so only
+    /// this prune removes it.
     #[test]
     fn peer_disconnected_prunes_peer_topics() {
         let now = Instant::now();

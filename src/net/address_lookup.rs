@@ -113,6 +113,7 @@ impl GossipAddressLookup {
         }
     }
 
+    /// Adds the addresses `endpoint_id` announced in its peer data.
     pub(crate) fn add_peer_data(&self, endpoint_id: EndpointId, peer_data: PeerData) {
         match AddrInfo::decode(&peer_data) {
             Err(err) => {

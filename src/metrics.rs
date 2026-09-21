@@ -33,9 +33,9 @@ pub struct Metrics {
     pub neighbor_up: Counter,
     /// Number of times we disconnected from a peer
     pub neighbor_down: Counter,
-    /// Number of messages we broadcasted to all nodes
+    /// Number of messages we broadcast to all nodes.
     pub msgs_broadcast_swarm: Counter,
-    /// Number of messages we broadcasted to direct neighbors
+    /// Number of messages we broadcast to direct neighbors.
     pub msgs_broadcast_neighbors: Counter,
     /// Number of topics we joined.
     pub topics_joined: Counter,
@@ -55,7 +55,7 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    /// Track an [`InEvent`].
+    /// Tracks an [`InEvent`].
     pub fn track_in_event<PI: Serialize>(&self, in_event: &InEvent<PI>) {
         match in_event {
             InEvent::RecvMessage(_, message) => match message.kind() {
@@ -84,7 +84,7 @@ impl Metrics {
         }
     }
 
-    /// Track an [`OutEvent`].
+    /// Tracks an [`OutEvent`].
     pub fn track_out_event<PI: Serialize>(&self, out_event: &OutEvent<PI>) {
         match out_event {
             OutEvent::SendMessage(_to, message) => match message.kind() {

@@ -1,3 +1,9 @@
+//! The wire format of gossip streams.
+//!
+//! Each topic a peer sends to gets one unidirectional stream. It starts with a
+//! [`StreamHeader`] naming the topic, followed by the protocol messages. Every
+//! item is postcard-encoded and prefixed with its length as a big-endian `u32`.
+
 use std::future::Future;
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -8,18 +14,22 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::proto::TopicId;
 
+/// The first item on a gossip stream, naming the topic it is for.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[non_exhaustive]
 pub struct StreamHeader {
+    /// The topic the stream is for.
     pub topic_id: TopicId,
 }
 
+/// The sending end of a gossip stream for one topic.
 #[derive(Debug)]
 pub(crate) struct GossipSender {
     send: PostcardCodec<SendStream>,
 }
 
 impl GossipSender {
+    /// Opens a stream for `topic_id` on `conn` and writes its header.
     pub(crate) async fn init(
         conn: &Connection,
         topic_id: TopicId,
@@ -32,6 +42,7 @@ impl GossipSender {
         Ok(Self { send })
     }
 
+    /// Writes a protocol message to the stream.
     pub(crate) async fn send(&mut self, msg: &super::ProtoMessage) -> Result<()> {
         self.send.send(&msg).await
     }
@@ -48,6 +59,7 @@ impl GossipSender {
     }
 }
 
+/// The receiving end of a gossip stream for one topic.
 #[derive(Debug)]
 pub(crate) struct GossipReceiver {
     recv: PostcardCodec<RecvStream>,
@@ -55,10 +67,14 @@ pub(crate) struct GossipReceiver {
 }
 
 impl GossipReceiver {
+    /// Returns the topic the stream is for, as named by its header.
     pub(crate) fn topic_id(&self) -> TopicId {
         self.header.topic_id
     }
 
+    /// Accepts the next stream the peer opens on `conn` and reads its header.
+    ///
+    /// Returns `None` once the connection is closed.
     pub(crate) async fn accept(conn: &Connection, max_message_size: usize) -> Result<Option<Self>> {
         let stream = match conn.accept_uni().await {
             Ok(stream) => stream,
@@ -69,11 +85,13 @@ impl GossipReceiver {
         Ok(Some(Self { recv, header }))
     }
 
+    /// Reads the next protocol message, or `None` once the stream is finished.
     pub(crate) async fn recv(&mut self) -> Result<Option<super::ProtoMessage>> {
         self.recv.recv().await
     }
 }
 
+/// Length-prefixed postcard framing over a QUIC stream.
 #[derive(Debug)]
 struct PostcardCodec<I> {
     max_message_size: usize,
@@ -92,6 +110,7 @@ impl<I> PostcardCodec<I> {
 }
 
 impl PostcardCodec<SendStream> {
+    /// Encodes `msg` and writes it with its length prefix.
     async fn send<T: Serialize>(&mut self, msg: &T) -> Result<()> {
         self.buf.clear();
         postcard::to_io(msg, (&mut self.buf).writer()).anyerr()?;
@@ -107,13 +126,14 @@ impl PostcardCodec<SendStream> {
 }
 
 impl PostcardCodec<RecvStream> {
+    /// Reads and decodes the next item, or returns `None` if the stream finished.
     async fn recv<T: DeserializeOwned>(&mut self) -> Result<Option<T>> {
         let len = match self.inner.read_u32().await {
             Ok(len) => len as usize,
-            // A cleanly finished stream reads as EOF. `NotConnected`, which this
-            // used to match on, is what quinn maps a *lost* connection to -- so
-            // the two cases were the wrong way round: every normal stream close
-            // was reported as an error, and a connection loss as a clean end.
+            // A cleanly finished stream reads as EOF. This used to match on
+            // `NotConnected`, which is what quinn maps a lost connection to, so
+            // every normal stream close was reported as an error and a lost
+            // connection as a clean end.
             Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
             Err(err) => return Err(err.into()),
         };
