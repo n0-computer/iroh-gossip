@@ -620,6 +620,7 @@ impl TopicHandle {
             api_send_tasks: Default::default(),
             connecting: Default::default(),
             sender_stopped: Default::default(),
+            next_sender_id: 0,
         };
         let handle = Self {
             tx,
@@ -658,7 +659,8 @@ struct TopicActor {
     api_send_tx: broadcast::Sender<ProtoEvent>,
     api_send_tasks: JoinSet<()>,
     connecting: FuturesUnordered<BoxFuture<(EndpointId, n0_error::Result<Guarded<GossipSender>>)>>,
-    sender_stopped: FuturesUnordered<BoxFuture<(EndpointId, usize)>>,
+    sender_stopped: FuturesUnordered<BoxFuture<(EndpointId, SenderId)>>,
+    next_sender_id: u64,
 }
 
 impl TopicActor {
@@ -720,15 +722,9 @@ impl TopicActor {
                 _ = self.api_send_tasks.join_next(), if !self.api_send_tasks.is_empty() => {
                     trace!(remaining=self.api_send_tasks.len(), "tick: api sender finished");
                 }
-                Some((remote_id, conn_id)) = self.sender_stopped.next(), if !self.sender_stopped.is_empty() => {
-                    trace!(remote=%remote_id.fmt_short(), "tick: sender to remote stopped");
-                    if let Some(SendQueue::Active(sender)) = self.remote_senders.get(&remote_id) {
-                        if sender.connection().stable_id() == conn_id {
-                            debug!(remote=%remote_id.fmt_short(), "active sender stopped, drop peer");
-                            self.drop_peers_queue.insert(remote_id);
-                            self.remote_senders.remove(&remote_id);
-                        }
-                    }
+                Some((remote, id)) = self.sender_stopped.next(), if !self.sender_stopped.is_empty() => {
+                    trace!(remote=%remote.fmt_short(), "tick: sender to remote stopped");
+                    self.handle_sender_stopped(remote, id);
                 }
                 else => break,
             }
@@ -779,12 +775,13 @@ impl TopicActor {
                     return;
                 };
                 let stopped = sender.closed();
-                let conn_id = sender.connection().stable_id();
+                let id = SenderId(self.next_sender_id);
+                self.next_sender_id += 1;
                 self.sender_stopped.push(Box::pin(async move {
                     stopped.await;
-                    (remote, conn_id)
+                    (remote, id)
                 }));
-                if let Err(err) = send_queue.init(sender).await {
+                if let Err(err) = send_queue.init(sender, id).await {
                     warn!("Remote failed while pushing queued messages: {err:?}");
                 }
             }
@@ -793,7 +790,7 @@ impl TopicActor {
                 // A dial is not cancelled when a newer one for the same peer
                 // succeeds first, so the failure can land on a live sender. Keep
                 // it: dropping it would cut off a working peer.
-                if let Some(SendQueue::Active(_)) = self.remote_senders.get(&remote) {
+                if let Some(SendQueue::Active { .. }) = self.remote_senders.get(&remote) {
                     debug!(?err, "dial failed, but a newer one succeeded");
                     return;
                 }
@@ -804,6 +801,22 @@ impl TopicActor {
                 self.remote_senders.remove(&remote);
                 self.handle_in_event(InEvent::PeerDisconnected(remote))
                     .await
+            }
+        }
+    }
+
+    /// Drops the peer if the sender that stopped is still its current one.
+    ///
+    /// A replaced sender stops too: dropping a stream finishes it, and it counts
+    /// as stopped once the peer has acknowledged the rest of it. That is
+    /// ordinary, and must not take down the sender that replaced it -- which
+    /// may well be on the same connection.
+    fn handle_sender_stopped(&mut self, remote: EndpointId, id: SenderId) {
+        if let Some(SendQueue::Active { id: current, .. }) = self.remote_senders.get(&remote) {
+            if *current == id {
+                debug!(remote=%remote.fmt_short(), "active sender stopped, drop peer");
+                self.drop_peers_queue.insert(remote);
+                self.remote_senders.remove(&remote);
             }
         }
     }
@@ -900,7 +913,7 @@ impl TopicActor {
         // view, rather than by which connection the peer's streams arrive on,
         // keeps two peers that disagree about the current connection from
         // moving each other's senders back and forth forever.
-        if let Some(SendQueue::Active(sender)) = self.remote_senders.get(&remote) {
+        if let Some(SendQueue::Active { sender, .. }) = self.remote_senders.get(&remote) {
             if sender.connection().is_superseded() {
                 debug!(remote=%remote.fmt_short(), "sender on a superseded connection, moving");
                 self.remote_senders.remove(&remote);
@@ -978,16 +991,24 @@ async fn forward_events(
     }
 }
 
+/// Identifies one sender a topic actor installed, among all it ever installs
+/// for any peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SenderId(u64);
+
 #[derive(Debug)]
 enum SendQueue {
-    Active(Guarded<GossipSender>),
+    Active {
+        sender: Guarded<GossipSender>,
+        id: SenderId,
+    },
     Pending(Vec<ProtoMessage>),
 }
 
 impl SendQueue {
     async fn send(&mut self, message: ProtoMessage) -> n0_error::Result<()> {
         match self {
-            Self::Active(sender) => sender.send(&message).await,
+            Self::Active { sender, .. } => sender.send(&message).await,
             Self::Pending(messages) => {
                 messages.push(message);
                 Ok(())
@@ -995,21 +1016,21 @@ impl SendQueue {
         }
     }
 
-    async fn init(&mut self, mut sender: Guarded<GossipSender>) -> n0_error::Result<()> {
+    async fn init(
+        &mut self,
+        mut sender: Guarded<GossipSender>,
+        id: SenderId,
+    ) -> n0_error::Result<()> {
         debug!("Initializing new sender");
-        *self = match self {
-            Self::Active(_old) => {
-                debug!("Dropping old sender");
-                Self::Active(sender)
+        if let Self::Pending(queue) = self {
+            debug!("Sending {} queued messages", queue.len());
+            for msg in queue.drain(..) {
+                sender.send(&msg).await?;
             }
-            Self::Pending(queue) => {
-                debug!("Sending {} queued messages", queue.len());
-                for msg in queue.drain(..) {
-                    sender.send(&msg).await?;
-                }
-                Self::Active(sender)
-            }
-        };
+        } else {
+            debug!("Dropping old sender");
+        }
+        *self = Self::Active { sender, id };
         Ok(())
     }
 }
@@ -1185,7 +1206,7 @@ pub(crate) mod tests {
         fn sender_is_active(&self) -> bool {
             matches!(
                 self.topic.remote_senders.get(&self.peer_id),
-                Some(SendQueue::Active(_))
+                Some(SendQueue::Active { .. })
             )
         }
     }
@@ -1901,6 +1922,55 @@ pub(crate) mod tests {
         assert!(
             f.sender_is_active(),
             "a stale dial failure dropped a live sender"
+        );
+        ct.cancel();
+        Ok(())
+    }
+
+    /// A replaced sender stopping must not drop the sender that replaced it.
+    ///
+    /// Dropping a stream finishes it, and it counts as stopped once the peer has
+    /// acknowledged it. Stops used to be matched to the current sender by
+    /// connection, so when the replacement was on the same connection -- the
+    /// usual case after the protocol dropped a peer and then talked to it again
+    /// -- the old stream's stop took down the new, working sender.
+    #[tokio::test]
+    #[traced_test]
+    async fn replaced_sender_stopping_keeps_its_replacement() -> Result {
+        let ct = CancellationToken::new();
+        let (relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+        let mut f = DialFixture::new(relay_map, &ct).await?;
+
+        let first = connect(&f.shared, f.peer_id, f.topic_id).await?;
+        let first_conn = first.connection().stable_id();
+        f.topic
+            .remote_senders
+            .insert(f.peer_id, SendQueue::default());
+        f.topic.handle_connected((f.peer_id, Ok(first))).await;
+
+        // The protocol drops the peer, and later talks to it again.
+        f.topic.remote_senders.remove(&f.peer_id);
+        let second = connect(&f.shared, f.peer_id, f.topic_id).await?;
+        assert_eq!(
+            second.connection().stable_id(),
+            first_conn,
+            "the replacement should reuse the connection"
+        );
+        f.topic
+            .remote_senders
+            .insert(f.peer_id, SendQueue::default());
+        f.topic.handle_connected((f.peer_id, Ok(second))).await;
+        assert!(f.sender_is_active());
+
+        // The first sender's stream was finished when it was dropped.
+        let (remote, id) = timeout(Duration::from_secs(10), f.topic.sender_stopped.next())
+            .await
+            .std_context("the dropped sender never stopped")?
+            .expect("a stop is pending");
+        f.topic.handle_sender_stopped(remote, id);
+        assert!(
+            f.sender_is_active(),
+            "a replaced sender's stop dropped its replacement"
         );
         ct.cancel();
         Ok(())
