@@ -1,7 +1,5 @@
 //! Networking for the `iroh-gossip` protocol
 
-#[cfg(test)]
-use std::sync::atomic::AtomicBool;
 use std::{
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
     ops::ControlFlow,
@@ -429,15 +427,6 @@ impl TopicMap {
             Some(TopicEntry::Running(handle)) if !handle.tx.is_closed()
         )
     }
-
-    /// Whether the actor for `topic_id` has seen a neighbor come up.
-    #[cfg(test)]
-    fn joined(&self, topic_id: &TopicId) -> Option<bool> {
-        match self.topics.get(topic_id)? {
-            TopicEntry::Running(handle) => Some(handle.joined()),
-            TopicEntry::Quitting(_) => None,
-        }
-    }
 }
 
 struct Shared {
@@ -628,16 +617,12 @@ async fn accept_loop(
 #[derive(Debug)]
 struct TopicHandle {
     tx: mpsc::Sender<TopicMessage>,
-    #[cfg(test)]
-    joined: Arc<AtomicBool>,
 }
 
 impl TopicHandle {
     fn new(topic_id: TopicId, shared: Arc<Shared>) -> (Self, TopicActor) {
         let (tx, rx) = mpsc::channel(16);
         let state = State::new(shared.me, None, shared.config.clone());
-        #[cfg(test)]
-        let joined = Arc::new(AtomicBool::new(false));
         let peer_data = Box::pin(shared.our_peer_data.watch().stream());
         let actor = TopicActor {
             topic_id,
@@ -645,8 +630,6 @@ impl TopicHandle {
             state,
             rx,
             peer_data,
-            #[cfg(test)]
-            joined: joined.clone(),
             timers: Default::default(),
             neighbors: Default::default(),
             out_events: Default::default(),
@@ -655,17 +638,7 @@ impl TopicHandle {
             remote_receivers: Default::default(),
             drop_peers_queue: Default::default(),
         };
-        let handle = Self {
-            tx,
-            #[cfg(test)]
-            joined,
-        };
-        (handle, actor)
-    }
-
-    #[cfg(test)]
-    fn joined(&self) -> bool {
-        self.joined.load(std::sync::atomic::Ordering::Relaxed)
+        (Self { tx }, actor)
     }
 }
 
@@ -679,8 +652,6 @@ struct TopicActor {
     neighbors: BTreeSet<EndpointId>,
     out_events: VecDeque<OutEvent>,
     drop_peers_queue: HashSet<EndpointId>,
-    #[cfg(test)]
-    joined: Arc<AtomicBool>,
 
     // -- senders and receivers
     peer_data: BoxStream<PeerData>,
@@ -908,9 +879,6 @@ impl TopicActor {
     fn handle_event(&mut self, event: ProtoEvent) {
         match &event {
             ProtoEvent::NeighborUp(n) => {
-                #[cfg(test)]
-                self.joined
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 self.neighbors.insert(*n);
             }
             ProtoEvent::NeighborDown(n) => {
@@ -1775,11 +1743,10 @@ pub(crate) mod tests {
 
         // advance and check that the topic is now subscribed
         actor
-            .until("the topic to be joined", |actor| {
-                actor.topics.joined(&topic) == Some(true)
+            .until("the topic to be joined", |_| {
+                go1_joined_rx.try_recv().is_ok()
             })
             .await?;
-        go1_joined_rx.recv().await.unwrap();
 
         // signal the second subscribe, we should remain subscribed
         go1_resubscribe_tx
@@ -1787,7 +1754,7 @@ pub(crate) mod tests {
             .await
             .std_context("signal additional subscribe")?;
         actor.settle().await;
-        assert_eq!(actor.topics.joined(&topic), Some(true));
+        assert!(actor.topics.is_running(&topic));
 
         // signal to drop the second handle, the topic should no longer be subscribed
         go1_resubscribe_tx
@@ -1795,9 +1762,7 @@ pub(crate) mod tests {
             .await
             .std_context("signal drop handles")?;
         actor
-            .until("the topic to be dropped", |actor| {
-                actor.topics.joined(&topic).is_none()
-            })
+            .until("the topic to be dropped", |actor| actor.topics.len() == 0)
             .await?;
 
         // cleanup and ensure everything went as expected
