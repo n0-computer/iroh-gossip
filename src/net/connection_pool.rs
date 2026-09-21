@@ -13,7 +13,7 @@ use std::{
     io,
     ops::Deref,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
 };
@@ -33,11 +33,12 @@ use tokio::{
 };
 use tracing::{debug, error, error_span, trace, Instrument};
 
-/// Close reason for a connection that was replaced by a newer one from the same peer.
+/// Close reason for a superseded connection that nothing used for a while.
 pub(crate) const CLOSE_SUPERSEDED: &[u8] = b"superseded";
 
-pub type OnConnected =
-    Arc<dyn Fn(&Endpoint, Connection) -> n0_future::future::Boxed<io::Result<()>> + Send + Sync>;
+pub type OnConnected = Arc<
+    dyn Fn(&Endpoint, ConnectionHandle) -> n0_future::future::Boxed<io::Result<()>> + Send + Sync,
+>;
 
 /// Configuration options for the connection pool
 #[derive(derive_more::Debug, Clone)]
@@ -70,7 +71,7 @@ impl Options {
     /// Set the on_connected callback
     pub fn with_on_connected<F, Fut>(mut self, f: F) -> Self
     where
-        F: Fn(Endpoint, Connection) -> Fut + Send + Sync + 'static,
+        F: Fn(Endpoint, ConnectionHandle) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = io::Result<()>> + Send + 'static,
     {
         self.on_connected = Some(Arc::new(move |ep, conn| {
@@ -101,6 +102,47 @@ impl ConnectionRef {
             connection,
             _permit: counter,
         }
+    }
+
+    /// Whether a newer connection to the same peer has taken this one's place.
+    ///
+    /// A superseded connection stays open for as long as it is used, but new
+    /// work should move to the current one: the old one may be a connection to a
+    /// peer that has since restarted, dead without us having noticed yet.
+    pub fn is_superseded(&self) -> bool {
+        self._permit.inner.superseded.load(Ordering::SeqCst)
+    }
+}
+
+/// A connection as handed to [`Options::on_connected`].
+///
+/// Unlike a [`ConnectionRef`], holding one does not keep the connection in use,
+/// so a task that watches the connection for as long as it lives can hold it.
+/// Work on the connection that should keep it open takes a [`ConnectionRef`]
+/// from [`Self::get_ref`] instead -- in particular a stream the peer opened,
+/// since the peer may keep using a connection we have superseded.
+#[derive(Debug, Clone)]
+pub struct ConnectionHandle {
+    connection: Connection,
+    counter: ConnectionCounter,
+}
+
+impl ConnectionHandle {
+    fn new(connection: &Connection, counter: &ConnectionCounter) -> Self {
+        Self {
+            connection: connection.clone(),
+            counter: counter.clone(),
+        }
+    }
+
+    /// Returns the underlying connection.
+    pub fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
+    /// Returns a reference that keeps the connection in use while it is alive.
+    pub fn get_ref(&self) -> ConnectionRef {
+        ConnectionRef::new(self.connection.clone(), self.counter.get_one())
     }
 }
 
@@ -206,7 +248,9 @@ impl Context {
         trace!(?mode, "Connection actor starting");
         let context = self;
 
-        let counter = ConnectionCounter::new();
+        // One counter per connection, not per peer: a superseded connection has
+        // to be able to go idle on its own while the current one is in use.
+        let mut counter = ConnectionCounter::new();
         let node_id = mode.remote_id();
 
         let conn_fut = async {
@@ -223,7 +267,7 @@ impl Context {
                 }
             };
             if let Some(on_connect) = &context.options.on_connected {
-                on_connect(&context.endpoint, conn.clone())
+                on_connect(&context.endpoint, ConnectionHandle::new(&conn, &counter))
                     .await
                     .map_err(PoolConnectError::from)?;
             }
@@ -248,9 +292,11 @@ impl Context {
         };
 
         let idle_timer = MaybeFuture::default();
-        let idle_stream = counter.clone().idle_stream();
+        // Boxed rather than pinned in place, so it can follow `counter` when a new
+        // connection supersedes the current one.
+        let mut idle_stream = Box::pin(counter.clone().idle_stream());
 
-        tokio::pin!(idle_timer, idle_stream, conn_close);
+        tokio::pin!(idle_timer, conn_close);
 
         loop {
             tokio::select! {
@@ -261,38 +307,38 @@ impl Context {
                     match handler {
                         Some(RequestRef { mode, tx }) => {
                             assert!(mode.remote_id() == node_id, "Not for me!");
-                            if let Mode::Handle(conn) = mode {
-                                debug!("handle new conn: replace old");
+                            let supersedes = match (&mode, &state) {
+                                (Mode::Handle(conn), Ok(current)) => {
+                                    conn.stable_id() != current.stable_id()
+                                }
+                                (Mode::Handle(_), Err(_)) => true,
+                                (Mode::Connect(_), _) => false,
+                            };
+                            if let (Mode::Handle(conn), true) = (mode, supersedes) {
+                                debug!("handle new conn: supersede old");
+                                let new_counter = ConnectionCounter::new();
                                 if let Some(on_connect) = &context.options.on_connected {
-                                    if let Err(err) = on_connect(&context.endpoint, conn.clone())
+                                    let handle = ConnectionHandle::new(&conn, &new_counter);
+                                    if let Err(err) = on_connect(&context.endpoint, handle)
                                         .await
                                         .map_err(PoolConnectError::from) {
                                             tx.send(Err(err)).ok();
                                             continue;
                                         }
                                 }
-                                conn_close.as_mut().set_future({
-                                    closed(conn.clone())
-                                });
-                                let new_id = conn.stable_id();
-                                let old_conn = std::mem::replace(&mut state, Ok(conn));
-                                // Close the connection we just replaced. Nothing watches it
-                                // anymore once `conn_close` points at the new one, and
-                                // keep-alives stop the peer from ever closing it for us, so
-                                // leaving it open leaks the connection along with whatever
-                                // `on_connected` spawned for it. A peer that opened a new
-                                // connection is not servicing the old one either, so there is
-                                // nothing to preserve by keeping it.
-                                if let Ok(old_conn) = &old_conn {
-                                    if old_conn.stable_id() != new_id {
-                                        debug!(
-                                            conn_id = old_conn.stable_id(),
-                                            "closing superseded connection"
-                                        );
-                                        old_conn.close(0u32.into(), CLOSE_SUPERSEDED);
-                                    }
+                                conn_close.as_mut().set_future(closed(conn.clone()));
+                                let old_counter = std::mem::replace(&mut counter, new_counter);
+                                old_counter.inner.superseded.store(true, Ordering::SeqCst);
+                                idle_stream = Box::pin(counter.clone().idle_stream());
+                                // Not closed here: the peer may still be using it. See
+                                // `close_when_unused`.
+                                if let Ok(old_conn) = std::mem::replace(&mut state, Ok(conn)) {
+                                    let grace = context.options.idle_timeout;
+                                    n0_future::task::spawn(
+                                        close_when_unused(old_conn, old_counter, grace)
+                                            .instrument(tracing::Span::current()),
+                                    );
                                 }
-                                drop(old_conn);
                             }
                             match &state {
                                 Ok(state) => {
@@ -354,6 +400,38 @@ impl Context {
 
 async fn closed(conn: Connection) -> iroh::endpoint::ConnectionError {
     conn.closed().await
+}
+
+/// Closes a superseded connection once nothing has used it for `grace`.
+///
+/// Closing it as soon as it is superseded would be wrong. Two peers that dial
+/// each other at once each keep the connection they saw last, and the two may
+/// disagree -- so each side can be receiving on the connection the other side
+/// superseded. "Used" therefore covers both directions: our senders hold a
+/// [`ConnectionRef`], and so does every stream the peer has open to us.
+///
+/// Detached rather than owned by the connection actor, because the connection
+/// can outlive the actor that superseded it. It ends when the connection closes,
+/// whoever closes it.
+async fn close_when_unused(conn: Connection, counter: ConnectionCounter, grace: Duration) {
+    loop {
+        tokio::select! {
+            _ = conn.closed() => return,
+            _ = counter.idle() => {}
+        }
+        tokio::select! {
+            _ = conn.closed() => return,
+            _ = n0_future::time::sleep(grace) => {}
+        }
+        if counter.is_idle() {
+            debug!(
+                conn_id = conn.stable_id(),
+                "closing superseded connection: unused"
+            );
+            conn.close(0u32.into(), CLOSE_SUPERSEDED);
+            return;
+        }
+    }
 }
 
 struct Actor {
@@ -577,6 +655,8 @@ impl ConnectionPool {
 struct ConnectionCounterInner {
     count: AtomicUsize,
     notify: Notify,
+    /// Set once a newer connection to the same peer took this one's place.
+    superseded: AtomicBool,
 }
 
 #[derive(Debug, Clone)]
@@ -590,6 +670,7 @@ impl ConnectionCounter {
             inner: Arc::new(ConnectionCounterInner {
                 count: Default::default(),
                 notify: Notify::new(),
+                superseded: AtomicBool::new(false),
             }),
         }
     }
@@ -608,6 +689,21 @@ impl ConnectionCounter {
 
     fn is_idle(&self) -> bool {
         self.inner.count.load(Ordering::SeqCst) == 0
+    }
+
+    /// Resolves once the count is zero.
+    async fn idle(&self) {
+        loop {
+            // Registered before the check, so a drop to zero in between still
+            // wakes us.
+            let notified = self.inner.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_idle() {
+                return;
+            }
+            notified.await;
+        }
     }
 
     /// Infinite stream that yields when the connection is briefly idle.
@@ -660,38 +756,40 @@ mod tests {
     use super::*;
 
     const TEST_ALPN: &[u8] = b"iroh-gossip/pool-test/0";
+    const IDLE_TIMEOUT: Duration = Duration::from_millis(200);
 
-    /// A connection replaced by a newer one from the same peer must be closed.
-    ///
-    /// Once `conn_close` points at the new connection nothing watches the old one,
-    /// and keep-alives stop the peer from closing it for us, so leaving it open
-    /// leaks the connection and anything `on_connected` spawned for it.
-    #[tokio::test]
-    #[traced_test]
-    async fn superseded_connection_is_closed() -> Result {
+    /// Two connections from one client, both handed to a server-side pool.
+    struct Superseded {
+        /// Client end of the connection that was superseded.
+        first: Connection,
+        /// Client end of the connection that superseded it.
+        second: Connection,
+        /// The server's refs to `first` and `second`.
+        first_ref: ConnectionRef,
+        second_ref: ConnectionRef,
+        _accept: AbortOnDropHandle<()>,
+        _client: Endpoint,
+    }
+
+    async fn superseded() -> Result<Superseded> {
         let server = Endpoint::builder(presets::Minimal)
             .alpns(vec![TEST_ALPN.to_vec()])
             .bind()
             .await?;
         let server_addr = server.addr();
         let client = Endpoint::bind(presets::Minimal).await?;
-
-        // A long idle timeout, so that an idle shutdown cannot be what closes the
-        // connection instead.
         let options = Options {
-            idle_timeout: Duration::from_secs(60),
+            idle_timeout: IDLE_TIMEOUT,
             ..Default::default()
         };
         let pool = ConnectionPool::new(server.clone(), TEST_ALPN, options);
 
-        // Hold on to the `ConnectionRef`s, so the pool never considers itself idle.
-        let (accepted_tx, mut accepted_rx) = mpsc::channel(4);
+        let (refs_tx, mut refs) = mpsc::channel(4);
         let accept = AbortOnDropHandle::new(n0_future::task::spawn(async move {
-            let mut refs = Vec::new();
             while let Some(incoming) = server.accept().await {
                 let Ok(conn) = incoming.await else { continue };
-                refs.push(pool.handle_connection(conn).await);
-                accepted_tx.send(()).await.ok();
+                let conn_ref = pool.handle_connection(conn).await.expect("pool shut down");
+                refs_tx.send(conn_ref).await.ok();
             }
         }));
 
@@ -701,20 +799,36 @@ mod tests {
             .std_context("connect first")?;
         // The pool must have taken the first connection before the second arrives,
         // otherwise there is nothing to supersede.
-        accepted_rx.recv().await.expect("accept loop stopped");
-
+        let first_ref = refs.recv().await.expect("accept loop stopped");
         let second = client
             .connect(server_addr, TEST_ALPN)
             .await
             .std_context("connect second")?;
-        accepted_rx.recv().await.expect("accept loop stopped");
-        assert_ne!(
-            first.stable_id(),
-            second.stable_id(),
-            "the client reused the connection, nothing was superseded"
-        );
+        assert_ne!(first.stable_id(), second.stable_id(), "connection reused");
+        let second_ref = refs.recv().await.expect("accept loop stopped");
+        Ok(Superseded {
+            first,
+            second,
+            first_ref,
+            second_ref,
+            _accept: accept,
+            _client: client,
+        })
+    }
 
-        let err = timeout(Duration::from_secs(10), first.closed())
+    /// A superseded connection is closed once nothing uses it.
+    ///
+    /// Nothing else would close it: the pool stops watching it, and keep-alives
+    /// stop the peer from closing it for us.
+    #[tokio::test]
+    #[traced_test]
+    async fn superseded_connection_is_closed_once_unused() -> Result {
+        let s = superseded().await?;
+        assert!(s.first_ref.is_superseded());
+        assert!(!s.second_ref.is_superseded());
+        drop(s.first_ref);
+
+        let err = timeout(IDLE_TIMEOUT * 10, s.first.closed())
             .await
             .std_context("superseded connection was not closed")?;
         assert!(
@@ -725,14 +839,28 @@ mod tests {
             ),
             "closed for the wrong reason: {err:?}"
         );
-
-        // The replacement must still be usable.
         assert!(
-            second.close_reason().is_none(),
+            s.second.close_reason().is_none(),
             "the new connection was closed"
         );
+        Ok(())
+    }
 
-        drop(accept);
+    /// A superseded connection stays open for as long as something uses it.
+    ///
+    /// Two peers that dial each other at once each keep the connection they saw
+    /// last, and may disagree, so the peer can still be using the one we
+    /// superseded.
+    #[tokio::test]
+    #[traced_test]
+    async fn superseded_connection_stays_open_while_used() -> Result {
+        let s = superseded().await?;
+
+        n0_future::time::sleep(IDLE_TIMEOUT * 5).await;
+        assert!(
+            s.first.close_reason().is_none(),
+            "a superseded connection was closed while in use"
+        );
         Ok(())
     }
 }

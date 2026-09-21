@@ -35,7 +35,7 @@ use tracing::{debug, error_span, instrument, trace, warn, Instrument};
 
 use self::{
     address_lookup::GossipAddressLookup,
-    connection_pool::{ConnectionPool, ConnectionRef},
+    connection_pool::{ConnectionHandle, ConnectionPool, ConnectionRef},
     util::{AddrInfo, Timers},
 };
 use crate::{
@@ -49,6 +49,17 @@ mod address_lookup;
 mod connection_pool;
 mod net_proto;
 mod util;
+
+/// How long a connection nothing uses is kept open.
+///
+/// Applies to superseded connections too, so tests that watch for a connection
+/// being closed from under a peer have to outlast it. Short under test for that
+/// reason.
+const CONN_IDLE_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_secs(1)
+} else {
+    Duration::from_secs(10)
+};
 
 /// ALPN protocol name
 pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/1";
@@ -242,9 +253,15 @@ enum TopicMessage {
     ApiJoin(ApiJoinRequest),
     RemoteStream {
         remote: EndpointId,
-        stream: GossipReceiver,
+        stream: RemoteStream,
     },
 }
+
+/// A stream a peer opened to us, holding its connection in use.
+///
+/// The peer may keep sending on a connection we have superseded, so the stream,
+/// not our choice of connection, decides how long the connection stays open.
+type RemoteStream = Guarded<GossipReceiver>;
 
 type ApiJoinRequest = WithChannels<api::JoinRequest, api::Request>;
 type ApiRecvStream = BoxStream<Result<api::Command, RecvError>>;
@@ -264,7 +281,7 @@ struct TopicMapInner {
     /// an error. Handed to the topic actor by [`TopicMap::get_or_init`] if the
     /// topic is ever joined, and capped by [`MAX_PENDING_STREAMS`] because a
     /// peer can ask about topics we never join.
-    parked: HashMap<TopicId, Vec<(EndpointId, GossipReceiver)>>,
+    parked: HashMap<TopicId, Vec<(EndpointId, RemoteStream)>>,
 }
 
 impl TopicMapInner {
@@ -315,8 +332,8 @@ impl TopicMap {
     fn route_stream(
         &self,
         remote: EndpointId,
-        stream: GossipReceiver,
-    ) -> Option<(TopicSender, GossipReceiver)> {
+        stream: RemoteStream,
+    ) -> Option<(TopicSender, RemoteStream)> {
         let topic_id = stream.topic_id();
         let mut inner = self.0.lock().expect("poisoned");
         if let Some(handle) = inner.topics.get(&topic_id) {
@@ -470,7 +487,7 @@ impl Actor {
             }
         });
         options.connect_timeout = Duration::from_secs(10);
-        options.idle_timeout = Duration::from_secs(10);
+        options.idle_timeout = CONN_IDLE_TIMEOUT;
         let pool = ConnectionPool::new(endpoint.clone(), &alpn, options);
 
         let shared = Arc::new(Shared {
@@ -563,14 +580,14 @@ impl Actor {
     }
 }
 
-async fn accept_loop(topics: TopicMap, conn: Connection, max_message_size: usize) {
+async fn accept_loop(topics: TopicMap, conn: ConnectionHandle, max_message_size: usize) {
+    let remote = conn.connection().remote_id();
     loop {
-        let stream = match GossipReceiver::accept(&conn, max_message_size).await {
-            Ok(Some(stream)) => stream,
+        let stream = match GossipReceiver::accept(conn.connection(), max_message_size).await {
+            Ok(Some(stream)) => Guarded::new(stream, conn.get_ref()),
             _ => break,
         };
 
-        let remote = conn.remote_id();
         if let Some((topic, stream)) = topics.route_stream(remote, stream) {
             topic
                 .send(TopicMessage::RemoteStream { remote, stream })
@@ -597,7 +614,7 @@ impl TopicHandle {
         topic_id: TopicId,
         shared: Arc<Shared>,
         topics: WeakTopicMap,
-        parked: Vec<(EndpointId, GossipReceiver)>,
+        parked: Vec<(EndpointId, RemoteStream)>,
     ) -> (Self, TopicActor) {
         let (tx, rx) = mpsc::channel(16);
         let state = State::new(shared.me, None, shared.config.clone());
@@ -667,7 +684,7 @@ struct TopicActor {
     ///
     /// Registered once the join has been processed, so that they behave exactly
     /// like a stream arriving a moment later.
-    parked: Vec<(EndpointId, GossipReceiver)>,
+    parked: Vec<(EndpointId, RemoteStream)>,
     shared: Arc<Shared>,
 
     // -- state
@@ -836,18 +853,13 @@ impl TopicActor {
         }
     }
 
-    fn register_remote_stream(&mut self, remote: EndpointId, stream: GossipReceiver) {
-        debug!(remote=%remote.fmt_short(), "remote connected");
-        // Replace our sender if this a new connection.
-        if let Some(SendQueue::Active(sender)) = self.remote_senders.get_mut(&remote) {
-            if !stream.is_same_conn(sender.conn()) {
-                debug!(remote=%remote.fmt_short(), "renew sender (used prev conn)");
-                // Removing the sender will trigger a "reconnect" on next send, which will
-                // then create a new sender on the new connection.
-                self.remote_senders.remove(&remote);
-            }
-        }
-        // We keep old receivers to fully drain them and just add our new receiver.
+    /// Starts reading a stream the peer opened.
+    ///
+    /// Leaves our sender alone even if it is on a different connection: two
+    /// peers need not agree on which connection is current, and each keeps the
+    /// other's connection open for as long as it has a stream on it.
+    fn register_remote_stream(&mut self, remote: EndpointId, stream: RemoteStream) {
+        debug!(remote=%remote.fmt_short(), "remote stream opened");
         self.remote_receivers
             .push(Box::pin(into_stream(stream).map(move |msg| (remote, msg))));
     }
@@ -857,18 +869,18 @@ impl TopicActor {
         remote: EndpointId,
         message: n0_error::Result<Option<ProtoMessage>>,
     ) {
-        let event = match message {
-            Ok(Some(message)) => InEvent::RecvMessage(remote, message),
-            Ok(None) => {
-                debug!(remote=%remote.fmt_short(), "Recv stream from remote closed");
-                InEvent::PeerDisconnected(remote)
+        // A stream ending is not the peer going away. The peer finishes a stream
+        // when it moves its sender to another connection, and says so at the
+        // protocol level when it actually leaves. A connection that is lost
+        // outright shows up on our sender instead, through `sender_stopped`.
+        match message {
+            Ok(Some(message)) => {
+                self.handle_in_event(InEvent::RecvMessage(remote, message))
+                    .await
             }
-            Err(error) => {
-                warn!(remote=%remote.fmt_short(), ?error, "Recv stream from remote closed with error");
-                InEvent::PeerDisconnected(remote)
-            }
-        };
-        self.handle_in_event(event).await;
+            Ok(None) => debug!(remote=%remote.fmt_short(), "remote stream finished"),
+            Err(error) => debug!(remote=%remote.fmt_short(), ?error, "remote stream failed"),
+        }
     }
 
     async fn handle_in_event(&mut self, event: InEvent) {
@@ -907,6 +919,16 @@ impl TopicActor {
 
     #[instrument(skip_all, fields(remote=%remote.fmt_short()))]
     async fn send(&mut self, remote: EndpointId, message: ProtoMessage) {
+        // Follow the peer to its current connection. Deciding by our own pool's
+        // view, rather than by which connection the peer's streams arrive on,
+        // keeps two peers that disagree about the current connection from
+        // moving each other's senders back and forth forever.
+        if let Some(SendQueue::Active(sender)) = self.remote_senders.get(&remote) {
+            if sender.conn().is_superseded() {
+                debug!(remote=%remote.fmt_short(), "sender on a superseded connection, moving");
+                self.remote_senders.remove(&remote);
+            }
+        }
         let sender = match self.remote_senders.entry(remote) {
             hash_map::Entry::Occupied(entry) => entry.into_mut(),
             hash_map::Entry::Vacant(entry) => {
@@ -1046,7 +1068,7 @@ impl Default for SendQueue {
 }
 
 fn into_stream(
-    receiver: GossipReceiver,
+    receiver: RemoteStream,
 ) -> impl Stream<Item = n0_error::Result<Option<ProtoMessage>>> + Send + Sync + 'static {
     n0_future::stream::unfold(Some(receiver), |recv| async move {
         let mut recv = recv?;
@@ -1677,6 +1699,111 @@ pub(crate) mod tests {
         assert_eq!(actor.topics.len(), 1, "the topic actor did not start");
 
         ct.cancel();
+        Ok(())
+    }
+
+    /// Two peers that dial each other at once keep a working connection.
+    ///
+    /// Each side keeps the connection it saw last as its primary, and the two
+    /// may disagree. Neither side may close the one the other side uses.
+    #[tokio::test]
+    #[traced_test]
+    async fn concurrent_dials_keep_both_connections() -> Result {
+        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
+        let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+        let memory_lookup = MemoryLookup::new();
+        let ep1 = create_endpoint(rng, relay_map.clone(), Some(memory_lookup.clone())).await?;
+        let ep2 = create_endpoint(rng, relay_map, Some(memory_lookup.clone())).await?;
+        let (ep1_id, ep2_id) = (ep1.id(), ep2.id());
+        for id in [ep1_id, ep2_id] {
+            memory_lookup
+                .add_endpoint_info(EndpointAddr::new(id).with_relay_url(relay_url.clone()));
+        }
+        let go1 = Gossip::builder().spawn(ep1.clone());
+        let go2 = Gossip::builder().spawn(ep2.clone());
+        let cancel = CancellationToken::new();
+        let _loops = [
+            AbortOnDropHandle::new(spawn(endpoint_loop(ep1, go1.clone(), cancel.clone()))),
+            AbortOnDropHandle::new(spawn(endpoint_loop(ep2, go2.clone(), cancel.clone()))),
+        ];
+
+        let topic: TopicId = blake3::hash(b"concurrent_dials").into();
+        let [mut t1, mut t2] = [
+            go1.subscribe_and_join(topic, vec![ep2_id]),
+            go2.subscribe_and_join(topic, vec![ep1_id]),
+        ]
+        .try_join()
+        .await?;
+
+        // The join resolves on `NeighborUp`, before either side has had a chance
+        // to supersede a connection. Watch past the idle timeout, after which an
+        // unused superseded connection is closed, for the neighbor to be lost.
+        let fallout = timeout(CONN_IDLE_TIMEOUT + Duration::from_secs(2), async {
+            loop {
+                let event = tokio::select! {
+                    event = t1.try_next() => event,
+                    event = t2.try_next() => event,
+                };
+                match event {
+                    Ok(Some(Event::NeighborDown(_))) => return "a side lost its neighbor",
+                    Ok(Some(_)) => {}
+                    _ => return "a topic stream ended",
+                }
+            }
+        })
+        .await;
+        if let Ok(what) = fallout {
+            panic!("{what} after concurrent dials");
+        }
+        cancel.cancel();
+        Ok(())
+    }
+
+    /// A peer whose connection was closed after it left dials again to rejoin.
+    #[tokio::test]
+    #[traced_test]
+    async fn rejoin_after_idle_close_redials() -> Result {
+        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
+        let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+        let memory_lookup = MemoryLookup::new();
+        let ep1 = create_endpoint(rng, relay_map.clone(), None).await?;
+        let ep2 = create_endpoint(rng, relay_map, Some(memory_lookup.clone())).await?;
+        let ep1_id = ep1.id();
+        memory_lookup.add_endpoint_info(EndpointAddr::new(ep1_id).with_relay_url(relay_url));
+        let go1 = Gossip::builder().spawn(ep1.clone());
+        let go2 = Gossip::builder().spawn(ep2.clone());
+
+        // Accept for `go1` and hand every connection to the test as well.
+        let (conn_tx, mut conn_rx) = mpsc::channel(2);
+        let accept_go1 = go1.clone();
+        let _accept = AbortOnDropHandle::new(spawn(async move {
+            while let Some(incoming) = ep1.accept().await {
+                let conn = incoming.await.expect("accept failed");
+                conn_tx.send(conn.clone()).await.ok();
+                accept_go1
+                    .handle_connection(conn)
+                    .await
+                    .expect("handle connection");
+            }
+        }));
+
+        let topic: TopicId = blake3::hash(b"rejoin_after_idle_close").into();
+        let _t1 = go1.subscribe(topic, vec![]).await?;
+        let t2 = go2.subscribe_and_join(topic, vec![ep1_id]).await?;
+        let conn1 = conn_rx.recv().await.expect("first connection");
+
+        // Leaving the topic disconnects the peer on both sides, and the connection
+        // closes once it has been unused for the idle timeout.
+        drop(t2);
+        timeout(CONN_IDLE_TIMEOUT + Duration::from_secs(2), conn1.closed())
+            .await
+            .std_context("connection was not closed once unused")?;
+
+        go2.subscribe_and_join(topic, vec![ep1_id])
+            .await
+            .std_context("rejoin")?;
+        let conn2 = conn_rx.recv().await.expect("second connection");
+        assert_ne!(conn1.stable_id(), conn2.stable_id());
         Ok(())
     }
 

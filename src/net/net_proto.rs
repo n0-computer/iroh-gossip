@@ -52,7 +52,6 @@ impl GossipSender {
 pub(crate) struct GossipReceiver {
     recv: PostcardCodec<RecvStream>,
     header: StreamHeader,
-    conn_id: usize,
 }
 
 impl GossipReceiver {
@@ -60,23 +59,14 @@ impl GossipReceiver {
         self.header.topic_id
     }
 
-    pub(crate) fn is_same_conn(&self, conn: &Connection) -> bool {
-        self.conn_id == conn.stable_id()
-    }
-
     pub(crate) async fn accept(conn: &Connection, max_message_size: usize) -> Result<Option<Self>> {
         let stream = match conn.accept_uni().await {
             Ok(stream) => stream,
             Err(_) => return Ok(None),
         };
-        let conn_id = conn.stable_id();
         let mut recv = PostcardCodec::new(stream, max_message_size);
         let header: StreamHeader = recv.recv().await?.context("Unexpected EOF")?;
-        Ok(Some(Self {
-            recv,
-            header,
-            conn_id,
-        }))
+        Ok(Some(Self { recv, header }))
     }
 
     pub(crate) async fn recv(&mut self) -> Result<Option<super::ProtoMessage>> {
