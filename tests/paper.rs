@@ -565,7 +565,6 @@ fn hyparview_heals_without_waiting_for_a_shuffle() {
 /// The paper's own count, 9999 payload messages for 10,000 nodes (Table 1), is
 /// RMR 0; one redundant message per broadcast at 200 nodes is RMR 0.005.
 #[test]
-#[ignore = "fails on some seeds: a fixed graft timeout misfires while shuffle-driven refills reshape the tree"]
 fn plumtree_redundancy_drops_to_zero_after_two_rounds() {
     const ROUNDS: usize = 20;
     let flooding = (Config::default().membership.active_view_capacity - 2) as f32;
@@ -704,31 +703,25 @@ fn plumtree_last_delivery_hop_stays_logarithmic() {
 /// flood has finished, so it can never fire early. With a different source
 /// every round, the tree path from the new source can be far longer than a lazy
 /// shortcut to it, and a timeout that expires first grafts a peer that was
-/// about to deliver anyway. At the crate's default of 80ms that leaves RMR at
-/// 0.64 to 0.77. This test therefore waits 3s, long enough to span the whole
-/// tree, and gives each round up to 30s. That is close to the paper's setting
-/// but not the same: a round ends once every peer has the message, so a Graft
-/// or Prune it caused can still be in flight when the next round starts.
+/// about to deliver anyway. The learned graft timeout holds the longest recent
+/// gap, which is what lets a shared tree reach the paper's number here. The
+/// control pins the timeout at the old default of 80ms, which leaves RMR at
+/// 0.64 to 0.77.
 #[test]
-#[ignore = "fails on some seeds: a fixed graft timeout misfires while shuffle-driven refills reshape the tree"]
 fn plumtree_shared_tree_has_no_redundancy() {
     const ROUNDS: usize = 40;
 
     for seed in seeds() {
-        let mut shared = swarm_from(
-            SimulatorConfig {
-                rng_seed: seed,
-                peers: PEERS,
-                gossip_round_timeout: Duration::from_secs(30),
-            },
-            fixed_graft_timeout(Duration::from_secs(3)),
-        );
-        for _ in 0..ROUNDS {
-            broadcast(&mut shared);
-        }
-        let settled = &shared.round_stats()[ROUNDS / 2..];
-        let rmr = mean_rmr(settled);
-        let shared_ldh = mean_ldh(settled);
+        let shared_rmr = |network: Config| {
+            let mut sim = swarm_with(PEERS, seed, network);
+            for _ in 0..ROUNDS {
+                broadcast(&mut sim);
+            }
+            let settled = &sim.round_stats()[ROUNDS / 2..];
+            (mean_rmr(settled), mean_ldh(settled))
+        };
+        let (rmr, shared_ldh) = shared_rmr(Config::default());
+        let (pinned, _) = shared_rmr(pinned_graft_timeout(Duration::from_millis(80)));
 
         let mut single = swarm(PEERS, seed);
         let sender = single.random_peer();
@@ -741,8 +734,8 @@ fn plumtree_shared_tree_has_no_redundancy() {
             "plumtree: shared tree",
             seed,
             format!(
-                "RMR {rmr:.3}, LDH {shared_ldh:.1} shared against {single_ldh:.1} single \
-                 ({:.2}x)",
+                "RMR {rmr:.3} learned, {pinned:.3} pinned at 80ms; LDH {shared_ldh:.1} \
+                 shared against {single_ldh:.1} single ({:.2}x)",
                 shared_ldh / single_ldh
             ),
         );
@@ -750,6 +743,12 @@ fn plumtree_shared_tree_has_no_redundancy() {
         assert!(
             rmr < 0.05,
             "seed {seed}: a shared tree carries RMR {rmr:.3}, the paper's is 0"
+        );
+        // Measured at 20 times and more.
+        assert!(
+            pinned > rmr * 3.0,
+            "seed {seed}: pinning the graft timeout at 80ms should cost redundancy on a \
+             shared tree, got {pinned:.3} against {rmr:.3}"
         );
         // Measured at 1.4 to 1.8 times.
         assert!(
@@ -843,18 +842,14 @@ fn plumtree_delivery_holds_under_a_constant_failure_rate() {
 /// The repair itself shows as a spike in the first broadcast after the failure.
 ///
 /// Plumtree builds one tree per source, so this holds a single sender across
-/// the run. At the crate's default graft timeout of 80ms the repaired tree
-/// keeps 7 to 25 percent redundancy for good, because 80ms is below one hop of
-/// the simulated links; the test uses 400ms, which clears the depth gaps the
-/// tree optimizer leaves, and
-/// `plumtree_graft_timeout_below_link_latency_costs_redundancy` pins down why.
+/// the run.
 #[test]
 fn plumtree_recovers_from_massive_failure() {
     const PEERS: usize = 400;
 
     for fraction in [40, 60, 80] {
         for seed in seeds() {
-            let mut sim = swarm_with(PEERS, seed, fixed_graft_timeout(Duration::from_millis(400)));
+            let mut sim = swarm(PEERS, seed);
             let sender = sim.random_peer();
             for _ in 0..15 {
                 broadcast_from(&mut sim, sender);
@@ -917,7 +912,7 @@ fn plumtree_recovers_from_massive_failure() {
     }
 }
 
-/// Claim: the graft timeout has to account for the latency of a link.
+/// Claim: the graft timeout has to account for the latency of the links.
 ///
 /// Plumtree 3.5 makes this a deployment parameter: "The timeout value is a
 /// protocol parameter that should be configured considering the diameter of the
@@ -927,37 +922,51 @@ fn plumtree_recovers_from_massive_failure() {
 /// straight back. The pair repeats every round, so redundancy never returns to
 /// where a healthy tree would put it.
 ///
-/// This pins the relationship rather than any particular default, on links of
-/// 50ms each way. The depth gaps the tree optimizer leaves alone reach seven
-/// hops, 350ms, so 80ms falls far short of them and 400ms clears them.
+/// This implementation learns the timeout instead of taking it as
+/// configuration, so the claim to test is that the same defaults hold across
+/// link speeds. The control pins the timeout at 80ms, the old default, which
+/// spans several hops of a fast network and not one of a slow one.
 #[test]
-fn plumtree_graft_timeout_below_link_latency_costs_redundancy() {
-    let mut ratios = Vec::new();
-    for seed in seeds() {
-        let impatient = repaired_tree_rmr(seed, Duration::from_millis(80));
-        let patient = repaired_tree_rmr(seed, Duration::from_millis(400));
-        report(
-            "plumtree: graft timeout",
-            seed,
-            format!("RMR {impatient:.3} at 80ms, {patient:.3} at 400ms"),
-        );
+fn plumtree_holds_across_link_speeds_without_tuning() {
+    /// One-way latency of every link, and whether 80ms falls short of it.
+    const LINKS: [(&str, u64, bool); 4] = [
+        ("lan", 1, false),
+        ("metro", 10, false),
+        ("continental", 50, true),
+        ("intercontinental", 150, true),
+    ];
+    const PINNED: Duration = Duration::from_millis(80);
 
-        assert!(
-            patient < 0.05,
-            "seed {seed}: a graft timeout above the link latency should leave a clean \
-             tree, got RMR {patient:.3}"
-        );
-        ratios.push(impatient / patient);
+    for (label, latency_ms, pinned_falls_short) in LINKS {
+        let latency = Duration::from_millis(latency_ms);
+        let mut ratios = Vec::new();
+        for seed in seeds() {
+            let learned = repaired_tree_rmr(seed, latency, Config::default());
+            let pinned = repaired_tree_rmr(seed, latency, pinned_graft_timeout(PINNED));
+            report(
+                &format!("plumtree: {label} {latency_ms}ms links"),
+                seed,
+                format!("RMR {learned:.3} learned, {pinned:.3} pinned at 80ms"),
+            );
+            assert!(
+                learned < 0.05,
+                "seed {seed}, {latency_ms}ms links: a learned timeout should leave a clean \
+                 tree, got RMR {learned:.3}"
+            );
+            ratios.push(pinned / learned);
+        }
+        // Where 80ms spans several hops, pinning costs nothing and there is
+        // nothing to compare. Where it does not, it has to cost clearly, across
+        // seeds: on a tree without deep gaps the two can come out level.
+        if pinned_falls_short {
+            let mean = ratios.iter().sum::<f32>() / ratios.len() as f32;
+            assert!(
+                mean > 5.0,
+                "{latency_ms}ms links: pinning the timeout at 80ms cost only {mean:.1} times \
+                 the redundancy on average"
+            );
+        }
     }
-    // How much depends on how deep the gaps in a particular tree run, from
-    // nothing on a tree without deep gaps to fifty times on one with many, so
-    // this can only hold across seeds. Measured at 25 times on average.
-    let mean = ratios.iter().sum::<f32>() / ratios.len() as f32;
-    assert!(
-        mean > 5.0,
-        "a graft timeout below the link latency cost only {mean:.1} times the redundancy \
-         on average"
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -990,8 +999,8 @@ fn every_tuning_knob_is_reachable() {
     config.membership.maintenance_interval = Duration::from_secs(10);
     config.membership.neighbor_request_timeout = Duration::from_secs(1);
 
-    config.broadcast.graft_timeout_1 = Duration::from_millis(300);
-    config.broadcast.graft_timeout_2 = Duration::from_millis(100);
+    config.broadcast.graft_timeout_min = Duration::from_millis(20);
+    config.broadcast.graft_timeout_max = Duration::from_secs(1);
     config.broadcast.dispatch_timeout = Duration::from_millis(10);
     config.broadcast.optimization_threshold = Round::from(3u16);
     config.broadcast.message_cache_retention = Duration::from_secs(60);
@@ -1044,20 +1053,23 @@ fn swarm_from(config: SimulatorConfig, network: impl Into<NetworkConfig>) -> Sim
     sim
 }
 
-/// Returns a config whose graft timeout is fixed at `timeout`.
-fn fixed_graft_timeout(timeout: Duration) -> Config {
+/// Returns a config whose graft timeout cannot adapt away from `timeout`.
+///
+/// Stands in for a fixed timeout, which is what this crate had before it
+/// learned one and what the other implementations of the paper still use.
+fn pinned_graft_timeout(timeout: Duration) -> Config {
     let mut config = Config::default();
-    config.broadcast.graft_timeout_1 = timeout;
-    config.broadcast.graft_timeout_2 = timeout / 2;
+    config.broadcast.graft_timeout_min = timeout;
+    config.broadcast.graft_timeout_max = timeout;
     config
 }
 
-/// Builds a tree on 50ms links, fails a quarter of the swarm, and returns the
-/// settled RMR.
-fn repaired_tree_rmr(seed: u64, graft_timeout: Duration) -> f32 {
+/// Builds a tree on links of `latency` each way, fails a quarter of the swarm,
+/// and returns the settled RMR.
+fn repaired_tree_rmr(seed: u64, latency: Duration, proto: Config) -> f32 {
     let network = NetworkConfig {
-        proto: fixed_graft_timeout(graft_timeout),
-        latency: LatencyConfig::Static(Duration::from_millis(50)),
+        proto,
+        latency: LatencyConfig::Static(latency),
     };
     let mut sim = swarm_with(PEERS, seed, network);
     let sender = sim.random_peer();

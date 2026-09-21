@@ -244,23 +244,34 @@ pub struct Graft {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// When receiving an `IHave` message, this timeout is registered. If the message for the
-    /// `IHave` was not received once the timeout is expired, a `Graft` message is sent to the
-    /// peer that sent us the `IHave` to request the message payload.
+    /// Lower bound, and starting point, for the `IHave` timeout.
+    ///
+    /// When an `IHave` arrives for a message we do not have, a timer is armed;
+    /// if the payload has not arrived over an eager link by the time it fires,
+    /// the advertising peer is grafted. The timeout itself is learned from how
+    /// long the eager path actually takes, between this bound and
+    /// [`Self::graft_timeout_max`], so this only needs to be low enough not to
+    /// hold back a fast network.
     ///
     /// The plumtree paper notes:
     /// > The timeout value is a protocol parameter that should be configured considering the
     /// > diameter of the overlay and a target maximum recovery latency, defined by the application
     /// > requirements. (p.8)
-    pub graft_timeout_1: Duration,
-    /// This timeout is registered when sending a `Graft` message. If a reply has not been
-    /// received once the timeout expires, we send another `Graft` message to the next peer that
-    /// sent us an `IHave` for this message.
     ///
-    /// The plumtree paper notes:
-    /// > This second timeout value should be smaller that the first, in the order of an average
-    /// > round trip time to a neighbor.
-    pub graft_timeout_2: Duration,
+    /// Both of those are properties of a deployment rather than of the code, so
+    /// rather than being "statically configured at deployment time" as the
+    /// paper suggests, they are measured. See [`GraftTimeout`].
+    pub graft_timeout_min: Duration,
+
+    /// Upper bound for the `IHave` timeout.
+    ///
+    /// Caps how long a node waits before repairing a hole in the tree, however
+    /// slow the network looks. Grafting is also how a tree gets built in the
+    /// first place, so this bounds how long a cold tree takes to form: raising
+    /// it slows down a swarm where many sources start broadcasting at once,
+    /// each of which needs a tree of its own.
+    pub graft_timeout_max: Duration,
+
     /// Timeout after which `IHave` messages are pushed to peers.
     pub dispatch_timeout: Duration,
     /// The protocol performs a tree optimization, which promotes lazy peers to eager peers if the
@@ -297,20 +308,18 @@ impl Default for Config {
     // numbers.
     fn default() -> Self {
         Self {
-            // Paper: "The timeout value is a protocol parameter that should be configured considering
-            // the diameter of the overlay and a target maximum recovery latency, defined by the
-            // application requirements. This is a parameter that should be statically configured
-            // at deployment time." (p. 8)
-            //
-            // Earthstar has 5ms it seems, see https://github.com/earthstar-project/earthstar/blob/1523c640fedf106f598bf79b184fb0ada64b1cc0/src/syncer/plum_tree.ts#L75
-            // However in the paper it is more like a few roundtrips if I read things correctly.
-            graft_timeout_1: Duration::from_millis(80),
+            // Low enough not to slow down a swarm on a local network, where a
+            // hop costs a millisecond or two. The estimator raises it from
+            // here; measurement showed a swarm on 50ms links settles around
+            // 350ms and one on 10ms links around 80ms.
+            graft_timeout_min: Duration::from_millis(50),
 
-            // Paper: "This second timeout value should be smaller that the first, in the order of an
-            // average round trip time to a neighbor." (p. 9)
-            //
-            // Earthstar doesn't have this step from my reading.
-            graft_timeout_2: Duration::from_millis(40),
+            // Covers roughly 115ms one way, so intercontinental links included,
+            // with the optimization threshold of 7 hops. Measured against a
+            // 100 peer swarm where every peer broadcasts at once: at this bound
+            // the cold trees all form within 3.7s, where 2s left messages
+            // undelivered after 5s.
+            graft_timeout_max: Duration::from_millis(800),
 
             // Again, paper does not tell a recommended number here. Likely should be quite small,
             // as to not delay messages without need. This would also be the time frame in which
@@ -345,6 +354,98 @@ pub struct Stats {
     pub max_last_delivery_hop: u16,
 }
 
+/// Learns how long to wait for the eager path before grafting a lazy peer.
+///
+/// An `IHave` from a peer closer to the message's source arrives before the
+/// payload does, by roughly the difference in tree depth times the latency of a
+/// hop. Waiting less than that grafts a peer we were about to hear from anyway;
+/// the duplicate that follows prunes the link straight back, and the pair
+/// repeats for every message. Waiting much longer only delays repairing a hole
+/// that is real.
+///
+/// Neither the depth difference nor the latency of a hop is known up front, but
+/// their product is directly observable: the time between the first `IHave` for
+/// a message and the payload arriving. That lead time is heavy-tailed whenever
+/// several peers broadcast over the same tree, because the tree path from a new
+/// source can be far longer than a lazy shortcut to it. What the timeout has to
+/// clear is therefore the largest lead time a node sees, not the usual one, so
+/// this holds the largest recent lead time with headroom and lets it decay
+/// slowly. A mean-plus-deviation estimate, as TCP uses for its retransmission
+/// timeout, settles inside the tail and keeps grafting there: with one random
+/// sender per round it left five times the redundancy this does.
+///
+/// Once a graft has been sent for a message, the time it eventually arrives says
+/// nothing about the eager path, so that message is not counted. Instead the
+/// timeout backs off multiplicatively, the same split TCP makes between
+/// measuring a round trip and reacting to a lost one (Karn's algorithm). The
+/// timeout therefore climbs while it is too short to be useful and settles on
+/// measured timings once it is long enough for them to exist.
+#[derive(Debug)]
+pub(crate) struct GraftTimeout {
+    /// The current timeout, always within the configured bounds.
+    current: Duration,
+}
+
+impl GraftTimeout {
+    /// Multiple of an observed lead time to wait.
+    const HEADROOM: f64 = 3.0;
+    /// Fraction of the timeout kept each time a shorter lead time is observed.
+    ///
+    /// At 0.98 a peak halves after about 35 shorter observations, long enough
+    /// to span the rotation of senders in a shared tree.
+    const DECAY: f64 = 0.98;
+    /// Factor the timeout grows by when it turned out to be too short.
+    const BACKOFF: u32 = 2;
+
+    fn new(config: &Config) -> Self {
+        Self {
+            current: config.graft_timeout_min,
+        }
+    }
+
+    /// Returns how long to wait for the eager path.
+    pub(crate) fn timeout(&self) -> Duration {
+        self.current
+    }
+
+    /// Returns how long to wait for a graft before asking the next peer.
+    ///
+    /// The paper puts this "in the order of an average round trip time to a
+    /// neighbor" (p.9). [`Self::timeout`] covers several hops of the tree, so a
+    /// small fraction of it is the round trip to one of them.
+    fn retry_timeout(&self) -> Duration {
+        self.current / 4
+    }
+
+    /// Records that the timeout expired before the eager path delivered.
+    ///
+    /// The true lead time is only known to be longer than the current timeout,
+    /// so the timeout grows until eager deliveries start landing inside it.
+    fn backoff(&mut self, config: &Config) {
+        self.current = (self.current * Self::BACKOFF).min(config.graft_timeout_max);
+    }
+
+    /// Records how long the eager path took after the first `IHave` arrived.
+    fn observe(&mut self, lead_time: Duration, config: &Config) {
+        let held = self.current.mul_f64(Self::DECAY);
+        self.current = lead_time
+            .mul_f64(Self::HEADROOM)
+            .max(held)
+            .clamp(config.graft_timeout_min, config.graft_timeout_max);
+    }
+}
+
+/// What we know about a message we have only heard about through an `IHave`.
+#[derive(Debug)]
+struct MissingMessage<PI> {
+    /// When the first `IHave` for this message arrived.
+    first_ihave_at: Instant,
+    /// The peers that advertised the message, in the order they did so.
+    advertised_by: VecDeque<(PI, Round)>,
+    /// Whether we gave up waiting and grafted a peer for this message.
+    grafted: bool,
+}
+
 /// State of the plumtree.
 #[derive(Debug)]
 pub struct State<PI> {
@@ -363,7 +464,7 @@ pub struct State<PI> {
     /// Messages for which a [`MessageId`] has been seen via a [`Message::IHave`] but we have not
     /// yet received the full payload. For each, we store the peers that have claimed to have this
     /// message.
-    missing_messages: HashMap<MessageId, VecDeque<(PI, Round)>>,
+    missing_messages: HashMap<MessageId, MissingMessage<PI>>,
     /// Messages for which the full payload has been seen.
     received_messages: TimeBoundCache<MessageId, ()>,
     /// Payloads of received messages.
@@ -371,6 +472,8 @@ pub struct State<PI> {
 
     /// Message ids for which a [`Timer::SendGraft`] has been scheduled.
     graft_timer_scheduled: HashSet<MessageId>,
+    /// Learned timeout for how long to wait for the eager path.
+    pub(crate) graft_timeout: GraftTimeout,
     /// Whether a [`Timer::DispatchLazyPush`] has been scheduled.
     dispatch_timer_scheduled: bool,
 
@@ -391,6 +494,7 @@ impl<PI: PeerIdentity> State<PI> {
             eager_push_peers: Default::default(),
             lazy_push_peers: Default::default(),
             lazy_push_queue: Default::default(),
+            graft_timeout: GraftTimeout::new(&config),
             config,
             missing_messages: Default::default(),
             received_messages: Default::default(),
@@ -439,7 +543,7 @@ impl<PI: PeerIdentity> State<PI> {
         match message {
             Message::Gossip(details) => self.on_gossip(sender, details, now, io),
             Message::Prune => self.on_prune(sender),
-            Message::IHave(details) => self.on_ihave(sender, details, io),
+            Message::IHave(details) => self.on_ihave(sender, details, now, io),
             Message::Graft(details) => self.on_graft(sender, details, io),
         }
     }
@@ -529,10 +633,16 @@ impl<PI: PeerIdentity> State<PI> {
                 self.lazy_push(message.clone(), &sender, io);
                 // cleanup places where we track missing messages
                 self.graft_timer_scheduled.remove(&message.id);
-                let previous_ihaves = self.missing_messages.remove(&message.id);
-                // do the optimization step from the paper
-                if let Some(previous_ihaves) = previous_ihaves {
-                    self.optimize_tree(&sender, &message, previous_ihaves, io);
+                // The eager path has delivered a message we had only been told
+                // about. How long that took is exactly what the graft timeout
+                // has to outlast.
+                if let Some(missing) = self.missing_messages.remove(&message.id) {
+                    if !missing.grafted {
+                        self.graft_timeout
+                            .observe(now.duration_since(missing.first_ihave_at), &self.config);
+                    }
+                    // do the optimization step from the paper
+                    self.optimize_tree(&sender, &message, missing.advertised_by, io);
                 }
                 self.stats.max_last_delivery_hop =
                     self.stats.max_last_delivery_hop.max(prev_round.0);
@@ -595,18 +705,23 @@ impl<PI: PeerIdentity> State<PI> {
     /// > protocol parameter that should be configured considering the diameter of the overlay and a
     /// > target maximum recovery latency, defined by the application requirements. This is a
     /// > parameter that should be statically configured at deployment time. (p8)
-    fn on_ihave(&mut self, sender: PI, ihaves: Vec<IHave>, io: &mut impl IO<PI>) {
+    fn on_ihave(&mut self, sender: PI, ihaves: Vec<IHave>, now: Instant, io: &mut impl IO<PI>) {
         for ihave in ihaves {
             if !self.received_messages.contains_key(&ihave.id) {
                 self.missing_messages
                     .entry(ihave.id)
-                    .or_default()
+                    .or_insert_with(|| MissingMessage {
+                        first_ihave_at: now,
+                        advertised_by: VecDeque::new(),
+                        grafted: false,
+                    })
+                    .advertised_by
                     .push_back((sender, ihave.round));
 
                 if !self.graft_timer_scheduled.contains(&ihave.id) {
                     self.graft_timer_scheduled.insert(ihave.id);
                     io.push(OutEvent::ScheduleTimer(
-                        self.config.graft_timeout_1,
+                        self.graft_timeout.timeout(),
                         Timer::SendGraft(ihave.id),
                     ));
                 }
@@ -623,11 +738,14 @@ impl<PI: PeerIdentity> State<PI> {
             return;
         }
         // get the first peer that advertised this message
-        let entry = self
-            .missing_messages
-            .get_mut(&id)
-            .and_then(|entries| entries.pop_front());
+        let entry = self.missing_messages.get_mut(&id).and_then(|missing| {
+            missing.grafted = true;
+            missing.advertised_by.pop_front()
+        });
         if let Some((peer, round)) = entry {
+            // The eager path did not deliver in time, so the timeout was too
+            // short for this tree.
+            self.graft_timeout.backoff(&self.config);
             self.add_eager(peer);
             let message = Message::Graft(Graft {
                 id: Some(id),
@@ -640,7 +758,7 @@ impl<PI: PeerIdentity> State<PI> {
             // meanwhile. This second timeout value should be smaller that the first, in the order of
             // an average round trip time to a neighbor." (p9)
             io.push(OutEvent::ScheduleTimer(
-                self.config.graft_timeout_2,
+                self.graft_timeout.retry_timeout(),
                 Timer::SendGraft(id),
             ));
         }
@@ -672,9 +790,11 @@ impl<PI: PeerIdentity> State<PI> {
     /// > membership. Furthermore, the record of IHAVE messages sent from failed members is deleted
     /// > from the missing history. (p9)
     fn on_neighbor_down(&mut self, peer: PI) {
-        self.missing_messages.retain(|_message_id, ihaves| {
-            ihaves.retain(|(ihave_peer, _round)| *ihave_peer != peer);
-            !ihaves.is_empty()
+        self.missing_messages.retain(|_message_id, missing| {
+            missing
+                .advertised_by
+                .retain(|(ihave_peer, _round)| *ihave_peer != peer);
+            !missing.advertised_by.is_empty()
         });
         self.eager_push_peers.remove(&peer);
         self.lazy_push_peers.remove(&peer);
@@ -744,6 +864,150 @@ impl<PI: PeerIdentity> State<PI> {
             ));
             self.dispatch_timer_scheduled = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod graft_timeout_tests {
+    use super::*;
+
+    /// Feeds the estimator `count` identical samples.
+    fn settle(lead_time: Duration, count: usize, config: &Config) -> GraftTimeout {
+        let mut timeout = GraftTimeout::new(config);
+        for _ in 0..count {
+            timeout.observe(lead_time, config);
+        }
+        timeout
+    }
+
+    /// With nothing observed yet, the configured floor is used.
+    #[test]
+    fn starts_at_the_configured_minimum() {
+        let config = Config::default();
+        let timeout = GraftTimeout::new(&config);
+        assert_eq!(timeout.timeout(), config.graft_timeout_min);
+    }
+
+    /// A steady lead time settles the timeout at a fixed multiple of it.
+    ///
+    /// A multiple, not far above: waiting longer than the eager path needs only
+    /// delays repairing holes that are real.
+    #[test]
+    fn settles_at_a_multiple_of_a_steady_lead_time() {
+        let config = Config {
+            graft_timeout_min: Duration::from_millis(1),
+            graft_timeout_max: Duration::from_secs(10),
+            ..Default::default()
+        };
+        let lead_time = Duration::from_millis(100);
+        let timeout = settle(lead_time, 200, &config).timeout();
+        assert_eq!(timeout, lead_time.mul_f64(GraftTimeout::HEADROOM));
+    }
+
+    /// A single long lead time raises the timeout at once, and shorter ones
+    /// that follow do not drag it back down quickly.
+    ///
+    /// This is what a shared tree needs: the long gaps come from whichever
+    /// source is farthest along the tree, and they recur every time that source
+    /// broadcasts again.
+    #[test]
+    fn holds_the_largest_recent_lead_time() {
+        let config = Config {
+            graft_timeout_min: Duration::from_millis(1),
+            graft_timeout_max: Duration::from_secs(10),
+            ..Default::default()
+        };
+        let mut timeout = settle(Duration::from_millis(50), 50, &config);
+        timeout.observe(Duration::from_millis(400), &config);
+        let peak = timeout.timeout();
+        assert_eq!(peak, Duration::from_millis(1200));
+
+        for _ in 0..10 {
+            timeout.observe(Duration::from_millis(50), &config);
+        }
+        assert!(
+            timeout.timeout() > peak.mul_f64(0.8),
+            "ten short lead times should not undo a peak: {:?} from {peak:?}",
+            timeout.timeout()
+        );
+    }
+
+    /// An old peak fades once it stops recurring.
+    #[test]
+    fn forgets_a_peak_that_stops_recurring() {
+        let config = Config {
+            graft_timeout_min: Duration::from_millis(1),
+            graft_timeout_max: Duration::from_secs(10),
+            ..Default::default()
+        };
+        let mut timeout = GraftTimeout::new(&config);
+        timeout.observe(Duration::from_millis(400), &config);
+        for _ in 0..300 {
+            timeout.observe(Duration::from_millis(50), &config);
+        }
+        assert_eq!(
+            timeout.timeout(),
+            Duration::from_millis(150),
+            "after 300 short lead times only the short ones should count"
+        );
+    }
+
+    /// A timeout that expires before the eager path delivers doubles.
+    #[test]
+    fn backs_off_when_it_expires_too_early() {
+        let config = Config {
+            graft_timeout_min: Duration::from_millis(50),
+            graft_timeout_max: Duration::from_millis(500),
+            ..Default::default()
+        };
+        let mut timeout = GraftTimeout::new(&config);
+        let mut seen = vec![timeout.timeout()];
+        for _ in 0..4 {
+            timeout.backoff(&config);
+            seen.push(timeout.timeout());
+        }
+        assert_eq!(
+            seen,
+            [50, 100, 200, 400, 500].map(Duration::from_millis),
+            "doubling, capped at the configured maximum"
+        );
+    }
+
+    /// The estimate never leaves the configured bounds.
+    #[test]
+    fn stays_within_the_configured_bounds() {
+        let config = Config {
+            graft_timeout_min: Duration::from_millis(50),
+            graft_timeout_max: Duration::from_millis(500),
+            ..Default::default()
+        };
+        assert_eq!(
+            settle(Duration::from_secs(30), 50, &config).timeout(),
+            config.graft_timeout_max,
+            "an absurdly slow network should be capped"
+        );
+        assert_eq!(
+            settle(Duration::from_micros(1), 50, &config).timeout(),
+            config.graft_timeout_min,
+            "an instant network should not drop below the floor"
+        );
+    }
+
+    /// The retry timeout stays a fraction of the main one.
+    ///
+    /// The paper puts it "in the order of an average round trip time to a
+    /// neighbor", which is a fraction of the several hops the main timeout
+    /// covers.
+    #[test]
+    fn retry_timeout_is_a_fraction_of_the_main_one() {
+        let config = Config {
+            graft_timeout_min: Duration::from_millis(1),
+            graft_timeout_max: Duration::from_secs(10),
+            ..Default::default()
+        };
+        let timeout = settle(Duration::from_millis(400), 50, &config);
+        assert!(timeout.retry_timeout() < timeout.timeout());
+        assert_eq!(timeout.retry_timeout(), timeout.timeout() / 4);
     }
 }
 
