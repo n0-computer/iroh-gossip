@@ -457,7 +457,7 @@ impl Actor {
         ConnectionPool,
         Self,
     ) {
-        let (api_tx, api_rx) = tokio::sync::mpsc::channel(16);
+        let (api_tx, api_rx) = mpsc::channel(16);
 
         let me = endpoint.id();
 
@@ -527,35 +527,26 @@ impl Actor {
         self.run().await
     }
 
-    async fn tick(&mut self) -> ControlFlow<(), ()> {
+    async fn tick(&mut self) -> ControlFlow<()> {
         self.shared.metrics.actor_tick_main.inc();
         tokio::select! {
             addr = self.endpoint_addr_updates.next() => {
                 trace!("tick: endpoint_addr_update");
-                match addr {
-                    None => {
-                        warn!("address stream returned None - endpoint has shut down");
-                        ControlFlow::Break(())
-                    }
-                    Some(addr) => {
-                        let data = AddrInfo::from(addr).encode();
-                        self.shared.our_peer_data.set(data).ok();
-                        ControlFlow::Continue(())
-                    }
-                }
+                let Some(addr) = addr else {
+                    warn!("address stream returned None - endpoint has shut down");
+                    return ControlFlow::Break(());
+                };
+                self.shared.our_peer_data.set(AddrInfo::from(addr).encode()).ok();
+                ControlFlow::Continue(())
             }
             msg = self.api_rx.recv() => {
                 trace!(some=msg.is_some(), "tick: api_rx");
-                match msg {
-                    Some(msg) => {
-                        self.handle_api_message(msg).await;
-                        ControlFlow::Continue(())
-                    }
-                    None => {
-                        trace!("all api senders dropped, stop actor");
-                        ControlFlow::Break(())
-                    }
-                }
+                let Some(msg) = msg else {
+                    trace!("all api senders dropped, stop actor");
+                    return ControlFlow::Break(());
+                };
+                self.handle_api_message(msg).await;
+                ControlFlow::Continue(())
             }
             Some(msg) = self.local_rx.recv() => match msg {
                 LocalMessage::RemoteStream(stream) => {
@@ -576,7 +567,6 @@ impl Actor {
                 self.topics.reap(&self.shared, exit);
                 ControlFlow::Continue(())
             }
-            else => unreachable!("reached else arm, but all fallible cases should be handled"),
         }
     }
 
@@ -586,12 +576,10 @@ impl Actor {
     }
 
     async fn handle_api_message(&mut self, msg: api::RpcMessage) {
-        let (topic_id, msg) = match msg {
-            api::RpcMessage::Join(msg) => (msg.inner.topic_id, msg),
-        };
-        self.topics
-            .send(&self.shared, topic_id, TopicMessage::ApiJoin(msg))
-            .await;
+        let api::RpcMessage::Join(join) = msg;
+        let topic_id = join.inner.topic_id;
+        let msg = TopicMessage::ApiJoin(join);
+        self.topics.send(&self.shared, topic_id, msg).await;
     }
 }
 
@@ -846,12 +834,8 @@ impl TopicActor {
                         self.drop_peers_queue.insert(remote);
                     }
                 }
-                OutEvent::EmitEvent(event) => {
-                    self.handle_event(event);
-                }
-                OutEvent::ScheduleTimer(delay, timer) => {
-                    self.timers.insert(now + delay, timer);
-                }
+                OutEvent::EmitEvent(event) => self.handle_event(event),
+                OutEvent::ScheduleTimer(delay, timer) => self.timers.insert(now + delay, timer),
                 // Dropping the sender lets its task write what is still queued,
                 // such as the protocol's `Disconnect`, within `DRAIN_TIMEOUT`.
                 OutEvent::DisconnectPeer(endpoint_id) => self.senders.remove(&endpoint_id),
@@ -866,12 +850,8 @@ impl TopicActor {
 
     fn handle_event(&mut self, event: ProtoEvent) {
         match &event {
-            ProtoEvent::NeighborUp(n) => {
-                self.neighbors.insert(*n);
-            }
-            ProtoEvent::NeighborDown(n) => {
-                self.neighbors.remove(n);
-            }
+            ProtoEvent::NeighborUp(n) => _ = self.neighbors.insert(*n),
+            ProtoEvent::NeighborDown(n) => _ = self.neighbors.remove(n),
             ProtoEvent::Received(_) => {}
         }
         self.subscribers.emit(event);
@@ -883,17 +863,14 @@ async fn connect(
     remote: EndpointId,
     topic: TopicId,
 ) -> n0_error::Result<Guarded<GossipSender>> {
-    let res = async {
+    async {
         let conn = shared.pool.get_or_connect(remote).await?;
         let tx = GossipSender::init(&conn, topic, shared.config.max_message_size).await?;
         n0_error::Ok(conn.guard(tx))
     }
-    .await;
-    match &res {
-        Ok(_) => shared.metrics.peers_dialed_success.inc(),
-        Err(_) => shared.metrics.peers_dialed_failure.inc(),
-    };
-    res
+    .await
+    .inspect(|_| _ = shared.metrics.peers_dialed_success.inc())
+    .inspect_err(|_| _ = shared.metrics.peers_dialed_failure.inc())
 }
 
 async fn forward_events(
@@ -902,7 +879,7 @@ async fn forward_events(
     initial_neighbors: impl Iterator<Item = EndpointId>,
 ) {
     for neighbor in initial_neighbors {
-        if let Err(_err) = tx.send(api::Event::NeighborUp(neighbor)).await {
+        if tx.send(api::Event::NeighborUp(neighbor)).await.is_err() {
             break;
         }
     }
@@ -917,7 +894,7 @@ async fn forward_events(
             Err(broadcast::error::RecvError::Lagged(_)) => api::Event::Lagged,
             Err(broadcast::error::RecvError::Closed) => break,
         };
-        if let Err(_err) = tx.send(event).await {
+        if tx.send(event).await.is_err() {
             break;
         }
     }
