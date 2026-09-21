@@ -14,10 +14,7 @@ use iroh::{
     Endpoint, EndpointAddr, EndpointId,
 };
 use iroh_util::connection_pool::{self, ConnectionHandle, ConnectionPool, Guarded};
-use irpc::{
-    channel::{self, mpsc::RecvError},
-    WithChannels,
-};
+use irpc::{channel, WithChannels};
 use n0_error::{anyerr, stack_error};
 use n0_future::{
     stream::Boxed as BoxStream,
@@ -274,8 +271,8 @@ enum TopicMessage {
 type RemoteStream = Guarded<GossipReceiver>;
 
 type ApiJoinRequest = WithChannels<api::JoinRequest, api::Request>;
-type ApiRecvStream = BoxStream<Result<api::Command, RecvError>>;
-type RemoteRecvStream = BoxStream<(EndpointId, n0_error::Result<Option<ProtoMessage>>)>;
+type ApiRecvStream = BoxStream<api::Command>;
+type RemoteRecvStream = BoxStream<(EndpointId, n0_error::Result<ProtoMessage>)>;
 
 /// The topic actors and everything waiting for one.
 ///
@@ -824,15 +821,14 @@ impl TopicActor {
     fn handle_remote_message(
         &mut self,
         remote: EndpointId,
-        message: n0_error::Result<Option<ProtoMessage>>,
+        message: n0_error::Result<ProtoMessage>,
     ) {
         // A stream ending is not the peer going away. The peer finishes a stream
         // when it moves its sender to another connection, and says so at the
         // protocol level when it actually leaves. A connection that is lost
         // outright shows up on our sender instead, through `sender_stopped`.
         match message {
-            Ok(Some(message)) => self.handle_in_event(InEvent::RecvMessage(remote, message)),
-            Ok(None) => debug!(remote=%remote.fmt_short(), "remote stream finished"),
+            Ok(message) => self.handle_in_event(InEvent::RecvMessage(remote, message)),
             Err(error) => debug!(remote=%remote.fmt_short(), ?error, "remote stream failed"),
         }
     }
@@ -1083,7 +1079,10 @@ impl Subscribers {
             forward_events(events, self.events.subscribe(), neighbors.into_iter())
                 .instrument(tracing::Span::current()),
         );
-        self.commands.push(Box::pin(into_stream2(commands)));
+        // A subscriber whose command channel failed can still be receiving
+        // events, so only its forwarder ending counts as it leaving.
+        self.commands
+            .push(Box::pin(commands.into_stream().map_while(Result::ok)));
     }
 
     fn is_empty(&self) -> bool {
@@ -1100,7 +1099,7 @@ impl Subscribers {
     /// check whether any are left. Pending while there are none.
     async fn next(&mut self) -> Option<api::Command> {
         tokio::select! {
-            Some(command) = self.commands.next(), if !self.commands.is_empty() => command.ok(),
+            Some(command) = self.commands.next(), if !self.commands.is_empty() => Some(command),
             _ = self.forwarders.join_next(), if !self.forwarders.is_empty() => None,
             else => std::future::pending().await,
         }
@@ -1199,30 +1198,16 @@ fn join_result(
     }
 }
 
+/// Reads `stream` until it ends or fails, yielding the failure as the last item.
 fn into_stream(
-    receiver: RemoteStream,
-) -> impl Stream<Item = n0_error::Result<Option<ProtoMessage>>> + Send + Sync + 'static {
-    n0_future::stream::unfold(Some(receiver), |recv| async move {
-        let mut recv = recv?;
-        let res = recv.recv().await;
-        match res {
-            Err(err) => Some((Err(err), None)),
-            Ok(Some(res)) => Some((Ok(Some(res)), Some(recv))),
-            Ok(None) => Some((Ok(None), None)),
-        }
-    })
-}
-
-fn into_stream2<T: irpc::RpcMessage>(
-    receiver: channel::mpsc::Receiver<T>,
-) -> impl Stream<Item = Result<T, RecvError>> + Send + Sync + 'static {
-    n0_future::stream::unfold(Some(receiver), |recv| async move {
-        let mut recv = recv?;
-        match recv.recv().await {
-            Err(err) => Some((Err(err), None)),
-            Ok(Some(res)) => Some((Ok(res), Some(recv))),
-            Ok(None) => None,
-        }
+    stream: RemoteStream,
+) -> impl Stream<Item = n0_error::Result<ProtoMessage>> + Send + Sync + 'static {
+    n0_future::stream::unfold(Some(stream), |stream| async move {
+        let mut stream = stream?;
+        let item = stream.recv().await.transpose()?;
+        // A failed stream fails again on the next read, so stop after one.
+        let stream = item.is_ok().then_some(stream);
+        Some((item, stream))
     })
 }
 
