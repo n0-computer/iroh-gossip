@@ -805,20 +805,37 @@ impl TopicActor {
         match sender {
             Ok(sender) => {
                 self.shared.metrics.peers_dialed_success.inc();
+                // The protocol may have dropped the peer while we were dialing.
+                // Installing the sender anyway would hold its connection open
+                // for nothing.
+                let Some(send_queue) = self.remote_senders.get_mut(&remote) else {
+                    debug!("dialed a peer that was dropped meanwhile, discarding");
+                    return;
+                };
                 let stopped = sender.closed();
                 let conn_id = sender.conn.stable_id();
-                let stopped = Box::pin(async move {
+                self.sender_stopped.push(Box::pin(async move {
                     stopped.await;
                     (remote, conn_id)
-                });
-                self.sender_stopped.push(stopped);
-                let send_queue = self.remote_senders.entry(remote).or_default();
+                }));
                 if let Err(err) = send_queue.init(sender).await {
                     warn!("Remote failed while pushing queued messages: {err:?}");
                 }
             }
-            Err(_err) => {
+            Err(err) => {
                 self.shared.metrics.peers_dialed_failure.inc();
+                // A dial is not cancelled when a newer one for the same peer
+                // succeeds first, so the failure can land on a live sender. Keep
+                // it: dropping it would cut off a working peer.
+                if let Some(SendQueue::Active(_)) = self.remote_senders.get(&remote) {
+                    debug!(?err, "dial failed, but a newer one succeeded");
+                    return;
+                }
+                debug!(?err, "dial failed");
+                // Drop the pending entry before telling the protocol: `send` only
+                // dials for a vacant entry, so leaving it would queue the
+                // protocol's retry -- and everything after it -- forever.
+                self.remote_senders.remove(&remote);
                 self.handle_in_event(InEvent::PeerDisconnected(remote))
                     .await
             }
@@ -1185,6 +1202,60 @@ pub(crate) mod tests {
 
         async fn finish(self) {
             self.0.finish().await
+        }
+    }
+
+    /// A topic actor driven by hand, with one peer it can reach.
+    ///
+    /// The topic actor belongs to no [`TopicMap`] and no task runs it, so tests
+    /// can feed it dial results directly.
+    struct DialFixture {
+        topic: TopicActor,
+        topic_id: TopicId,
+        shared: Arc<Shared>,
+        me: EndpointId,
+        peer: Gossip,
+        peer_id: EndpointId,
+        _actor: ManualActor,
+        _peer_router: Router,
+    }
+
+    impl DialFixture {
+        async fn new(relay_map: RelayMap, ct: &CancellationToken) -> Result<Self> {
+            let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
+            let (_gossip, actor, _router) =
+                Gossip::t_new_with_actor(rng, Default::default(), relay_map.clone(), ct).await?;
+            let (peer, peer_router) = spawn_node(rng, relay_map, []).await?;
+            let peer_addr = peer_router.endpoint().addr();
+            let lookup = MemoryLookup::new();
+            lookup.add_endpoint_info(peer_addr.clone());
+            actor.endpoint().address_lookup()?.add(lookup);
+
+            let topic_id = TopicId::from([5u8; 32]);
+            let shared = actor.shared.clone();
+            let (_handle, topic) = TopicHandle::new(
+                topic_id,
+                shared.clone(),
+                WeakTopicMap(std::sync::Weak::new()),
+                Vec::new(),
+            );
+            Ok(Self {
+                topic,
+                topic_id,
+                shared,
+                me: actor.endpoint().id(),
+                peer,
+                peer_id: peer_addr.id,
+                _actor: actor,
+                _peer_router: peer_router,
+            })
+        }
+
+        fn sender_is_active(&self) -> bool {
+            matches!(
+                self.topic.remote_senders.get(&self.peer_id),
+                Some(SendQueue::Active(_))
+            )
         }
     }
 
@@ -1804,6 +1875,93 @@ pub(crate) mod tests {
             .std_context("rejoin")?;
         let conn2 = conn_rx.recv().await.expect("second connection");
         assert_ne!(conn1.stable_id(), conn2.stable_id());
+        Ok(())
+    }
+
+    /// A join whose dial failed goes out again on a fresh dial.
+    ///
+    /// The protocol retries a join when the connection closes before a reply,
+    /// but `send` only dials for a vacant entry, so the retry reaches the peer
+    /// only if the failed dial left nothing behind. This is what
+    /// `join_during_peer_close_is_retried` covers on `main`: a join written to a
+    /// connection the peer just closed.
+    #[tokio::test]
+    #[traced_test]
+    async fn failed_dial_is_retried() -> Result {
+        let ct = CancellationToken::new();
+        let (relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+        let mut f = DialFixture::new(relay_map, &ct).await?;
+        let mut peer_topic = f.peer.subscribe(f.topic_id, vec![]).await?;
+
+        f.topic
+            .handle_in_event(InEvent::Command(Command::Join(vec![f.peer_id])))
+            .await;
+        // Fail the dial the way a connection closing under the join would.
+        f.topic.connecting = Default::default();
+        let err = anyerr!("connection closed before the join was written");
+        f.topic.handle_connected((f.peer_id, Err(err))).await;
+
+        let _topic = AbortOnDropHandle::new(task::spawn(f.topic.run()));
+        let me = f.me;
+        timeout(Duration::from_secs(10), async {
+            loop {
+                match peer_topic.try_next().await {
+                    Ok(Some(Event::NeighborUp(id))) if id == me => return,
+                    Ok(Some(_)) => {}
+                    other => panic!("peer topic ended: {other:?}"),
+                }
+            }
+        })
+        .await
+        .std_context("the peer never received the retried join")?;
+        ct.cancel();
+        Ok(())
+    }
+
+    /// A dial failing after a newer one for the same peer succeeded must leave
+    /// the live sender alone.
+    #[tokio::test]
+    #[traced_test]
+    async fn dial_failure_keeps_active_sender() -> Result {
+        let ct = CancellationToken::new();
+        let (relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+        let mut f = DialFixture::new(relay_map, &ct).await?;
+
+        let sender = connect(&f.shared, f.peer_id, f.topic_id).await?;
+        f.topic
+            .remote_senders
+            .insert(f.peer_id, SendQueue::default());
+        f.topic.handle_connected((f.peer_id, Ok(sender))).await;
+        assert!(f.sender_is_active());
+
+        let err = anyerr!("an older dial failed");
+        f.topic.handle_connected((f.peer_id, Err(err))).await;
+        assert!(
+            f.sender_is_active(),
+            "a stale dial failure dropped a live sender"
+        );
+        ct.cancel();
+        Ok(())
+    }
+
+    /// A dial that succeeds after the protocol dropped the peer is discarded.
+    ///
+    /// Installing the sender would hold the connection open for a peer nothing
+    /// wants to talk to.
+    #[tokio::test]
+    #[traced_test]
+    async fn dial_after_drop_is_discarded() -> Result {
+        let ct = CancellationToken::new();
+        let (relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+        let mut f = DialFixture::new(relay_map, &ct).await?;
+
+        let sender = connect(&f.shared, f.peer_id, f.topic_id).await?;
+        f.topic.handle_connected((f.peer_id, Ok(sender))).await;
+        assert!(
+            !f.topic.remote_senders.contains_key(&f.peer_id),
+            "installed a sender for a dropped peer"
+        );
+        ct.cancel();
         Ok(())
     }
 
