@@ -16,6 +16,7 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler},
     Endpoint, EndpointAddr, EndpointId,
 };
+use iroh_util::connection_pool::{self, ConnectionHandle, ConnectionPool, ConnectionRef};
 use irpc::{
     channel::{self, mpsc::RecvError},
     WithChannels,
@@ -35,7 +36,6 @@ use tracing::{debug, error_span, instrument, trace, warn, Instrument};
 
 use self::{
     address_lookup::GossipAddressLookup,
-    connection_pool::{ConnectionHandle, ConnectionPool, ConnectionRef},
     util::{AddrInfo, Timers},
 };
 use crate::{
@@ -46,7 +46,6 @@ use crate::{
 };
 
 mod address_lookup;
-mod connection_pool;
 mod net_proto;
 mod util;
 
@@ -581,9 +580,9 @@ impl Actor {
 }
 
 async fn accept_loop(topics: TopicMap, conn: ConnectionHandle, max_message_size: usize) {
-    let remote = conn.connection().remote_id();
+    let remote = conn.remote_id();
     loop {
-        let stream = match GossipReceiver::accept(conn.connection(), max_message_size).await {
+        let stream = match GossipReceiver::accept(&conn, max_message_size).await {
             Ok(Some(stream)) => Guarded::new(stream, conn.get_ref()),
             _ => break,
         };

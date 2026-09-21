@@ -1868,6 +1868,7 @@ dependencies = [
  "iroh",
  "iroh-base",
  "iroh-metrics",
+ "iroh-util",
  "irpc",
  "n0-error",
  "n0-future",
@@ -1982,6 +1983,19 @@ dependencies = [
  "vergen-gitcl",
  "webpki-roots",
  "ws_stream_wasm",
+]
+
+[[package]]
+name = "iroh-util"
+version = "0.6.0"
+source = "git+https://github.com/n0-computer/iroh-util?branch=Frando%2Ffeat-incoming#8b4d1fc659f4e09ec7be42b37e772332856d5116"
+dependencies = [
+ "derive_more",
+ "iroh",
+ "n0-error",
+ "n0-future",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
