@@ -4,7 +4,7 @@
 use std::sync::atomic::AtomicBool;
 use std::{
     collections::{hash_map, BTreeSet, HashMap, HashSet, VecDeque},
-    ops::{ControlFlow, DerefMut},
+    ops::ControlFlow,
     sync::Arc,
     time::Duration,
 };
@@ -15,7 +15,7 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler},
     Endpoint, EndpointAddr, EndpointId,
 };
-use iroh_util::connection_pool::{self, ConnectionHandle, ConnectionPool, ConnectionRef};
+use iroh_util::connection_pool::{self, ConnectionHandle, ConnectionPool, Guarded};
 use irpc::{
     channel::{self, mpsc::RecvError},
     WithChannels,
@@ -575,7 +575,7 @@ async fn accept_loop(
     let remote = conn.remote_id();
     loop {
         let stream = match GossipReceiver::accept(&conn, max_message_size).await {
-            Ok(Some(stream)) => Guarded::new(stream, conn.get_ref()),
+            Ok(Some(stream)) => conn.guard(stream),
             _ => break,
         };
         if streams.send((remote, stream)).await.is_err() {
@@ -688,7 +688,7 @@ impl TopicActor {
                     self.handle_actor_message(msg).await;
                 },
                 Some(conn) = self.connecting.next(), if !self.connecting.is_empty() => {
-                    trace!(remote=%conn.0.fmt_short(), "tick: connected to remote: {:?}", conn.1.as_ref().map(|conn| conn.conn().side()));
+                    trace!(remote=%conn.0.fmt_short(), "tick: connected to remote: {:?}", conn.1.as_ref().map(|conn| conn.connection().side()));
                     self.handle_connected(conn).await;
                 }
                 Some(message) = self.api_receivers.next(), if !self.api_receivers.is_empty() => {
@@ -723,7 +723,7 @@ impl TopicActor {
                 Some((remote_id, conn_id)) = self.sender_stopped.next(), if !self.sender_stopped.is_empty() => {
                     trace!(remote=%remote_id.fmt_short(), "tick: sender to remote stopped");
                     if let Some(SendQueue::Active(sender)) = self.remote_senders.get(&remote_id) {
-                        if sender.conn.stable_id() == conn_id {
+                        if sender.connection().stable_id() == conn_id {
                             debug!(remote=%remote_id.fmt_short(), "active sender stopped, drop peer");
                             self.drop_peers_queue.insert(remote_id);
                             self.remote_senders.remove(&remote_id);
@@ -779,7 +779,7 @@ impl TopicActor {
                     return;
                 };
                 let stopped = sender.closed();
-                let conn_id = sender.conn.stable_id();
+                let conn_id = sender.connection().stable_id();
                 self.sender_stopped.push(Box::pin(async move {
                     stopped.await;
                     (remote, conn_id)
@@ -901,7 +901,7 @@ impl TopicActor {
         // keeps two peers that disagree about the current connection from
         // moving each other's senders back and forth forever.
         if let Some(SendQueue::Active(sender)) = self.remote_senders.get(&remote) {
-            if sender.conn().is_superseded() {
+            if sender.connection().is_superseded() {
                 debug!(remote=%remote.fmt_short(), "sender on a superseded connection, moving");
                 self.remote_senders.remove(&remote);
             }
@@ -948,8 +948,7 @@ async fn connect(
 ) -> n0_error::Result<Guarded<GossipSender>> {
     let conn = shared.pool.get_or_connect(remote).await?;
     let tx = GossipSender::init(&conn, topic, shared.config.max_message_size).await?;
-    let tx = Guarded::new(tx, conn.clone());
-    Ok(tx)
+    Ok(conn.guard(tx))
 }
 
 async fn forward_events(
@@ -976,29 +975,6 @@ async fn forward_events(
         if let Err(_err) = tx.send(event).await {
             break;
         }
-    }
-}
-
-#[derive(Debug, derive_more::Deref)]
-struct Guarded<T> {
-    #[deref]
-    value: T,
-    conn: ConnectionRef,
-}
-
-impl<T> Guarded<T> {
-    fn new(value: T, conn: ConnectionRef) -> Self {
-        Self { value, conn }
-    }
-
-    fn conn(&self) -> &ConnectionRef {
-        &self.conn
-    }
-}
-
-impl<T> DerefMut for Guarded<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.value
     }
 }
 
