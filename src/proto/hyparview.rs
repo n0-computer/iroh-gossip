@@ -16,6 +16,9 @@ use tracing::debug;
 
 use super::{util::IndexSet, PeerData, PeerIdentity, PeerInfo, IO};
 
+/// How often a join is retried when its connection closes before a reply.
+const JOIN_RETRIES: u8 = 2;
+
 /// Input event for HyParView
 #[derive(Debug)]
 pub enum InEvent<PI> {
@@ -246,6 +249,8 @@ pub struct State<PI, RG = ThreadRng> {
     pub(crate) stats: Stats,
     /// The set of neighbor requests we sent out but did not yet receive a reply for
     pending_neighbor_requests: HashSet<PI>,
+    /// Joins we sent and got no reply for yet, with how often each was retried.
+    pending_joins: HashMap<PI, u8>,
     /// The opaque user peer data we received for other peers
     peer_data: HashMap<PI, PeerData>,
     /// List of peers that are disconnecting, but which we want to keep in the passive set once the connection closes
@@ -268,6 +273,7 @@ where
             rng,
             stats: Stats::default(),
             pending_neighbor_requests: Default::default(),
+            pending_joins: Default::default(),
             peer_data: Default::default(),
             alive_disconnect_peers: Default::default(),
         }
@@ -320,6 +326,11 @@ where
     }
 
     fn handle_join(&mut self, peer: PI, io: &mut impl IO<PI>) {
+        self.pending_joins.entry(peer).or_insert(0);
+        self.send_join(peer, io);
+    }
+
+    fn send_join(&mut self, peer: PI, io: &mut impl IO<PI>) {
         io.push(OutEvent::SendMessage(
             peer,
             Message::Join(self.me_data.clone()),
@@ -351,9 +362,20 @@ where
             self.passive_view.remove(&peer);
             self.peer_data.remove(&peer);
         }
+        // A join is not answered by the protocol, so a lost one has to be retried.
+        if let Some(retries) = self.pending_joins.get_mut(&peer) {
+            if *retries < JOIN_RETRIES {
+                *retries += 1;
+                debug!(other = ?peer, "connection closed with join pending, retry");
+                self.send_join(peer, io);
+            } else {
+                self.pending_joins.remove(&peer);
+            }
+        }
     }
 
     fn handle_quit(&mut self, io: &mut impl IO<PI>) {
+        self.pending_joins.clear();
         for peer in self.active_view.clone().into_iter() {
             self.active_view.remove(&peer);
             self.send_disconnect(peer, false, io);
@@ -752,6 +774,7 @@ where
         io: &mut impl IO<PI>,
     ) {
         self.passive_view.remove(&peer);
+        self.pending_joins.remove(&peer);
         if self.active_view.insert(peer) {
             debug!(other = ?peer, "add to active view");
             io.push(OutEvent::EmitEvent(Event::NeighborUp(peer)));
@@ -789,7 +812,7 @@ mod tests {
     use rand::{rngs::StdRng, SeedableRng};
 
     use super::*;
-    use crate::proto::topic::OutEvent as TopicOut;
+    use crate::proto::topic::{self, OutEvent as TopicOut};
 
     type Io = VecDeque<TopicOut<u32>>;
 
@@ -805,6 +828,55 @@ mod tests {
 
     fn has_metadata(state: &State<u32, StdRng>, peer: u32) -> bool {
         state.peer_data.contains_key(&peer) || state.alive_disconnect_peers.contains(&peer)
+    }
+
+    fn joins_sent(io: &Io, peer: u32) -> usize {
+        io.iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    TopicOut::SendMessage(to, topic::Message::Swarm(Message::Join(_))) if *to == peer
+                )
+            })
+            .count()
+    }
+
+    /// A join lost to a closed connection is retried a bounded number of times.
+    #[test]
+    fn join_is_retried_when_the_connection_closes() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.handle(InEvent::RequestJoin(1), io);
+        assert_eq!(joins_sent(io, 1), 1);
+
+        for retry in 1..=JOIN_RETRIES as usize {
+            state.handle(InEvent::PeerDisconnected(1), io);
+            assert_eq!(joins_sent(io, 1), 1 + retry);
+        }
+        state.handle(InEvent::PeerDisconnected(1), io);
+        assert_eq!(joins_sent(io, 1), 1 + JOIN_RETRIES as usize);
+        assert!(state.pending_joins.is_empty());
+    }
+
+    /// A join is not retried once the peer is a neighbor.
+    ///
+    /// Losing the connection then is an ordinary disconnect, not a lost join.
+    #[test]
+    fn join_is_not_retried_once_the_peer_is_a_neighbor() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.handle(InEvent::RequestJoin(1), io);
+        let neighbor = Neighbor {
+            priority: Priority::High,
+            data: None,
+        };
+        state.handle(InEvent::RecvMessage(1, Message::Neighbor(neighbor)), io);
+        assert!(state.active_view.contains(&1));
+        io.clear();
+
+        state.handle(InEvent::PeerDisconnected(1), io);
+
+        assert_eq!(joins_sent(io, 1), 0);
     }
 
     #[test]
