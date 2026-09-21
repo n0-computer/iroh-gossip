@@ -5,8 +5,7 @@ use std::sync::atomic::AtomicBool;
 use std::{
     collections::{hash_map, BTreeSet, HashMap, HashSet, VecDeque},
     ops::{ControlFlow, DerefMut},
-    sync::{Arc, Mutex},
-    task::{ready, Poll},
+    sync::Arc,
     time::Duration,
 };
 
@@ -239,15 +238,7 @@ impl Gossip {
 #[stack_error(derive)]
 pub struct ActorStoppedError;
 
-/// Error emitted when a topic actor stopped.
-///
-/// Deliberately carries no payload: nothing needs the message back, and a
-/// `SendError<TopicMessage>` would make every `Result` in the send path 152
-/// bytes wide.
-#[stack_error(derive)]
-struct TopicActorStoppedError;
-
-#[derive(strum::Display)]
+#[derive(Debug, strum::Display)]
 enum TopicMessage {
     ApiJoin(ApiJoinRequest),
     RemoteStream {
@@ -266,166 +257,155 @@ type ApiJoinRequest = WithChannels<api::JoinRequest, api::Request>;
 type ApiRecvStream = BoxStream<Result<api::Command, RecvError>>;
 type RemoteRecvStream = BoxStream<(EndpointId, n0_error::Result<Option<ProtoMessage>>)>;
 
-#[derive(Debug, Default, Clone)]
-struct TopicMap(Arc<Mutex<TopicMapInner>>);
-
+/// The topic actors and everything waiting for one.
+///
+/// Owned by the gossip [`Actor`] alone, and the only place that sends to a
+/// topic actor. That single ownership is what the closing protocol relies on;
+/// see [`TopicMap::send`] and [`TopicMap::reap`].
 #[derive(Debug, Default)]
-struct TopicMapInner {
-    topics: HashMap<TopicId, TopicHandle>,
-    tasks: JoinSet<TopicActor>,
+struct TopicMap {
+    topics: HashMap<TopicId, TopicEntry>,
+    tasks: JoinSet<TopicExit>,
     /// Streams that arrived for a topic that is not joined, keyed by topic.
     ///
     /// Two peers joining the same topic at once each open a stream before the
     /// other has processed its own local join, so this is expected rather than
-    /// an error. Handed to the topic actor by [`TopicMap::get_or_init`] if the
-    /// topic is ever joined, and capped by [`MAX_PENDING_STREAMS`] because a
-    /// peer can ask about topics we never join.
+    /// an error. Handed to the topic actor if the topic is ever joined, and
+    /// capped by [`MAX_PENDING_STREAMS`] because a peer can ask about topics we
+    /// never join.
     parked: HashMap<TopicId, Vec<(EndpointId, RemoteStream)>>,
-}
-
-impl TopicMapInner {
-    fn parked_len(&self) -> usize {
-        self.parked.values().map(Vec::len).sum()
-    }
 }
 
 /// How many streams to hold for topics that are not joined.
 const MAX_PENDING_STREAMS: usize = 32;
 
+#[derive(Debug)]
+enum TopicEntry {
+    Running(TopicHandle),
+    /// The actor closed its inbox and is quitting. Messages for the topic wait
+    /// here until it has been reaped, so that a successor only starts once the
+    /// predecessor's `Disconnect`s are out.
+    Quitting(Vec<TopicMessage>),
+}
+
+/// What a topic actor hands back when it stops.
+#[derive(Debug)]
+struct TopicExit {
+    topic_id: TopicId,
+    /// Messages that were in its inbox when it closed it.
+    leftovers: Vec<TopicMessage>,
+}
+
 impl TopicMap {
-    /// Returns a sender for `topic_id`, starting the topic actor if the topic is
-    /// not joined yet.
+    /// Delivers `msg` to the actor for `topic_id`, starting one for a join if
+    /// there is none.
     ///
-    /// Holding the returned [`TopicSender`] is what keeps the actor alive until
-    /// the caller has sent; see [`WeakTopicMap::try_quit`].
-    fn get_or_init(&self, topic_id: TopicId, shared: &Arc<Shared>) -> TopicSender {
-        let mut inner = self.0.lock().expect("poisoned");
-        let parked = inner.parked.remove(&topic_id).unwrap_or_default();
-        match inner.topics.entry(topic_id) {
-            hash_map::Entry::Occupied(entry) => entry.get().sender(),
-            hash_map::Entry::Vacant(entry) => {
-                let (handle, actor) = TopicHandle::new(
-                    topic_id,
-                    shared.clone(),
-                    WeakTopicMap(Arc::downgrade(&self.0)),
-                    parked,
-                );
-                let sender = entry.insert(handle).sender();
-                inner.tasks.spawn(
-                    actor
-                        .run()
-                        .instrument(error_span!("topic", topic=%topic_id.fmt_short())),
-                );
-                sender
+    /// Nothing sent here is lost. A topic actor stops by closing its inbox and
+    /// draining it (see [`TopicActor::run`]), so a send either lands before the
+    /// close, and comes back from the actor as a leftover, or fails and returns
+    /// the message. In both cases [`Self::reap`] gets it.
+    async fn send(&mut self, shared: &Arc<Shared>, topic_id: TopicId, msg: TopicMessage) {
+        match self.topics.get_mut(&topic_id) {
+            Some(TopicEntry::Running(handle)) => {
+                if let Err(mpsc::error::SendError(msg)) = handle.tx.send(msg).await {
+                    debug!(topic=%topic_id.fmt_short(), "topic actor is quitting, holding message");
+                    self.topics
+                        .insert(topic_id, TopicEntry::Quitting(vec![msg]));
+                }
             }
+            Some(TopicEntry::Quitting(buffer)) => buffer.push(msg),
+            None => self.dispatch(shared, topic_id, vec![msg]),
         }
     }
 
-    /// Returns the sender to deliver `stream` to, parking it if the topic is not
-    /// joined.
+    /// Handles a topic actor that stopped.
     ///
-    /// One lock for both, so a stream cannot be parked for a topic that has
-    /// just been joined -- which would leave it sitting there until the topic is
-    /// joined again. `stream` comes back with the sender because sending has to
-    /// happen outside the lock.
-    fn route_stream(
-        &self,
-        remote: EndpointId,
-        stream: RemoteStream,
-    ) -> Option<(TopicSender, RemoteStream)> {
-        let topic_id = stream.topic_id();
-        let mut inner = self.0.lock().expect("poisoned");
-        if let Some(handle) = inner.topics.get(&topic_id) {
-            return Some((handle.sender(), stream));
+    /// Its leftovers and whatever was held for it while it quit go to a
+    /// successor if they include a join, and are parked otherwise.
+    fn reap(&mut self, shared: &Arc<Shared>, exit: TopicExit) {
+        let TopicExit {
+            topic_id,
+            mut leftovers,
+        } = exit;
+        trace!(topic=%topic_id.fmt_short(), leftovers = leftovers.len(), "topic actor finished");
+        if let Some(TopicEntry::Quitting(held)) = self.topics.remove(&topic_id) {
+            leftovers.extend(held);
         }
-        if inner.parked_len() >= MAX_PENDING_STREAMS {
-            debug!(topic=%topic_id.fmt_short(), "dropping stream: too many parked");
-        } else {
+        if !leftovers.is_empty() {
+            self.dispatch(shared, topic_id, leftovers);
+        }
+    }
+
+    /// Starts an actor for `msgs` if they include a join, and parks their
+    /// streams otherwise. A stream alone never creates topic state.
+    fn dispatch(&mut self, shared: &Arc<Shared>, topic_id: TopicId, msgs: Vec<TopicMessage>) {
+        debug_assert!(
+            !self.topics.contains_key(&topic_id),
+            "a topic actor started while another was still around"
+        );
+        if msgs
+            .iter()
+            .any(|msg| matches!(msg, TopicMessage::ApiJoin(_)))
+        {
+            let parked = self.parked.remove(&topic_id).unwrap_or_default();
+            let initial = msgs.into_iter().chain(
+                parked
+                    .into_iter()
+                    .map(|(remote, stream)| TopicMessage::RemoteStream { remote, stream }),
+            );
+            let (handle, actor) = TopicHandle::new(topic_id, shared.clone());
+            self.topics.insert(topic_id, TopicEntry::Running(handle));
+            self.tasks.spawn(
+                actor
+                    .run(initial.collect())
+                    .instrument(error_span!("topic", topic=%topic_id.fmt_short())),
+            );
+            return;
+        }
+        for msg in msgs {
+            let TopicMessage::RemoteStream { remote, stream } = msg else {
+                unreachable!("checked above");
+            };
+            if self.parked.values().map(Vec::len).sum::<usize>() >= MAX_PENDING_STREAMS {
+                debug!(topic=%topic_id.fmt_short(), "dropping stream: too many parked");
+                continue;
+            }
             debug!(topic=%topic_id.fmt_short(), "parking stream for an unjoined topic");
-            inner
-                .parked
+            self.parked
                 .entry(topic_id)
                 .or_default()
                 .push((remote, stream));
         }
-        None
     }
 
     /// Number of streams held for topics that are not joined.
     #[cfg(test)]
     fn parked_len(&self) -> usize {
-        self.0.lock().expect("poisoned").parked_len()
+        self.parked.values().map(Vec::len).sum()
     }
 
-    /// Number of topics the map will currently route messages to.
+    /// Number of topics with an entry, running or quitting.
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.0.lock().expect("poisoned").topics.len()
+        self.topics.len()
+    }
+
+    /// Whether the actor for `topic_id` is running and still accepts messages.
+    #[cfg(test)]
+    fn is_running(&self, topic_id: &TopicId) -> bool {
+        matches!(
+            self.topics.get(topic_id),
+            Some(TopicEntry::Running(handle)) if !handle.tx.is_closed()
+        )
     }
 
     /// Whether the actor for `topic_id` has seen a neighbor come up.
-    ///
-    /// Deliberately not built on [`Self::get`]: peeking must not look like a
-    /// pending send and hold the actor open.
     #[cfg(test)]
     fn joined(&self, topic_id: &TopicId) -> Option<bool> {
-        let inner = self.0.lock().expect("poisoned");
-        inner.topics.get(topic_id).map(TopicHandle::joined)
-    }
-
-    async fn join_next(&self) -> TopicId {
-        std::future::poll_fn(|cx| {
-            let mut inner = self.0.lock().expect("poisoned");
-            if inner.tasks.is_empty() {
-                Poll::Pending
-            } else {
-                let res = ready!(inner.tasks.poll_join_next(cx)).expect("task map is not empty");
-                let actor = res.expect("topic actor task panicked");
-                trace!(topic=%actor.topic_id.fmt_short(), "tick: topic actor finished");
-                // The entry was already removed by `try_quit`. Removing it here
-                // too would drop a newer actor that has since taken its place.
-                Poll::Ready(actor.topic_id)
-            }
-        })
-        .await
-    }
-}
-
-/// A [`TopicMap`] reference held by the topic actors it owns.
-///
-/// Weak to break the cycle: the map owns the actor tasks, and each actor needs
-/// the map back in order to stop (see [`TopicMap::try_quit`]).
-#[derive(Debug, Clone)]
-struct WeakTopicMap(std::sync::Weak<Mutex<TopicMapInner>>);
-
-impl WeakTopicMap {
-    /// Removes `topic_id` from the map, so that its actor can stop.
-    ///
-    /// Returns `false` if the actor still has work coming, in which case it has
-    /// to keep running and serve it. Two things count as work coming:
-    ///
-    /// * Something is already queued in `rx`.
-    /// * A [`TopicSender`] is outstanding. They are only handed out under this
-    ///   lock, and are consumed by the `send` that follows, so a caller that has
-    ///   looked the actor up but not sent yet shows up here as an extra sender.
-    ///
-    /// Holding the lock across both checks is what makes the decision final: no
-    /// sender can be handed out in between. A caller therefore either sends to
-    /// an actor that is still running, or finds the entry gone and starts a
-    /// fresh one. There is no third case.
-    ///
-    /// Returns `true` if the map is gone, since then nobody can reach us either.
-    fn try_quit(&self, topic_id: TopicId, rx: &mpsc::Receiver<TopicMessage>) -> bool {
-        let Some(inner) = self.0.upgrade() else {
-            return true;
-        };
-        let mut inner = inner.lock().expect("poisoned");
-        // One sender is the map's own entry, which we are about to drop.
-        if !rx.is_empty() || rx.sender_strong_count() > 1 {
-            return false;
+        match self.topics.get(topic_id)? {
+            TopicEntry::Running(handle) => Some(handle.joined()),
+            TopicEntry::Quitting(_) => None,
         }
-        inner.topics.remove(&topic_id);
-        true
     }
 }
 
@@ -444,6 +424,8 @@ struct Actor {
     shared: Arc<Shared>,
     topics: TopicMap,
     api_rx: mpsc::Receiver<api::RpcMessage>,
+    /// Streams peers opened, from the accept loops.
+    stream_rx: mpsc::Receiver<(EndpointId, RemoteStream)>,
     endpoint_addr_updates: BoxStream<EndpointAddr>,
 }
 
@@ -473,14 +455,13 @@ impl Actor {
 
         let alpn = alpn.unwrap_or_else(|| crate::ALPN.to_vec().into());
 
-        let topics = TopicMap::default();
         let max_message_size = config.max_message_size;
+        let (stream_tx, stream_rx) = mpsc::channel(16);
         let mut options = connection_pool::Options::default().with_on_connected({
-            let topics = topics.clone();
             move |_ep, conn| {
-                let topics = topics.clone();
+                let stream_tx = stream_tx.clone();
                 Box::pin(async move {
-                    task::spawn(accept_loop(topics, conn, max_message_size));
+                    task::spawn(accept_loop(stream_tx, conn, max_message_size));
                     Ok(())
                 })
             }
@@ -506,8 +487,9 @@ impl Actor {
                 endpoint,
                 shared,
                 api_rx,
+                stream_rx,
                 endpoint_addr_updates: Box::pin(endpoint_addr_updates),
-                topics,
+                topics: TopicMap::default(),
             },
         )
     }
@@ -552,8 +534,16 @@ impl Actor {
                     }
                 }
             }
-            topic_id = self.topics.join_next() => {
-                trace!(%topic_id, "topic actor stopped");
+            Some((remote, stream)) = self.stream_rx.recv() => {
+                trace!(remote=%remote.fmt_short(), "tick: remote stream");
+                let topic_id = stream.topic_id();
+                let msg = TopicMessage::RemoteStream { remote, stream };
+                self.topics.send(&self.shared, topic_id, msg).await;
+                ControlFlow::Continue(())
+            }
+            Some(exit) = self.topics.tasks.join_next(), if !self.topics.tasks.is_empty() => {
+                let exit = exit.expect("topic actor task panicked");
+                self.topics.reap(&self.shared, exit);
                 ControlFlow::Continue(())
             }
             else => unreachable!("reached else arm, but all fallible cases should be handled"),
@@ -569,38 +559,32 @@ impl Actor {
         let (topic_id, msg) = match msg {
             api::RpcMessage::Join(msg) => (msg.inner.topic_id, msg),
         };
-        // Holding on to the handle across the send is load-bearing: it is what
-        // stops the actor from quitting underneath us. See
-        // [`WeakTopicMap::try_quit`].
-        let topic = self.topics.get_or_init(topic_id, &self.shared);
-        if topic.send(TopicMessage::ApiJoin(msg)).await.is_err() {
-            warn!(topic=%topic_id.fmt_short(), "Topic actor dead");
-        }
+        self.topics
+            .send(&self.shared, topic_id, TopicMessage::ApiJoin(msg))
+            .await;
     }
 }
 
-async fn accept_loop(topics: TopicMap, conn: ConnectionHandle, max_message_size: usize) {
+/// Accepts the streams a peer opens on `conn` and hands them to the gossip
+/// actor, which routes them to the topic.
+async fn accept_loop(
+    streams: mpsc::Sender<(EndpointId, RemoteStream)>,
+    conn: ConnectionHandle,
+    max_message_size: usize,
+) {
     let remote = conn.remote_id();
     loop {
         let stream = match GossipReceiver::accept(&conn, max_message_size).await {
             Ok(Some(stream)) => Guarded::new(stream, conn.get_ref()),
             _ => break,
         };
-
-        if let Some((topic, stream)) = topics.route_stream(remote, stream) {
-            topic
-                .send(TopicMessage::RemoteStream { remote, stream })
-                .await
-                .ok();
+        if streams.send((remote, stream)).await.is_err() {
+            break;
         }
     }
 }
 
-/// The map's end of a topic actor's inbox.
-///
-/// Not `Clone`: an extra `tx` clone reads as a pending send in
-/// [`WeakTopicMap::try_quit`], so the only way to get one is [`Self::sender`],
-/// which yields a [`TopicSender`] that cannot be stored.
+/// The [`TopicMap`]'s end of a topic actor's inbox.
 #[derive(Debug)]
 struct TopicHandle {
     tx: mpsc::Sender<TopicMessage>,
@@ -609,12 +593,7 @@ struct TopicHandle {
 }
 
 impl TopicHandle {
-    fn new(
-        topic_id: TopicId,
-        shared: Arc<Shared>,
-        topics: WeakTopicMap,
-        parked: Vec<(EndpointId, RemoteStream)>,
-    ) -> (Self, TopicActor) {
+    fn new(topic_id: TopicId, shared: Arc<Shared>) -> (Self, TopicActor) {
         let (tx, rx) = mpsc::channel(16);
         let state = State::new(shared.me, None, shared.config.clone());
         #[cfg(test)]
@@ -623,8 +602,6 @@ impl TopicHandle {
         let (forward_event_tx, _) = broadcast::channel(512);
         let actor = TopicActor {
             topic_id,
-            topics,
-            parked,
             shared,
             state,
             rx,
@@ -652,38 +629,14 @@ impl TopicHandle {
         (handle, actor)
     }
 
-    fn sender(&self) -> TopicSender {
-        TopicSender(self.tx.clone())
-    }
-
     #[cfg(test)]
     fn joined(&self) -> bool {
         self.joined.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
-/// Permission to send one message to a topic actor.
-///
-/// While one of these is alive the actor will not stop, so it is deliberately
-/// neither `Clone` nor storable: [`Self::send`] consumes it, which bounds how
-/// long it can hold the actor open to a single send.
-#[derive(Debug)]
-struct TopicSender(mpsc::Sender<TopicMessage>);
-
-impl TopicSender {
-    async fn send(self, msg: TopicMessage) -> Result<(), TopicActorStoppedError> {
-        self.0.send(msg).await.map_err(|_| TopicActorStoppedError)
-    }
-}
-
 struct TopicActor {
     topic_id: TopicId,
-    topics: WeakTopicMap,
-    /// Streams that arrived for this topic before it was joined.
-    ///
-    /// Registered once the join has been processed, so that they behave exactly
-    /// like a stream arriving a moment later.
-    parked: Vec<(EndpointId, RemoteStream)>,
     shared: Arc<Shared>,
 
     // -- state
@@ -709,8 +662,22 @@ struct TopicActor {
 }
 
 impl TopicActor {
-    pub async fn run(mut self) -> Self {
+    /// Runs the actor until the topic has no subscribers left.
+    ///
+    /// `initial` is handled before anything else. Registering a stream does not
+    /// read from it, so its order relative to the joins does not matter: every
+    /// join in `initial` is processed before the first message is read.
+    ///
+    /// Stops by closing the inbox and draining it until `recv` returns `None`,
+    /// which tokio only does once no permit taken before the close is still
+    /// outstanding. Everything that was sent to the actor is therefore either
+    /// handled or returned in [`TopicExit::leftovers`], and every send after the
+    /// close fails and gives its message back to the [`TopicMap`].
+    async fn run(mut self, initial: Vec<TopicMessage>) -> TopicExit {
         self.shared.metrics.topics_joined.inc();
+        for msg in initial {
+            self.handle_actor_message(msg).await;
+        }
         let peer_data = self.peer_data.clone().stream();
         tokio::pin!(peer_data);
         loop {
@@ -777,23 +744,23 @@ impl TopicActor {
             }
 
             if self.init && self.api_receivers.is_empty() && self.api_send_tasks.is_empty() {
-                // Ask the map to drop us before we stop. It refuses if something
-                // was queued while we were getting here, which is how a `Join`
-                // that raced our shutdown still gets served -- by us, rather than
-                // being dropped on the floor with the caller's irpc channels
-                // inside it.
-                if !self.topics.try_quit(self.topic_id, &self.rx) {
-                    trace!("not closing topic: work arrived while shutting down");
-                    continue;
-                }
-                debug!("Closing topic: All API subscribers dropped");
-                self.handle_in_event(InEvent::Command(Command::Quit)).await;
-                debug!("Topic closed");
+                debug!("closing topic: all subscribers dropped");
                 break;
             }
         }
+
+        self.rx.close();
+        let mut leftovers = Vec::new();
+        while let Some(msg) = self.rx.recv().await {
+            leftovers.push(msg);
+        }
+        self.handle_in_event(InEvent::Command(Command::Quit)).await;
         self.shared.metrics.topics_quit.inc();
-        self
+        debug!(leftovers = leftovers.len(), "topic closed");
+        TopicExit {
+            topic_id: self.topic_id,
+            leftovers,
+        }
     }
 
     #[instrument("connected", skip_all, fields(remote=%remote.fmt_short()))]
@@ -859,12 +826,6 @@ impl TopicActor {
                     inner.bootstrap.into_iter().collect(),
                 )))
                 .await;
-                // Streams a peer opened before we got here. Registered after the
-                // join so they behave like a stream arriving a moment from now.
-                for (remote, stream) in std::mem::take(&mut self.parked) {
-                    debug!(remote=%remote.fmt_short(), "registering parked stream");
-                    self.register_remote_stream(remote, stream);
-                }
             }
         }
     }
@@ -1232,12 +1193,7 @@ pub(crate) mod tests {
 
             let topic_id = TopicId::from([5u8; 32]);
             let shared = actor.shared.clone();
-            let (_handle, topic) = TopicHandle::new(
-                topic_id,
-                shared.clone(),
-                WeakTopicMap(std::sync::Weak::new()),
-                Vec::new(),
-            );
+            let (_handle, topic) = TopicHandle::new(topic_id, shared.clone());
             Ok(Self {
                 topic,
                 topic_id,
@@ -1677,19 +1633,16 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// The topic map must not point at a topic actor that has stopped.
+    /// A join that arrives while the topic's actor is quitting is served by its
+    /// successor, and the successor starts only once the old actor is gone.
     ///
-    /// A topic actor stops as soon as its last subscriber goes away. It used to
-    /// stay reachable through the map until the main actor got round to
-    /// `join_next`, so a join landing in that gap was queued into an inbox
-    /// nobody would ever read again -- taking the caller's irpc channels down
-    /// with it, with no error anywhere.
-    ///
-    /// Stepping the main actor by hand is what makes the gap observable: until
-    /// we step it, nothing reaps the stopped actor.
+    /// The old actor has closed its inbox but not been reaped yet, so the send
+    /// fails and the map holds the join. Calling `handle_api_message` directly,
+    /// rather than stepping the actor, is what orders the join before the reap:
+    /// `select!` would pick either.
     #[tokio::test]
     #[traced_test]
-    async fn topic_map_drops_stopped_actors() -> Result {
+    async fn join_racing_topic_shutdown_is_served() -> Result {
         let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
         let ct = CancellationToken::new();
         let (relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
@@ -1699,29 +1652,63 @@ pub(crate) mod tests {
 
         let topic = gossip.subscribe(topic_id, vec![]).await?;
         actor
-            .until("the topic actor to start", |actor| actor.topics.len() == 1)
-            .await?;
-
-        drop(topic);
-        actor.pause().await;
-        assert_eq!(
-            actor.topics.len(),
-            0,
-            "the map still routes to a stopped topic actor"
-        );
-
-        // A join landing in what used to be the gap is served by a fresh actor.
-        let mut topic = gossip.subscribe(topic_id, vec![]).await?;
-        actor
-            .until("the second join to be served", |actor| {
-                actor.topics.len() == 1
+            .until("the topic actor to start", |actor| {
+                actor.topics.is_running(&topic_id)
             })
             .await?;
-        topic
-            .broadcast(b"ping".to_vec().into())
-            .await
-            .std_context("broadcast on the re-joined topic")?;
 
+        // The only subscriber leaves, and the actor closes its inbox and stops.
+        drop(topic);
+        actor.pause().await;
+        assert!(!actor.topics.is_running(&topic_id));
+        assert_eq!(
+            actor.topics.tasks.len(),
+            1,
+            "the old actor is not reaped yet"
+        );
+
+        let _topic = gossip.subscribe(topic_id, vec![]).await?;
+        let join = actor.api_rx.recv().await.expect("api channel open");
+        actor.handle_api_message(join).await;
+        assert_eq!(
+            actor.topics.tasks.len(),
+            1,
+            "a successor started before the old actor was reaped"
+        );
+
+        actor
+            .until("the held join to start a successor", |actor| {
+                actor.topics.is_running(&topic_id)
+            })
+            .await?;
+        ct.cancel();
+        Ok(())
+    }
+
+    /// A join left in a stopping actor's inbox starts a successor.
+    #[tokio::test]
+    #[traced_test]
+    async fn leftover_join_starts_a_successor() -> Result {
+        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
+        let ct = CancellationToken::new();
+        let (relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+        let (gossip, mut actor, _router) =
+            Gossip::t_new_with_actor(rng, Default::default(), relay_map, &ct).await?;
+        let topic_id = TopicId::from([2u8; 32]);
+
+        let _topic = gossip.subscribe(topic_id, vec![]).await?;
+        let api::RpcMessage::Join(join) = actor.api_rx.recv().await.expect("api channel open");
+        let exit = TopicExit {
+            topic_id,
+            leftovers: vec![TopicMessage::ApiJoin(join)],
+        };
+        let shared = actor.shared.clone();
+        actor.topics.reap(&shared, exit);
+
+        assert!(
+            actor.topics.is_running(&topic_id),
+            "the leftover join was dropped"
+        );
         ct.cancel();
         Ok(())
     }
@@ -1900,7 +1887,7 @@ pub(crate) mod tests {
         let err = anyerr!("connection closed before the join was written");
         f.topic.handle_connected((f.peer_id, Err(err))).await;
 
-        let _topic = AbortOnDropHandle::new(task::spawn(f.topic.run()));
+        let _topic = AbortOnDropHandle::new(task::spawn(f.topic.run(Vec::new())));
         let me = f.me;
         timeout(Duration::from_secs(10), async {
             loop {
