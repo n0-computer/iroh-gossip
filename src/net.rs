@@ -254,10 +254,7 @@ impl Gossip {
 #[allow(clippy::large_enum_variant)]
 enum LocalMessage {
     /// A stream a peer opened, from an accept loop.
-    RemoteStream {
-        remote: EndpointId,
-        stream: RemoteStream,
-    },
+    RemoteStream(RemoteStream),
     /// Leave every topic and stop, then reply. See [`Gossip::shutdown`].
     Shutdown(oneshot::Sender<()>),
 }
@@ -269,10 +266,7 @@ pub struct ActorStoppedError;
 #[derive(Debug, strum::Display)]
 enum TopicMessage {
     ApiJoin(ApiJoinRequest),
-    RemoteStream {
-        remote: EndpointId,
-        stream: RemoteStream,
-    },
+    RemoteStream(RemoteStream),
 }
 
 /// A stream a peer opened to us, holding its connection in use.
@@ -301,7 +295,7 @@ struct TopicMap {
     /// an error. Handed to the topic actor if the topic is ever joined, and
     /// capped by [`MAX_PENDING_STREAMS`] because a peer can ask about topics we
     /// never join.
-    parked: HashMap<TopicId, Vec<(EndpointId, RemoteStream)>>,
+    parked: HashMap<TopicId, Vec<RemoteStream>>,
 }
 
 /// How many streams to hold for topics that are not joined.
@@ -376,11 +370,9 @@ impl TopicMap {
             .any(|msg| matches!(msg, TopicMessage::ApiJoin(_)))
         {
             let parked = self.parked.remove(&topic_id).unwrap_or_default();
-            let initial = msgs.into_iter().chain(
-                parked
-                    .into_iter()
-                    .map(|(remote, stream)| TopicMessage::RemoteStream { remote, stream }),
-            );
+            let initial = msgs
+                .into_iter()
+                .chain(parked.into_iter().map(TopicMessage::RemoteStream));
             let (handle, actor) = TopicHandle::new(topic_id, shared.clone());
             self.topics.insert(topic_id, TopicEntry::Running(handle));
             self.tasks.spawn(
@@ -391,18 +383,15 @@ impl TopicMap {
             return;
         }
         for msg in msgs {
-            let TopicMessage::RemoteStream { remote, stream } = msg else {
-                unreachable!("checked above");
+            let TopicMessage::RemoteStream(stream) = msg else {
+                continue;
             };
             if self.parked.values().map(Vec::len).sum::<usize>() >= MAX_PENDING_STREAMS {
                 debug!(topic=%topic_id.fmt_short(), "dropping stream: too many parked");
                 continue;
             }
             debug!(topic=%topic_id.fmt_short(), "parking stream for an unjoined topic");
-            self.parked
-                .entry(topic_id)
-                .or_default()
-                .push((remote, stream));
+            self.parked.entry(topic_id).or_default().push(stream);
         }
     }
 
@@ -583,10 +572,10 @@ impl Actor {
                 }
             }
             Some(msg) = self.local_rx.recv() => match msg {
-                LocalMessage::RemoteStream { remote, stream } => {
-                    trace!(remote=%remote.fmt_short(), "tick: remote stream");
+                LocalMessage::RemoteStream(stream) => {
+                    trace!("tick: remote stream");
                     let topic_id = stream.topic_id();
-                    let msg = TopicMessage::RemoteStream { remote, stream };
+                    let msg = TopicMessage::RemoteStream(stream);
                     self.topics.send(&self.shared, topic_id, msg).await;
                     ControlFlow::Continue(())
                 }
@@ -627,17 +616,9 @@ async fn accept_loop(
     conn: ConnectionHandle,
     max_message_size: usize,
 ) {
-    let remote = conn.remote_id();
-    loop {
-        let stream = match GossipReceiver::accept(&conn, max_message_size).await {
-            Ok(Some(stream)) => conn.guard(stream),
-            _ => break,
-        };
-        if actor
-            .send(LocalMessage::RemoteStream { remote, stream })
-            .await
-            .is_err()
-        {
+    while let Ok(Some(stream)) = GossipReceiver::accept(&conn, max_message_size).await {
+        let stream = LocalMessage::RemoteStream(conn.guard(stream));
+        if actor.send(stream).await.is_err() {
             break;
         }
     }
@@ -846,9 +827,7 @@ impl TopicActor {
 
     fn handle_actor_message(&mut self, msg: TopicMessage) {
         match msg {
-            TopicMessage::RemoteStream { remote, stream } => {
-                self.register_remote_stream(remote, stream);
-            }
+            TopicMessage::RemoteStream(stream) => self.register_remote_stream(stream),
             TopicMessage::ApiJoin(req) => {
                 let WithChannels { inner, tx, rx, .. } = req;
                 self.subscribers.add(tx, rx, self.neighbors.clone());
@@ -864,7 +843,8 @@ impl TopicActor {
     /// Leaves our sender alone even if it is on a different connection: two
     /// peers need not agree on which connection is current, and each keeps the
     /// other's connection open for as long as it has a stream on it.
-    fn register_remote_stream(&mut self, remote: EndpointId, stream: RemoteStream) {
+    fn register_remote_stream(&mut self, stream: RemoteStream) {
+        let remote = stream.connection().remote_id();
         debug!(remote=%remote.fmt_short(), "remote stream opened");
         self.remote_receivers
             .push(Box::pin(into_stream(stream).map(move |msg| (remote, msg))));
