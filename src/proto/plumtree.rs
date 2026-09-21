@@ -662,7 +662,8 @@ impl<PI: PeerIdentity> State<PI> {
 
     /// Handle a [`InEvent::NeighborUp`] when a peer joins the topic.
     fn on_neighbor_up(&mut self, peer: PI) {
-        self.add_eager(peer);
+        self.lazy_push_peers.remove(&peer);
+        self.eager_push_peers.insert(peer);
     }
 
     /// Handle a [`InEvent::NeighborDown`] when a peer leaves the topic.
@@ -687,16 +688,26 @@ impl<PI: PeerIdentity> State<PI> {
         ));
     }
 
-    /// Moves peer into eager set.
+    /// Moves a neighbor into the eager set.
+    ///
+    /// Peers that are not neighbors are left alone. A `Graft`, `Prune`, or
+    /// `IHave` can still be in flight when the membership layer drops a peer,
+    /// and handling it must not put the peer back: its `NeighborDown` has
+    /// already been handled, so nothing would ever take it out again, and every
+    /// later broadcast would go to a peer outside the active view.
     fn add_eager(&mut self, peer: PI) {
-        self.lazy_push_peers.remove(&peer);
-        self.eager_push_peers.insert(peer);
+        if self.lazy_push_peers.remove(&peer) {
+            self.eager_push_peers.insert(peer);
+        }
     }
 
-    /// Moves peer into lazy set.
+    /// Moves a neighbor into the lazy set.
+    ///
+    /// Peers that are not neighbors are left alone, see [`Self::add_eager`].
     fn add_lazy(&mut self, peer: PI) {
-        self.eager_push_peers.remove(&peer);
-        self.lazy_push_peers.insert(peer);
+        if self.eager_push_peers.remove(&peer) {
+            self.lazy_push_peers.insert(peer);
+        }
     }
 
     /// Immediately sends message to eager peers.
@@ -738,6 +749,87 @@ impl<PI: PeerIdentity> State<PI> {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// Messages from a peer that is no longer a neighbor never make it a
+    /// broadcast peer again.
+    ///
+    /// A payload, `Prune`, `Graft`, or `IHave` can be in flight when the
+    /// membership layer drops a peer. Handling any of them used to put the peer
+    /// back into the eager or lazy set, where it stayed for good because its
+    /// `NeighborDown` had already been handled, and every later broadcast went to
+    /// a peer outside the active view.
+    #[test]
+    fn messages_from_a_former_neighbor_do_not_restore_it() {
+        const CURRENT: u64 = 2;
+        const FORMER: u64 = 3;
+
+        let mut state = State::new(1, Config::default(), 1024);
+        let now = Instant::now();
+        let mut io = VecDeque::new();
+        state.handle(InEvent::NeighborUp(CURRENT), now, &mut io);
+        state.handle(InEvent::NeighborUp(FORMER), now, &mut io);
+        state.handle(InEvent::NeighborDown(FORMER), now, &mut io);
+
+        let content: Bytes = b"hello".to_vec().into();
+        let id = MessageId::from_content(&content);
+        let gossip = Gossip {
+            content,
+            id,
+            scope: DeliveryScope::Swarm(Round(1)),
+        };
+        let unknown = MessageId::from_content(b"not yet received");
+        let late_messages = [
+            // a duplicate payload, which normally demotes the sender to lazy
+            Message::Gossip(gossip.clone()),
+            Message::Prune,
+            // a graft, which normally promotes the sender to eager
+            Message::Graft(Graft {
+                id: Some(id),
+                round: Round(0),
+            }),
+            // an announcement, whose graft timer normally promotes the sender
+            Message::IHave(vec![IHave {
+                id: unknown,
+                round: Round(1),
+            }]),
+        ];
+        state.handle(
+            InEvent::RecvMessage(CURRENT, Message::Gossip(gossip)),
+            now,
+            &mut io,
+        );
+        for message in late_messages {
+            state.handle(InEvent::RecvMessage(FORMER, message), now, &mut io);
+        }
+        io.clear();
+        state.handle(
+            InEvent::TimerExpired(Timer::SendGraft(unknown)),
+            now,
+            &mut io,
+        );
+
+        assert!(
+            !state.eager_push_peers.contains(&FORMER) && !state.lazy_push_peers.contains(&FORMER),
+            "a former neighbor became a broadcast peer again: eager {:?}, lazy {:?}",
+            state.eager_push_peers,
+            state.lazy_push_peers
+        );
+        assert!(state.eager_push_peers.contains(&CURRENT));
+        // The message it announced can still be fetched from it.
+        assert!(
+            io.iter().any(|event| matches!(
+                event,
+                crate::proto::topic::OutEvent::SendMessage(
+                    FORMER,
+                    crate::proto::topic::Message::Gossip(Message::Graft(Graft {
+                        id: Some(requested),
+                        ..
+                    }))
+                ) if *requested == unknown
+            )),
+            "the announced message should still be requested: {io:?}"
+        );
+    }
     #[test]
     fn optimize_tree() {
         let mut io = VecDeque::new();
