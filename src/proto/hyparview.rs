@@ -95,9 +95,11 @@ pub enum Message<PI> {
 #[derive(From, Sub, Eq, PartialEq, Clone, Debug, Copy, Serialize, Deserialize)]
 pub struct Ttl(pub u16);
 impl Ttl {
+    /// Returns `true` once the message may not be forwarded any further.
     pub fn expired(&self) -> bool {
         *self == Ttl(0)
     }
+    /// Returns the `Ttl` to forward a message with, one hop lower.
     pub fn next(&self) -> Ttl {
         Ttl(self.0.saturating_sub(1))
     }

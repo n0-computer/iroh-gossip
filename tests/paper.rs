@@ -961,6 +961,51 @@ fn plumtree_graft_timeout_below_link_latency_costs_redundancy() {
 }
 
 // ---------------------------------------------------------------------------
+// Configuration reach
+// ---------------------------------------------------------------------------
+
+/// Every protocol parameter is settable from outside the crate.
+///
+/// `optimization_threshold` and the three random walk lengths used to be
+/// unreachable: their types live in private modules, so nothing downstream
+/// could name them. `optimization_threshold` in particular sets how large a
+/// depth gap the broadcast tree is allowed to keep, which is half of the same
+/// decision as the graft timeout.
+#[test]
+fn every_tuning_knob_is_reachable() {
+    use iroh_gossip::proto::{Round, Ttl};
+
+    let mut config = Config::default();
+
+    config.membership.active_view_capacity = 6;
+    config.membership.active_view_min = 2;
+    config.membership.passive_view_capacity = 40;
+    config.membership.active_random_walk_length = Ttl(5);
+    config.membership.passive_random_walk_length = Ttl(2);
+    config.membership.shuffle_random_walk_length = Ttl(5);
+    config.membership.shuffle_active_view_count = 2;
+    config.membership.shuffle_passive_view_count = 3;
+    config.membership.shuffle_interval = Duration::from_secs(30);
+    config.membership.initial_shuffle_interval = Duration::from_secs(2);
+    config.membership.maintenance_interval = Duration::from_secs(10);
+    config.membership.neighbor_request_timeout = Duration::from_secs(1);
+
+    config.broadcast.graft_timeout_1 = Duration::from_millis(300);
+    config.broadcast.graft_timeout_2 = Duration::from_millis(100);
+    config.broadcast.dispatch_timeout = Duration::from_millis(10);
+    config.broadcast.optimization_threshold = Round::from(3u16);
+    config.broadcast.message_cache_retention = Duration::from_secs(60);
+    config.broadcast.message_id_retention = Duration::from_secs(120);
+    config.broadcast.cache_evict_interval = Duration::from_secs(2);
+
+    config.max_message_size = 8192;
+
+    // The swarm has to still work with all of it applied.
+    let mut sim = swarm_with(PEERS, 0, config);
+    assert_eq!(broadcast(&mut sim).missed, 0.0);
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
