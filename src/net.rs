@@ -776,19 +776,11 @@ impl TopicActor {
             trace!(remote=%remote.fmt_short(), ?exit, "replaced sender ended");
             return;
         }
-        let remote_id = remote.fmt_short();
         match exit {
-            SenderExit::DialFailed(err) => {
-                debug!(remote=%remote_id, ?err, "dial failed, drop peer")
+            SenderExit::Failed(err) => {
+                debug!(remote=%remote.fmt_short(), ?err, "sender failed, drop peer")
             }
-            SenderExit::WriteFailed(err) => {
-                debug!(remote=%remote_id, ?err, "write failed, drop peer")
-            }
-            SenderExit::Stopped => debug!(remote=%remote_id, "peer stopped reading, drop peer"),
-            // Only reachable once the queue is closed, which the current sender's is not.
-            SenderExit::Finished | SenderExit::DrainTimedOut => {
-                debug!(remote=%remote_id, ?exit, "sender ended, drop peer")
-            }
+            exit => debug!(remote=%remote.fmt_short(), ?exit, "sender ended, drop peer"),
         }
         self.drop_peers_queue.insert(remote);
     }
@@ -1111,10 +1103,8 @@ impl Subscribers {
 enum SenderExit {
     /// Its queue was closed and everything in it was written.
     Finished,
-    /// It could not reach the peer.
-    DialFailed(n0_error::AnyError),
-    /// Writing failed.
-    WriteFailed(n0_error::AnyError),
+    /// Dialing the peer or writing to it failed.
+    Failed(n0_error::AnyError),
     /// The peer stopped reading the stream, or the connection was lost.
     Stopped,
     /// It was still writing when its `DRAIN_TIMEOUT` ran out.
@@ -1153,7 +1143,7 @@ async fn deliver(
 ) -> SenderExit {
     let mut sender = match connect(shared, remote, topic).await {
         Ok(sender) => sender,
-        Err(err) => return SenderExit::DialFailed(err),
+        Err(err) => return SenderExit::Failed(err),
     };
     let mut stopped = Box::pin(sender.closed());
     loop {
@@ -1172,12 +1162,12 @@ async fn deliver(
             debug!("sender on a superseded connection, moving");
             sender = match connect(shared, remote, topic).await {
                 Ok(sender) => sender,
-                Err(err) => return SenderExit::DialFailed(err),
+                Err(err) => return SenderExit::Failed(err),
             };
             stopped = Box::pin(sender.closed());
         }
         if let Err(err) = sender.send(&message).await {
-            return SenderExit::WriteFailed(err);
+            return SenderExit::Failed(err);
         }
     }
 }
@@ -2024,7 +2014,7 @@ pub(crate) mod tests {
         f.topic.senders.tasks.abort_all();
         let err = anyerr!("connection closed before the join was written");
         f.topic
-            .handle_sender_exit(f.peer_id, id, SenderExit::DialFailed(err));
+            .handle_sender_exit(f.peer_id, id, SenderExit::Failed(err));
         assert_eq!(f.sender_id(), None, "the failed task was kept");
 
         // The next event lets the actor tell the protocol, which retries the join
@@ -2100,7 +2090,7 @@ pub(crate) mod tests {
 
         let err = anyerr!("an older dial failed");
         f.topic
-            .handle_sender_exit(f.peer_id, first, SenderExit::DialFailed(err));
+            .handle_sender_exit(f.peer_id, first, SenderExit::Failed(err));
         assert_eq!(
             f.sender_id(),
             Some(second),
