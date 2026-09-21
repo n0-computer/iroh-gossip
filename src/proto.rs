@@ -135,9 +135,59 @@ mod test {
 
     use super::{Command, Config, Event};
     use crate::proto::{
-        sim::{LatencyConfig, Network, NetworkConfig},
+        sim::{BootstrapMode, LatencyConfig, Network, NetworkConfig, Simulator, SimulatorConfig},
         Scope, TopicId,
     };
+
+    /// The graft timeout is learned from the running swarm, not just configured.
+    ///
+    /// The estimator itself is covered by unit tests and its effect on
+    /// redundancy by `tests/paper.rs`. This covers the wiring between them: on
+    /// links slow enough that the configured floor cannot possibly span the
+    /// tree, peers should end up holding timeouts well above that floor.
+    #[test]
+    fn graft_timeout_is_learned_from_the_network() {
+        use std::time::Duration;
+
+        const TOPIC: TopicId = TopicId::from_bytes([0u8; 32]);
+        /// One-way latency of every link, far above the configured floor.
+        const LATENCY: Duration = Duration::from_millis(50);
+
+        let mut sim = Simulator::new(
+            SimulatorConfig {
+                rng_seed: 0,
+                peers: 200,
+                ..Default::default()
+            },
+            NetworkConfig {
+                proto: Config::default(),
+                latency: LatencyConfig::Static(LATENCY),
+            },
+        );
+        sim.bootstrap(BootstrapMode::default());
+        let sender = sim.random_peer();
+        for round in 0..20 {
+            let message = format!("m{round}").into_bytes().into();
+            sim.gossip_round(vec![(sender, message)]);
+        }
+
+        // Only peers that were told about a message before it reached them have
+        // anything to learn from. The rest never arm the timer and stay at the
+        // floor, which is correct.
+        let floor = Config::default().broadcast.graft_timeout_min;
+        let learned = sim
+            .network
+            .peer_states()
+            .filter_map(|state| state.state(&TOPIC))
+            .map(|state| state.gossip.graft_timeout.timeout())
+            .filter(|timeout| *timeout > floor * 2)
+            .count();
+        assert!(
+            learned >= 5,
+            "only {learned} peers raised their graft timeout above {:?} on {LATENCY:?} links",
+            floor * 2
+        );
+    }
 
     #[test]
     #[traced_test]
