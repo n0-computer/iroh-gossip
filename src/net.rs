@@ -658,27 +658,21 @@ impl TopicHandle {
         #[cfg(test)]
         let joined = Arc::new(AtomicBool::new(false));
         let peer_data = Box::pin(shared.our_peer_data.watch().stream());
-        let (forward_event_tx, _) = broadcast::channel(512);
         let actor = TopicActor {
             topic_id,
             shared,
             state,
             rx,
             peer_data,
-            api_send_tx: forward_event_tx,
-            init: false,
             #[cfg(test)]
             joined: joined.clone(),
             timers: Default::default(),
             neighbors: Default::default(),
             out_events: Default::default(),
-            api_receivers: Default::default(),
-            remote_senders: Default::default(),
+            subscribers: Subscribers::default(),
+            senders: Default::default(),
             remote_receivers: Default::default(),
             drop_peers_queue: Default::default(),
-            api_send_tasks: Default::default(),
-            send_tasks: Default::default(),
-            next_sender_id: 0,
         };
         let handle = Self {
             tx,
@@ -703,7 +697,6 @@ struct TopicActor {
     timers: Timers<Timer>,
     neighbors: BTreeSet<EndpointId>,
     out_events: VecDeque<OutEvent>,
-    init: bool,
     drop_peers_queue: HashSet<EndpointId>,
     #[cfg(test)]
     joined: Arc<AtomicBool>,
@@ -711,13 +704,9 @@ struct TopicActor {
     // -- senders and receivers
     peer_data: BoxStream<PeerData>,
     rx: mpsc::Receiver<TopicMessage>,
-    remote_senders: HashMap<EndpointId, PeerSender>,
+    subscribers: Subscribers,
+    senders: PeerSenders,
     remote_receivers: MergeUnbounded<RemoteRecvStream>,
-    api_receivers: MergeUnbounded<ApiRecvStream>,
-    api_send_tx: broadcast::Sender<ProtoEvent>,
-    api_send_tasks: JoinSet<()>,
-    send_tasks: JoinSet<(EndpointId, SenderId, SenderExit)>,
-    next_sender_id: u64,
 }
 
 impl TopicActor {
@@ -754,13 +743,10 @@ impl TopicActor {
                     return ControlFlow::Break(());
                 }
             },
-            Some(message) = self.api_receivers.next(), if !self.api_receivers.is_empty() => {
-                match message {
-                    Ok(message) => {
-                        trace!("tick: api message {message}");
-                        self.handle_in_event(InEvent::Command(message.into()));
-                    }
-                    Err(err) => trace!("tick: api receiver closed {err:#}"),
+            command = self.subscribers.next() => {
+                if let Some(command) = command {
+                    trace!("tick: api message {command}");
+                    self.handle_in_event(InEvent::Command(command.into()));
                 }
             }
             Some((remote, message)) = self.remote_receivers.next(), if !self.remote_receivers.is_empty() => {
@@ -778,13 +764,8 @@ impl TopicActor {
                     self.handle_in_event(InEvent::TimerExpired(timer));
                 }
             }
-            _ = self.api_send_tasks.join_next(), if !self.api_send_tasks.is_empty() => {
-                trace!(remaining=self.api_send_tasks.len(), "tick: api sender finished");
-            }
-            Some(res) = self.send_tasks.join_next(), if !self.send_tasks.is_empty() => {
-                if let Some((remote, id, exit)) = join_result(res) {
-                    self.handle_sender_exit(remote, id, exit);
-                }
+            (remote, id, exit) = self.senders.next_exit() => {
+                self.handle_sender_exit(remote, id, exit);
             }
             else => return ControlFlow::Break(()),
         }
@@ -799,7 +780,7 @@ impl TopicActor {
             self.process_out_events(now);
         }
 
-        if self.init && self.api_receivers.is_empty() && self.api_send_tasks.is_empty() {
+        if self.subscribers.is_empty() {
             debug!("closing topic: all subscribers dropped");
             return ControlFlow::Break(());
         }
@@ -822,10 +803,7 @@ impl TopicActor {
             leftovers.push(msg);
         }
         self.handle_in_event(InEvent::Command(Command::Quit));
-        self.remote_senders.clear();
-        while let Some(res) = self.send_tasks.join_next().await {
-            join_result(res);
-        }
+        self.senders.drain().await;
         self.shared.metrics.topics_quit.inc();
         debug!(leftovers = leftovers.len(), "topic closed");
         TopicExit {
@@ -845,7 +823,7 @@ impl TopicActor {
     /// disconnect, so that whatever the protocol sends in response -- a retried
     /// join, say -- starts a fresh task rather than queueing behind a dead one.
     fn handle_sender_exit(&mut self, remote: EndpointId, id: SenderId, exit: SenderExit) {
-        if !matches!(self.remote_senders.get(&remote), Some(sender) if sender.id == id) {
+        if !self.senders.remove_if_current(remote, id) {
             trace!(remote=%remote.fmt_short(), ?exit, "replaced sender ended");
             return;
         }
@@ -863,7 +841,6 @@ impl TopicActor {
                 debug!(remote=%remote_id, ?exit, "sender ended, drop peer")
             }
         }
-        self.remote_senders.remove(&remote);
         self.drop_peers_queue.insert(remote);
     }
 
@@ -873,14 +850,8 @@ impl TopicActor {
                 self.register_remote_stream(remote, stream);
             }
             TopicMessage::ApiJoin(req) => {
-                self.init = true;
                 let WithChannels { inner, tx, rx, .. } = req;
-                let initial_neighbors = self.neighbors.clone().into_iter();
-                self.api_send_tasks.spawn(
-                    forward_events(tx, self.api_send_tx.subscribe(), initial_neighbors)
-                        .instrument(tracing::Span::current()),
-                );
-                self.api_receivers.push(Box::pin(into_stream2(rx)));
+                self.subscribers.add(tx, rx, self.neighbors.clone());
                 self.handle_in_event(InEvent::Command(Command::Join(
                     inner.bootstrap.into_iter().collect(),
                 )));
@@ -928,7 +899,14 @@ impl TopicActor {
             trace!("out_event {event:?}");
             self.shared.metrics.track_out_event(&event);
             match event {
-                OutEvent::SendMessage(endpoint_id, message) => self.send(endpoint_id, message),
+                OutEvent::SendMessage(remote, message) => {
+                    if !self
+                        .senders
+                        .send(&self.shared, self.topic_id, remote, message)
+                    {
+                        self.drop_peers_queue.insert(remote);
+                    }
+                }
                 OutEvent::EmitEvent(event) => {
                     self.handle_event(event);
                 }
@@ -937,52 +915,13 @@ impl TopicActor {
                 }
                 // Dropping the sender lets its task write what is still queued,
                 // such as the protocol's `Disconnect`, within `DRAIN_TIMEOUT`.
-                OutEvent::DisconnectPeer(endpoint_id) => {
-                    self.remote_senders.remove(&endpoint_id);
-                }
+                OutEvent::DisconnectPeer(endpoint_id) => self.senders.remove(&endpoint_id),
                 OutEvent::PeerData(endpoint_id, peer_data) => {
                     self.shared
                         .address_lookup
                         .add_peer_data(endpoint_id, peer_data);
                 }
             }
-        }
-    }
-
-    /// Queues `message` for `remote`, starting its send task if there is none.
-    ///
-    /// Never waits: a peer that has let its queue fill up is not keeping up, and
-    /// is dropped like one that failed. Waiting for it instead would stall the
-    /// whole topic, and through the gossip actor's sends to this topic, every
-    /// other topic too.
-    fn send(&mut self, remote: EndpointId, message: ProtoMessage) {
-        let sender = self.remote_senders.entry(remote).or_insert_with(|| {
-            let id = SenderId(self.next_sender_id);
-            self.next_sender_id += 1;
-            let (queue, rx) = mpsc::channel(SEND_QUEUE_CAP);
-            let (closing, closed) = oneshot::channel();
-            self.send_tasks.spawn(
-                run_sender(self.shared.clone(), remote, self.topic_id, id, rx, closed)
-                    .instrument(error_span!("send", remote=%remote.fmt_short())),
-            );
-            PeerSender {
-                id,
-                queue,
-                _closing: closing,
-            }
-        });
-        if let Err(err) = sender.queue.try_send(message) {
-            match err {
-                mpsc::error::TrySendError::Full(_) => {
-                    warn!(remote=%remote.fmt_short(), "peer is not keeping up, dropping it")
-                }
-                // The task ended and its exit is on the way; handle it now.
-                mpsc::error::TrySendError::Closed(_) => {
-                    debug!(remote=%remote.fmt_short(), "send task ended, dropping peer")
-                }
-            }
-            self.remote_senders.remove(&remote);
-            self.drop_peers_queue.insert(remote);
         }
     }
 
@@ -999,7 +938,7 @@ impl TopicActor {
             }
             ProtoEvent::Received(_) => {}
         }
-        self.api_send_tx.send(event).ok();
+        self.subscribers.emit(event);
     }
 }
 
@@ -1071,6 +1010,153 @@ struct PeerSender {
     queue: mpsc::Sender<ProtoMessage>,
     /// Dropped with the handle, which tells the task to wrap up.
     _closing: oneshot::Sender<()>,
+}
+
+/// A topic actor's send tasks, one per peer it currently sends to.
+#[derive(Debug, Default)]
+struct PeerSenders {
+    current: HashMap<EndpointId, PeerSender>,
+    tasks: JoinSet<(EndpointId, SenderId, SenderExit)>,
+    next_id: u64,
+}
+
+impl PeerSenders {
+    /// Queues `message` for `remote`, starting its send task if there is none.
+    ///
+    /// Never waits, since waiting on one slow peer would stall the whole topic,
+    /// and through the gossip actor's sends to it, every other topic too.
+    /// Returns `false`, and forgets the sender, if the peer has let its queue
+    /// fill up or its task has ended; the peer then counts as disconnected.
+    fn send(
+        &mut self,
+        shared: &Arc<Shared>,
+        topic: TopicId,
+        remote: EndpointId,
+        message: ProtoMessage,
+    ) -> bool {
+        let sender = self.current.entry(remote).or_insert_with(|| {
+            let id = SenderId(self.next_id);
+            self.next_id += 1;
+            let (queue, rx) = mpsc::channel(SEND_QUEUE_CAP);
+            let (closing, closed) = oneshot::channel();
+            self.tasks.spawn(
+                run_sender(shared.clone(), remote, topic, id, rx, closed)
+                    .instrument(error_span!("send", remote=%remote.fmt_short())),
+            );
+            PeerSender {
+                id,
+                queue,
+                _closing: closing,
+            }
+        });
+        let Err(err) = sender.queue.try_send(message) else {
+            return true;
+        };
+        match err {
+            mpsc::error::TrySendError::Full(_) => {
+                warn!(remote=%remote.fmt_short(), "peer is not keeping up, dropping it")
+            }
+            // The task ended and its exit is on the way; act on it now.
+            mpsc::error::TrySendError::Closed(_) => {
+                debug!(remote=%remote.fmt_short(), "send task ended, dropping peer")
+            }
+        }
+        self.current.remove(&remote);
+        false
+    }
+
+    /// Lets go of `remote`'s send task, which delivers what is still queued
+    /// within `DRAIN_TIMEOUT`.
+    fn remove(&mut self, remote: &EndpointId) {
+        self.current.remove(remote);
+    }
+
+    /// Lets go of `remote`'s send task if `id` is the current one, and returns
+    /// whether it was.
+    fn remove_if_current(&mut self, remote: EndpointId, id: SenderId) -> bool {
+        let current = matches!(self.current.get(&remote), Some(sender) if sender.id == id);
+        if current {
+            self.current.remove(&remote);
+        }
+        current
+    }
+
+    /// Waits for a send task to end. Pending while there are none.
+    async fn next_exit(&mut self) -> (EndpointId, SenderId, SenderExit) {
+        loop {
+            match self.tasks.join_next().await {
+                Some(res) => {
+                    if let Some(exit) = join_result(res) {
+                        return exit;
+                    }
+                }
+                None => std::future::pending().await,
+            }
+        }
+    }
+
+    /// Lets go of every send task and waits for them to deliver what is queued.
+    async fn drain(&mut self) {
+        self.current.clear();
+        while let Some(res) = self.tasks.join_next().await {
+            join_result(res);
+        }
+    }
+}
+
+/// The local subscribers of a topic.
+struct Subscribers {
+    /// Commands from every subscriber.
+    commands: MergeUnbounded<ApiRecvStream>,
+    /// Events for every subscriber, each forwarded by its own task.
+    events: broadcast::Sender<ProtoEvent>,
+    forwarders: JoinSet<()>,
+}
+
+impl Default for Subscribers {
+    fn default() -> Self {
+        Self {
+            commands: Default::default(),
+            events: broadcast::channel(512).0,
+            forwarders: Default::default(),
+        }
+    }
+}
+
+impl Subscribers {
+    /// Adds a subscriber, telling it about the neighbors we already have.
+    fn add(
+        &mut self,
+        events: channel::mpsc::Sender<api::Event>,
+        commands: channel::mpsc::Receiver<api::Command>,
+        neighbors: BTreeSet<EndpointId>,
+    ) {
+        self.forwarders.spawn(
+            forward_events(events, self.events.subscribe(), neighbors.into_iter())
+                .instrument(tracing::Span::current()),
+        );
+        self.commands.push(Box::pin(into_stream2(commands)));
+    }
+
+    fn is_empty(&self) -> bool {
+        self.commands.is_empty() && self.forwarders.is_empty()
+    }
+
+    fn emit(&self, event: ProtoEvent) {
+        self.events.send(event).ok();
+    }
+
+    /// Waits for a command from a subscriber.
+    ///
+    /// Resolves to `None` when a subscriber went away instead, so the caller can
+    /// check whether any are left. Pending while there are none.
+    async fn next(&mut self) -> Option<api::Command> {
+        tokio::select! {
+            Some(command) = self.commands.next(), if !self.commands.is_empty() => command.ok(),
+            _ = self.forwarders.join_next(), if !self.forwarders.is_empty() => None,
+            else => std::future::pending().await,
+        }
+    }
 }
 
 /// Why a peer's send task ended.
@@ -1329,7 +1415,7 @@ pub(crate) mod tests {
 
         /// The id of the peer's current send task, if there is one.
         fn sender_id(&self) -> Option<SenderId> {
-            self.topic.remote_senders.get(&self.peer_id).map(|s| s.id)
+            self.topic.senders.current.get(&self.peer_id).map(|s| s.id)
         }
 
         /// Sends the protocol's join to the peer, which starts a send task.
@@ -2005,13 +2091,16 @@ pub(crate) mod tests {
         f.join_peer();
         // Fail the dial the way a connection closing under the join would.
         let id = f.sender_id().expect("a send task started");
-        f.topic.send_tasks.abort_all();
+        f.topic.senders.tasks.abort_all();
         let err = anyerr!("connection closed before the join was written");
         f.topic
             .handle_sender_exit(f.peer_id, id, SenderExit::DialFailed(err));
         assert_eq!(f.sender_id(), None, "the failed task was kept");
 
-        let _topic = AbortOnDropHandle::new(task::spawn(f.topic.run(Vec::new())));
+        // The next event lets the actor tell the protocol, which retries the join
+        // on a fresh send task. Which event comes first does not matter, and nor
+        // does the `Break` it returns for an actor without subscribers.
+        let _ = f.topic.tick().await;
         let me = f.me;
         timeout(Duration::from_secs(10), async {
             loop {
@@ -2043,16 +2132,17 @@ pub(crate) mod tests {
         f.join_peer();
         let first = f.sender_id().expect("a send task started");
         // The protocol drops the peer, and later talks to it again.
-        f.topic.remote_senders.remove(&f.peer_id);
+        f.topic.senders.current.remove(&f.peer_id);
         f.join_peer();
         let second = f.sender_id().expect("a send task started");
         assert_ne!(first, second);
 
-        let (remote, id, exit) = timeout(Duration::from_secs(10), f.topic.send_tasks.join_next())
-            .await
-            .std_context("the dropped task never ended")?
-            .and_then(join_result)
-            .expect("a send task ended");
+        let (remote, id, exit) =
+            timeout(Duration::from_secs(10), f.topic.senders.tasks.join_next())
+                .await
+                .std_context("the dropped task never ended")?
+                .and_then(join_result)
+                .expect("a send task ended");
         assert_eq!(id, first, "the replacement ended first: {exit:?}");
         f.topic.handle_sender_exit(remote, id, exit);
         assert_eq!(
@@ -2074,7 +2164,7 @@ pub(crate) mod tests {
 
         f.join_peer();
         let first = f.sender_id().expect("a send task started");
-        f.topic.remote_senders.remove(&f.peer_id);
+        f.topic.senders.current.remove(&f.peer_id);
         f.join_peer();
         let second = f.sender_id().expect("a send task started");
 
@@ -2100,8 +2190,8 @@ pub(crate) mod tests {
         let mut f = DialFixture::new(relay_map, &ct).await?;
 
         f.join_peer();
-        f.topic.remote_senders.remove(&f.peer_id);
-        let (_, _, exit) = timeout(DRAIN_TIMEOUT * 2, f.topic.send_tasks.join_next())
+        f.topic.senders.current.remove(&f.peer_id);
+        let (_, _, exit) = timeout(DRAIN_TIMEOUT * 2, f.topic.senders.tasks.join_next())
             .await
             .std_context("the dropped task never ended")?
             .and_then(join_result)
@@ -2169,7 +2259,7 @@ pub(crate) mod tests {
             queue,
             _closing: closing,
         };
-        f.topic.remote_senders.insert(f.peer_id, stuck);
+        f.topic.senders.current.insert(f.peer_id, stuck);
 
         // Every join sends the peer one message; one more than fits.
         for _ in 0..=SEND_QUEUE_CAP {
