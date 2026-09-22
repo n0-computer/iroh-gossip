@@ -26,7 +26,7 @@ missing_debug_implementations = "warn"
 # require a feature enabled when using `--cfg docsrs` which we can not
 # do.  To enable for a crate set `#![cfg_attr(iroh_docsrs,
 # feature(doc_cfg))]` in the crate.
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(iroh_docsrs)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(iroh_docsrs)", "cfg(iroh_skip_netsim)"] }
 
 [lints.clippy]
 unused-async = "warn"
@@ -110,6 +110,13 @@ url = "2.4.0"
 serde-byte-array = "0.1.2"
 rand = { version = "0.10", features = ["chacha"] }
 
+# patchbay netsim test dependencies (linux only)
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+ctor = "1"
+iroh-relay = { version = "1", default-features = false, features = ["test-utils", "server"] }
+patchbay = "0.7"
+testdir = "0.9"
+
 [features]
 default = ["net", "metrics"]
 net = [
@@ -146,6 +153,11 @@ name = "sim"
 path = "tests/sim.rs"
 required-features = ["test-utils"]
 
+[[test]]
+name = "patchbay"
+path = "tests/patchbay.rs"
+required-features = ["net"]
+
 [[bin]]
 name = "sim"
 required-features = ["simulator"]
@@ -167,4 +179,3 @@ debug = true
 
 [profile.release]
 debug = true
-
