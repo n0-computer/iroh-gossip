@@ -1,7 +1,7 @@
 //! Simulation framework for testing the protocol implementation
 
 use std::{
-    collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque},
+    collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, VecDeque},
     fmt,
     str::FromStr,
 };
@@ -116,7 +116,7 @@ pub struct Network<PI, R> {
     /// apart from messages that open a new one.
     closed_at: BTreeMap<ConnId<PI>, Instant>,
     events: VecDeque<(PI, TopicId, Event<PI>)>,
-    latencies: BTreeMap<ConnId<PI>, Duration>,
+    latencies: HashMap<ConnId<PI>, Duration>,
     rng: R,
     config: NetworkConfig,
     queue: TimedEventQueue<PI>,
@@ -136,7 +136,7 @@ impl<PI, R> Network<PI, R> {
             conns: Default::default(),
             closed_at: Default::default(),
             events: Default::default(),
-            latencies: BTreeMap::new(),
+            latencies: HashMap::new(),
             rng,
         }
     }
@@ -240,7 +240,7 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
 
     /// Returns the time elapsed since starting the network, formatted as seconds with limited decimals.
     pub fn elapsed_fmt(&self) -> String {
-        format!("{:>2.4}s", self.elapsed().as_secs_f32())
+        Secs(self.elapsed()).to_string()
     }
 
     /// Runs the simulation for `n` times the maximum latency between peers.
@@ -306,7 +306,7 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
         };
         assert!(time >= self.time);
         self.time = time;
-        let span = debug_span!("tick", %peer, tick = %self.tick, t = %self.elapsed_fmt());
+        let span = debug_span!("tick", %peer, tick = %self.tick, t = %Secs(self.elapsed()));
         let _guard = span.enter();
         debug!("~~ TICK ");
 
@@ -549,7 +549,7 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
 
 fn latency_between<PI: PeerIdentity + Ord + PartialOrd, R: Rng>(
     latency_config: &LatencyConfig,
-    latencies: &mut BTreeMap<ConnId<PI>, Duration>,
+    latencies: &mut HashMap<ConnId<PI>, Duration>,
     a: &PI,
     b: &PI,
     rng: &mut R,
@@ -1231,6 +1231,18 @@ impl Simulator {
 fn add_one(map: &mut BTreeMap<usize, usize>, key: usize) {
     let entry = map.entry(key).or_default();
     *entry += 1;
+}
+
+/// Formats a duration as seconds with limited decimals.
+///
+/// Formatting happens only when the value is written, so a disabled tracing
+/// span that holds one costs nothing. The simulator opens a span per event.
+struct Secs(Duration);
+
+impl fmt::Display for Secs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:>2.4}s", self.0.as_secs_f32())
+    }
 }
 
 /// Helper struct for active connections. A sorted tuple.
