@@ -214,7 +214,7 @@ impl Gossip {
     }
 
     /// Creates the gossip actor and spawns it.
-    #[tracing::instrument("gossip", parent=None, skip_all, fields(me=%endpoint.id().fmt_short()))]
+    #[tracing::instrument("gossip", parent = None, skip_all, fields(me = %endpoint.id().fmt_short()))]
     fn new(endpoint: Endpoint, builder: Builder) -> Self {
         let (mut inner, actor) = GossipActor::new(endpoint, builder);
         let actor_task = task::spawn(actor.run().instrument(tracing::Span::current()));
@@ -237,7 +237,7 @@ impl Gossip {
 #[allow(clippy::large_enum_variant)]
 enum LocalMessage {
     /// A stream a peer opened, from an accept loop.
-    RemoteStream(RemoteStream),
+    InboundStream(InboundStream),
     /// Asks the actor to leave every topic, stop, and then reply.
     ///
     /// See [`Gossip::shutdown`].
@@ -254,18 +254,18 @@ enum TopicMessage {
     /// A local subscription to the topic.
     Subscribe(ApiJoinRequest),
     /// A stream a peer opened for the topic.
-    RemoteStream(RemoteStream),
+    InboundStream(InboundStream),
 }
 
 /// A stream a peer opened to us, which keeps its connection in use.
 ///
 /// The peer may keep sending on a connection we have superseded, so the stream,
 /// not our choice of connection, decides how long the connection stays open.
-type RemoteStream = Guarded<GossipReceiver>;
+type InboundStream = Guarded<GossipReceiver>;
 
 type ApiJoinRequest = WithChannels<api::JoinRequest, api::Request>;
 type SubscriberCommands = BoxStream<api::Command>;
-type RemoteMessages = BoxStream<(EndpointId, n0_error::Result<ProtoMessage>)>;
+type InboundMessages = BoxStream<(EndpointId, n0_error::Result<ProtoMessage>)>;
 
 /// The topic actors and the messages waiting for one.
 ///
@@ -283,7 +283,7 @@ struct Topics {
     /// an error. The streams go to the topic actor if the topic is ever joined.
     /// They are capped by [`MAX_PARKED_STREAMS`], because a peer can ask about
     /// topics we never join.
-    parked: HashMap<TopicId, Vec<RemoteStream>>,
+    parked: HashMap<TopicId, Vec<InboundStream>>,
 }
 
 /// The number of streams held for topics that are not joined, at most.
@@ -321,7 +321,7 @@ impl Topics {
         match self.entries.get_mut(&topic_id) {
             Some(TopicEntry::Running(handle)) => {
                 if let Err(mpsc::error::SendError(msg)) = handle.tx.send(msg).await {
-                    debug!(topic=%topic_id.fmt_short(), "topic actor is quitting, holding message");
+                    debug!(topic = %topic_id.fmt_short(), "topic actor is quitting, holding message");
                     self.entries
                         .insert(topic_id, TopicEntry::Quitting(vec![msg]));
                 }
@@ -340,7 +340,7 @@ impl Topics {
             topic_id,
             mut leftovers,
         } = exit;
-        trace!(topic=%topic_id.fmt_short(), leftovers = leftovers.len(), "topic actor finished");
+        trace!(topic = %topic_id.fmt_short(), leftovers = leftovers.len(), "topic actor finished");
         if let Some(TopicEntry::Quitting(held)) = self.entries.remove(&topic_id) {
             leftovers.extend(held);
         }
@@ -365,20 +365,20 @@ impl Topics {
             let parked = self.parked.remove(&topic_id).unwrap_or_default();
             let initial = msgs
                 .into_iter()
-                .chain(parked.into_iter().map(TopicMessage::RemoteStream));
+                .chain(parked.into_iter().map(TopicMessage::InboundStream));
             let handle = TopicActor::spawn(topic_id, shared, initial.collect(), &mut self.tasks);
             self.entries.insert(topic_id, TopicEntry::Running(handle));
             return;
         }
         for msg in msgs {
-            let TopicMessage::RemoteStream(stream) = msg else {
+            let TopicMessage::InboundStream(stream) = msg else {
                 continue;
             };
             if self.parked.values().map(Vec::len).sum::<usize>() >= MAX_PARKED_STREAMS {
-                debug!(topic=%topic_id.fmt_short(), "dropping stream: too many parked");
+                debug!(topic = %topic_id.fmt_short(), "dropping stream: too many parked");
                 continue;
             }
-            debug!(topic=%topic_id.fmt_short(), "parking stream for an unjoined topic");
+            debug!(topic = %topic_id.fmt_short(), "parking stream for an unjoined topic");
             self.parked.entry(topic_id).or_default().push(stream);
         }
     }
@@ -519,7 +519,7 @@ impl GossipActor {
     }
 
     #[cfg(test)]
-    #[tracing::instrument("gossip", skip_all, fields(me=%self.shared.me.fmt_short()))]
+    #[tracing::instrument("gossip", skip_all, fields(me = %self.shared.me.fmt_short()))]
     pub(crate) async fn finish(self) {
         self.run().await
     }
@@ -549,10 +549,10 @@ impl GossipActor {
                 ControlFlow::Continue(())
             }
             Some(msg) = self.local_rx.recv() => match msg {
-                LocalMessage::RemoteStream(stream) => {
-                    trace!("tick: remote stream");
+                LocalMessage::InboundStream(stream) => {
+                    trace!("tick: inbound stream");
                     let topic_id = stream.topic_id();
-                    let msg = TopicMessage::RemoteStream(stream);
+                    let msg = TopicMessage::InboundStream(stream);
                     self.topics.send(&self.shared, topic_id, msg).await;
                     ControlFlow::Continue(())
                 }
@@ -590,7 +590,7 @@ async fn accept_loop(
     max_message_size: usize,
 ) {
     while let Ok(Some(stream)) = GossipReceiver::accept(&conn, max_message_size).await {
-        let stream = LocalMessage::RemoteStream(conn.guard(stream));
+        let stream = LocalMessage::InboundStream(conn.guard(stream));
         if actor.send(stream).await.is_err() {
             break;
         }
@@ -620,7 +620,7 @@ struct TopicActor {
     rx: mpsc::Receiver<TopicMessage>,
     subscribers: Subscribers,
     senders: PeerSenders,
-    remote_streams: MergeUnbounded<RemoteMessages>,
+    inbound_streams: MergeUnbounded<InboundMessages>,
 }
 
 impl TopicActor {
@@ -634,7 +634,7 @@ impl TopicActor {
         tasks: &mut JoinSet<TopicExit>,
     ) -> TopicHandle {
         let (handle, actor) = Self::new(topic_id, shared.clone());
-        let span = error_span!("topic", topic=%topic_id.fmt_short());
+        let span = error_span!("topic", topic = %topic_id.fmt_short());
         tasks.spawn(actor.run(initial).instrument(span));
         handle
     }
@@ -655,7 +655,7 @@ impl TopicActor {
             out_events: Default::default(),
             subscribers: Subscribers::default(),
             senders: Default::default(),
-            remote_streams: Default::default(),
+            inbound_streams: Default::default(),
             peers_to_drop: Default::default(),
         };
         (TopicHandle { tx }, actor)
@@ -699,9 +699,9 @@ impl TopicActor {
                     self.handle_in_event(InEvent::Command(command.into()));
                 }
             }
-            Some((remote, message)) = self.remote_streams.next(), if !self.remote_streams.is_empty() => {
-                trace!(remote=%remote.fmt_short(), msg=?message, "tick: recv from remote");
-                self.handle_remote_message(remote, message);
+            Some((peer, message)) = self.inbound_streams.next(), if !self.inbound_streams.is_empty() => {
+                trace!(peer = %peer.fmt_short(), msg = ?message, "tick: recv from peer");
+                self.handle_peer_message(peer, message);
             }
             Some(data) = self.peer_data.next() => {
                 trace!("tick: peer_data");
@@ -714,8 +714,8 @@ impl TopicActor {
                     self.handle_in_event(InEvent::TimerExpired(timer));
                 }
             }
-            (remote, id, exit) = self.senders.next_exit() => {
-                self.handle_sender_exit(remote, id, exit);
+            (peer, id, exit) = self.senders.next_exit() => {
+                self.handle_sender_exit(peer, id, exit);
             }
             else => return ControlFlow::Break(()),
         }
@@ -771,24 +771,24 @@ impl TopicActor {
     /// The current task's entry is removed before the protocol hears of the
     /// disconnect. Whatever the protocol sends in response, such as a retried
     /// join, then starts a fresh task instead of queueing behind a dead one.
-    fn handle_sender_exit(&mut self, remote: EndpointId, id: task::Id, exit: SenderExit) {
-        if !self.senders.remove_if_current(remote, id) {
-            trace!(remote=%remote.fmt_short(), ?exit, "replaced sender ended");
+    fn handle_sender_exit(&mut self, peer: EndpointId, id: task::Id, exit: SenderExit) {
+        if !self.senders.remove_if_current(peer, id) {
+            trace!(peer = %peer.fmt_short(), ?exit, "replaced sender ended");
             return;
         }
         match exit {
             SenderExit::Failed(err) => {
-                debug!(remote=%remote.fmt_short(), ?err, "sender failed, drop peer")
+                debug!(peer = %peer.fmt_short(), ?err, "sender failed, drop peer")
             }
-            exit => debug!(remote=%remote.fmt_short(), ?exit, "sender ended, drop peer"),
+            exit => debug!(peer = %peer.fmt_short(), ?exit, "sender ended, drop peer"),
         }
-        self.peers_to_drop.insert(remote);
+        self.peers_to_drop.insert(peer);
     }
 
     /// Handles a message from the gossip actor.
     fn handle_message(&mut self, msg: TopicMessage) {
         match msg {
-            TopicMessage::RemoteStream(stream) => self.register_remote_stream(stream),
+            TopicMessage::InboundStream(stream) => self.register_inbound_stream(stream),
             TopicMessage::Subscribe(req) => {
                 let WithChannels { inner, tx, rx, .. } = req;
                 self.subscribers.add(tx, rx, self.neighbors.clone());
@@ -804,27 +804,22 @@ impl TopicActor {
     /// Leaves our sender alone even if it is on a different connection: two
     /// peers need not agree on which connection is current, and each keeps the
     /// other's connection open for as long as it has a stream on it.
-    fn register_remote_stream(&mut self, stream: RemoteStream) {
-        let remote = stream.connection().remote_id();
-        debug!(remote=%remote.fmt_short(), "remote stream opened");
-        self.remote_streams.push(Box::pin(
-            read_messages(stream).map(move |msg| (remote, msg)),
-        ));
+    fn register_inbound_stream(&mut self, stream: InboundStream) {
+        let peer = stream.connection().remote_id();
+        debug!(peer = %peer.fmt_short(), "inbound stream opened");
+        self.inbound_streams
+            .push(Box::pin(read_messages(stream).map(move |msg| (peer, msg))));
     }
 
     /// Hands a message a peer sent to the protocol.
-    fn handle_remote_message(
-        &mut self,
-        remote: EndpointId,
-        message: n0_error::Result<ProtoMessage>,
-    ) {
+    fn handle_peer_message(&mut self, peer: EndpointId, message: n0_error::Result<ProtoMessage>) {
         // A stream ending is not the peer going away. The peer finishes a stream
         // when it moves its sender to another connection, and says so at the
         // protocol level when it actually leaves. A connection that is lost
         // outright shows up on our sender instead, as its send task ending.
         match message {
-            Ok(message) => self.handle_in_event(InEvent::RecvMessage(remote, message)),
-            Err(error) => debug!(remote=%remote.fmt_short(), ?error, "remote stream failed"),
+            Ok(message) => self.handle_in_event(InEvent::RecvMessage(peer, message)),
+            Err(error) => debug!(peer = %peer.fmt_short(), ?error, "inbound stream failed"),
         }
     }
 
@@ -843,12 +838,12 @@ impl TopicActor {
             trace!("out_event {event:?}");
             self.shared.metrics.track_out_event(&event);
             match event {
-                OutEvent::SendMessage(remote, message) => {
+                OutEvent::SendMessage(peer, message) => {
                     if !self
                         .senders
-                        .send(&self.shared, self.topic_id, remote, message)
+                        .send(&self.shared, self.topic_id, peer, message)
                     {
-                        self.peers_to_drop.insert(remote);
+                        self.peers_to_drop.insert(peer);
                     }
                 }
                 OutEvent::EmitEvent(event) => self.emit_event(event),
@@ -876,14 +871,14 @@ impl TopicActor {
     }
 }
 
-/// Opens a stream to `remote` for `topic` on the pool's current connection.
+/// Opens a stream to `peer` for `topic` on the pool's current connection.
 async fn connect(
     shared: &Shared,
-    remote: EndpointId,
+    peer: EndpointId,
     topic: TopicId,
 ) -> n0_error::Result<Guarded<GossipSender>> {
     async {
-        let conn = shared.pool.get_or_connect(remote).await?;
+        let conn = shared.pool.get_or_connect(peer).await?;
         let sender = GossipSender::init(&conn, topic, shared.config.max_message_size).await?;
         n0_error::Ok(conn.guard(sender))
     }
@@ -959,7 +954,7 @@ struct PeerSenders {
 }
 
 impl PeerSenders {
-    /// Queues `message` for `remote`, starting its send task if there is none.
+    /// Queues `message` for `peer`, starting its send task if there is none.
     ///
     /// Never waits, since waiting on one slow peer would stall the whole topic,
     /// and through the gossip actor's sends to it, every other topic too.
@@ -969,17 +964,17 @@ impl PeerSenders {
         &mut self,
         shared: &Arc<Shared>,
         topic: TopicId,
-        remote: EndpointId,
+        peer: EndpointId,
         message: ProtoMessage,
     ) -> bool {
-        let sender = self.current.entry(remote).or_insert_with(|| {
+        let sender = self.current.entry(peer).or_insert_with(|| {
             let (queue, rx) = mpsc::channel(MAX_QUEUED_MESSAGES);
             let (closing, closed) = oneshot::channel();
             let id = self
                 .tasks
                 .spawn(
-                    run_sender(shared.clone(), remote, topic, rx, closed)
-                        .instrument(error_span!("send", remote=%remote.fmt_short())),
+                    run_sender(shared.clone(), peer, topic, rx, closed)
+                        .instrument(error_span!("send", peer = %peer.fmt_short())),
                 )
                 .id();
             PeerSender {
@@ -993,31 +988,31 @@ impl PeerSenders {
         };
         match err {
             mpsc::error::TrySendError::Full(_) => {
-                warn!(remote=%remote.fmt_short(), "peer is not keeping up, dropping it")
+                warn!(peer = %peer.fmt_short(), "peer is not keeping up, dropping it")
             }
             // The task ended and its exit is on the way; act on it now.
             mpsc::error::TrySendError::Closed(_) => {
-                debug!(remote=%remote.fmt_short(), "send task ended, dropping peer")
+                debug!(peer = %peer.fmt_short(), "send task ended, dropping peer")
             }
         }
-        self.current.remove(&remote);
+        self.current.remove(&peer);
         false
     }
 
-    /// Lets go of `remote`'s send task.
+    /// Lets go of `peer`'s send task.
     ///
     /// The task delivers what is still queued within `DRAIN_TIMEOUT`.
-    fn remove(&mut self, remote: &EndpointId) {
-        self.current.remove(remote);
+    fn remove(&mut self, peer: &EndpointId) {
+        self.current.remove(peer);
     }
 
-    /// Lets go of `remote`'s send task if `id` is the current one.
+    /// Lets go of `peer`'s send task if `id` is the current one.
     ///
     /// Returns whether it was.
-    fn remove_if_current(&mut self, remote: EndpointId, id: task::Id) -> bool {
-        let current = matches!(self.current.get(&remote), Some(sender) if sender.id == id);
+    fn remove_if_current(&mut self, peer: EndpointId, id: task::Id) -> bool {
+        let current = matches!(self.current.get(&peer), Some(sender) if sender.id == id);
         if current {
-            self.current.remove(&remote);
+            self.current.remove(&peer);
         }
         current
     }
@@ -1029,8 +1024,8 @@ impl PeerSenders {
         loop {
             match self.tasks.join_next_with_id().await {
                 Some(res) => {
-                    if let Some((id, (remote, exit))) = join_result(res) {
-                        return (remote, id, exit);
+                    if let Some((id, (peer, exit))) = join_result(res) {
+                        return (peer, id, exit);
                     }
                 }
                 None => std::future::pending().await,
@@ -1125,7 +1120,7 @@ enum SenderExit {
 /// to finish.
 async fn run_sender(
     shared: Arc<Shared>,
-    remote: EndpointId,
+    peer: EndpointId,
     topic: TopicId,
     mut queue: mpsc::Receiver<ProtoMessage>,
     closing: oneshot::Receiver<()>,
@@ -1135,20 +1130,20 @@ async fn run_sender(
         n0_future::time::sleep(DRAIN_TIMEOUT).await;
     };
     let exit = tokio::select! {
-        exit = deliver(&shared, remote, topic, &mut queue) => exit,
+        exit = deliver(&shared, peer, topic, &mut queue) => exit,
         _ = drain_timeout => SenderExit::DrainTimedOut,
     };
-    (remote, exit)
+    (peer, exit)
 }
 
-/// Dials `remote` and writes the messages from `queue` to it.
+/// Dials `peer` and writes the messages from `queue` to it.
 async fn deliver(
     shared: &Shared,
-    remote: EndpointId,
+    peer: EndpointId,
     topic: TopicId,
     queue: &mut mpsc::Receiver<ProtoMessage>,
 ) -> SenderExit {
-    let mut sender = match connect(shared, remote, topic).await {
+    let mut sender = match connect(shared, peer, topic).await {
         Ok(sender) => sender,
         Err(err) => return SenderExit::Failed(err),
     };
@@ -1167,7 +1162,7 @@ async fn deliver(
         // moving each other's senders back and forth forever.
         if sender.connection().is_superseded() {
             debug!("sender on a superseded connection, moving");
-            sender = match connect(shared, remote, topic).await {
+            sender = match connect(shared, peer, topic).await {
                 Ok(sender) => sender,
                 Err(err) => return SenderExit::Failed(err),
             };
@@ -1195,7 +1190,7 @@ fn join_result<T>(res: Result<T, task::JoinError>) -> Option<T> {
 
 /// Reads `stream` until it ends or fails, yielding a failure as the last item.
 fn read_messages(
-    stream: RemoteStream,
+    stream: InboundStream,
 ) -> impl Stream<Item = n0_error::Result<ProtoMessage>> + Send + Sync + 'static {
     n0_future::stream::unfold(Some(stream), |stream| async move {
         let mut stream = stream?;
@@ -1695,7 +1690,7 @@ pub(crate) mod tests {
                 res = subscribe_fut => res,
             }
         }
-        .instrument(tracing::debug_span!("endpoint_2", id=%endpoint_id2.fmt_short()));
+        .instrument(tracing::debug_span!("endpoint_2", %endpoint_id2));
         let go2_handle = task::spawn(go2_task);
 
         // first endpoint
@@ -1738,7 +1733,7 @@ pub(crate) mod tests {
 
             Ok::<_, AnyError>(())
         }
-        .instrument(tracing::debug_span!("endpoint_1", id=%endpoint_id1.fmt_short()));
+        .instrument(tracing::debug_span!("endpoint_1", %endpoint_id1));
         let go1_handle = task::spawn(go1_task);
 
         // advance and check that the topic is now subscribed
@@ -2090,11 +2085,11 @@ pub(crate) mod tests {
         let second = f.sender_id().expect("a send task started");
         assert_ne!(first, second);
 
-        let (remote, id, exit) = timeout(Duration::from_secs(10), f.topic.senders.next_exit())
+        let (peer, id, exit) = timeout(Duration::from_secs(10), f.topic.senders.next_exit())
             .await
             .std_context("the dropped task never ended")?;
         assert_eq!(id, first, "the replacement ended first: {exit:?}");
-        f.topic.handle_sender_exit(remote, id, exit);
+        f.topic.handle_sender_exit(peer, id, exit);
         assert_eq!(
             f.sender_id(),
             Some(second),
@@ -2325,7 +2320,7 @@ pub(crate) mod tests {
             tracing::info!("resubscribe ok");
             Ok::<_, ApiError>(())
         }
-        .instrument(tracing::debug_span!("endpoint_2", id=%endpoint_id2.fmt_short()));
+        .instrument(tracing::debug_span!("endpoint_2", %endpoint_id2));
 
         let go2_handle = task::spawn(go2_task);
 
