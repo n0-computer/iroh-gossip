@@ -112,6 +112,9 @@ pub struct Network<PI, R> {
     tick: usize,
     peers: BTreeMap<PI, State<PI, R>>,
     conns: BTreeSet<ConnId<PI>>,
+    /// When each closed connection was closed, to tell messages sent over it
+    /// apart from messages that open a new one.
+    closed_at: BTreeMap<ConnId<PI>, Instant>,
     events: VecDeque<(PI, TopicId, Event<PI>)>,
     latencies: BTreeMap<ConnId<PI>, Duration>,
     rng: R,
@@ -131,6 +134,7 @@ impl<PI, R> Network<PI, R> {
             queue: Default::default(),
             peers: Default::default(),
             conns: Default::default(),
+            closed_at: Default::default(),
             events: Default::default(),
             latencies: BTreeMap::new(),
             rng,
@@ -306,14 +310,62 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
         let _guard = span.enter();
         debug!("~~ TICK ");
 
-        let Some(state) = self.peers.get_mut(&peer) else {
-            // TODO: queue PeerDisconnected for sender?
-            warn!(?time, ?peer, ?event, "event for dead peer");
+        if !self.peers.contains_key(&peer) {
+            // A message sent to a peer that has gone fails at the sender, the way
+            // a send over a closed connection does. Without this, a peer that
+            // never had a connection to the dead one never learns it is gone,
+            // and keeps it in its active view for good.
+            if let InEvent::RecvMessage(from, _message) = &event {
+                if self.peers.contains_key(from) {
+                    let latency = latency_between(
+                        &self.config.latency,
+                        &mut self.latencies,
+                        &peer,
+                        from,
+                        &mut self.rng,
+                    );
+                    self.queue
+                        .insert(self.time + latency, *from, InEvent::PeerDisconnected(peer));
+                }
+            }
+            debug!(?time, ?peer, ?event, "event for dead peer");
             return;
-        };
-        if let InEvent::RecvMessage(from, _message) = &event {
-            self.conns.insert((*from, peer).into());
         }
+        match &event {
+            InEvent::RecvMessage(from, _message) => {
+                // A message sent before its connection closed arrives over that
+                // connection. One sent afterwards opens a new connection.
+                let conn: ConnId<PI> = (*from, peer).into();
+                let latency = latency_between(
+                    &self.config.latency,
+                    &mut self.latencies,
+                    from,
+                    &peer,
+                    &mut self.rng,
+                );
+                let sent_at = self.time - latency;
+                // A sender that is gone sent this before it went, so it cannot
+                // open anything.
+                let over_closed = !self.peers.contains_key(from)
+                    || self
+                        .closed_at
+                        .get(&conn)
+                        .is_some_and(|closed_at| sent_at < *closed_at);
+                if !over_closed {
+                    self.closed_at.remove(&conn);
+                    self.conns.insert(conn);
+                }
+            }
+            // The close of a connection that has since been replaced says nothing
+            // about the peer. The net layer ignores it the same way, by only
+            // reporting the close of the active connection.
+            InEvent::PeerDisconnected(from) if self.conns.contains(&(*from, peer).into()) => {
+                debug!(?from, ?peer, "ignoring the close of a replaced connection");
+                return;
+            }
+            _ => {}
+        }
+        let state = self.peers.get_mut(&peer).expect("checked above");
         let out = state.handle(event, self.time, None);
         let mut kill = vec![];
         for event in out {
@@ -355,6 +407,7 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
     fn kill_connection(&mut self, from: PI, to: PI) {
         let conn = ConnId::from((from, to));
         if self.conns.remove(&conn) {
+            self.closed_at.insert(conn, self.time);
             // We add the event a microsecond after the regular latency between the two peers,
             // so that any messages queued from the current time arrive before the disconnected event.
             let latency = latency_between(
