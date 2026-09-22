@@ -464,6 +464,59 @@ fn churn_rounds_broken(mut sim: Simulator, churn: usize, rounds: usize) -> usize
     broken
 }
 
+/// Claim: a peer cut off from everyone finds its way back.
+///
+/// A peer whose only neighbor was its bootstrap peer, and whose passive view is
+/// empty, has nobody left to dial when that neighbor restarts: HyParView's
+/// repair works from the passive view (4.3), and the passive view refills
+/// through shuffles with active peers (4.4), of which there are none. The
+/// bootstrap peers the application joined with are the only addresses left.
+///
+/// Deterministic, with a control: without the maintenance pass the peer is still
+/// alone a full minute later.
+#[test]
+fn hyparview_isolated_peer_rejoins_through_its_bootstrap_peer() {
+    for (config, rejoins) in [(Config::default(), true), (without_maintenance(), false)] {
+        // Peer 1 joins through peer 0, and they are each other's only peer.
+        let mut sim = swarm_with(2, 0, config.clone());
+        assert_eq!(neighbors(&sim, 1), vec![0]);
+
+        // Peer 0 restarts with no memory of peer 1.
+        sim.network.remove(&0);
+        sim.network.run_trips(5);
+        assert!(neighbors(&sim, 1).is_empty(), "peer 1 should notice");
+        sim.network.insert_with_config(0, config.clone());
+        sim.network
+            .command(0, TOPIC, iroh_gossip::proto::Command::Join(vec![]));
+
+        sim.network.run_duration(Duration::from_secs(60));
+        let reconnected = neighbors(&sim, 1) == vec![0] && neighbors(&sim, 0) == vec![1];
+        let arm = if rejoins {
+            "defaults"
+        } else {
+            "without maintenance"
+        };
+        report(
+            "hyparview: isolated peer",
+            0,
+            format!(
+                "{} after a minute, {arm}",
+                if reconnected {
+                    "reconnected"
+                } else {
+                    "still alone"
+                }
+            ),
+        );
+        assert_eq!(
+            reconnected,
+            rejoins,
+            "{arm}: expected the peer {}to rejoin",
+            if rejoins { "" } else { "not " }
+        );
+    }
+}
+
 /// Claim: the overlay heals quickly after a failure, without waiting for a
 /// shuffle.
 ///
@@ -796,7 +849,6 @@ fn plumtree_delivery_holds_under_a_constant_failure_rate() {
 /// tree optimizer leaves, and
 /// `plumtree_graft_timeout_below_link_latency_costs_redundancy` pins down why.
 #[test]
-#[ignore = "fails on some seeds: a peer that loses every neighbor is never reconnected"]
 fn plumtree_recovers_from_massive_failure() {
     const PEERS: usize = 400;
 
@@ -987,6 +1039,15 @@ fn remove_peers_except(sim: &mut Simulator, count: usize, keep: u64) {
     for peer in victims {
         sim.network.remove(&peer);
     }
+}
+
+/// Returns a config whose maintenance pass never runs.
+///
+/// The control arm for tests that show the maintenance pass at work.
+fn without_maintenance() -> Config {
+    let mut config = Config::default();
+    config.membership.maintenance_interval = Duration::from_secs(24 * 60 * 60);
+    config
 }
 
 /// Runs `cycles` membership cycles, the paper's unit of healing time.
