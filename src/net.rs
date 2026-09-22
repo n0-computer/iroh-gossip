@@ -387,13 +387,8 @@ impl Topics {
             let initial = msgs
                 .into_iter()
                 .chain(parked.into_iter().map(TopicMessage::RemoteStream));
-            let (handle, actor) = TopicHandle::new(topic_id, shared.clone());
+            let handle = TopicActor::spawn(topic_id, shared, initial.collect(), &mut self.tasks);
             self.entries.insert(topic_id, TopicEntry::Running(handle));
-            self.tasks.spawn(
-                actor
-                    .run(initial.collect())
-                    .instrument(error_span!("topic", topic=%topic_id.fmt_short())),
-            );
             return;
         }
         for msg in msgs {
@@ -627,30 +622,6 @@ struct TopicHandle {
     tx: mpsc::Sender<TopicMessage>,
 }
 
-impl TopicHandle {
-    /// Creates a topic actor and the handle that sends to it.
-    fn new(topic_id: TopicId, shared: Arc<Shared>) -> (Self, TopicActor) {
-        let (tx, rx) = mpsc::channel(16);
-        let state = State::new(shared.me, None, shared.config.clone());
-        let peer_data = Box::pin(shared.our_peer_data.watch().stream());
-        let actor = TopicActor {
-            topic_id,
-            shared,
-            state,
-            rx,
-            peer_data,
-            timers: Default::default(),
-            neighbors: Default::default(),
-            out_events: Default::default(),
-            subscribers: Subscribers::default(),
-            senders: Default::default(),
-            remote_streams: Default::default(),
-            peers_to_drop: Default::default(),
-        };
-        (Self { tx }, actor)
-    }
-}
-
 /// The actor for one topic, which runs its protocol state and its connections.
 struct TopicActor {
     topic_id: TopicId,
@@ -672,6 +643,43 @@ struct TopicActor {
 }
 
 impl TopicActor {
+    /// Spawns a topic actor on `tasks` and returns the handle that sends to it.
+    ///
+    /// The actor handles `initial` first; see [`Self::run`].
+    fn spawn(
+        topic_id: TopicId,
+        shared: &Arc<Shared>,
+        initial: Vec<TopicMessage>,
+        tasks: &mut JoinSet<TopicExit>,
+    ) -> TopicHandle {
+        let (handle, actor) = Self::new(topic_id, shared.clone());
+        let span = error_span!("topic", topic=%topic_id.fmt_short());
+        tasks.spawn(actor.run(initial).instrument(span));
+        handle
+    }
+
+    /// Creates a topic actor and the handle that sends to it.
+    fn new(topic_id: TopicId, shared: Arc<Shared>) -> (TopicHandle, Self) {
+        let (tx, rx) = mpsc::channel(16);
+        let state = State::new(shared.me, None, shared.config.clone());
+        let peer_data = Box::pin(shared.our_peer_data.watch().stream());
+        let actor = Self {
+            topic_id,
+            shared,
+            state,
+            rx,
+            peer_data,
+            timers: Default::default(),
+            neighbors: Default::default(),
+            out_events: Default::default(),
+            subscribers: Subscribers::default(),
+            senders: Default::default(),
+            remote_streams: Default::default(),
+            peers_to_drop: Default::default(),
+        };
+        (TopicHandle { tx }, actor)
+    }
+
     /// Runs the actor until it leaves the topic.
     ///
     /// `initial` is handled before anything else. Registering a stream does not
@@ -1342,7 +1350,7 @@ pub(crate) mod tests {
             actor.endpoint().address_lookup()?.add(lookup);
 
             let topic_id = TopicId::from([5u8; 32]);
-            let (handle, topic) = TopicHandle::new(topic_id, actor.shared.clone());
+            let (handle, topic) = TopicActor::new(topic_id, actor.shared.clone());
             Ok(Self {
                 topic,
                 topic_id,
