@@ -24,13 +24,13 @@ pub struct StreamHeader {
 
 /// The sending end of a gossip stream for one topic.
 #[derive(Debug)]
-pub(crate) struct GossipSender {
+pub(crate) struct TopicSender {
     send: PostcardCodec<SendStream>,
 }
 
-impl GossipSender {
+impl TopicSender {
     /// Opens a stream for `topic_id` on `conn` and writes its header.
-    pub(crate) async fn init(
+    pub(crate) async fn open(
         conn: &Connection,
         topic_id: TopicId,
         max_message_size: usize,
@@ -61,12 +61,12 @@ impl GossipSender {
 
 /// The receiving end of a gossip stream for one topic.
 #[derive(Debug)]
-pub(crate) struct GossipReceiver {
+pub(crate) struct TopicReceiver {
     recv: PostcardCodec<RecvStream>,
     header: StreamHeader,
 }
 
-impl GossipReceiver {
+impl TopicReceiver {
     /// Returns the topic the stream is for, as named by its header.
     pub(crate) fn topic_id(&self) -> TopicId {
         self.header.topic_id
@@ -197,8 +197,8 @@ mod tests {
         let (out, inc, _endpoints) = connected_pair().await?;
         let topic_id = TopicId::from([7u8; 32]);
 
-        let mut tx = GossipSender::init(&out, topic_id, 1024).await?;
-        let mut rx = GossipReceiver::accept(&inc, 1024)
+        let mut tx = TopicSender::open(&out, topic_id, 1024).await?;
+        let mut rx = TopicReceiver::accept(&inc, 1024)
             .await?
             .expect("stream was opened");
         assert_eq!(rx.topic_id(), topic_id);

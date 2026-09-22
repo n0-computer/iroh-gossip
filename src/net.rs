@@ -32,9 +32,9 @@ use self::{
     util::{AddrInfo, Timers},
 };
 use crate::{
-    api::{self, GossipApi},
+    api::{self, GossipApi, JoinRequest},
     metrics::Metrics,
-    net::net_proto::{GossipReceiver, GossipSender},
+    net::net_proto::{TopicReceiver, TopicSender},
     proto::{self, Config, HyparviewConfig, PeerData, PlumtreeConfig, TopicId},
 };
 
@@ -42,18 +42,32 @@ mod address_lookup;
 mod net_proto;
 mod util;
 
+/// The ALPN protocol name of `iroh-gossip`.
+pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/1";
+
+/// The number of streams held for topics that are not joined, at most.
+const MAX_PARKED_STREAMS: usize = 32;
+
+/// The number of messages that may wait for a peer's send task, at most.
+///
+/// A peer whose queue is full counts as not keeping up.
+const MAX_QUEUED_MESSAGES: usize = 64;
+
+/// How long a send task may keep writing once the topic has let go of it.
+///
+/// This is long enough to deliver a queued `Disconnect`, and short enough that
+/// a peer that stopped reading cannot keep the task around.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// How long the pool keeps a connection that nothing uses, by default.
 ///
 /// This applies to superseded connections too.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The ALPN protocol name of `iroh-gossip`.
-pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/1";
-
+pub(super) type ProtoMessage = proto::topic::Message<EndpointId>;
 type InEvent = proto::topic::InEvent<EndpointId>;
 type OutEvent = proto::topic::OutEvent<EndpointId>;
 type Timer = proto::topic::Timer<EndpointId>;
-pub(super) type ProtoMessage = proto::topic::Message<EndpointId>;
 type ProtoEvent = proto::topic::Event<EndpointId>;
 type State = proto::topic::State<EndpointId, StdRng>;
 type Command = proto::topic::Command<EndpointId>;
@@ -90,10 +104,10 @@ struct Inner {
     api: GossipApi,
     pool: ConnectionPool,
     local_tx: mpsc::Sender<LocalMessage>,
-    /// The gossip actor's task, or `None` while a test drives the actor.
-    _actor_task: Option<AbortOnDropHandle<()>>,
     max_message_size: usize,
     metrics: Arc<Metrics>,
+    /// The gossip actor's task, or `None` while a test drives the actor.
+    _actor_task: Option<AbortOnDropHandle<()>>,
 }
 
 impl ProtocolHandler for Gossip {
@@ -252,7 +266,7 @@ pub struct ActorStoppedError;
 #[derive(Debug, strum::Display)]
 enum TopicMessage {
     /// A local subscription to the topic.
-    Subscribe(ApiJoinRequest),
+    Subscribe(SubscribeRequest),
     /// A stream a peer opened for the topic.
     InboundStream(InboundStream),
 }
@@ -261,9 +275,9 @@ enum TopicMessage {
 ///
 /// The peer may keep sending on a connection we have superseded, so the stream,
 /// not our choice of connection, decides how long the connection stays open.
-type InboundStream = Guarded<GossipReceiver>;
+type InboundStream = Guarded<TopicReceiver>;
 
-type ApiJoinRequest = WithChannels<api::JoinRequest, api::Request>;
+type SubscribeRequest = WithChannels<api::JoinRequest, api::Request>;
 type SubscriberCommands = BoxStream<api::Command>;
 type InboundMessages = BoxStream<(EndpointId, n0_error::Result<ProtoMessage>)>;
 
@@ -273,7 +287,7 @@ type InboundMessages = BoxStream<(EndpointId, n0_error::Result<ProtoMessage>)>;
 /// topic actor. The way topic actors stop relies on that; see
 /// [`Topics::send`] and [`Topics::handle_exit`].
 #[derive(Debug, Default)]
-struct Topics {
+struct TopicHandles {
     entries: HashMap<TopicId, TopicEntry>,
     tasks: JoinSet<TopicExit>,
     /// Streams that arrived for a topic that is not joined, keyed by topic.
@@ -285,9 +299,6 @@ struct Topics {
     /// topics we never join.
     parked: HashMap<TopicId, Vec<InboundStream>>,
 }
-
-/// The number of streams held for topics that are not joined, at most.
-const MAX_PARKED_STREAMS: usize = 32;
 
 /// The state of a topic in the [`Topics`].
 #[derive(Debug)]
@@ -309,7 +320,7 @@ struct TopicExit {
     leftovers: Vec<TopicMessage>,
 }
 
-impl Topics {
+impl TopicHandles {
     /// Delivers `msg` to the actor for `topic_id`.
     ///
     /// A join for a topic without an actor starts one. Nothing sent here is
@@ -358,6 +369,7 @@ impl Topics {
             !self.entries.contains_key(&topic_id),
             "a topic actor started while another was still around"
         );
+        // If the batch contains any `Subscribe` command: start a topic actor.
         if msgs
             .iter()
             .any(|msg| matches!(msg, TopicMessage::Subscribe(_)))
@@ -368,18 +380,21 @@ impl Topics {
                 .chain(parked.into_iter().map(TopicMessage::InboundStream));
             let handle = TopicActor::spawn(topic_id, shared, initial.collect(), &mut self.tasks);
             self.entries.insert(topic_id, TopicEntry::Running(handle));
-            return;
-        }
-        for msg in msgs {
-            let TopicMessage::InboundStream(stream) = msg else {
-                continue;
-            };
-            if self.parked.values().map(Vec::len).sum::<usize>() >= MAX_PARKED_STREAMS {
-                debug!(topic = %topic_id.fmt_short(), "dropping stream: too many parked");
-                continue;
+        } else {
+            // The batch does not contain a `Subscribe` command. Thus there are only
+            // InboundStream messages. Park them.
+            for msg in msgs {
+                let stream = match msg {
+                    TopicMessage::InboundStream(stream) => stream,
+                    TopicMessage::Subscribe(_) => unreachable!("asserted above"),
+                };
+                if self.parked.values().map(Vec::len).sum::<usize>() >= MAX_PARKED_STREAMS {
+                    debug!(topic = %topic_id.fmt_short(), "dropping stream: too many parked");
+                    continue;
+                }
+                debug!(topic = %topic_id.fmt_short(), "parking stream for an unjoined topic");
+                self.parked.entry(topic_id).or_default().push(stream);
             }
-            debug!(topic = %topic_id.fmt_short(), "parking stream for an unjoined topic");
-            self.parked.entry(topic_id).or_default().push(stream);
         }
     }
 
@@ -434,7 +449,7 @@ struct GossipActor {
     #[cfg(test)]
     endpoint: Endpoint,
     shared: Arc<Shared>,
-    topics: Topics,
+    topics: TopicHandles,
     api_rx: mpsc::Receiver<api::RpcMessage>,
     local_rx: mpsc::Receiver<LocalMessage>,
     endpoint_addr_updates: BoxStream<EndpointAddr>,
@@ -471,6 +486,9 @@ impl GossipActor {
 
         let max_message_size = config.max_message_size;
         let (local_tx, local_rx) = mpsc::channel(16);
+
+        // Open a connection pool that spawns an accept loop for each incoming connection.
+        // TODO: This spawns a free-floating task.
         let mut options = connection_pool::Options::default().with_on_connected({
             let local_tx = local_tx.clone();
             move |_ep, conn| {
@@ -509,7 +527,7 @@ impl GossipActor {
             api_rx,
             local_rx,
             endpoint_addr_updates: Box::pin(endpoint_addr_updates),
-            topics: Topics::default(),
+            topics: TopicHandles::default(),
         };
         (inner, actor)
     }
@@ -589,7 +607,7 @@ async fn accept_loop(
     conn: ConnectionHandle,
     max_message_size: usize,
 ) {
-    while let Ok(Some(stream)) = GossipReceiver::accept(&conn, max_message_size).await {
+    while let Ok(Some(stream)) = TopicReceiver::accept(&conn, max_message_size).await {
         let stream = LocalMessage::InboundStream(conn.guard(stream));
         if actor.send(stream).await.is_err() {
             break;
@@ -597,7 +615,7 @@ async fn accept_loop(
     }
 }
 
-/// The [`Topics`]'s end of a topic actor's inbox.
+/// Handle to a topic actor's inbox.
 #[derive(Debug)]
 struct TopicHandle {
     tx: mpsc::Sender<TopicMessage>,
@@ -617,7 +635,7 @@ struct TopicActor {
 
     // Senders and receivers
     peer_data: BoxStream<PeerData>,
-    rx: mpsc::Receiver<TopicMessage>,
+    inbox: mpsc::Receiver<TopicMessage>,
     subscribers: Subscribers,
     senders: PeerSenders,
     inbound_streams: MergeUnbounded<InboundMessages>,
@@ -641,14 +659,14 @@ impl TopicActor {
 
     /// Creates a topic actor and the handle that sends to it.
     fn new(topic_id: TopicId, shared: Arc<Shared>) -> (TopicHandle, Self) {
-        let (tx, rx) = mpsc::channel(16);
+        let (inbox_tx, inbox) = mpsc::channel(16);
         let state = State::new(shared.me, None, shared.config.clone());
         let peer_data = Box::pin(shared.our_peer_data.watch().stream());
         let actor = Self {
             topic_id,
             shared,
             state,
-            rx,
+            inbox,
             peer_data,
             timers: Default::default(),
             neighbors: Default::default(),
@@ -658,7 +676,7 @@ impl TopicActor {
             inbound_streams: Default::default(),
             peers_to_drop: Default::default(),
         };
-        (TopicHandle { tx }, actor)
+        (TopicHandle { tx: inbox_tx }, actor)
     }
 
     /// Runs the actor until it leaves the topic.
@@ -682,18 +700,18 @@ impl TopicActor {
     /// subscribers left, or the gossip actor let go of it.
     async fn tick(&mut self) -> ControlFlow<()> {
         tokio::select! {
-            msg = self.rx.recv() => match msg {
+            msg = self.inbox.recv() => match msg {
                 Some(msg) => {
                     trace!("tick: actor_rx {msg}");
                     self.handle_message(msg);
                 }
-                // The owner let go of us: gossip is shutting down.
+                // All inbox handles dropped: gossip is shutting down.
                 None => {
                     debug!("closing topic: gossip is shutting down");
                     return ControlFlow::Break(());
                 }
             },
-            command = self.subscribers.next() => {
+            command = self.subscribers.next_command() => {
                 if let Some(command) = command {
                     trace!("tick: api message {command}");
                     self.handle_in_event(InEvent::Command(command.into()));
@@ -732,9 +750,10 @@ impl TopicActor {
 
         if self.subscribers.is_empty() {
             debug!("closing topic: all subscribers dropped");
-            return ControlFlow::Break(());
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
         }
-        ControlFlow::Continue(())
     }
 
     /// Leaves the topic and returns what was left in the inbox.
@@ -746,9 +765,9 @@ impl TopicActor {
     /// the `Disconnect`s `Quit` just produced, before a successor can start.
     /// Each task gets at most `DRAIN_TIMEOUT` once its sender is dropped.
     async fn leave(mut self) -> TopicExit {
-        self.rx.close();
+        self.inbox.close();
         let mut leftovers = Vec::new();
-        while let Some(msg) = self.rx.recv().await {
+        while let Some(msg) = self.inbox.recv().await {
             leftovers.push(msg);
         }
         self.handle_in_event(InEvent::Command(Command::Quit));
@@ -788,27 +807,24 @@ impl TopicActor {
     /// Handles a message from the gossip actor.
     fn handle_message(&mut self, msg: TopicMessage) {
         match msg {
-            TopicMessage::InboundStream(stream) => self.register_inbound_stream(stream),
+            TopicMessage::InboundStream(stream) => {
+                let peer = stream.connection().remote_id();
+                debug!(peer = %peer.fmt_short(), "inbound stream opened");
+                let stream = inbound_message_stream(stream).map(move |msg| (peer, msg));
+                self.inbound_streams.push(Box::pin(stream));
+            }
             TopicMessage::Subscribe(req) => {
                 let WithChannels { inner, tx, rx, .. } = req;
-                self.subscribers.add(tx, rx, self.neighbors.clone());
-                self.handle_in_event(InEvent::Command(Command::Join(
-                    inner.bootstrap.into_iter().collect(),
-                )));
+                let JoinRequest {
+                    topic_id,
+                    bootstrap,
+                } = inner;
+                debug_assert_eq!(topic_id, self.topic_id);
+                let bootstrap = bootstrap.into_iter().collect();
+                self.subscribers.push(tx, rx, self.neighbors.clone());
+                self.handle_in_event(InEvent::Command(Command::Join(bootstrap)));
             }
         }
-    }
-
-    /// Starts reading a stream the peer opened.
-    ///
-    /// Leaves our sender alone even if it is on a different connection: two
-    /// peers need not agree on which connection is current, and each keeps the
-    /// other's connection open for as long as it has a stream on it.
-    fn register_inbound_stream(&mut self, stream: InboundStream) {
-        let peer = stream.connection().remote_id();
-        debug!(peer = %peer.fmt_short(), "inbound stream opened");
-        self.inbound_streams
-            .push(Box::pin(read_messages(stream).map(move |msg| (peer, msg))));
     }
 
     /// Hands a message a peer sent to the protocol.
@@ -876,10 +892,10 @@ async fn connect(
     shared: &Shared,
     peer: EndpointId,
     topic: TopicId,
-) -> n0_error::Result<Guarded<GossipSender>> {
+) -> n0_error::Result<Guarded<TopicSender>> {
     async {
         let conn = shared.pool.get_or_connect(peer).await?;
-        let sender = GossipSender::init(&conn, topic, shared.config.max_message_size).await?;
+        let sender = TopicSender::open(&conn, topic, shared.config.max_message_size).await?;
         n0_error::Ok(conn.guard(sender))
     }
     .await
@@ -920,17 +936,6 @@ async fn forward_events(
         }
     }
 }
-
-/// The number of messages that may wait for a peer's send task, at most.
-///
-/// A peer whose queue is full counts as not keeping up.
-const MAX_QUEUED_MESSAGES: usize = 64;
-
-/// How long a send task may keep writing once the topic has let go of it.
-///
-/// This is long enough to deliver a queued `Disconnect`, and short enough that
-/// a peer that stopped reading cannot keep the task around.
-const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A topic actor's handle on one peer's send task.
 ///
@@ -1045,56 +1050,55 @@ impl PeerSenders {
 /// The local subscribers of a topic.
 struct Subscribers {
     /// Commands from every subscriber.
-    commands: MergeUnbounded<SubscriberCommands>,
+    command_rx: MergeUnbounded<SubscriberCommands>,
     /// Events for every subscriber, each forwarded by its own task.
-    events: broadcast::Sender<ProtoEvent>,
-    forwarders: JoinSet<()>,
+    event_tx: broadcast::Sender<ProtoEvent>,
+    event_forward_tasks: JoinSet<()>,
 }
 
 impl Default for Subscribers {
     fn default() -> Self {
         Self {
-            commands: Default::default(),
-            events: broadcast::channel(512).0,
-            forwarders: Default::default(),
+            command_rx: Default::default(),
+            event_tx: broadcast::channel(512).0,
+            event_forward_tasks: Default::default(),
         }
     }
 }
 
 impl Subscribers {
     /// Adds a subscriber, telling it about the neighbors we already have.
-    fn add(
+    fn push(
         &mut self,
-        events: channel::mpsc::Sender<api::Event>,
-        commands: channel::mpsc::Receiver<api::Command>,
+        event_tx: channel::mpsc::Sender<api::Event>,
+        command_rx: channel::mpsc::Receiver<api::Command>,
         neighbors: BTreeSet<EndpointId>,
     ) {
-        self.forwarders.spawn(
-            forward_events(events, self.events.subscribe(), neighbors.into_iter())
-                .instrument(tracing::Span::current()),
-        );
+        let future = forward_events(event_tx, self.event_tx.subscribe(), neighbors.into_iter());
+        self.event_forward_tasks
+            .spawn(future.instrument(tracing::Span::current()));
         // A subscriber whose command channel failed can still be receiving
         // events, so only its forwarder ending counts as it leaving.
-        self.commands
-            .push(Box::pin(commands.into_stream().map_while(Result::ok)));
+        self.command_rx
+            .push(Box::pin(command_rx.into_stream().map_while(Result::ok)));
     }
 
     fn is_empty(&self) -> bool {
-        self.commands.is_empty() && self.forwarders.is_empty()
+        self.command_rx.is_empty() && self.event_forward_tasks.is_empty()
     }
 
     fn emit(&self, event: ProtoEvent) {
-        self.events.send(event).ok();
+        self.event_tx.send(event).ok();
     }
 
     /// Waits for a command from a subscriber.
     ///
     /// Resolves to `None` when a subscriber went away instead, so the caller can
     /// check whether any are left. This stays pending while there are none.
-    async fn next(&mut self) -> Option<api::Command> {
+    async fn next_command(&mut self) -> Option<api::Command> {
         tokio::select! {
-            Some(command) = self.commands.next(), if !self.commands.is_empty() => Some(command),
-            _ = self.forwarders.join_next(), if !self.forwarders.is_empty() => None,
+            Some(command) = self.command_rx.next(), if !self.command_rx.is_empty() => Some(command),
+            _ = self.event_forward_tasks.join_next(), if !self.event_forward_tasks.is_empty() => None,
             else => std::future::pending().await,
         }
     }
@@ -1130,14 +1134,14 @@ async fn run_sender(
         n0_future::time::sleep(DRAIN_TIMEOUT).await;
     };
     let exit = tokio::select! {
-        exit = deliver(&shared, peer, topic, &mut queue) => exit,
+        exit = connect_and_send(&shared, peer, topic, &mut queue) => exit,
         _ = drain_timeout => SenderExit::DrainTimedOut,
     };
     (peer, exit)
 }
 
 /// Dials `peer` and writes the messages from `queue` to it.
-async fn deliver(
+async fn connect_and_send(
     shared: &Shared,
     peer: EndpointId,
     topic: TopicId,
@@ -1189,7 +1193,7 @@ fn join_result<T>(res: Result<T, task::JoinError>) -> Option<T> {
 }
 
 /// Reads `stream` until it ends or fails, yielding a failure as the last item.
-fn read_messages(
+fn inbound_message_stream(
     stream: InboundStream,
 ) -> impl Stream<Item = n0_error::Result<ProtoMessage>> + Send + Sync + 'static {
     n0_future::stream::unfold(Some(stream), |stream| async move {
