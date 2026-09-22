@@ -146,6 +146,11 @@ name = "sim"
 path = "tests/sim.rs"
 required-features = ["test-utils"]
 
+[[test]]
+name = "paper"
+path = "tests/paper.rs"
+required-features = ["test-utils"]
+
 [[bin]]
 name = "sim"
 required-features = ["simulator"]
