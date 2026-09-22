@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 
 use derive_more::{From, Sub};
 use n0_future::time::Duration;
-use rand::{rngs::ThreadRng, Rng};
+use rand::{rngs::ThreadRng, Rng, RngExt};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
@@ -61,6 +61,7 @@ pub enum Event<PI> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Timer<PI> {
     DoShuffle,
+    DoMaintenance,
     PendingNeighborRequest(PI),
 }
 
@@ -94,9 +95,11 @@ pub enum Message<PI> {
 #[derive(From, Sub, Eq, PartialEq, Clone, Debug, Copy, Serialize, Deserialize)]
 pub struct Ttl(pub u16);
 impl Ttl {
+    /// Returns `true` once the message may not be forwarded any further.
     pub fn expired(&self) -> bool {
         *self == Ttl(0)
     }
+    /// Returns the `Ttl` to forward a message with, one hop lower.
     pub fn next(&self) -> Ttl {
         Ttl(self.0.saturating_sub(1))
     }
@@ -174,6 +177,15 @@ pub struct Disconnect {
 pub struct Config {
     /// Number of peers to which active connections are maintained
     pub active_view_capacity: usize,
+    /// Number of active connections below which a node considers itself
+    /// under-connected and starts refilling on its own.
+    ///
+    /// Falling one short of [`Self::active_view_capacity`] is normal and not
+    /// worth acting on: the peer that would fill the slot is usually full
+    /// itself, so retrying only produces rejected `Neighbor` requests and churns
+    /// the broadcast tree. Dropping near zero is worth acting on, because the
+    /// next failure disconnects the node entirely.
+    pub active_view_min: usize,
     /// Number of peers for which contact information is remembered,
     /// but to which we are not actively connected to.
     pub passive_view_capacity: usize,
@@ -189,8 +201,29 @@ pub struct Config {
     pub shuffle_active_view_count: usize,
     /// Number of passive peers to be included in a `Shuffle` request.
     pub shuffle_passive_view_count: usize,
-    /// Interval duration for shuffle requests
+    /// Interval between shuffle requests, once the swarm has settled.
+    ///
+    /// Shuffling is what keeps the passive view a diverse, live sample of the
+    /// swarm, and the passive view is the only thing a node has to fall back on
+    /// when its neighbors fail. A long interval leaves a young swarm unable to
+    /// recover from a large simultaneous failure.
     pub shuffle_interval: Duration,
+    /// Delay before the first shuffle request.
+    ///
+    /// The bootstrap leaves passive views small and lopsided, because they are
+    /// filled only by whatever `ForwardJoin` walks happened to pass by. The
+    /// first few shuffles matter far more than later ones, so the interval
+    /// starts here and doubles after each shuffle until it reaches
+    /// [`Self::shuffle_interval`].
+    pub initial_shuffle_interval: Duration,
+    /// Interval at which the active view is checked against
+    /// [`Self::active_view_min`] and refilled if it has fallen below.
+    ///
+    /// Refilling the active view is otherwise driven only by a peer
+    /// disconnecting, and that chain ends silently once the passive view runs
+    /// out of candidates. Without a periodic check a node that loses its last
+    /// neighbor stays isolated forever.
+    pub maintenance_interval: Duration,
     /// Timeout after which a `Neighbor` request is considered failed
     pub neighbor_request_timeout: Duration,
 }
@@ -200,6 +233,9 @@ impl Default for Config {
         Self {
             // From the paper (p9)
             active_view_capacity: 5,
+            // The paper has no equivalent. Partisan pairs an active view of 6
+            // with a minimum of 3, and the same ratio applies here.
+            active_view_min: 3,
             // From the paper (p9)
             passive_view_capacity: 30,
             // From the paper (p9)
@@ -212,8 +248,14 @@ impl Default for Config {
             shuffle_active_view_count: 3,
             // From the paper (p9)
             shuffle_passive_view_count: 4,
-            // Wild guess
-            shuffle_interval: Duration::from_secs(60),
+            // The paper gives no number. Partisan, the most widely deployed
+            // HyParView implementation, uses 10s.
+            shuffle_interval: Duration::from_secs(10),
+            // Long enough not to collide with the bootstrap's own traffic,
+            // short enough that a swarm is resilient seconds after forming.
+            initial_shuffle_interval: Duration::from_secs(1),
+            // Partisan runs the equivalent check ("random promotion") at 5s.
+            maintenance_interval: Duration::from_secs(5),
             // Wild guess
             neighbor_request_timeout: Duration::from_millis(500),
         }
@@ -238,8 +280,16 @@ pub struct State<PI, RG = ThreadRng> {
     pub(crate) passive_view: IndexSet<PI>,
     /// Protocol configuration (cannot change at runtime)
     config: Config,
-    /// Whether a shuffle timer is currently scheduled
-    shuffle_scheduled: bool,
+    /// Whether the periodic timers have been scheduled
+    timers_scheduled: bool,
+    /// Delay to use for the next shuffle, doubling up to `config.shuffle_interval`
+    next_shuffle_interval: Duration,
+    /// Peers the application asked us to join, kept as a last resort
+    ///
+    /// When both views run empty there is nothing left to dial, and no incoming
+    /// message will ever arrive to restart the protocol. These are the only
+    /// addresses we can still try.
+    bootstrap_peers: IndexSet<PI>,
     /// Random number generator
     rng: RG,
     /// Statistics
@@ -263,8 +313,10 @@ where
             me_data,
             active_view: IndexSet::new(),
             passive_view: IndexSet::new(),
+            next_shuffle_interval: config.initial_shuffle_interval,
             config,
-            shuffle_scheduled: false,
+            timers_scheduled: false,
+            bootstrap_peers: IndexSet::new(),
             rng,
             stats: Stats::default(),
             pending_neighbor_requests: Default::default(),
@@ -278,6 +330,7 @@ where
             InEvent::RecvMessage(from, message) => self.handle_message(from, message, io),
             InEvent::TimerExpired(timer) => match timer {
                 Timer::DoShuffle => self.handle_shuffle_timer(io),
+                Timer::DoMaintenance => self.handle_maintenance_timer(io),
                 Timer::PendingNeighborRequest(peer) => self.handle_pending_neighbor_timer(peer, io),
             },
             InEvent::PeerDisconnected(peer) => self.handle_connection_closed(peer, io),
@@ -289,12 +342,13 @@ where
         }
 
         // this will only happen on the first call
-        if !self.shuffle_scheduled {
+        if !self.timers_scheduled {
+            self.timers_scheduled = true;
+            self.schedule_shuffle(io);
             io.push(OutEvent::ScheduleTimer(
-                self.config.shuffle_interval,
-                Timer::DoShuffle,
+                self.config.maintenance_interval,
+                Timer::DoMaintenance,
             ));
-            self.shuffle_scheduled = true;
         }
     }
 
@@ -320,6 +374,7 @@ where
     }
 
     fn handle_join(&mut self, peer: PI, io: &mut impl IO<PI>) {
+        self.bootstrap_peers.insert(peer);
         io.push(OutEvent::SendMessage(
             peer,
             Message::Join(self.me_data.clone()),
@@ -344,12 +399,18 @@ where
 
     /// A connection was closed by the peer.
     fn handle_connection_closed(&mut self, peer: PI, io: &mut impl IO<PI>) {
-        self.pending_neighbor_requests.remove(&peer);
+        let was_pending = self.pending_neighbor_requests.remove(&peer);
         if self.active_view.contains(&peer) {
             self.remove_active(&peer, RemovalReason::ConnectionClosed, io);
         } else if !self.alive_disconnect_peers.remove(&peer) {
             self.passive_view.remove(&peer);
             self.peer_data.remove(&peer);
+            // "If the connection fails to establish, node q is considered failed
+            // and removed from p's passive view; another node q' is selected at
+            // random and a new attempt is made." (4.3)
+            if was_pending {
+                self.refill_active_from_passive(&[], io);
+            }
         }
     }
 
@@ -555,9 +616,53 @@ where
             };
             io.push(OutEvent::SendMessage(*node, Message::Shuffle(message)));
         }
+        self.schedule_shuffle(io);
+    }
+
+    /// Schedules the next shuffle, backing off towards the steady interval.
+    ///
+    /// The delay is jittered because every node in a swarm that started
+    /// together would otherwise shuffle in lockstep, turning a steady trickle of
+    /// messages into a burst every interval.
+    fn schedule_shuffle(&mut self, io: &mut impl IO<PI>) {
+        let interval = self.next_shuffle_interval;
+        self.next_shuffle_interval = (interval * 2).min(self.config.shuffle_interval);
+        let jitter = self.rng.random_range(0.75..1.25);
         io.push(OutEvent::ScheduleTimer(
-            self.config.shuffle_interval,
+            interval.mul_f64(jitter),
             Timer::DoShuffle,
+        ));
+    }
+
+    /// Refills the active view if it is short, and rejoins if it is empty.
+    ///
+    /// This runs on a timer rather than only on disconnect, because
+    /// [`Self::refill_active_from_passive`] gives up once the passive view holds
+    /// no untried candidate, and nothing would restart it. A node that has lost
+    /// every neighbor also has nobody to shuffle with, so its passive view can
+    /// never refill on its own either: the bootstrap peers are the only way
+    /// back into the swarm.
+    fn handle_maintenance_timer(&mut self, io: &mut impl IO<PI>) {
+        if self.active_view.is_empty() && self.passive_view.is_empty() {
+            let bootstrap: Vec<PI> = self.bootstrap_peers.iter().cloned().collect();
+            if !bootstrap.is_empty() {
+                debug!(
+                    peers = bootstrap.len(),
+                    "isolated from the swarm, rejoining via the bootstrap peers"
+                );
+            }
+            for peer in bootstrap {
+                io.push(OutEvent::SendMessage(
+                    peer,
+                    Message::Join(self.me_data.clone()),
+                ));
+            }
+        } else if self.active_view.len() < self.config.active_view_min {
+            self.refill_active_from_passive(&[], io);
+        }
+        io.push(OutEvent::ScheduleTimer(
+            self.config.maintenance_interval,
+            Timer::DoMaintenance,
         ));
     }
 
@@ -761,4 +866,238 @@ enum RemovalReason {
     DisconnectReceived { is_alive: bool },
     /// A peer is removed after random selection to make room for a newly joined peer.
     Random,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use rand::{rngs::ChaCha12Rng, SeedableRng};
+
+    use super::*;
+    use crate::proto::topic::{Message as TopicMessage, OutEvent as TopicOut};
+
+    /// Our own id in these tests. Peers are numbered from 1.
+    const ME: u64 = 0;
+
+    fn state(config: Config) -> State<u64, ChaCha12Rng> {
+        State::new(ME, None, config, ChaCha12Rng::seed_from_u64(0))
+    }
+
+    /// Drives the state with one event and returns what it emitted.
+    fn handle(state: &mut State<u64, ChaCha12Rng>, event: InEvent<u64>) -> Vec<TopicOut<u64>> {
+        let mut io: VecDeque<TopicOut<u64>> = VecDeque::new();
+        state.handle(event, &mut io);
+        io.into_iter().collect()
+    }
+
+    /// Returns the peers a `Join` was sent to.
+    fn joined(out: &[TopicOut<u64>]) -> Vec<u64> {
+        out.iter()
+            .filter_map(|event| match event {
+                TopicOut::SendMessage(peer, TopicMessage::Swarm(Message::Join(_))) => Some(*peer),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Returns the peers a `Neighbor` request was sent to.
+    fn neighbor_requests(out: &[TopicOut<u64>]) -> Vec<u64> {
+        out.iter()
+            .filter_map(|event| match event {
+                TopicOut::SendMessage(peer, TopicMessage::Swarm(Message::Neighbor(_))) => {
+                    Some(*peer)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Returns the delays of the scheduled shuffle timers.
+    fn shuffle_delays(out: &[TopicOut<u64>]) -> Vec<Duration> {
+        out.iter()
+            .filter_map(|event| match event {
+                TopicOut::ScheduleTimer(
+                    delay,
+                    super::super::topic::Timer::Swarm(Timer::DoShuffle),
+                ) => Some(*delay),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Accepts an incoming `Neighbor`, putting `peer` in the active view.
+    fn connect(state: &mut State<u64, ChaCha12Rng>, peer: u64) {
+        handle(
+            state,
+            InEvent::RecvMessage(
+                peer,
+                Message::Neighbor(Neighbor {
+                    priority: Priority::High,
+                    data: None,
+                }),
+            ),
+        );
+    }
+
+    /// Puts `peers` in the passive view, the way a shuffle reply would.
+    fn learn_passive(state: &mut State<u64, ChaCha12Rng>, peers: impl IntoIterator<Item = u64>) {
+        let nodes = peers.into_iter().map(|id| (id, None).into()).collect();
+        handle(
+            state,
+            InEvent::RecvMessage(99, Message::ShuffleReply(ShuffleReply { nodes })),
+        );
+    }
+
+    /// A node that loses its last neighbor with nothing in its passive view
+    /// rejoins through the peers the application bootstrapped it with.
+    ///
+    /// Without this the node is stuck for good: refilling the active view needs
+    /// a passive peer to dial, and refilling the passive view needs an active
+    /// peer to shuffle with.
+    #[test]
+    fn maintenance_rejoins_bootstrap_peers_when_isolated() {
+        let mut state = state(Config::default());
+
+        let out = handle(&mut state, InEvent::RequestJoin(1));
+        assert_eq!(joined(&out), vec![1], "joining should contact the peer");
+        connect(&mut state, 1);
+        assert_eq!(
+            state.active_view.iter().copied().collect::<Vec<_>>(),
+            vec![1]
+        );
+
+        handle(&mut state, InEvent::PeerDisconnected(1));
+        assert!(state.active_view.is_empty(), "the only neighbor is gone");
+        assert!(
+            state.passive_view.is_empty(),
+            "an abrupt disconnect leaves nothing to fall back on"
+        );
+
+        let out = handle(&mut state, InEvent::TimerExpired(Timer::DoMaintenance));
+        assert_eq!(
+            joined(&out),
+            vec![1],
+            "an isolated node should rejoin through its bootstrap peers"
+        );
+    }
+
+    /// A node below the minimum refills from its passive view on the timer,
+    /// not only when a peer disconnects.
+    #[test]
+    fn maintenance_refills_the_active_view_below_the_minimum() {
+        let mut state = state(Config::default());
+        learn_passive(&mut state, 10..20);
+        // The refill that the shuffle reply itself triggers is not what is
+        // under test here.
+        handle(
+            &mut state,
+            InEvent::TimerExpired(Timer::PendingNeighborRequest(99)),
+        );
+
+        let out = handle(&mut state, InEvent::TimerExpired(Timer::DoMaintenance));
+        let requested = neighbor_requests(&out);
+        assert_eq!(
+            requested.len(),
+            1,
+            "expected one refill attempt, got {requested:?}"
+        );
+        assert!(
+            (10..20).contains(&requested[0]),
+            "the refill should dial a peer from the passive view"
+        );
+    }
+
+    /// A node at the minimum stays quiet.
+    ///
+    /// One slot short of capacity is the normal resting state, because the peer
+    /// that would fill it is usually full itself. Retrying every interval would
+    /// produce nothing but rejected requests and a churning broadcast tree.
+    #[test]
+    fn maintenance_is_quiet_when_the_view_is_healthy() {
+        let config = Config::default();
+        let min = config.active_view_min;
+        let mut state = state(config);
+        for peer in 1..=min as u64 {
+            connect(&mut state, peer);
+        }
+        learn_passive(&mut state, 10..20);
+        assert_eq!(state.active_view.len(), min);
+
+        let out = handle(&mut state, InEvent::TimerExpired(Timer::DoMaintenance));
+        assert!(
+            neighbor_requests(&out).is_empty(),
+            "a healthy node should not dial anyone: {out:?}"
+        );
+        assert!(
+            joined(&out).is_empty(),
+            "a healthy node should not rejoin: {out:?}"
+        );
+    }
+
+    /// The shuffle interval starts short and backs off to the steady value.
+    ///
+    /// The bootstrap leaves passive views thin, and it is the first shuffles
+    /// that fill them. Waiting a full steady interval for the first one leaves
+    /// a young swarm unable to recover from a large failure.
+    #[test]
+    fn shuffle_interval_backs_off_to_the_steady_value() {
+        let config = Config {
+            initial_shuffle_interval: Duration::from_secs(1),
+            shuffle_interval: Duration::from_secs(10),
+            ..Default::default()
+        };
+        let mut state = state(config.clone());
+
+        let mut delays = shuffle_delays(&handle(&mut state, InEvent::RequestJoin(1)));
+        for _ in 0..6 {
+            delays.extend(shuffle_delays(&handle(
+                &mut state,
+                InEvent::TimerExpired(Timer::DoShuffle),
+            )));
+        }
+
+        // Jitter is +/- 25%, so compare against the nominal schedule loosely.
+        let nominal = [1, 2, 4, 8, 10, 10, 10].map(Duration::from_secs);
+        assert_eq!(delays.len(), nominal.len());
+        for (delay, nominal) in delays.iter().zip(nominal) {
+            assert!(
+                *delay >= nominal.mul_f64(0.75) && *delay <= nominal.mul_f64(1.25),
+                "delay {delay:?} is not within jitter of {nominal:?}, full schedule {delays:?}"
+            );
+        }
+        assert!(
+            delays.iter().any(|delay| *delay != config.shuffle_interval),
+            "the schedule should be jittered, got {delays:?}"
+        );
+    }
+
+    /// A neighbor request whose connection fails moves on to another passive
+    /// peer.
+    ///
+    /// HyParView 4.3: "If the connection fails to establish, node q is
+    /// considered failed and removed from p's passive view; another node q' is
+    /// selected at random and a new attempt is made." A failed connection used
+    /// to end the refill, leaving the node short of neighbors until something
+    /// else started another.
+    #[test]
+    fn a_failed_neighbor_request_moves_on_to_another_passive_peer() {
+        let mut state = state(Config::default());
+        learn_passive(&mut state, 10..20);
+        let unreachable = *state
+            .pending_neighbor_requests
+            .iter()
+            .next()
+            .expect("learning passive peers with no neighbors starts a refill");
+
+        let out = handle(&mut state, InEvent::PeerDisconnected(unreachable));
+
+        let next = neighbor_requests(&out);
+        assert_eq!(next.len(), 1, "the refill should move on: {out:?}");
+        assert_ne!(next[0], unreachable, "it should try someone else");
+        assert!(
+            !state.passive_view.contains(&unreachable),
+            "an unreachable peer should leave the passive view"
+        );
+    }
 }
