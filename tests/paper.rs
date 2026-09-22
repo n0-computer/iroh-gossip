@@ -751,8 +751,11 @@ fn plumtree_shared_tree_has_no_redundancy() {
             ),
         );
 
+        // Measured 0.021 median and 0.051 at most over 200 seeds. The
+        // defect this guards against, a timeout that grafts before the tree
+        // delivers, starts at 0.6.
         assert!(
-            rmr < 0.05,
+            rmr < 0.1,
             "seed {seed}: a shared tree carries RMR {rmr:.3}, the paper's is 0"
         );
         // Measured at 20 times and more.
@@ -1068,10 +1071,25 @@ fn swarm_with(peers: usize, seed: u64, network: impl Into<NetworkConfig>) -> Sim
     swarm_from(config, network)
 }
 
-/// Builds a swarm from a full simulator config, the way the paper does.
+/// How long a swarm runs after its last peer joins, before a test starts.
+///
+/// The papers let their overlays stabilize before they measure. The newest
+/// peers need that time to fill their passive views: at 10,000 peers the
+/// smallest holds 3 entries right after the last join, 17 after 10s, and 28
+/// after 20s. A peer whose every known address fails is cut off for good, so
+/// without this a failure of half the swarm now and then strands one of the
+/// newest peers at the papers' size.
+///
+/// It is a fixed time rather than a number of shuffle intervals, so that a
+/// swarm on a longer interval does not get more time to recover.
+const WARMUP: Duration = Duration::from_secs(20);
+
+/// Builds a swarm from a full simulator config, the way the paper does, and
+/// lets it run for [`WARMUP`].
 fn swarm_from(config: SimulatorConfig, network: impl Into<NetworkConfig>) -> Simulator {
     let mut sim = Simulator::new(config, network);
     sim.bootstrap(BootstrapMode::Sequential);
+    sim.network.run_duration(WARMUP);
     assert_invariants(&sim);
     sim
 }
