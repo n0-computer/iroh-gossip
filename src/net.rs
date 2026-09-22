@@ -214,7 +214,8 @@ impl Gossip {
     fn new(endpoint: Endpoint, config: Config, alpn: Option<Bytes>) -> Self {
         let metrics = Arc::new(Metrics::default());
         let max_message_size = config.max_message_size;
-        let (api_tx, local_tx, pool, actor) = Actor::new(endpoint, config, alpn, metrics.clone());
+        let (api_tx, local_tx, pool, actor) =
+            GossipActor::new(endpoint, config, alpn, metrics.clone());
         let actor_task = task::spawn(actor.run().instrument(tracing::Span::current()));
 
         Self(Arc::new(Inner {
@@ -229,10 +230,15 @@ impl Gossip {
 
     /// Creates the gossip actor without spawning it, for a test to drive.
     #[cfg(test)]
-    fn new_with_actor(endpoint: Endpoint, config: Config, alpn: Option<Bytes>) -> (Self, Actor) {
+    fn new_with_actor(
+        endpoint: Endpoint,
+        config: Config,
+        alpn: Option<Bytes>,
+    ) -> (Self, GossipActor) {
         let metrics = Arc::new(Metrics::default());
         let max_message_size = config.max_message_size;
-        let (api_tx, local_tx, pool, actor) = Actor::new(endpoint, config, alpn, metrics.clone());
+        let (api_tx, local_tx, pool, actor) =
+            GossipActor::new(endpoint, config, alpn, metrics.clone());
         let handle = Self(Arc::new(Inner {
             pool,
             local_tx,
@@ -267,7 +273,7 @@ pub struct ActorStoppedError;
 #[derive(Debug, strum::Display)]
 enum TopicMessage {
     /// A local subscription to the topic.
-    ApiJoin(ApiJoinRequest),
+    Subscribe(ApiJoinRequest),
     /// A stream a peer opened for the topic.
     RemoteStream(RemoteStream),
 }
@@ -279,32 +285,32 @@ enum TopicMessage {
 type RemoteStream = Guarded<GossipReceiver>;
 
 type ApiJoinRequest = WithChannels<api::JoinRequest, api::Request>;
-type ApiRecvStream = BoxStream<api::Command>;
-type RemoteRecvStream = BoxStream<(EndpointId, n0_error::Result<ProtoMessage>)>;
+type SubscriberCommands = BoxStream<api::Command>;
+type RemoteMessages = BoxStream<(EndpointId, n0_error::Result<ProtoMessage>)>;
 
 /// The topic actors and the messages waiting for one.
 ///
-/// The gossip [`Actor`] owns it alone, and it is the only place that sends to a
+/// The [`GossipActor`] owns it alone, and it is the only place that sends to a
 /// topic actor. The way topic actors stop relies on that; see
-/// [`TopicMap::send`] and [`TopicMap::handle_exit`].
+/// [`Topics::send`] and [`Topics::handle_exit`].
 #[derive(Debug, Default)]
-struct TopicMap {
-    topics: HashMap<TopicId, TopicEntry>,
+struct Topics {
+    entries: HashMap<TopicId, TopicEntry>,
     tasks: JoinSet<TopicExit>,
     /// Streams that arrived for a topic that is not joined, keyed by topic.
     ///
     /// Two peers joining the same topic at once each open a stream before the
     /// other has processed its own local join, so this is expected rather than
     /// an error. The streams go to the topic actor if the topic is ever joined.
-    /// They are capped by [`MAX_PENDING_STREAMS`], because a peer can ask about
+    /// They are capped by [`MAX_PARKED_STREAMS`], because a peer can ask about
     /// topics we never join.
     parked: HashMap<TopicId, Vec<RemoteStream>>,
 }
 
 /// The number of streams held for topics that are not joined, at most.
-const MAX_PENDING_STREAMS: usize = 32;
+const MAX_PARKED_STREAMS: usize = 32;
 
-/// The state of a topic in the [`TopicMap`].
+/// The state of a topic in the [`Topics`].
 #[derive(Debug)]
 enum TopicEntry {
     /// The topic actor is running and accepts messages.
@@ -324,7 +330,7 @@ struct TopicExit {
     leftovers: Vec<TopicMessage>,
 }
 
-impl TopicMap {
+impl Topics {
     /// Delivers `msg` to the actor for `topic_id`.
     ///
     /// A join for a topic without an actor starts one. Nothing sent here is
@@ -333,16 +339,16 @@ impl TopicMap {
     /// back as a leftover, or fails and returns the message. Either way,
     /// [`Self::handle_exit`] gets it.
     async fn send(&mut self, shared: &Arc<Shared>, topic_id: TopicId, msg: TopicMessage) {
-        match self.topics.get_mut(&topic_id) {
+        match self.entries.get_mut(&topic_id) {
             Some(TopicEntry::Running(handle)) => {
                 if let Err(mpsc::error::SendError(msg)) = handle.tx.send(msg).await {
                     debug!(topic=%topic_id.fmt_short(), "topic actor is quitting, holding message");
-                    self.topics
+                    self.entries
                         .insert(topic_id, TopicEntry::Quitting(vec![msg]));
                 }
             }
             Some(TopicEntry::Quitting(buffer)) => buffer.push(msg),
-            None => self.dispatch(shared, topic_id, vec![msg]),
+            None => self.start_or_park(shared, topic_id, vec![msg]),
         }
     }
 
@@ -356,11 +362,11 @@ impl TopicMap {
             mut leftovers,
         } = exit;
         trace!(topic=%topic_id.fmt_short(), leftovers = leftovers.len(), "topic actor finished");
-        if let Some(TopicEntry::Quitting(held)) = self.topics.remove(&topic_id) {
+        if let Some(TopicEntry::Quitting(held)) = self.entries.remove(&topic_id) {
             leftovers.extend(held);
         }
         if !leftovers.is_empty() {
-            self.dispatch(shared, topic_id, leftovers);
+            self.start_or_park(shared, topic_id, leftovers);
         }
     }
 
@@ -368,21 +374,21 @@ impl TopicMap {
     ///
     /// Otherwise the streams among them are parked: a stream alone never
     /// creates topic state.
-    fn dispatch(&mut self, shared: &Arc<Shared>, topic_id: TopicId, msgs: Vec<TopicMessage>) {
+    fn start_or_park(&mut self, shared: &Arc<Shared>, topic_id: TopicId, msgs: Vec<TopicMessage>) {
         debug_assert!(
-            !self.topics.contains_key(&topic_id),
+            !self.entries.contains_key(&topic_id),
             "a topic actor started while another was still around"
         );
         if msgs
             .iter()
-            .any(|msg| matches!(msg, TopicMessage::ApiJoin(_)))
+            .any(|msg| matches!(msg, TopicMessage::Subscribe(_)))
         {
             let parked = self.parked.remove(&topic_id).unwrap_or_default();
             let initial = msgs
                 .into_iter()
                 .chain(parked.into_iter().map(TopicMessage::RemoteStream));
             let (handle, actor) = TopicHandle::new(topic_id, shared.clone());
-            self.topics.insert(topic_id, TopicEntry::Running(handle));
+            self.entries.insert(topic_id, TopicEntry::Running(handle));
             self.tasks.spawn(
                 actor
                     .run(initial.collect())
@@ -394,7 +400,7 @@ impl TopicMap {
             let TopicMessage::RemoteStream(stream) = msg else {
                 continue;
             };
-            if self.parked.values().map(Vec::len).sum::<usize>() >= MAX_PENDING_STREAMS {
+            if self.parked.values().map(Vec::len).sum::<usize>() >= MAX_PARKED_STREAMS {
                 debug!(topic=%topic_id.fmt_short(), "dropping stream: too many parked");
                 continue;
             }
@@ -409,9 +415,9 @@ impl TopicMap {
     /// the topic as it would with no subscribers left. Nothing starts in its
     /// place, so joins held here or left over in its inbox are dropped, which
     /// ends those subscriptions.
-    async fn shut_down(&mut self) {
+    async fn shutdown(&mut self) {
         debug!(topics = self.tasks.len(), "shutting down");
-        self.topics.clear();
+        self.entries.clear();
         while let Some(res) = self.tasks.join_next().await {
             res.expect("topic actor task panicked");
         }
@@ -426,14 +432,14 @@ impl TopicMap {
     /// Returns the number of topics with an entry, running or quitting.
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.topics.len()
+        self.entries.len()
     }
 
     /// Returns whether the actor for `topic_id` is running and accepts messages.
     #[cfg(test)]
     fn is_running(&self, topic_id: &TopicId) -> bool {
         matches!(
-            self.topics.get(topic_id),
+            self.entries.get(topic_id),
             Some(TopicEntry::Running(handle)) if !handle.tx.is_closed()
         )
     }
@@ -450,17 +456,17 @@ struct Shared {
 }
 
 /// The gossip actor, which routes joins and streams to topic actors.
-struct Actor {
+struct GossipActor {
     #[cfg(test)]
     endpoint: Endpoint,
     shared: Arc<Shared>,
-    topics: TopicMap,
+    topics: Topics,
     api_rx: mpsc::Receiver<api::RpcMessage>,
     local_rx: mpsc::Receiver<LocalMessage>,
     endpoint_addr_updates: BoxStream<EndpointAddr>,
 }
 
-impl Actor {
+impl GossipActor {
     /// Creates the actor, with its API and local senders and connection pool.
     fn new(
         endpoint: Endpoint,
@@ -520,14 +526,14 @@ impl Actor {
             api_tx,
             local_tx,
             pool,
-            Actor {
+            GossipActor {
                 #[cfg(test)]
                 endpoint,
                 shared,
                 api_rx,
                 local_rx,
                 endpoint_addr_updates: Box::pin(endpoint_addr_updates),
-                topics: TopicMap::default(),
+                topics: Topics::default(),
             },
         )
     }
@@ -575,7 +581,7 @@ impl Actor {
                     ControlFlow::Continue(())
                 }
                 LocalMessage::Shutdown(reply) => {
-                    self.topics.shut_down().await;
+                    self.topics.shutdown().await;
                     reply.send(()).ok();
                     ControlFlow::Break(())
                 }
@@ -596,7 +602,7 @@ impl Actor {
     async fn handle_api_message(&mut self, msg: api::RpcMessage) {
         let api::RpcMessage::Join(join) = msg;
         let topic_id = join.inner.topic_id;
-        let msg = TopicMessage::ApiJoin(join);
+        let msg = TopicMessage::Subscribe(join);
         self.topics.send(&self.shared, topic_id, msg).await;
     }
 }
@@ -615,7 +621,7 @@ async fn accept_loop(
     }
 }
 
-/// The [`TopicMap`]'s end of a topic actor's inbox.
+/// The [`Topics`]'s end of a topic actor's inbox.
 #[derive(Debug)]
 struct TopicHandle {
     tx: mpsc::Sender<TopicMessage>,
@@ -638,8 +644,8 @@ impl TopicHandle {
             out_events: Default::default(),
             subscribers: Subscribers::default(),
             senders: Default::default(),
-            remote_receivers: Default::default(),
-            drop_peers_queue: Default::default(),
+            remote_streams: Default::default(),
+            peers_to_drop: Default::default(),
         };
         (Self { tx }, actor)
     }
@@ -655,14 +661,14 @@ struct TopicActor {
     timers: Timers<Timer>,
     neighbors: BTreeSet<EndpointId>,
     out_events: VecDeque<OutEvent>,
-    drop_peers_queue: HashSet<EndpointId>,
+    peers_to_drop: HashSet<EndpointId>,
 
     // Senders and receivers
     peer_data: BoxStream<PeerData>,
     rx: mpsc::Receiver<TopicMessage>,
     subscribers: Subscribers,
     senders: PeerSenders,
-    remote_receivers: MergeUnbounded<RemoteRecvStream>,
+    remote_streams: MergeUnbounded<RemoteMessages>,
 }
 
 impl TopicActor {
@@ -675,7 +681,7 @@ impl TopicActor {
     async fn run(mut self, initial: Vec<TopicMessage>) -> TopicExit {
         self.shared.metrics.topics_joined.inc();
         for msg in initial {
-            self.handle_actor_message(msg);
+            self.handle_message(msg);
         }
         while let ControlFlow::Continue(()) = self.tick().await {}
         self.leave().await
@@ -690,7 +696,7 @@ impl TopicActor {
             msg = self.rx.recv() => match msg {
                 Some(msg) => {
                     trace!("tick: actor_rx {msg}");
-                    self.handle_actor_message(msg);
+                    self.handle_message(msg);
                 }
                 // The owner let go of us: gossip is shutting down.
                 None => {
@@ -704,7 +710,7 @@ impl TopicActor {
                     self.handle_in_event(InEvent::Command(command.into()));
                 }
             }
-            Some((remote, message)) = self.remote_receivers.next(), if !self.remote_receivers.is_empty() => {
+            Some((remote, message)) = self.remote_streams.next(), if !self.remote_streams.is_empty() => {
                 trace!(remote=%remote.fmt_short(), msg=?message, "tick: recv from remote");
                 self.handle_remote_message(remote, message);
             }
@@ -725,10 +731,10 @@ impl TopicActor {
             else => return ControlFlow::Break(()),
         }
 
-        if !self.drop_peers_queue.is_empty() {
-            trace!(len = self.drop_peers_queue.len(), "process peer drop queue");
+        if !self.peers_to_drop.is_empty() {
+            trace!(len = self.peers_to_drop.len(), "process peer drop queue");
             let now = Instant::now();
-            for peer in self.drop_peers_queue.drain() {
+            for peer in self.peers_to_drop.drain() {
                 self.out_events
                     .extend(self.state.handle(InEvent::PeerDisconnected(peer), now));
             }
@@ -787,14 +793,14 @@ impl TopicActor {
             }
             exit => debug!(remote=%remote.fmt_short(), ?exit, "sender ended, drop peer"),
         }
-        self.drop_peers_queue.insert(remote);
+        self.peers_to_drop.insert(remote);
     }
 
     /// Handles a message from the gossip actor.
-    fn handle_actor_message(&mut self, msg: TopicMessage) {
+    fn handle_message(&mut self, msg: TopicMessage) {
         match msg {
             TopicMessage::RemoteStream(stream) => self.register_remote_stream(stream),
-            TopicMessage::ApiJoin(req) => {
+            TopicMessage::Subscribe(req) => {
                 let WithChannels { inner, tx, rx, .. } = req;
                 self.subscribers.add(tx, rx, self.neighbors.clone());
                 self.handle_in_event(InEvent::Command(Command::Join(
@@ -812,8 +818,9 @@ impl TopicActor {
     fn register_remote_stream(&mut self, stream: RemoteStream) {
         let remote = stream.connection().remote_id();
         debug!(remote=%remote.fmt_short(), "remote stream opened");
-        self.remote_receivers
-            .push(Box::pin(into_stream(stream).map(move |msg| (remote, msg))));
+        self.remote_streams.push(Box::pin(
+            read_messages(stream).map(move |msg| (remote, msg)),
+        ));
     }
 
     /// Hands a message a peer sent to the protocol.
@@ -852,10 +859,10 @@ impl TopicActor {
                         .senders
                         .send(&self.shared, self.topic_id, remote, message)
                     {
-                        self.drop_peers_queue.insert(remote);
+                        self.peers_to_drop.insert(remote);
                     }
                 }
-                OutEvent::EmitEvent(event) => self.handle_event(event),
+                OutEvent::EmitEvent(event) => self.emit_event(event),
                 OutEvent::ScheduleTimer(delay, timer) => self.timers.insert(now + delay, timer),
                 // Dropping the sender lets its task write what is still queued,
                 // such as the protocol's `Disconnect`, within `DRAIN_TIMEOUT`.
@@ -870,7 +877,7 @@ impl TopicActor {
     }
 
     /// Tracks neighbors and passes a protocol event on to the subscribers.
-    fn handle_event(&mut self, event: ProtoEvent) {
+    fn emit_event(&mut self, event: ProtoEvent) {
         match &event {
             ProtoEvent::NeighborUp(n) => _ = self.neighbors.insert(*n),
             ProtoEvent::NeighborDown(n) => _ = self.neighbors.remove(n),
@@ -888,8 +895,8 @@ async fn connect(
 ) -> n0_error::Result<Guarded<GossipSender>> {
     async {
         let conn = shared.pool.get_or_connect(remote).await?;
-        let tx = GossipSender::init(&conn, topic, shared.config.max_message_size).await?;
-        n0_error::Ok(conn.guard(tx))
+        let sender = GossipSender::init(&conn, topic, shared.config.max_message_size).await?;
+        n0_error::Ok(conn.guard(sender))
     }
     .await
     .inspect(|_| _ = shared.metrics.peers_dialed_success.inc())
@@ -900,27 +907,31 @@ async fn connect(
 ///
 /// The subscriber first hears about `initial_neighbors`.
 async fn forward_events(
-    tx: channel::mpsc::Sender<api::Event>,
-    mut sub: broadcast::Receiver<ProtoEvent>,
+    subscriber: channel::mpsc::Sender<api::Event>,
+    mut events: broadcast::Receiver<ProtoEvent>,
     initial_neighbors: impl Iterator<Item = EndpointId>,
 ) {
     for neighbor in initial_neighbors {
-        if tx.send(api::Event::NeighborUp(neighbor)).await.is_err() {
+        if subscriber
+            .send(api::Event::NeighborUp(neighbor))
+            .await
+            .is_err()
+        {
             break;
         }
     }
     loop {
         let event = tokio::select! {
             biased;
-            event = sub.recv() => event,
-            _ = tx.closed() => break
+            event = events.recv() => event,
+            _ = subscriber.closed() => break
         };
         let event: api::Event = match event {
             Ok(event) => event.into(),
             Err(broadcast::error::RecvError::Lagged(_)) => api::Event::Lagged,
             Err(broadcast::error::RecvError::Closed) => break,
         };
-        if tx.send(event).await.is_err() {
+        if subscriber.send(event).await.is_err() {
             break;
         }
     }
@@ -929,7 +940,7 @@ async fn forward_events(
 /// The number of messages that may wait for a peer's send task, at most.
 ///
 /// A peer whose queue is full counts as not keeping up.
-const SEND_QUEUE_CAP: usize = 64;
+const MAX_QUEUED_MESSAGES: usize = 64;
 
 /// How long a send task may keep writing once the topic has let go of it.
 ///
@@ -973,7 +984,7 @@ impl PeerSenders {
         message: ProtoMessage,
     ) -> bool {
         let sender = self.current.entry(remote).or_insert_with(|| {
-            let (queue, rx) = mpsc::channel(SEND_QUEUE_CAP);
+            let (queue, rx) = mpsc::channel(MAX_QUEUED_MESSAGES);
             let (closing, closed) = oneshot::channel();
             let id = self
                 .tasks
@@ -1050,7 +1061,7 @@ impl PeerSenders {
 /// The local subscribers of a topic.
 struct Subscribers {
     /// Commands from every subscriber.
-    commands: MergeUnbounded<ApiRecvStream>,
+    commands: MergeUnbounded<SubscriberCommands>,
     /// Events for every subscriber, each forwarded by its own task.
     events: broadcast::Sender<ProtoEvent>,
     forwarders: JoinSet<()>,
@@ -1194,7 +1205,7 @@ fn join_result<T>(res: Result<T, task::JoinError>) -> Option<T> {
 }
 
 /// Reads `stream` until it ends or fails, yielding a failure as the last item.
-fn into_stream(
+fn read_messages(
     stream: RemoteStream,
 ) -> impl Stream<Item = n0_error::Result<ProtoMessage>> + Send + Sync + 'static {
     n0_future::stream::unfold(Some(stream), |stream| async move {
@@ -1240,9 +1251,9 @@ pub(crate) mod tests {
     const SETTLE: Duration = Duration::from_millis(50);
 
     /// How long [`ManualActor::until`] keeps trying.
-    const PATIENCE: Duration = Duration::from_secs(10);
+    const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-    /// A gossip [`Actor`] driven by the test instead of by a task.
+    /// A [`GossipActor`] driven by the test instead of by a task.
     ///
     /// Stepping the actor by hand is what makes the ordering between the actor,
     /// its topic actors and the API observable. Prefer [`Self::until`] over
@@ -1250,7 +1261,7 @@ pub(crate) mod tests {
     /// blocks forever, and one that asks for fewer leaves work behind, and
     /// neither count is something a test should have to know.
     #[derive(derive_more::Deref, derive_more::DerefMut)]
-    pub(super) struct ManualActor(Actor);
+    pub(super) struct ManualActor(GossipActor);
 
     impl ManualActor {
         /// Handles one unit of work. Returns `false` if the actor stopped.
@@ -1285,8 +1296,12 @@ pub(crate) mod tests {
         ///
         /// `what` is used in the failure message, phrased as the thing that did
         /// not happen: "the topic actor to start".
-        async fn until(&mut self, what: &str, mut cond: impl FnMut(&Actor) -> bool) -> Result {
-            let deadline = Instant::now() + PATIENCE;
+        async fn until(
+            &mut self,
+            what: &str,
+            mut cond: impl FnMut(&GossipActor) -> bool,
+        ) -> Result {
+            let deadline = Instant::now() + TEST_TIMEOUT;
             while !cond(&self.0) {
                 ensure_any!(Instant::now() < deadline, "timed out waiting for {what}");
                 ensure_any!(self.step().await, "actor stopped while waiting for {what}");
@@ -1301,7 +1316,7 @@ pub(crate) mod tests {
 
     /// A topic actor driven by hand, with one peer it can reach.
     ///
-    /// The topic actor belongs to no [`TopicMap`] and no task runs it, so tests
+    /// The topic actor belongs to no [`Topics`] and no task runs it, so tests
     /// can feed it dial results directly.
     struct DialFixture {
         topic: TopicActor,
@@ -1835,7 +1850,7 @@ pub(crate) mod tests {
         let api::RpcMessage::Join(join) = actor.api_rx.recv().await.expect("api channel open");
         let exit = TopicExit {
             topic_id,
-            leftovers: vec![TopicMessage::ApiJoin(join)],
+            leftovers: vec![TopicMessage::Subscribe(join)],
         };
         let shared = actor.shared.clone();
         actor.topics.handle_exit(&shared, exit);
@@ -2173,7 +2188,7 @@ pub(crate) mod tests {
         let mut f = DialFixture::new(relay_map, &ct).await?;
 
         // A send task that never takes anything off its queue.
-        let (queue, _unread) = mpsc::channel(SEND_QUEUE_CAP);
+        let (queue, _unread) = mpsc::channel(MAX_QUEUED_MESSAGES);
         let (closing, _closed) = oneshot::channel();
         let stuck = PeerSender {
             id: f.topic.senders.tasks.spawn(std::future::pending()).id(),
@@ -2183,12 +2198,12 @@ pub(crate) mod tests {
         f.topic.senders.current.insert(f.peer_id, stuck);
 
         // Every join sends the peer one message; one more than fits.
-        for _ in 0..=SEND_QUEUE_CAP {
+        for _ in 0..=MAX_QUEUED_MESSAGES {
             f.join_peer();
         }
         assert_eq!(f.sender_id(), None, "the stuck sender was kept");
         assert!(
-            f.topic.drop_peers_queue.contains(&f.peer_id),
+            f.topic.peers_to_drop.contains(&f.peer_id),
             "the protocol was not told"
         );
         ct.cancel();
