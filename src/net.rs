@@ -42,16 +42,10 @@ mod address_lookup;
 mod net_proto;
 mod util;
 
-/// How long the pool keeps a connection that nothing uses.
+/// How long the pool keeps a connection that nothing uses, by default.
 ///
-/// This applies to superseded connections too, so a test that checks a
-/// connection is not closed from under a peer has to outlast it. It is short
-/// under test for that reason.
-const CONN_IDLE_TIMEOUT: Duration = if cfg!(test) {
-    Duration::from_secs(1)
-} else {
-    Duration::from_secs(10)
-};
+/// This applies to superseded connections too.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The ALPN protocol name of `iroh-gossip`.
 pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/1";
@@ -131,6 +125,7 @@ impl ProtocolHandler for Gossip {
 pub struct Builder {
     config: proto::Config,
     alpn: Option<Bytes>,
+    idle_timeout: Duration,
 }
 
 impl Builder {
@@ -166,6 +161,13 @@ impl Builder {
         self
     }
 
+    /// Sets how long a connection that nothing uses stays open.
+    #[cfg(test)]
+    fn idle_timeout(mut self, timeout: Duration) -> Self {
+        self.idle_timeout = timeout;
+        self
+    }
+
     /// Spawns a gossip actor and returns a handle to it.
     pub fn spawn(self, endpoint: Endpoint) -> Gossip {
         Gossip::new(endpoint, self)
@@ -178,6 +180,7 @@ impl Gossip {
         Builder {
             config: Default::default(),
             alpn: None,
+            idle_timeout: IDLE_TIMEOUT,
         }
     }
 
@@ -442,7 +445,11 @@ impl GossipActor {
     ///
     /// The handle's actor task is left empty for the caller to fill in.
     fn new(endpoint: Endpoint, builder: Builder) -> (Inner, Self) {
-        let Builder { config, alpn } = builder;
+        let Builder {
+            config,
+            alpn,
+            idle_timeout,
+        } = builder;
         let metrics = Arc::new(Metrics::default());
         let (api_tx, api_rx) = mpsc::channel(16);
 
@@ -475,7 +482,7 @@ impl GossipActor {
             }
         });
         options.connect_timeout = Duration::from_secs(10);
-        options.idle_timeout = CONN_IDLE_TIMEOUT;
+        options.idle_timeout = idle_timeout;
         let pool = ConnectionPool::new(endpoint.clone(), &alpn, options);
 
         let shared = Arc::new(Shared {
@@ -1235,6 +1242,12 @@ pub(crate) mod tests {
     /// How long [`ManualActor::until`] keeps trying.
     const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+    /// The idle timeout for tests that depend on it.
+    ///
+    /// It applies to superseded connections too, so a test that checks a
+    /// connection is not closed from under a peer has to outlast it.
+    const TEST_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
+
     /// A [`GossipActor`] driven by the test instead of by a task.
     ///
     /// Stepping the actor by hand is what makes the ordering between the actor,
@@ -1363,7 +1376,9 @@ pub(crate) mod tests {
             lookup.add_endpoint_info(addr);
         }
         let endpoint = create_endpoint(rng, relay_map, Some(lookup)).await?;
-        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let gossip = Gossip::builder()
+            .idle_timeout(TEST_IDLE_TIMEOUT)
+            .spawn(endpoint.clone());
         let router = Router::builder(endpoint)
             .accept(GOSSIP_ALPN, gossip.clone())
             .spawn();
@@ -1408,8 +1423,14 @@ pub(crate) mod tests {
                 .await?;
 
             endpoint.online().await;
-            let (gossip, mut actor) =
-                Gossip::new_with_actor(endpoint.clone(), Builder { config, alpn: None });
+            let (gossip, mut actor) = Gossip::new_with_actor(
+                endpoint.clone(),
+                Builder {
+                    config,
+                    alpn: None,
+                    idle_timeout: TEST_IDLE_TIMEOUT,
+                },
+            );
             actor.endpoint_addr_updates = Box::pin(n0_future::stream::pending());
             let router = Router::builder(endpoint)
                 .accept(GOSSIP_ALPN, gossip.clone())
@@ -1909,8 +1930,12 @@ pub(crate) mod tests {
             memory_lookup
                 .add_endpoint_info(EndpointAddr::new(id).with_relay_url(relay_url.clone()));
         }
-        let go1 = Gossip::builder().spawn(ep1.clone());
-        let go2 = Gossip::builder().spawn(ep2.clone());
+        let go1 = Gossip::builder()
+            .idle_timeout(TEST_IDLE_TIMEOUT)
+            .spawn(ep1.clone());
+        let go2 = Gossip::builder()
+            .idle_timeout(TEST_IDLE_TIMEOUT)
+            .spawn(ep2.clone());
         let cancel = CancellationToken::new();
         let _loops = [
             AbortOnDropHandle::new(spawn(endpoint_loop(ep1, go1.clone(), cancel.clone()))),
@@ -1928,7 +1953,7 @@ pub(crate) mod tests {
         // The join resolves on `NeighborUp`, before either side has had a chance
         // to supersede a connection. Watch past the idle timeout, after which an
         // unused superseded connection is closed, for the neighbor to be lost.
-        let fallout = timeout(CONN_IDLE_TIMEOUT + Duration::from_secs(2), async {
+        let fallout = timeout(TEST_IDLE_TIMEOUT + Duration::from_secs(2), async {
             loop {
                 let event = tokio::select! {
                     event = t1.try_next() => event,
@@ -1960,8 +1985,12 @@ pub(crate) mod tests {
         let ep2 = create_endpoint(rng, relay_map, Some(memory_lookup.clone())).await?;
         let ep1_id = ep1.id();
         memory_lookup.add_endpoint_info(EndpointAddr::new(ep1_id).with_relay_url(relay_url));
-        let go1 = Gossip::builder().spawn(ep1.clone());
-        let go2 = Gossip::builder().spawn(ep2.clone());
+        let go1 = Gossip::builder()
+            .idle_timeout(TEST_IDLE_TIMEOUT)
+            .spawn(ep1.clone());
+        let go2 = Gossip::builder()
+            .idle_timeout(TEST_IDLE_TIMEOUT)
+            .spawn(ep2.clone());
 
         // Accept for `go1` and hand every connection to the test as well.
         let (conn_tx, mut conn_rx) = mpsc::channel(2);
@@ -1985,7 +2014,7 @@ pub(crate) mod tests {
         // Leaving the topic disconnects the peer on both sides, and the connection
         // closes once it has been unused for the idle timeout.
         drop(t2);
-        timeout(CONN_IDLE_TIMEOUT + Duration::from_secs(2), conn1.closed())
+        timeout(TEST_IDLE_TIMEOUT + Duration::from_secs(2), conn1.closed())
             .await
             .std_context("connection was not closed once unused")?;
 
@@ -2216,10 +2245,10 @@ pub(crate) mod tests {
             .std_context("shutdown did not finish")?;
 
         // Once nothing uses the connection, the pool closes it after
-        // `CONN_IDLE_TIMEOUT`, and the neighbor would hear of that too. Hearing
+        // `TEST_IDLE_TIMEOUT`, and the neighbor would hear of that too. Hearing
         // sooner means it was told, not that the connection timed out.
         let a_id = a_addr.id;
-        timeout(CONN_IDLE_TIMEOUT / 2, async {
+        timeout(TEST_IDLE_TIMEOUT / 2, async {
             loop {
                 match b_topic.try_next().await {
                     Ok(Some(Event::NeighborDown(id))) if id == a_id => return,
