@@ -26,7 +26,8 @@
 //! The papers simulate 10,000 nodes; these run at 200 to 400 so the file stays
 //! fast in debug builds. Claims hold across five seeds by default. Set
 //! `PAPER_SEEDS` to check more, for example `PAPER_SEEDS=50 cargo test
-//! --release --test paper`.
+//! --release --test paper`, and `PAPER_PEERS` to run every claim at another
+//! size, for example `PAPER_PEERS=10000` for the papers' own.
 
 use std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, VecDeque},
@@ -65,8 +66,9 @@ const PEERS: usize = 200;
 /// guard against it getting worse, not at the paper's.
 #[test]
 fn hyparview_active_view_is_bounded_and_nearly_full() {
+    let peers = swarm_size(PEERS);
     for seed in seeds() {
-        let sim = swarm(PEERS, seed);
+        let sim = swarm(peers, seed);
         let capacity = Config::default().membership.active_view_capacity;
         let sizes = active_view_sizes(&sim);
 
@@ -107,8 +109,9 @@ fn hyparview_active_view_is_bounded_and_nearly_full() {
 /// split into two halves.
 #[test]
 fn hyparview_overlay_is_connected() {
+    let peers = swarm_size(PEERS);
     for seed in seeds() {
-        let sim = swarm(PEERS, seed);
+        let sim = swarm(peers, seed);
         let components = connected_components(&sim);
         report(
             "hyparview: connectivity",
@@ -137,8 +140,9 @@ fn hyparview_overlay_is_connected() {
 /// next failure.
 #[test]
 fn hyparview_active_views_are_symmetric() {
+    let peers = swarm_size(PEERS);
     for seed in seeds() {
-        let mut sim = swarm(PEERS, seed);
+        let mut sim = swarm(peers, seed);
         let min_degree = active_view_sizes(&sim)
             .into_iter()
             .min()
@@ -200,13 +204,13 @@ fn asymmetric_links(sim: &Simulator) -> BTreeSet<(u64, u64)> {
 /// 4.32.
 #[test]
 fn hyparview_overlay_is_a_random_graph() {
-    const PEERS: usize = 400;
+    let peers = swarm_size(400);
     let degree = Config::default().membership.active_view_capacity as f64;
-    let random_clustering = degree / PEERS as f64;
-    let random_path = (PEERS as f64).ln() / (degree - 1.0).ln();
+    let random_clustering = degree / peers as f64;
+    let random_path = (peers as f64).ln() / (degree - 1.0).ln();
 
     for seed in seeds() {
-        let sim = swarm(PEERS, seed);
+        let sim = swarm(peers, seed);
         let clustering = clustering_coefficient(&sim);
         let path = average_shortest_path(&sim);
         report(
@@ -245,14 +249,15 @@ fn hyparview_overlay_is_a_random_graph() {
 /// send to report back.
 #[test]
 fn hyparview_failed_neighbors_leave_active_views_at_once() {
+    let peers = swarm_size(PEERS);
     for fraction in [50, 80] {
         for seed in seeds() {
-            let mut sim = swarm(PEERS, seed);
+            let mut sim = swarm(peers, seed);
             let mut rng = sim.rng();
             let failed: BTreeSet<u64> = sim
                 .network
                 .peer_ids()
-                .sample(&mut rng, PEERS * fraction / 100)
+                .sample(&mut rng, peers * fraction / 100)
                 .into_iter()
                 .collect();
             for peer in &failed {
@@ -297,13 +302,14 @@ fn hyparview_failed_neighbors_leave_active_views_at_once() {
 #[test]
 #[ignore = "fails on some seeds: a peer that loses every neighbor is never reconnected"]
 fn hyparview_delivers_through_failure_without_waiting_to_heal() {
+    let peers = swarm_size(PEERS);
     const MESSAGES: usize = 30;
     const SETTLED_FROM: usize = 4;
 
     for fraction in [10, 30, 50] {
         for seed in seeds() {
-            let mut sim = swarm(PEERS, seed);
-            sim.remove_peers(PEERS * fraction / 100);
+            let mut sim = swarm(peers, seed);
+            sim.remove_peers(peers * fraction / 100);
 
             let mut rates = Vec::with_capacity(MESSAGES);
             for idx in 0..MESSAGES {
@@ -351,15 +357,15 @@ fn hyparview_delivers_through_failure_without_waiting_to_heal() {
 #[test]
 #[ignore = "fails on some seeds: a peer that loses every neighbor is never reconnected"]
 fn hyparview_survives_massive_simultaneous_failure() {
-    const PEERS: usize = 400;
+    let peers = swarm_size(400);
 
     for fraction in [10, 30, 50, 80] {
         let mut rates = Vec::new();
         for seed in seeds() {
-            let mut sim = swarm(PEERS, seed);
+            let mut sim = swarm(peers, seed);
             assert_eq!(broadcast(&mut sim).missed, 0.0, "baseline delivery failed");
 
-            sim.remove_peers(PEERS * fraction / 100);
+            sim.remove_peers(peers * fraction / 100);
             run_membership_cycles(&mut sim, 2);
 
             let survivors = sim.peer_count();
@@ -420,17 +426,17 @@ fn hyparview_survives_massive_simultaneous_failure() {
 #[test]
 #[ignore = "fails on some seeds: a peer that loses every neighbor is never reconnected"]
 fn hyparview_survives_continuous_churn() {
-    const PEERS: usize = 300;
-    /// Peers replaced per round, five percent of the swarm.
-    const CHURN: usize = 15;
+    let peers = swarm_size(300);
+    // Peers replaced per round, five percent of the swarm.
+    let churn = peers / 20;
     const ROUNDS: usize = 25;
 
     for seed in seeds() {
-        let broken = churn_rounds_broken(swarm(PEERS, seed), CHURN, ROUNDS);
+        let broken = churn_rounds_broken(swarm(peers, seed), churn, ROUNDS);
         report(
             "hyparview: churn",
             seed,
-            format!("{ROUNDS} rounds at {CHURN}/{PEERS}: {broken} broken"),
+            format!("{ROUNDS} rounds at {churn}/{peers}: {broken} broken"),
         );
         assert_eq!(
             broken, 0,
@@ -474,13 +480,14 @@ fn churn_rounds_broken(mut sim: Simulator, churn: usize, rounds: usize) -> usize
 #[test]
 #[ignore = "fails on some seeds: a peer that loses every neighbor is never reconnected"]
 fn hyparview_heals_without_waiting_for_a_shuffle() {
+    let peers = swarm_size(PEERS);
     /// Round trips allowed before the overlay must be whole again.
     const MAX_TRIPS: usize = 20;
 
     for fraction in [10, 50] {
         for seed in seeds() {
-            let mut sim = swarm(PEERS, seed);
-            sim.remove_peers(PEERS * fraction / 100);
+            let mut sim = swarm(peers, seed);
+            sim.remove_peers(peers * fraction / 100);
             let trips = trips_until_whole(&mut sim, MAX_TRIPS);
             report(
                 &format!("hyparview: healing after {fraction}%"),
@@ -513,11 +520,12 @@ fn hyparview_heals_without_waiting_for_a_shuffle() {
 /// RMR 0; one redundant message per broadcast at 200 nodes is RMR 0.005.
 #[test]
 fn plumtree_redundancy_drops_to_zero_after_two_rounds() {
+    let peers = swarm_size(PEERS);
     const ROUNDS: usize = 20;
     let flooding = (Config::default().membership.active_view_capacity - 2) as f32;
 
     for seed in seeds() {
-        let mut sim = swarm(PEERS, seed);
+        let mut sim = swarm(peers, seed);
         let sender = sim.random_peer();
         for _ in 0..ROUNDS {
             broadcast_from(&mut sim, sender);
@@ -563,8 +571,9 @@ fn plumtree_redundancy_drops_to_zero_after_two_rounds() {
 /// hop is flooding's; the settled tree must not be deeper.
 #[test]
 fn plumtree_single_sender_tree_is_as_fast_as_flooding() {
+    let peers = swarm_size(PEERS);
     for seed in seeds() {
-        let mut sim = swarm(PEERS, seed);
+        let mut sim = swarm(peers, seed);
         let sender = sim.random_peer();
         for _ in 0..15 {
             broadcast_from(&mut sim, sender);
@@ -596,7 +605,8 @@ fn plumtree_single_sender_tree_is_as_fast_as_flooding() {
 fn plumtree_last_delivery_hop_stays_logarithmic() {
     for seed in seeds() {
         let mut measured = Vec::new();
-        for peers in [50, 100, 200, 400] {
+        let largest = swarm_size(400);
+        for peers in [largest / 8, largest / 4, largest / 2, largest] {
             let mut sim = swarm(peers, seed);
             let sender = sim.random_peer();
             for _ in 0..15 {
@@ -657,13 +667,14 @@ fn plumtree_last_delivery_hop_stays_logarithmic() {
 /// or Prune it caused can still be in flight when the next round starts.
 #[test]
 fn plumtree_shared_tree_has_no_redundancy() {
+    let peers = swarm_size(PEERS);
     const ROUNDS: usize = 40;
 
     for seed in seeds() {
         let mut shared = swarm_from(
             SimulatorConfig {
                 rng_seed: seed,
-                peers: PEERS,
+                peers,
                 gossip_round_timeout: Duration::from_secs(30),
             },
             fixed_graft_timeout(Duration::from_secs(3)),
@@ -675,7 +686,7 @@ fn plumtree_shared_tree_has_no_redundancy() {
         let rmr = mean_rmr(settled);
         let shared_ldh = mean_ldh(settled);
 
-        let mut single = swarm(PEERS, seed);
+        let mut single = swarm(peers, seed);
         let sender = single.random_peer();
         for _ in 0..15 {
             broadcast_from(&mut single, sender);
@@ -713,11 +724,12 @@ fn plumtree_shared_tree_has_no_redundancy() {
 /// per cycle; this runs ten concurrently, each needing a tree of its own.
 #[test]
 fn plumtree_delivery_is_total_with_concurrent_senders() {
+    let peers = swarm_size(PEERS);
     const SENDERS: usize = 10;
     const ROUNDS: usize = 10;
 
     for seed in seeds() {
-        let mut sim = swarm(PEERS, seed);
+        let mut sim = swarm(peers, seed);
         for round in 0..ROUNDS {
             let messages = (0..SENDERS)
                 .map(|idx| {
@@ -752,12 +764,12 @@ fn plumtree_delivery_is_total_with_concurrent_senders() {
 #[test]
 #[ignore = "fails on some seeds: a peer that loses every neighbor is never reconnected"]
 fn plumtree_delivery_holds_under_a_constant_failure_rate() {
-    const PEERS: usize = 400;
+    let peers = swarm_size(400);
     const ROUNDS: usize = 100;
-    let per_round = PEERS / 200;
+    let per_round = peers / 200;
 
     for seed in seeds() {
-        let mut sim = swarm(PEERS, seed);
+        let mut sim = swarm(peers, seed);
         let mut worst: f32 = 100.0;
         for round in 0..ROUNDS {
             sim.remove_peers(per_round);
@@ -796,11 +808,11 @@ fn plumtree_delivery_holds_under_a_constant_failure_rate() {
 #[test]
 #[ignore = "fails on some seeds: a peer that loses every neighbor is never reconnected"]
 fn plumtree_recovers_from_massive_failure() {
-    const PEERS: usize = 400;
+    let peers = swarm_size(400);
 
     for fraction in [40, 60, 80] {
         for seed in seeds() {
-            let mut sim = swarm_with(PEERS, seed, fixed_graft_timeout(Duration::from_millis(400)));
+            let mut sim = swarm_with(peers, seed, fixed_graft_timeout(Duration::from_millis(400)));
             let sender = sim.random_peer();
             for _ in 0..15 {
                 broadcast_from(&mut sim, sender);
@@ -809,7 +821,7 @@ fn plumtree_recovers_from_massive_failure() {
             let before = mean_rmr(&rounds[5..]);
             let ldh_before = rounds[rounds.len() - 1].ldh;
 
-            remove_peers_except(&mut sim, PEERS * fraction / 100, sender);
+            remove_peers_except(&mut sim, peers * fraction / 100, sender);
             heal(&mut sim);
 
             let repair = broadcast_from(&mut sim, sender);
@@ -910,6 +922,16 @@ fn plumtree_graft_timeout_below_link_latency_costs_redundancy() {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Returns the swarm size a test runs at: `default`, unless `PAPER_PEERS` is set.
+///
+/// The papers simulate 10,000 nodes. `PAPER_PEERS=10000` runs every claim at
+/// that size, and a test that varies the size scales its range to end there.
+fn swarm_size(default: usize) -> usize {
+    std::env::var("PAPER_PEERS")
+        .map(|peers| peers.parse().expect("PAPER_PEERS must be a number"))
+        .unwrap_or(default)
+}
+
 /// Returns the seeds to check every claim against.
 ///
 /// A single seed proves a protocol worked once. These are randomised protocols,
@@ -955,16 +977,17 @@ fn fixed_graft_timeout(timeout: Duration) -> Config {
 /// Builds a tree on 50ms links, fails a quarter of the swarm, and returns the
 /// settled RMR.
 fn repaired_tree_rmr(seed: u64, graft_timeout: Duration) -> f32 {
+    let peers = swarm_size(PEERS);
     let network = NetworkConfig {
         proto: fixed_graft_timeout(graft_timeout),
         latency: LatencyConfig::Static(Duration::from_millis(50)),
     };
-    let mut sim = swarm_with(PEERS, seed, network);
+    let mut sim = swarm_with(peers, seed, network);
     let sender = sim.random_peer();
     for _ in 0..15 {
         broadcast_from(&mut sim, sender);
     }
-    remove_peers_except(&mut sim, PEERS / 4, sender);
+    remove_peers_except(&mut sim, peers / 4, sender);
     heal(&mut sim);
     for _ in 0..20 {
         broadcast_from(&mut sim, sender);
@@ -1102,14 +1125,21 @@ fn clustering_coefficient(sim: &Simulator) -> f64 {
 
 /// Returns the mean shortest path between peers, over active view edges.
 fn average_shortest_path(sim: &Simulator) -> f64 {
+    // Read every active view once: at the papers' 10,000 nodes this runs
+    // 10,000 searches over the whole overlay.
+    let adjacency: HashMap<u64, Vec<u64>> = sim
+        .network
+        .peer_ids()
+        .map(|peer| (peer, neighbors(sim, peer)))
+        .collect();
     let mut total = 0usize;
     let mut pairs = 0usize;
-    for start in sim.network.peer_ids() {
+    for &start in adjacency.keys() {
         let mut distance = HashMap::from([(start, 0usize)]);
         let mut queue = VecDeque::from([start]);
         while let Some(peer) = queue.pop_front() {
             let hops = distance[&peer];
-            for neighbor in neighbors(sim, peer) {
+            for &neighbor in adjacency.get(&peer).into_iter().flatten() {
                 if let Entry::Vacant(entry) = distance.entry(neighbor) {
                     entry.insert(hops + 1);
                     queue.push_back(neighbor);
