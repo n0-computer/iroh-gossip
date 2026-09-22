@@ -96,7 +96,8 @@ struct Inner {
     api: GossipApi,
     pool: ConnectionPool,
     local_tx: mpsc::Sender<LocalMessage>,
-    _actor_handle: AbortOnDropHandle<()>,
+    /// The gossip actor's task, or `None` while a test drives the actor.
+    _actor_task: Option<AbortOnDropHandle<()>>,
     max_message_size: usize,
     metrics: Arc<Metrics>,
 }
@@ -167,7 +168,7 @@ impl Builder {
 
     /// Spawns a gossip actor and returns a handle to it.
     pub fn spawn(self, endpoint: Endpoint) -> Gossip {
-        Gossip::new(endpoint, self.config, self.alpn)
+        Gossip::new(endpoint, self)
     }
 }
 
@@ -211,43 +212,18 @@ impl Gossip {
 
     /// Creates the gossip actor and spawns it.
     #[tracing::instrument("gossip", parent=None, skip_all, fields(me=%endpoint.id().fmt_short()))]
-    fn new(endpoint: Endpoint, config: Config, alpn: Option<Bytes>) -> Self {
-        let metrics = Arc::new(Metrics::default());
-        let max_message_size = config.max_message_size;
-        let (api_tx, local_tx, pool, actor) =
-            GossipActor::new(endpoint, config, alpn, metrics.clone());
+    fn new(endpoint: Endpoint, builder: Builder) -> Self {
+        let (mut inner, actor) = GossipActor::new(endpoint, builder);
         let actor_task = task::spawn(actor.run().instrument(tracing::Span::current()));
-
-        Self(Arc::new(Inner {
-            max_message_size,
-            api: GossipApi::local(api_tx),
-            pool,
-            local_tx,
-            metrics,
-            _actor_handle: AbortOnDropHandle::new(actor_task),
-        }))
+        inner._actor_task = Some(AbortOnDropHandle::new(actor_task));
+        Self(Arc::new(inner))
     }
 
     /// Creates the gossip actor without spawning it, for a test to drive.
     #[cfg(test)]
-    fn new_with_actor(
-        endpoint: Endpoint,
-        config: Config,
-        alpn: Option<Bytes>,
-    ) -> (Self, GossipActor) {
-        let metrics = Arc::new(Metrics::default());
-        let max_message_size = config.max_message_size;
-        let (api_tx, local_tx, pool, actor) =
-            GossipActor::new(endpoint, config, alpn, metrics.clone());
-        let handle = Self(Arc::new(Inner {
-            pool,
-            local_tx,
-            max_message_size,
-            api: GossipApi::local(api_tx),
-            metrics,
-            _actor_handle: AbortOnDropHandle::new(task::spawn(std::future::pending())),
-        }));
-        (handle, actor)
+    fn new_with_actor(endpoint: Endpoint, builder: Builder) -> (Self, GossipActor) {
+        let (inner, actor) = GossipActor::new(endpoint, builder);
+        (Self(Arc::new(inner)), actor)
     }
 }
 
@@ -462,18 +438,12 @@ struct GossipActor {
 }
 
 impl GossipActor {
-    /// Creates the actor, with its API and local senders and connection pool.
-    fn new(
-        endpoint: Endpoint,
-        config: Config,
-        alpn: Option<Bytes>,
-        metrics: Arc<Metrics>,
-    ) -> (
-        mpsc::Sender<api::RpcMessage>,
-        mpsc::Sender<LocalMessage>,
-        ConnectionPool,
-        Self,
-    ) {
+    /// Creates the actor and the state of the [`Gossip`] handle that talks to it.
+    ///
+    /// The handle's actor task is left empty for the caller to fill in.
+    fn new(endpoint: Endpoint, builder: Builder) -> (Inner, Self) {
+        let Builder { config, alpn } = builder;
+        let metrics = Arc::new(Metrics::default());
         let (api_tx, api_rx) = mpsc::channel(16);
 
         let me = endpoint.id();
@@ -517,20 +487,24 @@ impl GossipActor {
             pool: pool.clone(),
         });
 
-        (
-            api_tx,
-            local_tx,
+        let inner = Inner {
+            api: GossipApi::local(api_tx),
             pool,
-            GossipActor {
-                #[cfg(test)]
-                endpoint,
-                shared,
-                api_rx,
-                local_rx,
-                endpoint_addr_updates: Box::pin(endpoint_addr_updates),
-                topics: Topics::default(),
-            },
-        )
+            local_tx,
+            _actor_task: None,
+            max_message_size,
+            metrics,
+        };
+        let actor = GossipActor {
+            #[cfg(test)]
+            endpoint,
+            shared,
+            api_rx,
+            local_rx,
+            endpoint_addr_updates: Box::pin(endpoint_addr_updates),
+            topics: Topics::default(),
+        };
+        (inner, actor)
     }
 
     async fn run(mut self) {
@@ -1434,7 +1408,8 @@ pub(crate) mod tests {
                 .await?;
 
             endpoint.online().await;
-            let (gossip, mut actor) = Gossip::new_with_actor(endpoint.clone(), config, None);
+            let (gossip, mut actor) =
+                Gossip::new_with_actor(endpoint.clone(), Builder { config, alpn: None });
             actor.endpoint_addr_updates = Box::pin(n0_future::stream::pending());
             let router = Router::builder(endpoint)
                 .accept(GOSSIP_ALPN, gossip.clone())
