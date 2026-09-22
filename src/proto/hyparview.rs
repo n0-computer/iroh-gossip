@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 
 use derive_more::{From, Sub};
 use n0_future::time::Duration;
-use rand::{rngs::ThreadRng, Rng};
+use rand::{rngs::ThreadRng, Rng, RngExt};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
@@ -189,8 +189,21 @@ pub struct Config {
     pub shuffle_active_view_count: usize,
     /// Number of passive peers to be included in a `Shuffle` request.
     pub shuffle_passive_view_count: usize,
-    /// Interval duration for shuffle requests
+    /// Interval between shuffle requests, once the swarm has settled.
+    ///
+    /// Shuffling is what keeps the passive view a diverse, live sample of the
+    /// swarm, and the passive view is the only thing a node has to fall back on
+    /// when its neighbors fail. A long interval leaves a young swarm unable to
+    /// recover from a large simultaneous failure.
     pub shuffle_interval: Duration,
+    /// Delay before the first shuffle request.
+    ///
+    /// The bootstrap leaves passive views small and lopsided, because they are
+    /// filled only by whatever `ForwardJoin` walks happened to pass by. The
+    /// first few shuffles matter far more than later ones, so the interval
+    /// starts here and doubles after each shuffle until it reaches
+    /// [`Self::shuffle_interval`].
+    pub initial_shuffle_interval: Duration,
     /// Timeout after which a `Neighbor` request is considered failed
     pub neighbor_request_timeout: Duration,
 }
@@ -212,8 +225,12 @@ impl Default for Config {
             shuffle_active_view_count: 3,
             // From the paper (p9)
             shuffle_passive_view_count: 4,
-            // Wild guess
-            shuffle_interval: Duration::from_secs(60),
+            // The paper gives no number. Partisan, the most widely deployed
+            // HyParView implementation, uses 10s.
+            shuffle_interval: Duration::from_secs(10),
+            // Long enough not to collide with the bootstrap's own traffic,
+            // short enough that a swarm is resilient seconds after forming.
+            initial_shuffle_interval: Duration::from_secs(1),
             // Wild guess
             neighbor_request_timeout: Duration::from_millis(500),
         }
@@ -240,6 +257,8 @@ pub struct State<PI, RG = ThreadRng> {
     config: Config,
     /// Whether a shuffle timer is currently scheduled
     shuffle_scheduled: bool,
+    /// Delay to use for the next shuffle, doubling up to `config.shuffle_interval`
+    next_shuffle_interval: Duration,
     /// Random number generator
     rng: RG,
     /// Statistics
@@ -263,6 +282,7 @@ where
             me_data,
             active_view: IndexSet::new(),
             passive_view: IndexSet::new(),
+            next_shuffle_interval: config.initial_shuffle_interval,
             config,
             shuffle_scheduled: false,
             rng,
@@ -290,11 +310,8 @@ where
 
         // this will only happen on the first call
         if !self.shuffle_scheduled {
-            io.push(OutEvent::ScheduleTimer(
-                self.config.shuffle_interval,
-                Timer::DoShuffle,
-            ));
             self.shuffle_scheduled = true;
+            self.schedule_shuffle(io);
         }
     }
 
@@ -561,8 +578,20 @@ where
             };
             io.push(OutEvent::SendMessage(*node, Message::Shuffle(message)));
         }
+        self.schedule_shuffle(io);
+    }
+
+    /// Schedules the next shuffle, backing off towards the steady interval.
+    ///
+    /// The delay is jittered because every node in a swarm that started
+    /// together would otherwise shuffle in lockstep, turning a steady trickle of
+    /// messages into a burst every interval.
+    fn schedule_shuffle(&mut self, io: &mut impl IO<PI>) {
+        let interval = self.next_shuffle_interval;
+        self.next_shuffle_interval = (interval * 2).min(self.config.shuffle_interval);
+        let jitter = self.rng.random_range(0.75..1.25);
         io.push(OutEvent::ScheduleTimer(
-            self.config.shuffle_interval,
+            interval.mul_f64(jitter),
             Timer::DoShuffle,
         ));
     }
@@ -804,6 +833,19 @@ mod tests {
             .collect()
     }
 
+    /// Returns the delays of the scheduled shuffle timers.
+    fn shuffle_delays(out: &[TopicOut<u64>]) -> Vec<Duration> {
+        out.iter()
+            .filter_map(|event| match event {
+                TopicOut::ScheduleTimer(
+                    delay,
+                    super::super::topic::Timer::Swarm(Timer::DoShuffle),
+                ) => Some(*delay),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Puts `peers` in the passive view, the way a shuffle reply would.
     fn learn_passive(state: &mut State<u64, ChaCha12Rng>, peers: impl IntoIterator<Item = u64>) {
         let nodes = peers.into_iter().map(|id| (id, None).into()).collect();
@@ -839,6 +881,43 @@ mod tests {
         assert!(
             !state.passive_view.contains(&unreachable),
             "an unreachable peer should leave the passive view"
+        );
+    }
+
+    /// The shuffle interval starts short and backs off to the steady value.
+    ///
+    /// The bootstrap leaves passive views thin, and it is the first shuffles
+    /// that fill them. Waiting a full steady interval for the first one leaves
+    /// a young swarm unable to recover from a large failure.
+    #[test]
+    fn shuffle_interval_backs_off_to_the_steady_value() {
+        let config = Config {
+            initial_shuffle_interval: Duration::from_secs(1),
+            shuffle_interval: Duration::from_secs(10),
+            ..Default::default()
+        };
+        let mut state = state(config.clone());
+
+        let mut delays = shuffle_delays(&handle(&mut state, InEvent::RequestJoin(1)));
+        for _ in 0..6 {
+            delays.extend(shuffle_delays(&handle(
+                &mut state,
+                InEvent::TimerExpired(Timer::DoShuffle),
+            )));
+        }
+
+        // Jitter is +/- 25%, so compare against the nominal schedule loosely.
+        let nominal = [1, 2, 4, 8, 10, 10, 10].map(Duration::from_secs);
+        assert_eq!(delays.len(), nominal.len());
+        for (delay, nominal) in delays.iter().zip(nominal) {
+            assert!(
+                *delay >= nominal.mul_f64(0.75) && *delay <= nominal.mul_f64(1.25),
+                "delay {delay:?} is not within jitter of {nominal:?}, full schedule {delays:?}"
+            );
+        }
+        assert!(
+            delays.iter().any(|delay| *delay != config.shuffle_interval),
+            "the schedule should be jittered, got {delays:?}"
         );
     }
 }
