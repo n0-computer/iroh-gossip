@@ -39,6 +39,7 @@ derive_more = { version = "2.0.1", features = [
     "add",
     "debug",
     "deref",
+    "deref_mut",
     "display",
     "from",
     "try_into",
@@ -59,9 +60,15 @@ serde = { version = "1.0.164", features = ["derive"] }
 
 # net dependencies (optional)
 futures-concurrency = { version = "7.6.1", optional = true }
+futures-util = { version = "0.3.30", optional = true }
 iroh = { version = "1", default-features = false, optional = true }
+# Pinned to a branch until its incoming-connection support
+# (`ConnectionPool::handle_connection`) is released.
+iroh-util = { git = "https://github.com/n0-computer/iroh-util", branch = "Frando/feat-incoming", optional = true }
+n0-watcher = { version = "1.0", optional = true }
+strum = { version = "0.27.2", features = ["derive"], optional = true }
 tokio = { version = "1", optional = true, features = ["io-util", "sync"] }
-tokio-util = { version = "0.7.12", optional = true, features = ["codec"] }
+tokio-util = { version = "0.7.12", optional = true, features = ["codec", "time"] }
 tracing = "0.1"
 irpc = { version = "0.17.0", optional = true, default-features = false, features = [
     "derive",
@@ -97,6 +104,7 @@ tokio = { version = "1", features = [
     "fs",
 ] }
 clap = { version = "4", features = ["derive"] }
+ed25519-dalek = { version = "3.0.0-pre.1", features = ["serde", "rand_core"] }
 humantime-serde = { version = "1.1.1" }
 iroh = { version = "1", default-features = false, features = [
     "metrics",
@@ -113,11 +121,15 @@ rand = { version = "0.10", features = ["chacha"] }
 [features]
 default = ["net", "metrics"]
 net = [
-    "dep:irpc",
+    "dep:futures-concurrency",
+    "dep:futures-util",
     "dep:iroh",
+    "dep:iroh-util",
+    "dep:irpc",
+    "dep:n0-watcher",
+    "dep:strum",
     "dep:tokio",
     "dep:tokio-util",
-    "dep:futures-concurrency",
 ]
 rpc = [
     "dep:irpc",
