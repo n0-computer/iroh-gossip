@@ -52,6 +52,13 @@ const TO_ACTOR_CAP: usize = 64;
 const IN_EVENT_CAP: usize = 1024;
 /// Channel capacity for broadcast subscriber event queue (one per topic)
 const TOPIC_EVENT_CAP: usize = 256;
+/// Consecutive `try_send` Full failures on a peer's per-connection send-loop
+/// channel before the actor force-drops the peer to break out of a stuck-
+/// peer wedge.
+///
+/// See `OutEvent::SendMessage` below for the wedge mechanism this guards
+/// against — addresses the failure mode described in #47.
+const SEND_FULL_FAILURES_TO_DROP_PEER: u32 = 8;
 
 /// Events emitted from the gossip protocol
 pub type ProtoEvent = proto::Event<PublicKey>;
@@ -302,6 +309,13 @@ struct Actor {
     metrics: Arc<Metrics>,
     topic_event_forwarders: JoinSet<TopicId>,
     address_lookup: GossipAddressLookup,
+    /// Per-peer counter of consecutive `try_send` Full failures on the
+    /// per-connection send-loop channel. Reset on Ok / Closed; on
+    /// `>= SEND_FULL_FAILURES_TO_DROP_PEER` the actor drops the peer
+    /// from `peers`, which closes its `send_tx` end-of-channel → SendLoop
+    /// exits → connection task finishes → existing
+    /// `handle_connection_task_finished` path emits `PeerDisconnected`.
+    send_full_failures: HashMap<EndpointId, u32>,
 }
 
 impl Actor {
@@ -346,6 +360,7 @@ impl Actor {
             local_rx,
             topic_event_forwarders: Default::default(),
             address_lookup,
+            send_full_failures: Default::default(),
         };
 
         (actor, rpc_tx, local_tx)
@@ -683,13 +698,86 @@ impl Actor {
                     let state = self.peers.entry(peer_id).or_default();
                     match state {
                         PeerState::Active { active_send_tx, .. } => {
-                            if let Err(_err) = active_send_tx.send(message).await {
-                                // Removing the peer is handled by the in_event PeerDisconnected sent
-                                // in [`Self::handle_connection_task_finished`].
-                                warn!(
-                                    peer = %peer_id.fmt_short(),
-                                    "failed to send: connection task send loop terminated",
-                                );
+                            // Bounded `try_send` + consecutive-Full counter,
+                            // dropping the peer after K consecutive Full
+                            // failures.
+                            //
+                            // Previously this was `.send(message).await`,
+                            // which blocks the entire actor `tokio::select!`
+                            // loop whenever ONE peer's per-connection
+                            // `SendLoop` cannot drain its `send_rx`
+                            // (e.g. a stuck/half-open QUIC stream on a
+                            // NAT-degraded peer, or any "neighbor that
+                            // accepted into the active view but no longer
+                            // drains data" condition). Once the actor is
+                            // blocked on `.send().await`, NO other branch
+                            // of the `select!` advances — including the
+                            // connection-task-finished branch that would
+                            // otherwise demote the wedged peer via
+                            // `NeighborDown`. `.send().await` never
+                            // returns `Full` on a bounded channel, so the
+                            // actor has no signal to escape; the wedge is
+                            // process-wide and persistent. This is the
+                            // failure mode described in issue #47.
+                            //
+                            // `try_send` lets the actor observe `Full`,
+                            // count consecutive occurrences per-peer, and
+                            // — at threshold — drop the wedged peer's
+                            // `PeerState`. Dropping closes `send_tx`'s
+                            // end of the channel, which signals
+                            // `SendLoop`'s `send_rx.recv()` → `None`,
+                            // the connection task exits, and the existing
+                            // `handle_connection_task_finished` path
+                            // emits `PeerDisconnected` cleanly. Healthy
+                            // peers — whose SendLoops drain at line
+                            // rate — never accumulate Full counts because
+                            // any `Ok` resets the counter.
+                            //
+                            // Plumtree's eager-push protocol tolerates
+                            // best-effort delivery (recovery is via the
+                            // lazy-pull REQUEST/PRUNE backstop), so the
+                            // dropped messages on Full are consistent
+                            // with the protocol's at-most-once-per-eager
+                            // contract.
+                            match active_send_tx.try_send(message) {
+                                Ok(()) => {
+                                    self.send_full_failures.remove(&peer_id);
+                                }
+                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                    let counter = self
+                                        .send_full_failures
+                                        .entry(peer_id)
+                                        .and_modify(|c| *c += 1)
+                                        .or_insert(1);
+                                    let consecutive_failures = *counter;
+                                    warn!(
+                                        peer = %peer_id.fmt_short(),
+                                        consecutive_failures,
+                                        "send queue full; will drop peer after {} consecutive failures",
+                                        SEND_FULL_FAILURES_TO_DROP_PEER,
+                                    );
+                                    if consecutive_failures >= SEND_FULL_FAILURES_TO_DROP_PEER {
+                                        warn!(
+                                            peer = %peer_id.fmt_short(),
+                                            consecutive_failures,
+                                            "dropping wedged peer after {} consecutive send-queue-full failures",
+                                            SEND_FULL_FAILURES_TO_DROP_PEER,
+                                        );
+                                        self.peers.remove(&peer_id);
+                                        self.send_full_failures.remove(&peer_id);
+                                    }
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => {
+                                    // Receiver gone; the existing
+                                    // PeerDisconnected path via
+                                    // `handle_connection_task_finished`
+                                    // will land for this peer.
+                                    warn!(
+                                        peer = %peer_id.fmt_short(),
+                                        "failed to send: connection task send loop terminated",
+                                    );
+                                    self.send_full_failures.remove(&peer_id);
+                                }
                             }
                         }
                         PeerState::Pending { queue } => {
