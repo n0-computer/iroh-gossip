@@ -2,8 +2,15 @@ name: run simulations
 on:
   pull_request:
 
+# Default to read-only; jobs that need more grant it explicitly.
+permissions:
+  contents: read
+
 jobs:
   run_sim:
+    permissions:
+      contents: read
+      pull-requests: write   # posts the simulation report
     runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: "sccache"
@@ -12,6 +19,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Install rust stable
