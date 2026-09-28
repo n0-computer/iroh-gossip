@@ -24,9 +24,6 @@ jobs:
       contents: write   # creates the GitHub release
     name: create-release
     runs-on: ubuntu-latest
-    outputs:
-      upload_url: ${{ steps.release.outputs.upload_url }}
-      release_version: ${{ env.RELEASE_VERSION }}
     steps:
     - name: Get the release version from the tag (push)
       shell: bash
@@ -48,12 +45,12 @@ jobs:
       with:
         persist-credentials: false
         fetch-depth: 1
+    # actions/create-release is archived; gh ships on the runner.
     - name: Create GitHub release
-      id: release
       if: github.event.inputs.create_release == 'true' || github.event_name == 'push'
-      uses: actions/create-release@0cb9c9b65d5d1901c1f53e5e66eaf4afd303e70e # v1.1.4
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ env.RELEASE_VERSION }}
-        release_name: ${{ env.RELEASE_VERSION }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh release create "$RELEASE_VERSION" \
+          --repo "$GITHUB_REPOSITORY" \
+          --title "$RELEASE_VERSION"
