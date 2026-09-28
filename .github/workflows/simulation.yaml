@@ -23,9 +23,9 @@ jobs:
       - name: Run simulations
         run: |
           git checkout ${{ github.event.pull_request.base.ref }}
-          cargo run -q --bin sim --features simulator --release -- run -c simulations/all.toml -o /tmp/sim-main
+          cargo run -q --locked --bin sim --features simulator --release -- run -c simulations/all.toml -o /tmp/sim-main
           git checkout ${{ github.event.pull_request.head.sha }}
-          cargo run -q --bin sim --features simulator --release -- run -c simulations/all.toml -o /tmp/sim-pr --baseline /tmp/sim-main |& tee REPORT
+          cargo run -q --locked --bin sim --features simulator --release -- run -c simulations/all.toml -o /tmp/sim-pr --baseline /tmp/sim-main |& tee REPORT
           echo "<details><summary>Simulation report</summary>" >> COMMENT
           echo "" >> COMMENT
           echo '```' >> COMMENT
