@@ -31,10 +31,12 @@ jobs:
         uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
 
       - name: Run simulations
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          git checkout ${{ github.event.pull_request.base.ref }}
+          git checkout "$GITHUB_BASE_REF"
           cargo run -q --locked --bin sim --features simulator --release -- run -c simulations/all.toml -o /tmp/sim-main
-          git checkout ${{ github.event.pull_request.head.sha }}
+          git checkout "$HEAD_SHA"
           cargo run -q --locked --bin sim --features simulator --release -- run -c simulations/all.toml -o /tmp/sim-pr --baseline /tmp/sim-main |& tee REPORT
           echo "<details><summary>Simulation report</summary>" >> COMMENT
           echo "" >> COMMENT
