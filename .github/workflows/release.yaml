@@ -14,37 +14,43 @@ on:
         required: true
         default: "true"
 
+# Default to read-only; jobs that need more grant it explicitly.
+permissions:
+  contents: read
+
 jobs:
   create-release:
+    permissions:
+      contents: write   # creates the GitHub release
     name: create-release
     runs-on: ubuntu-latest
-    outputs:
-      upload_url: ${{ steps.release.outputs.upload_url }}
-      release_version: ${{ env.RELEASE_VERSION }}
     steps:
     - name: Get the release version from the tag (push)
       shell: bash
       if: env.RELEASE_VERSION == '' && github.event_name == 'push'
       run: |
         # See: https://github.community/t5/GitHub-Actions/How-to-get-just-the-tag-name/m-p/32167/highlight/true#M1027
-        echo "RELEASE_VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
-        echo "version is: ${{ env.RELEASE_VERSION }}"
+        echo "RELEASE_VERSION=${GITHUB_REF#refs/tags/}" >> "$GITHUB_ENV"
+        echo "version is: ${GITHUB_REF#refs/tags/}"
     - name: Get the release version from the tag (dispatch)
       shell: bash
       if: github.event_name == 'workflow_dispatch'
-      run: |
-        echo "RELEASE_VERSION=${{ github.event.inputs.release_version }}" >> $GITHUB_ENV
-        echo "version is: ${{ env.RELEASE_VERSION }}"
-    - name: Checkout repository
-      uses: actions/checkout@v6
-      with:
-        fetch-depth: 1
-    - name: Create GitHub release
-      id: release
-      if: github.event.inputs.create_release == 'true' || github.event_name == 'push'
-      uses: actions/create-release@v1
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        RELEASE_VERSION_INPUT: ${{ github.event.inputs.release_version }}
+      run: |
+        echo "RELEASE_VERSION=$RELEASE_VERSION_INPUT" >> "$GITHUB_ENV"
+        echo "version is: $RELEASE_VERSION_INPUT"
+    - name: Checkout repository
+      uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       with:
-        tag_name: ${{ env.RELEASE_VERSION }}
-        release_name: ${{ env.RELEASE_VERSION }}
+        persist-credentials: false
+        fetch-depth: 1
+    # actions/create-release is archived; gh ships on the runner.
+    - name: Create GitHub release
+      if: github.event.inputs.create_release == 'true' || github.event_name == 'push'
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh release create "$RELEASE_VERSION" \
+          --repo "$GITHUB_REPOSITORY" \
+          --title "$RELEASE_VERSION"
