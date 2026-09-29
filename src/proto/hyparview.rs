@@ -62,6 +62,7 @@ pub enum Event<PI> {
 pub enum Timer<PI> {
     DoShuffle,
     PendingNeighborRequest(PI),
+    ClearReconnectCooldown(PI),
 }
 
 /// Messages that we can send and receive from peers within the topic.
@@ -193,6 +194,9 @@ pub struct Config {
     pub shuffle_interval: Duration,
     /// Timeout after which a `Neighbor` request is considered failed
     pub neighbor_request_timeout: Duration,
+    /// After disconnecting a peer, refuse their reconnection for this duration.
+    /// Prevents rapid churn cycles under high connection stress.
+    pub reconnect_cooldown: Duration,
 }
 impl Default for Config {
     /// Default values for the HyParView layer
@@ -212,10 +216,13 @@ impl Default for Config {
             shuffle_active_view_count: 3,
             // From the paper (p9)
             shuffle_passive_view_count: 4,
-            // Wild guess
-            shuffle_interval: Duration::from_secs(60),
-            // Wild guess
+            // Reduced from 60s for faster mesh healing under stress
+            shuffle_interval: Duration::from_secs(30),
+            // Wild guess - Dials take 2-5s under connection stress
             neighbor_request_timeout: Duration::from_millis(500),
+            // Cooldown period after we disconnect a peer before accepting their reconnection.
+            // Helps prevent rapid churn cycles under high connection stress.
+            reconnect_cooldown: Duration::from_millis(200),
         }
     }
 }
@@ -250,6 +257,8 @@ pub struct State<PI, RG = ThreadRng> {
     peer_data: HashMap<PI, PeerData>,
     /// List of peers that are disconnecting, but which we want to keep in the passive set once the connection closes
     alive_disconnect_peers: HashSet<PI>,
+    /// Peers we recently disconnected - refuse their reconnection attempts to prevent churn cycles
+    reconnect_cooldown_peers: HashSet<PI>,
 }
 
 impl<PI, RG> State<PI, RG>
@@ -270,6 +279,7 @@ where
             pending_neighbor_requests: Default::default(),
             peer_data: Default::default(),
             alive_disconnect_peers: Default::default(),
+            reconnect_cooldown_peers: Default::default(),
         }
     }
 
@@ -279,6 +289,9 @@ where
             InEvent::TimerExpired(timer) => match timer {
                 Timer::DoShuffle => self.handle_shuffle_timer(io),
                 Timer::PendingNeighborRequest(peer) => self.handle_pending_neighbor_timer(peer, io),
+                Timer::ClearReconnectCooldown(peer) => {
+                    self.reconnect_cooldown_peers.remove(&peer);
+                }
             },
             InEvent::PeerDisconnected(peer) => self.handle_connection_closed(peer, io),
             InEvent::RequestJoin(peer) => self.handle_join(peer, io),
@@ -361,6 +374,20 @@ where
     }
 
     fn send_disconnect(&mut self, peer: PI, alive: bool, io: &mut impl IO<PI>) {
+        // Clear pending neighbor request so future Neighbor messages from this peer
+        // are treated as new requests (not replies), ensuring we send a proper reply
+        // to establish symmetric neighbor relationships.
+        self.pending_neighbor_requests.remove(&peer);
+
+        // Add peer to reconnect cooldown to prevent rapid churn cycles.
+        // If this peer immediately tries to reconnect, we'll refuse them temporarily.
+        if self.reconnect_cooldown_peers.insert(peer) {
+            io.push(OutEvent::ScheduleTimer(
+                self.config.reconnect_cooldown,
+                Timer::ClearReconnectCooldown(peer),
+            ));
+        }
+
         // Before disconnecting, send a `ShuffleReply` with some of our nodes to
         // prevent the other node from running out of connections. This is especially
         // relevant if the other node just joined the swarm.
@@ -448,13 +475,25 @@ where
     }
 
     fn on_neighbor(&mut self, from: PI, details: Neighbor, io: &mut impl IO<PI>) {
+        // If this peer is in reconnect cooldown (we recently disconnected them),
+        // refuse the request to prevent rapid churn cycles.
+        if self.reconnect_cooldown_peers.contains(&from) {
+            debug!(peer = ?from, "refusing neighbor request: peer in reconnect cooldown");
+            // Don't add to cooldown again, just disconnect
+            io.push(OutEvent::DisconnectPeer(from));
+            return;
+        }
+
         let is_reply = self.pending_neighbor_requests.remove(&from);
         let do_reply = !is_reply;
         // "A node q that receives a high priority neighbor request will always accept the request, even
         // if it has to drop a random member from its active view (again, the member that is dropped will
         // receive a Disconnect notification). If a node q receives a low priority Neighbor request, it will
         // only accept the request if it has a free slot in its active view, otherwise it will refuse the request."
-        if !self.add_active(from, details.data, details.priority, do_reply, io) {
+        //
+        // Allow slight over-capacity for High priority requests to dampen cascading disconnections
+        // when many peers simultaneously try to recover from isolation.
+        if !self.add_active_allow_overcapacity(from, details.data, details.priority, do_reply, io) {
             self.send_disconnect(from, true, io);
         }
     }
@@ -596,37 +635,57 @@ where
     }
 
     fn refill_active_from_passive(&mut self, skip_peers: &[&PI], io: &mut impl IO<PI>) {
-        if self.active_view.len() + self.pending_neighbor_requests.len()
-            >= self.config.active_view_capacity
-        {
+        let available_slots = self
+            .config
+            .active_view_capacity
+            .saturating_sub(self.active_view.len())
+            .saturating_sub(self.pending_neighbor_requests.len());
+        if available_slots == 0 {
             return;
         }
         // "When a node p suspects that one of the nodes present in its active view has failed
         // (by either disconnecting or blocking), it selects a random node q from its passive view and
         // attempts to establish a TCP connection with q. If the connection fails to establish,
-        // node q is considered failed and removed from p’s passive view; another node q′ is selected
+        // node q is considered failed and removed from p's passive view; another node q′ is selected
         // at random and a new attempt is made. The procedure is repeated until a connection is established
         // with success." (p7)
-        let mut skip_peers = skip_peers.to_vec();
-        skip_peers.extend(self.pending_neighbor_requests.iter());
+        //
+        // When active_view is empty, we're isolated from the network. Try multiple passive peers
+        // simultaneously to recover quickly instead of waiting for timeouts one by one.
+        let mut tried: Vec<PI> = skip_peers.iter().copied().copied().collect();
+        tried.extend(self.pending_neighbor_requests.iter().copied());
 
-        if let Some(node) = self
-            .passive_view
-            .pick_random_without(&skip_peers, &mut self.rng)
-            .copied()
-        {
-            let priority = match self.active_view.is_empty() {
-                true => Priority::High,
-                false => Priority::Low,
-            };
-            self.send_neighbor(node, priority, io);
-            // schedule a timer that checks if the node replied with a neighbor message,
-            // otherwise try again with another passive node.
-            io.push(OutEvent::ScheduleTimer(
-                self.config.neighbor_request_timeout,
-                Timer::PendingNeighborRequest(node),
-            ));
+        let is_isolated = self.active_view.is_empty();
+        // When isolated, try multiple passive peers to recover quickly.
+        // Limit to 3 to avoid cascading kicks when many peers recover simultaneously.
+        let attempts = if is_isolated {
+            available_slots.min(3)
+        } else {
+            1
         };
+
+        for _ in 0..attempts {
+            let skip_refs: Vec<&PI> = tried.iter().collect();
+            if let Some(node) = self
+                .passive_view
+                .pick_random_without(&skip_refs, &mut self.rng)
+                .copied()
+            {
+                let priority = if is_isolated {
+                    Priority::High
+                } else {
+                    Priority::Low
+                };
+                self.send_neighbor(node, priority, io);
+                io.push(OutEvent::ScheduleTimer(
+                    self.config.neighbor_request_timeout,
+                    Timer::PendingNeighborRequest(node),
+                ));
+                tried.push(node);
+            } else {
+                break;
+            }
+        }
     }
 
     fn handle_pending_neighbor_timer(&mut self, peer: PI, io: &mut impl IO<PI>) {
@@ -699,6 +758,30 @@ where
         reply: bool,
         io: &mut impl IO<PI>,
     ) -> bool {
+        self.add_active_inner(peer, data, priority, reply, false, io)
+    }
+
+    /// Add a peer allowing slight over-capacity for High priority requests.
+    fn add_active_allow_overcapacity(
+        &mut self,
+        peer: PI,
+        data: Option<PeerData>,
+        priority: Priority,
+        reply: bool,
+        io: &mut impl IO<PI>,
+    ) -> bool {
+        self.add_active_inner(peer, data, priority, reply, true, io)
+    }
+
+    fn add_active_inner(
+        &mut self,
+        peer: PI,
+        data: Option<PeerData>,
+        priority: Priority,
+        reply: bool,
+        allow_overcapacity: bool,
+        io: &mut impl IO<PI>,
+    ) -> bool {
         if peer == self.me {
             return false;
         }
@@ -712,7 +795,14 @@ where
         match (priority, self.active_is_full()) {
             (Priority::High, is_full) => {
                 if is_full {
-                    self.free_random_slot_in_active_view(io);
+                    // When allow_overcapacity is set (Neighbor requests from recovering peers),
+                    // allow going 1 over capacity to dampen cascading disconnections.
+                    // Otherwise, kick immediately as per HyParView paper.
+                    let should_kick = !allow_overcapacity
+                        || self.active_view.len() > self.config.active_view_capacity;
+                    if should_kick {
+                        self.free_random_slot_in_active_view(io);
+                    }
                 }
                 self.add_active_unchecked(peer, Priority::High, reply, io);
                 true
@@ -744,6 +834,8 @@ where
 
     fn send_neighbor(&mut self, peer: PI, priority: Priority, io: &mut impl IO<PI>) {
         if self.pending_neighbor_requests.insert(peer) {
+            // Clear cooldown when we initiate contact - we're intentionally reconnecting
+            self.reconnect_cooldown_peers.remove(&peer);
             let message = Message::Neighbor(Neighbor {
                 priority,
                 data: self.me_data.clone(),
@@ -761,4 +853,130 @@ enum RemovalReason {
     DisconnectReceived { is_alive: bool },
     /// A peer is removed after random selection to make room for a newly joined peer.
     Random,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use rand::SeedableRng;
+
+    use super::*;
+    use crate::proto::topic::{Message as TopicMessage, OutEvent as TopicOutEvent};
+
+    type IO = VecDeque<TopicOutEvent<u32>>;
+
+    fn state() -> State<u32, rand::rngs::StdRng> {
+        State::new(
+            1,
+            None,
+            Config::default(),
+            rand::rngs::StdRng::seed_from_u64(42),
+        )
+    }
+
+    fn count_neighbor_msgs(io: &IO) -> usize {
+        io.iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    TopicOutEvent::SendMessage(_, TopicMessage::Swarm(Message::Neighbor(_)))
+                )
+            })
+            .count()
+    }
+
+    #[test]
+    fn disconnect_clears_pending_and_adds_cooldown() {
+        let mut s = state();
+        let mut io = IO::new();
+
+        s.pending_neighbor_requests.insert(2);
+        s.active_view.insert(2);
+        s.remove_active(&2, RemovalReason::Random, &mut io);
+
+        assert!(!s.pending_neighbor_requests.contains(&2));
+        assert!(s.reconnect_cooldown_peers.contains(&2));
+
+        // Peer in cooldown gets rejected
+        io.clear();
+        s.handle_message(
+            2,
+            Message::Neighbor(Neighbor {
+                priority: Priority::High,
+                data: None,
+            }),
+            &mut io,
+        );
+        assert!(io
+            .iter()
+            .any(|e| matches!(e, TopicOutEvent::DisconnectPeer(2))));
+    }
+
+    #[test]
+    fn refill_tries_multiple_peers_only_when_isolated() {
+        let mut s = state();
+        let mut io = IO::new();
+
+        for i in 10..15 {
+            s.passive_view.insert(i);
+        }
+        s.refill_active_from_passive(&[], &mut io);
+        let n = count_neighbor_msgs(&io);
+        assert!(
+            (2..=3).contains(&n),
+            "isolated: expected 2-3 peers, got {n}"
+        );
+
+        // With active peer, only try 1
+        s.active_view.insert(2);
+        io.clear();
+        s.refill_active_from_passive(&[], &mut io);
+        assert_eq!(count_neighbor_msgs(&io), 1);
+    }
+
+    #[test]
+    fn cooldown_clears_on_timer_or_initiation() {
+        let mut s = state();
+        let mut io = IO::new();
+
+        // Timer clears cooldown
+        s.reconnect_cooldown_peers.insert(2);
+        s.handle(
+            InEvent::TimerExpired(Timer::ClearReconnectCooldown(2)),
+            &mut io,
+        );
+        assert!(!s.reconnect_cooldown_peers.contains(&2));
+
+        // Our own initiation clears cooldown
+        s.reconnect_cooldown_peers.insert(3);
+        s.passive_view.insert(3);
+        s.send_neighbor(3, Priority::Low, &mut io);
+        assert!(!s.reconnect_cooldown_peers.contains(&3));
+    }
+
+    #[test]
+    fn overcapacity_tolerance_for_high_priority() {
+        let mut s = state();
+        let mut io = IO::new();
+
+        for i in 10..15 {
+            s.active_view.insert(i);
+        }
+        s.handle_message(
+            20,
+            Message::Neighbor(Neighbor {
+                priority: Priority::High,
+                data: None,
+            }),
+            &mut io,
+        );
+
+        assert_eq!(s.active_view.len(), s.config.active_view_capacity + 1);
+        assert!(s.active_view.contains(&20));
+        let kicked = io.iter().any(|e| {
+            matches!(e, TopicOutEvent::SendMessage(p, TopicMessage::Swarm(Message::Disconnect(_))) if (10..15).contains(p))
+        });
+        assert!(!kicked, "first over-capacity should not kick");
+    }
 }
