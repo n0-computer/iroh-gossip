@@ -112,6 +112,9 @@ pub struct Network<PI, R> {
     tick: usize,
     peers: BTreeMap<PI, State<PI, R>>,
     conns: BTreeSet<ConnId<PI>>,
+    /// When each closed connection was closed, to tell messages sent over it
+    /// apart from messages that open a new one.
+    closed_at: BTreeMap<ConnId<PI>, Instant>,
     events: VecDeque<(PI, TopicId, Event<PI>)>,
     latencies: BTreeMap<ConnId<PI>, Duration>,
     rng: R,
@@ -131,6 +134,7 @@ impl<PI, R> Network<PI, R> {
             queue: Default::default(),
             peers: Default::default(),
             conns: Default::default(),
+            closed_at: Default::default(),
             events: Default::default(),
             latencies: BTreeMap::new(),
             rng,
@@ -306,14 +310,62 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
         let _guard = span.enter();
         debug!("~~ TICK ");
 
-        let Some(state) = self.peers.get_mut(&peer) else {
-            // TODO: queue PeerDisconnected for sender?
-            warn!(?time, ?peer, ?event, "event for dead peer");
+        if !self.peers.contains_key(&peer) {
+            // A message sent to a peer that has gone fails at the sender, the way
+            // a send over a closed connection does. Without this, a peer that
+            // never had a connection to the dead one never learns it is gone,
+            // and keeps it in its active view for good.
+            if let InEvent::RecvMessage(from, _message) = &event {
+                if self.peers.contains_key(from) {
+                    let latency = latency_between(
+                        &self.config.latency,
+                        &mut self.latencies,
+                        &peer,
+                        from,
+                        &mut self.rng,
+                    );
+                    self.queue
+                        .insert(self.time + latency, *from, InEvent::PeerDisconnected(peer));
+                }
+            }
+            debug!(?time, ?peer, ?event, "event for dead peer");
             return;
-        };
-        if let InEvent::RecvMessage(from, _message) = &event {
-            self.conns.insert((*from, peer).into());
         }
+        match &event {
+            InEvent::RecvMessage(from, _message) => {
+                // A message sent before its connection closed arrives over that
+                // connection. One sent afterwards opens a new connection.
+                let conn: ConnId<PI> = (*from, peer).into();
+                let latency = latency_between(
+                    &self.config.latency,
+                    &mut self.latencies,
+                    from,
+                    &peer,
+                    &mut self.rng,
+                );
+                let sent_at = self.time - latency;
+                // A sender that is gone sent this before it went, so it cannot
+                // open anything.
+                let over_closed = !self.peers.contains_key(from)
+                    || self
+                        .closed_at
+                        .get(&conn)
+                        .is_some_and(|closed_at| sent_at < *closed_at);
+                if !over_closed {
+                    self.closed_at.remove(&conn);
+                    self.conns.insert(conn);
+                }
+            }
+            // The close of a connection that has since been replaced says nothing
+            // about the peer. The net layer ignores it the same way, by only
+            // reporting the close of the active connection.
+            InEvent::PeerDisconnected(from) if self.conns.contains(&(*from, peer).into()) => {
+                debug!(?from, ?peer, "ignoring the close of a replaced connection");
+                return;
+            }
+            _ => {}
+        }
+        let state = self.peers.get_mut(&peer).expect("checked above");
         let out = state.handle(event, self.time, None);
         let mut kill = vec![];
         for event in out {
@@ -355,6 +407,7 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
     fn kill_connection(&mut self, from: PI, to: PI) {
         let conn = ConnId::from((from, to));
         if self.conns.remove(&conn) {
+            self.closed_at.insert(conn, self.time);
             // We add the event a microsecond after the regular latency between the two peers,
             // so that any messages queued from the current time arrive before the disconnected event.
             let latency = latency_between(
@@ -414,6 +467,61 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
             }
         }
         ok
+    }
+
+    /// Checks the invariants each peer's state must hold at all times.
+    ///
+    /// These are local: they hold after every event a peer handles, whatever is
+    /// still in flight. Invariants that relate two peers, like symmetric active
+    /// views, only hold once messages have settled; see
+    /// [`Self::check_synchronicity`].
+    ///
+    /// Returns a description of the first violation found.
+    pub fn check_invariants(&self) -> Result<(), String> {
+        let membership = &self.config.proto.membership;
+        for state in self.peers.values() {
+            let me = state.me();
+            for (topic, state) in state.states() {
+                let active = &state.swarm.active_view;
+                let passive = &state.swarm.passive_view;
+                let eager = &state.gossip.eager_push_peers;
+                let lazy = &state.gossip.lazy_push_peers;
+                let fail =
+                    |what: String| Err(format!("peer {me} on {}: {what}", topic.fmt_short()));
+
+                if active.len() > membership.active_view_capacity {
+                    return fail(format!("active view holds {} peers", active.len()));
+                }
+                if passive.len() > membership.passive_view_capacity {
+                    return fail(format!("passive view holds {} peers", passive.len()));
+                }
+                if active.contains(me) || passive.contains(me) {
+                    return fail("lists itself in a view".to_string());
+                }
+                if let Some(peer) = active.iter().find(|peer| passive.contains(*peer)) {
+                    return fail(format!("{peer} is in both the active and the passive view"));
+                }
+                if let Some(peer) = eager.iter().find(|peer| lazy.contains(*peer)) {
+                    return fail(format!("{peer} is both an eager and a lazy peer"));
+                }
+                if let Some(peer) = eager
+                    .iter()
+                    .chain(lazy.iter())
+                    .find(|peer| !active.contains(*peer))
+                {
+                    return fail(format!("{peer} is a broadcast peer but not a neighbor"));
+                }
+                if let Some(peer) = active
+                    .iter()
+                    .find(|peer| !eager.contains(*peer) && !lazy.contains(*peer))
+                {
+                    return fail(format!(
+                        "neighbor {peer} is neither an eager nor a lazy peer"
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Returns a report with histograms on active, passive, eager and lazy counts.
@@ -545,9 +653,22 @@ pub struct SimulatorConfig {
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum BootstrapMode {
-    /// All peers join a single peer.
+    /// All peers join a single peer, all at once.
+    ///
+    /// Every `ForwardJoin` random walk then runs through the handful of peers
+    /// that have joined so far, so the overlay comes out clustered: at 2000
+    /// peers the clustering coefficient is about 25 times that of a random
+    /// graph. That is the right model for many clients hitting one well-known
+    /// bootstrap peer together, but not for the overlays the papers measure.
     #[default]
     Single,
+    /// Peers join one at a time through a single peer, each after the previous
+    /// join has had two round trips to settle.
+    ///
+    /// This is how the HyParView paper builds its overlays (5), and it yields
+    /// the random graph the paper measures: clustering coefficient and average
+    /// shortest path match those of a random 5-regular graph.
+    Sequential,
     /// First `count` bootstrap peers are created and join each other,
     /// then the remaining peers join the swarm by joining one of these first `count` peers.
     Set {
@@ -931,6 +1052,14 @@ impl Simulator {
                 }
                 self.network.run_trips(20);
             }
+            BootstrapMode::Sequential => {
+                self.network.insert_and_join(0, TOPIC, vec![]);
+                for i in 1..node_count {
+                    self.network.insert_and_join(i, TOPIC, vec![0]);
+                    self.network.run_trips(2);
+                }
+                self.network.run_trips(20);
+            }
             BootstrapMode::Set { count } => {
                 self.network.insert_and_join(0, TOPIC, vec![]);
                 for i in 1..count {
@@ -994,7 +1123,11 @@ impl Simulator {
                 if let Event::Received(message) = event {
                     let set = missing.get_mut(&peer).unwrap();
                     if !set.remove(&message.content) {
-                        panic!("received duplicate message event");
+                        panic!(
+                            "peer {peer} received a message it was not expecting: either a \
+                             duplicate delivery, or a straggler from an earlier round that \
+                             ran past gossip_round_timeout"
+                        );
                     } else if set.is_empty() {
                         missing.remove(&peer);
                     }
@@ -1046,6 +1179,16 @@ impl Simulator {
     /// Calculates the [`RoundStatsAvg`] of all gossip rounds.
     pub fn round_stats_average(&self) -> RoundStatsAvg {
         RoundStats::avg(&self.round_stats)
+    }
+
+    /// Returns the [`RoundStats`] of each gossip round so far, in order.
+    ///
+    /// Use this to observe how a metric develops across rounds, which the
+    /// aggregate in [`Self::round_stats_average`] hides. Plumtree's redundancy,
+    /// for instance, is high for the first broadcast and drops once the tree
+    /// has been built.
+    pub fn round_stats(&self) -> &[RoundStats] {
+        &self.round_stats
     }
 
     fn reset_stats(&mut self) {
