@@ -351,7 +351,7 @@ fn track_out_events<PI: Serialize>(events: &[OutEvent<PI>], metrics: &Metrics) {
                 super::Event::NeighborUp(_peer) => {
                     metrics.neighbor_up.inc();
                 }
-                super::Event::NeighborDown(_peer) => {
+                super::Event::NeighborDown { .. } => {
                     metrics.neighbor_down.inc();
                 }
                 _ => {}
