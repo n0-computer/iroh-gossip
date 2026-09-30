@@ -344,6 +344,23 @@ pub struct Stats {
     pub max_last_delivery_hop: u16,
 }
 
+/// Maximum number of IHave entries to process from a single message.
+///
+/// Any entries beyond this limit are silently dropped. This prevents a peer from
+/// flooding us with IHave entries that each spawn a graft timer.
+const MAX_IHAVE_PER_MESSAGE: usize = 100;
+
+/// Maximum number of unresolved missing message entries.
+///
+/// Once this limit is reached, new IHave entries for unknown messages are dropped.
+/// This prevents memory exhaustion from a flood of IHave messages with fake message IDs.
+const MAX_MISSING_MESSAGES: usize = 10_000;
+
+/// Maximum number of queued IHave entries per lazy peer.
+///
+/// Once this limit is reached, the oldest entries are dropped for the peer.
+const MAX_LAZY_QUEUE_PER_PEER: usize = 1_000;
+
 /// State of the plumtree.
 #[derive(Debug)]
 pub struct State<PI> {
@@ -595,8 +612,12 @@ impl<PI: PeerIdentity> State<PI> {
     /// > target maximum recovery latency, defined by the application requirements. This is a
     /// > parameter that should be statically configured at deployment time. (p8)
     fn on_ihave(&mut self, sender: PI, ihaves: Vec<IHave>, io: &mut impl IO<PI>) {
-        for ihave in ihaves {
+        for ihave in ihaves.into_iter().take(MAX_IHAVE_PER_MESSAGE) {
             if !self.received_messages.contains_key(&ihave.id) {
+                if self.missing_messages.len() >= MAX_MISSING_MESSAGES {
+                    warn!("missing_messages limit reached, dropping IHave");
+                    break;
+                }
                 self.missing_messages
                     .entry(ihave.id)
                     .or_default()
@@ -720,10 +741,13 @@ impl<PI: PeerIdentity> State<PI> {
             return;
         };
         for peer in self.lazy_push_peers.iter().filter(|x| *x != sender) {
-            self.lazy_push_queue.entry(*peer).or_default().push(IHave {
-                id: gossip.id,
-                round,
-            });
+            let queue = self.lazy_push_queue.entry(*peer).or_default();
+            if queue.len() < MAX_LAZY_QUEUE_PER_PEER {
+                queue.push(IHave {
+                    id: gossip.id,
+                    round,
+                });
+            }
         }
         if !self.dispatch_timer_scheduled {
             io.push(OutEvent::ScheduleTimer(
