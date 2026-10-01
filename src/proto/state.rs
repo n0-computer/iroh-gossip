@@ -289,6 +289,12 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
                         handle_out_event(*topic, event, &mut self.peer_topics, &mut self.outbox);
                     }
                 }
+                // A peer that sent us a message without joining a view is never
+                // pruned by `handle_out_event`. Prune after the states ran: they
+                // emit `DisconnectPeer` through this index.
+                if let topic::InEvent::PeerDisconnected(peer) = &event {
+                    self.peer_topics.remove(peer);
+                }
             }
         }
 
@@ -317,13 +323,13 @@ fn handle_out_event<PI: PeerIdentity>(
             outbox.push(OutEvent::ScheduleTimer(delay, Timer { topic, timer }))
         }
         topic::OutEvent::DisconnectPeer(peer) => {
-            let empty = conns
-                .get_mut(&peer)
-                .map(|list| list.remove(&topic) || list.is_empty())
-                .unwrap_or(false);
-            if empty {
-                conns.remove(&peer);
-                outbox.push(OutEvent::DisconnectPeer(peer));
+            // The connection is shared by every topic that uses the peer.
+            if let Some(topics) = conns.get_mut(&peer) {
+                topics.remove(&topic);
+                if topics.is_empty() {
+                    conns.remove(&peer);
+                    outbox.push(OutEvent::DisconnectPeer(peer));
+                }
             }
         }
         topic::OutEvent::PeerData(peer, data) => outbox.push(OutEvent::PeerData(peer, data)),
@@ -377,5 +383,70 @@ fn track_in_event<PI: Serialize>(event: &InEvent<PI>, metrics: &Metrics) {
                     .inc_by(message.size().unwrap_or(0) as u64);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rand::rngs::StdRng;
+
+    use super::*;
+    use crate::proto::plumtree;
+
+    /// A peer that only sent us a message is pruned when it disconnects.
+    ///
+    /// Such a peer is tracked in `peer_topics` but in no topic state, so only
+    /// this prune removes it.
+    #[test]
+    fn peer_disconnected_prunes_peer_topics() {
+        let now = Instant::now();
+        let mut state = State::new(
+            0u32,
+            PeerData::default(),
+            Config::default(),
+            StdRng::seed_from_u64(1),
+        );
+        let topic: TopicId = [0u8; 32].into();
+        let peer = 1u32;
+
+        state
+            .handle(InEvent::Command(topic, Command::Join(vec![])), now, None)
+            .for_each(drop);
+        let message = Message {
+            topic,
+            message: topic::Message::Gossip(plumtree::Message::Prune),
+        };
+        state
+            .handle(InEvent::RecvMessage(peer, message), now, None)
+            .for_each(drop);
+        assert!(state.peer_topics.contains_key(&peer));
+
+        state
+            .handle(InEvent::PeerDisconnected(peer), now, None)
+            .for_each(drop);
+
+        assert!(!state.peer_topics.contains_key(&peer));
+    }
+
+    /// Leaving one topic must not disconnect a peer another topic still uses.
+    #[test]
+    fn disconnect_peer_waits_for_the_last_topic() {
+        let topic_a: TopicId = [1u8; 32].into();
+        let topic_b: TopicId = [2u8; 32].into();
+        let peer = 1u32;
+        let mut conns = ConnsMap::from([(peer, HashSet::from([topic_a, topic_b]))]);
+        let mut outbox = Outbox::new();
+
+        let event = topic::OutEvent::DisconnectPeer(peer);
+        handle_out_event(topic_a, event, &mut conns, &mut outbox);
+        assert!(
+            outbox.is_empty(),
+            "disconnected while topic_b still uses the peer"
+        );
+
+        let event = topic::OutEvent::DisconnectPeer(peer);
+        handle_out_event(topic_b, event, &mut conns, &mut outbox);
+        assert!(matches!(outbox[..], [OutEvent::DisconnectPeer(p)] if p == peer));
+        assert!(!conns.contains_key(&peer));
     }
 }

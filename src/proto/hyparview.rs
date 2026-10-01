@@ -16,6 +16,9 @@ use tracing::debug;
 
 use super::{util::IndexSet, PeerData, PeerIdentity, PeerInfo, IO};
 
+/// How often a join is retried when its connection closes before a reply.
+const JOIN_RETRIES: u8 = 2;
+
 /// Input event for HyParView
 #[derive(Debug)]
 pub enum InEvent<PI> {
@@ -246,6 +249,8 @@ pub struct State<PI, RG = ThreadRng> {
     pub(crate) stats: Stats,
     /// The set of neighbor requests we sent out but did not yet receive a reply for
     pending_neighbor_requests: HashSet<PI>,
+    /// Joins we sent and got no reply for yet, with how often each was retried.
+    pending_joins: HashMap<PI, u8>,
     /// The opaque user peer data we received for other peers
     peer_data: HashMap<PI, PeerData>,
     /// List of peers that are disconnecting, but which we want to keep in the passive set once the connection closes
@@ -268,6 +273,7 @@ where
             rng,
             stats: Stats::default(),
             pending_neighbor_requests: Default::default(),
+            pending_joins: Default::default(),
             peer_data: Default::default(),
             alive_disconnect_peers: Default::default(),
         }
@@ -288,8 +294,11 @@ where
             InEvent::Quit => self.handle_quit(io),
         }
 
-        // this will only happen on the first call
-        if !self.shuffle_scheduled {
+        // Arms the shuffle timer once we have someone to shuffle with, and
+        // re-arms it whenever the active view refills after emptying out. A node
+        // with no peers has nothing to shuffle, so it must not keep the timer
+        // alive; see `handle_shuffle_timer`, which clears the flag again.
+        if !self.shuffle_scheduled && !self.active_view.is_empty() {
             io.push(OutEvent::ScheduleTimer(
                 self.config.shuffle_interval,
                 Timer::DoShuffle,
@@ -320,6 +329,11 @@ where
     }
 
     fn handle_join(&mut self, peer: PI, io: &mut impl IO<PI>) {
+        self.pending_joins.entry(peer).or_insert(0);
+        self.send_join(peer, io);
+    }
+
+    fn send_join(&mut self, peer: PI, io: &mut impl IO<PI>) {
         io.push(OutEvent::SendMessage(
             peer,
             Message::Join(self.me_data.clone()),
@@ -351,9 +365,20 @@ where
             self.passive_view.remove(&peer);
             self.peer_data.remove(&peer);
         }
+        // The protocol does not answer a join, so a lost one has to be retried.
+        if let Some(retries) = self.pending_joins.get_mut(&peer) {
+            if *retries < JOIN_RETRIES {
+                *retries += 1;
+                debug!(other = ?peer, "connection closed with join pending, retry");
+                self.send_join(peer, io);
+            } else {
+                self.pending_joins.remove(&peer);
+            }
+        }
     }
 
     fn handle_quit(&mut self, io: &mut impl IO<PI>) {
+        self.pending_joins.clear();
         for peer in self.active_view.clone().into_iter() {
             self.active_view.remove(&peer);
             self.send_disconnect(peer, false, io);
@@ -554,11 +579,13 @@ where
                 ttl: self.config.shuffle_random_walk_length,
             };
             io.push(OutEvent::SendMessage(*node, Message::Shuffle(message)));
+            io.push(OutEvent::ScheduleTimer(
+                self.config.shuffle_interval,
+                Timer::DoShuffle,
+            ));
+        } else {
+            self.shuffle_scheduled = false;
         }
-        io.push(OutEvent::ScheduleTimer(
-            self.config.shuffle_interval,
-            Timer::DoShuffle,
-        ));
     }
 
     fn passive_is_full(&self) -> bool {
@@ -580,9 +607,26 @@ where
             return;
         }
         if self.passive_is_full() {
-            self.passive_view.remove_random(&mut self.rng);
+            if let Some(evicted) = self.passive_view.remove_random(&mut self.rng) {
+                self.forget_peer(&evicted);
+            }
         }
         self.passive_view.insert(peer);
+    }
+
+    /// Drops the metadata we hold for a peer, unless it is still in a view.
+    ///
+    /// Peers leave a view from several places, and every one of them left
+    /// `peer_data` and `alive_disconnect_peers` behind, so both grew with every
+    /// peer ever seen. The guard covers callers that cannot tell: a neighbor
+    /// request can time out after the peer joined the active view by another
+    /// route, and its data is still in use there.
+    fn forget_peer(&mut self, peer: &PI) {
+        if self.active_view.contains(peer) || self.passive_view.contains(peer) {
+            return;
+        }
+        self.peer_data.remove(peer);
+        self.alive_disconnect_peers.remove(peer);
     }
 
     /// Remove a peer from the active view.
@@ -632,6 +676,7 @@ where
     fn handle_pending_neighbor_timer(&mut self, peer: PI, io: &mut impl IO<PI>) {
         if self.pending_neighbor_requests.remove(&peer) {
             self.passive_view.remove(&peer);
+            self.forget_peer(&peer);
             self.refill_active_from_passive(&[], io);
         }
     }
@@ -671,6 +716,8 @@ where
                 if !matches!(reason, RemovalReason::ConnectionClosed) {
                     self.alive_disconnect_peers.insert(peer);
                 }
+            } else {
+                self.forget_peer(&peer);
             }
             debug!(other = ?peer, "removed from active view, reason: {reason:?}");
             Some(peer)
@@ -733,6 +780,7 @@ where
         io: &mut impl IO<PI>,
     ) {
         self.passive_view.remove(&peer);
+        self.pending_joins.remove(&peer);
         if self.active_view.insert(peer) {
             debug!(other = ?peer, "add to active view");
             io.push(OutEvent::EmitEvent(Event::NeighborUp(peer)));
@@ -761,4 +809,137 @@ enum RemovalReason {
     DisconnectReceived { is_alive: bool },
     /// A peer is removed after random selection to make room for a newly joined peer.
     Random,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use rand::{rngs::StdRng, SeedableRng};
+
+    use super::*;
+    use crate::proto::topic::{self, OutEvent as TopicOut};
+
+    type Io = VecDeque<TopicOut<u32>>;
+
+    fn state() -> State<u32, StdRng> {
+        State::new(0, None, Config::default(), StdRng::seed_from_u64(1))
+    }
+
+    /// Seeds the metadata a peer accumulates while it is known to us.
+    fn seed_metadata(state: &mut State<u32, StdRng>, peer: u32) {
+        state.peer_data.insert(peer, PeerData::new(vec![1]));
+        state.alive_disconnect_peers.insert(peer);
+    }
+
+    fn knows(state: &State<u32, StdRng>, peer: u32) -> bool {
+        state.peer_data.contains_key(&peer) || state.alive_disconnect_peers.contains(&peer)
+    }
+
+    fn joins_sent(io: &Io, peer: u32) -> usize {
+        io.iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    TopicOut::SendMessage(to, topic::Message::Swarm(Message::Join(_))) if *to == peer
+                )
+            })
+            .count()
+    }
+
+    /// A join lost to a closed connection is retried a bounded number of times.
+    #[test]
+    fn join_is_retried_when_the_connection_closes() {
+        let mut state = state();
+        let io = &mut Io::new();
+        state.handle(InEvent::RequestJoin(1), io);
+        assert_eq!(joins_sent(io, 1), 1);
+
+        for retry in 1..=JOIN_RETRIES as usize {
+            state.handle(InEvent::PeerDisconnected(1), io);
+            assert_eq!(joins_sent(io, 1), 1 + retry);
+        }
+        state.handle(InEvent::PeerDisconnected(1), io);
+        assert_eq!(joins_sent(io, 1), 1 + JOIN_RETRIES as usize);
+        assert!(state.pending_joins.is_empty());
+    }
+
+    /// A join is not retried once the peer is a neighbor.
+    ///
+    /// Losing the connection then is an ordinary disconnect, not a lost join.
+    #[test]
+    fn join_is_not_retried_once_the_peer_is_a_neighbor() {
+        let mut state = state();
+        let io = &mut Io::new();
+        state.handle(InEvent::RequestJoin(1), io);
+        let neighbor = Neighbor {
+            priority: Priority::High,
+            data: None,
+        };
+        state.handle(InEvent::RecvMessage(1, Message::Neighbor(neighbor)), io);
+        assert!(state.active_view.contains(&1));
+        io.clear();
+
+        state.handle(InEvent::PeerDisconnected(1), io);
+
+        assert_eq!(joins_sent(io, 1), 0);
+    }
+
+    #[test]
+    fn passive_eviction_forgets_peer() {
+        let mut state = state();
+        state.config.passive_view_capacity = 1;
+        let io = &mut Io::new();
+        state.add_passive(1, None, io);
+        seed_metadata(&mut state, 1);
+
+        // The passive view is full, so peer 1 is the one evicted to make room.
+        state.add_passive(2, None, io);
+
+        assert!(!knows(&state, 1));
+    }
+
+    #[test]
+    fn active_discard_forgets_peer() {
+        let mut state = state();
+        let io = &mut Io::new();
+        state.active_view.insert(1);
+        seed_metadata(&mut state, 1);
+
+        // A peer that is not alive is dropped rather than kept as passive.
+        let reason = RemovalReason::DisconnectReceived { is_alive: false };
+        state.remove_active(&1, reason, io);
+
+        assert!(!knows(&state, 1));
+    }
+
+    #[test]
+    fn neighbor_request_timeout_forgets_peer() {
+        let mut state = state();
+        let io = &mut Io::new();
+        state.pending_neighbor_requests.insert(1);
+        state.passive_view.insert(1);
+        seed_metadata(&mut state, 1);
+
+        state.handle(InEvent::TimerExpired(Timer::PendingNeighborRequest(1)), io);
+
+        assert!(!knows(&state, 1));
+    }
+
+    /// A timed-out neighbor request keeps the data of a peer that is active.
+    ///
+    /// The request can time out after the peer joined the active view through
+    /// another message, where we still need its data.
+    #[test]
+    fn neighbor_request_timeout_keeps_active_peer() {
+        let mut state = state();
+        let io = &mut Io::new();
+        state.pending_neighbor_requests.insert(1);
+        state.active_view.insert(1);
+        seed_metadata(&mut state, 1);
+
+        state.handle(InEvent::TimerExpired(Timer::PendingNeighborRequest(1)), io);
+
+        assert!(knows(&state, 1));
+    }
 }
