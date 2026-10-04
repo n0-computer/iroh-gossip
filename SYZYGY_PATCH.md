@@ -226,19 +226,28 @@ The following results predate these additional disconnect regressions:
 - Pending Neighbor implementation at the pinned base:
   https://github.com/n0-computer/iroh-gossip/blob/2ce78afe09d89d41d123f28eac19bdc831609cc8/src/proto/hyparview.rs
 - Connection-task leak report: https://github.com/n0-computer/iroh-gossip/issues/145
-- Open churn cleanup PR: https://github.com/n0-computer/iroh-gossip/pull/146
-- Related open churn cleanup PR: https://github.com/n0-computer/iroh-gossip/pull/147
+- Closed, unmerged churn cleanup PR: https://github.com/n0-computer/iroh-gossip/pull/146
+- Related closed, unmerged churn cleanup PR: https://github.com/n0-computer/iroh-gossip/pull/147
 - Current upstream network actor:
   https://github.com/n0-computer/iroh-gossip/blob/main/src/net.rs
 
 PR #43 and #117 are already present in `v0.101.0`; neither handles a failed
 `active_send_tx.send(...)` or separates pending queue data from dial ownership.
-PRs #146 and #147 are still open. This patch ports only the SendLoop/connection-task
+PRs #146 and #147 were both closed without merging when checked on 2026-10-04.
+This patch ports only the SendLoop/connection-task
 reaping portion; it deliberately does not copy #146's dial-failure peer deletion
 because that would discard the pending queue before a later route/intention can
-retry. As verified on 2026-07-25, upstream `main` remains
-`2ce78afe09d89d41d123f28eac19bdc831609cc8` (`v0.101.0`) and still has the
-affected paths.
+retry.
+
+As verified on 2026-10-04, the latest stable release remains `v0.101.0` at
+`2ce78afe09d89d41d123f28eac19bdc831609cc8`. Upstream `main` is now
+[`2885dd9f1120e46aca5acbcd7f212e4c64e278b9`](https://github.com/n0-computer/iroh-gossip/commit/2885dd9f1120e46aca5acbcd7f212e4c64e278b9),
+three commits beyond that release. Those commits change scheduled CI, CI
+security configuration, the dependency lockfile, and one redundant borrow in
+the simulation binary. The network actor and protocol sources are unchanged
+from the stable baseline; none of these commits replaces the local ownership
+or disconnect fixes. The fork therefore retains the latest stable source
+baseline and the existing behavioral patches.
 
 This local patch is not a substitute for an upstream PR. Before removing it,
 an upstream release must provide all observable guarantees: unfinished initial
