@@ -289,12 +289,12 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
                         handle_out_event(*topic, event, &mut self.peer_topics, &mut self.outbox);
                     }
                 }
-                // `handle_out_event` removes a peer from `peer_topics` only when a
-                // topic disconnects it, and topics only disconnect neighbors. A
-                // peer that just relayed a shuffle or a forward join to us would
-                // stay forever. Remove it after the topics handled the event:
-                // `handle_out_event` needs the entry to tell whether this was the
-                // peer's last topic.
+                // If the peer disconnected, make sure to clear its `peer_topics` entry here.
+                // `handle_out_event` does the same, but only for peers that we were neighbors
+                // with. Peers that only relayed a shuffle or forward join to us also have
+                // entries in `peer_topics`, so we clear them here explicitly. This has to
+                // stay after the loop: `handle_out_event` needs the entry to tell whether a
+                // topic's `DisconnectPeer` was the peer's last.
                 if let topic::InEvent::PeerDisconnected(peer) = &event {
                     self.peer_topics.remove(peer);
                 }
@@ -330,6 +330,7 @@ fn handle_out_event<PI: PeerIdentity>(
             if let Some(topics) = conns.get_mut(&peer) {
                 topics.remove(&topic);
                 if topics.is_empty() {
+                    // If the peer is no longer used by any topic, disconnect.
                     conns.remove(&peer);
                     outbox.push(OutEvent::DisconnectPeer(peer));
                 }
@@ -396,6 +397,7 @@ mod tests {
     use super::*;
     use crate::proto::plumtree;
 
+    /// Handles `event` and drops what it produces.
     fn handle(state: &mut State<u32, StdRng>, event: InEvent<u32>) {
         state.handle(event, Instant::now(), None).for_each(drop);
     }
@@ -403,7 +405,8 @@ mod tests {
     /// A peer that never became a neighbor is removed from `peer_topics`.
     ///
     /// Such a peer only relayed a message to us. No topic disconnects it, so
-    /// nothing else removes the entry.
+    /// nothing else removes the entry. We only ever see such a peer's messages
+    /// for topics we joined, so the test joins the topic first.
     #[test]
     fn peer_disconnected_prunes_peer_topics() {
         let mut state = State::new(
