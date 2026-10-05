@@ -706,13 +706,18 @@ impl Actor {
                     let state = self.peers.entry(peer_id).or_default();
                     match state {
                         PeerState::Active { active_send_tx, .. } => {
-                            if let Err(_err) = active_send_tx.send(message).await {
-                                // Removing the peer is handled by the in_event PeerDisconnected sent
-                                // in [`Self::handle_connection_task_finished`].
+                            if let Err(err) = active_send_tx.send(message).await {
+                                // The send loop has ended and its connection task is about to
+                                // finish, which removes the peer. The message is lost; the
+                                // protocol repeats what matters.
+                                let message = err.0;
                                 debug!(
                                     peer = %peer_id.fmt_short(),
-                                    "failed to send: connection task send loop terminated",
+                                    topic = %message.topic.fmt_short(),
+                                    kind = ?message.kind(),
+                                    "dropping message: the connection's send loop has ended",
                                 );
+                                trace!(?message, "dropped message");
                             }
                         }
                         PeerState::Pending { queue } => {
