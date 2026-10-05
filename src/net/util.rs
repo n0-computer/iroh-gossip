@@ -134,8 +134,8 @@ impl RecvLoop {
     /// Reads messages until the connection is done.
     ///
     /// That is when the peer closes it, or when our send loop has ended and the
-    /// peer has kept no stream open for [`IDLE_GRACE`]. A send loop that failed
-    /// closes the connection itself.
+    /// peer has kept no stream open for [`IDLE_GRACE`]. When the send loop
+    /// fails, the connection task closes the connection, which ends this too.
     ///
     /// The peer may still use a connection we stopped sending on. When two peers
     /// dial each other at once, each side keeps the connection it saw last as
