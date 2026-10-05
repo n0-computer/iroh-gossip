@@ -378,6 +378,15 @@ where
     }
 
     fn on_join(&mut self, peer: PI, data: Option<PeerData>, io: &mut impl IO<PI>) {
+        // Drop a neighbor request we may still have pending to this peer. The peer
+        // is joining, usually after a restart, so it has no memory of a request we
+        // sent it before and will not answer it. While that request is pending,
+        // `send_neighbor` would send nothing, and the Join would go unanswered.
+        // The request and the Join can also cross in flight: another of the
+        // peer's bootstrap peers forwarded its join to us, and we sent the peer a
+        // request before its own Join reached us. Then the peer gets one Neighbor
+        // more than needed and takes it as the reply to its own.
+        self.pending_neighbor_requests.remove(&peer);
         // "A node that receives a join request will start by adding the new
         // node to its active view, even if it has to drop a random node from it. (6)"
         self.add_active(peer, data.clone(), Priority::High, true, io);
@@ -448,6 +457,8 @@ where
     }
 
     fn on_neighbor(&mut self, from: PI, details: Neighbor, io: &mut impl IO<PI>) {
+        // A `Neighbor` is a reply if we have a request out to the peer, and a
+        // request otherwise. See `send_neighbor` for the full picture.
         let is_reply = self.pending_neighbor_requests.remove(&from);
         let do_reply = !is_reply;
         // "A node q that receives a high priority neighbor request will always accept the request, even
@@ -636,15 +647,15 @@ where
                 false => Priority::Low,
             };
             self.send_neighbor(node, priority, io);
-            // schedule a timer that checks if the node replied with a neighbor message,
-            // otherwise try again with another passive node.
-            io.push(OutEvent::ScheduleTimer(
-                self.config.neighbor_request_timeout,
-                Timer::PendingNeighborRequest(node),
-            ));
         };
     }
 
+    /// Handles a `Neighbor` to `peer` that was not answered in time.
+    ///
+    /// For a request, the peer is taken as failed and dropped from the passive
+    /// view. For a reply, which is never answered, the peer is in the active
+    /// view and keeps its data; the entry is cleared, and the refill below
+    /// only acts if the active view has room.
     fn handle_pending_neighbor_timer(&mut self, peer: PI, io: &mut impl IO<PI>) {
         if self.pending_neighbor_requests.remove(&peer) {
             self.passive_view.remove(&peer);
@@ -761,6 +772,15 @@ where
         }
     }
 
+    /// Sends a `Neighbor` unless one is pending for the peer, and arms its timer.
+    ///
+    /// `Neighbor` is both the request to become neighbors and the reply that
+    /// accepts it. `on_neighbor` tells them apart by `pending_neighbor_requests`:
+    /// a `Neighbor` from a peer we have one pending for is the reply, any other
+    /// is a request. Replies are recorded as pending too. That is what stops two
+    /// peers from answering each other forever when a request is duplicated: the
+    /// extra `Neighbor` is taken as the reply and not answered. The entry for a
+    /// reply is cleared by the timer alone.
     fn send_neighbor(&mut self, peer: PI, priority: Priority, io: &mut impl IO<PI>) {
         if self.pending_neighbor_requests.insert(peer) {
             let message = Message::Neighbor(Neighbor {
@@ -768,6 +788,10 @@ where
                 data: self.me_data.clone(),
             });
             io.push(OutEvent::SendMessage(peer, message));
+            io.push(OutEvent::ScheduleTimer(
+                self.config.neighbor_request_timeout,
+                Timer::PendingNeighborRequest(peer),
+            ));
         }
     }
 }
@@ -789,10 +813,11 @@ mod tests {
     use rand::{rngs::StdRng, SeedableRng};
 
     use super::*;
-    use crate::proto::topic::OutEvent as TopicOut;
+    use crate::proto::topic::{self, OutEvent as TopicOut};
 
     type Io = VecDeque<TopicOut<u32>>;
 
+    /// A state for peer `0` with the default config.
     fn new_state() -> State<u32, StdRng> {
         State::new(0, None, Config::default(), StdRng::seed_from_u64(1))
     }
@@ -803,10 +828,133 @@ mod tests {
         state.alive_disconnect_peers.insert(peer);
     }
 
+    /// Returns whether any metadata for `peer` is left.
     fn has_metadata(state: &State<u32, StdRng>, peer: u32) -> bool {
         state.peer_data.contains_key(&peer) || state.alive_disconnect_peers.contains(&peer)
     }
 
+    /// Returns whether a `Neighbor` to `peer` was sent.
+    fn sent_neighbor(io: &Io, peer: u32) -> bool {
+        io.iter().any(|event| {
+            matches!(
+                event,
+                TopicOut::SendMessage(to, topic::Message::Swarm(Message::Neighbor(_))) if *to == peer
+            )
+        })
+    }
+
+    /// A join from a peer we still hold as a neighbor is answered.
+    ///
+    /// The peer restarted while a neighbor request to it was pending. The
+    /// request is void and must not silence our answer.
+    #[test]
+    fn join_from_a_held_neighbor_is_answered() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.active_view.insert(1);
+        state.pending_neighbor_requests.insert(1);
+
+        state.handle(InEvent::RecvMessage(1, Message::Join(None)), io);
+
+        assert!(sent_neighbor(io, 1), "the join was not answered");
+    }
+
+    /// Every `Neighbor` sent arms its timer, not only those refilling the active view.
+    ///
+    /// Without the timer a request the peer never answers blocks every later
+    /// request to that peer.
+    #[test]
+    fn neighbor_request_schedules_a_timeout() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+
+        state.handle(InEvent::RecvMessage(1, Message::Join(None)), io);
+
+        assert!(sent_neighbor(io, 1));
+        let timer = topic::Timer::Swarm(Timer::PendingNeighborRequest(1));
+        assert!(
+            io.iter()
+                .any(|event| matches!(event, TopicOut::ScheduleTimer(_, t) if *t == timer)),
+            "no timeout scheduled for the neighbor request"
+        );
+    }
+
+    /// Delivers the `Swarm` messages between `a` and `b` until neither has any left.
+    ///
+    /// Returns the number of messages ferried. Bounded, so two peers answering
+    /// each other without end fail the test instead of hanging it.
+    fn ferry(a: &mut State<u32, StdRng>, b: &mut State<u32, StdRng>, io: &mut Io) -> usize {
+        let (a_id, b_id) = (a.me, b.me);
+        let mut count = 0;
+        for _ in 0..20 {
+            let outgoing: Vec<_> = io
+                .drain(..)
+                .filter_map(|event| match event {
+                    TopicOut::SendMessage(to, topic::Message::Swarm(message)) => {
+                        Some((to, message))
+                    }
+                    _ => None,
+                })
+                .collect();
+            if outgoing.is_empty() {
+                return count;
+            }
+            for (to, message) in outgoing {
+                count += 1;
+                if to == b_id {
+                    b.handle(InEvent::RecvMessage(a_id, message), io);
+                } else if to == a_id {
+                    a.handle(InEvent::RecvMessage(b_id, message), io);
+                }
+            }
+        }
+        panic!("the two sides kept answering each other");
+    }
+
+    /// A join handshake ends with both sides neighbors after three messages.
+    ///
+    /// The contact's answer to the join is a request the joiner answers, and
+    /// the joiner's answer is a reply the contact does not answer. The joiner's
+    /// reply stays recorded until its timer clears it.
+    #[test]
+    fn join_handshake_settles() {
+        let mut contact = new_state();
+        let mut joiner = State::new(1, None, Config::default(), StdRng::seed_from_u64(2));
+        let io = &mut Io::new();
+
+        joiner.handle(InEvent::RequestJoin(0), io);
+        let messages = ferry(&mut joiner, &mut contact, io);
+
+        assert_eq!(messages, 3, "join, neighbor request, neighbor reply");
+        assert!(contact.active_view.contains(&1));
+        assert!(joiner.active_view.contains(&0));
+        assert!(contact.pending_neighbor_requests.is_empty());
+        assert!(joiner.pending_neighbor_requests.contains(&0));
+    }
+
+    /// A request to a peer that crosses with the peer's join settles.
+    ///
+    /// We sent the peer a request, as after a forwarded join from another of its
+    /// bootstrap peers, and its own `Join` arrives before the answer. Clearing
+    /// the pending request on the `Join` makes us send a second request; the
+    /// peer takes it as the reply to the one it sent, and nothing loops.
+    #[test]
+    fn crossed_request_and_join_settle() {
+        let mut us = new_state();
+        let mut peer = State::new(1, None, Config::default(), StdRng::seed_from_u64(2));
+        let io = &mut Io::new();
+
+        us.send_neighbor(1, Priority::High, io);
+        peer.handle(InEvent::RequestJoin(0), io);
+        let messages = ferry(&mut us, &mut peer, io);
+
+        assert_eq!(messages, 4, "request, join, second request, reply");
+        assert!(us.active_view.contains(&1));
+        assert!(peer.active_view.contains(&0));
+        assert!(us.pending_neighbor_requests.is_empty());
+    }
+
+    /// A peer evicted from a full passive view loses its metadata.
     #[test]
     fn passive_eviction_forgets_peer() {
         let mut state = new_state();
@@ -821,6 +969,7 @@ mod tests {
         assert!(!has_metadata(&state, 1));
     }
 
+    /// A peer removed from the active view and not kept as passive loses its metadata.
     #[test]
     fn active_discard_forgets_peer() {
         let mut state = new_state();
@@ -835,6 +984,7 @@ mod tests {
         assert!(!has_metadata(&state, 1));
     }
 
+    /// A passive peer whose neighbor request timed out loses its metadata.
     #[test]
     fn neighbor_request_timeout_forgets_peer() {
         let mut state = new_state();
