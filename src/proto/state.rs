@@ -283,20 +283,35 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
                 if let topic::InEvent::UpdatePeerData(data) = &event {
                     self.me_data = data.clone();
                 }
+                let disconnected = match &event {
+                    topic::InEvent::PeerDisconnected(peer) => Some(*peer),
+                    _ => None,
+                };
                 for (topic, state) in self.states.iter_mut() {
                     let out = state.handle(event.clone(), now);
                     for event in out {
+                        // A topic that held the disconnected peer as neighbor asks to
+                        // disconnect it, but the network layer dropped the peer already.
+                        // Another topic may send to the peer in the same batch to retry
+                        // a join; the disconnect would drop that message and leave the
+                        // dial it started to complete into a connection with nothing to
+                        // send.
+                        let gone = matches!(
+                            event,
+                            topic::OutEvent::DisconnectPeer(peer) if Some(peer) == disconnected
+                        );
+                        if gone {
+                            continue;
+                        }
                         handle_out_event(*topic, event, &mut self.peer_topics, &mut self.outbox);
                     }
                 }
-                // If the peer disconnected, make sure to clear its `peer_topics` entry here.
-                // `handle_out_event` does the same, but only for peers that we were neighbors
-                // with. Peers that only relayed a shuffle or forward join to us also have
-                // entries in `peer_topics`, so we clear them here explicitly. This has to
-                // stay after the loop: `handle_out_event` needs the entry to tell whether a
-                // topic's `DisconnectPeer` was the peer's last.
-                if let topic::InEvent::PeerDisconnected(peer) = &event {
-                    self.peer_topics.remove(peer);
+                // If the peer disconnected, clear its `peer_topics` entry here. The
+                // topics' `DisconnectPeer` for it is skipped above, and peers that only
+                // relayed a shuffle or forward join to us never get one, but have entries
+                // in `peer_topics` too.
+                if let Some(peer) = disconnected {
+                    self.peer_topics.remove(&peer);
                 }
             }
         }
@@ -395,7 +410,7 @@ mod tests {
     use rand::rngs::StdRng;
 
     use super::*;
-    use crate::proto::plumtree;
+    use crate::proto::{hyparview, plumtree};
 
     /// Handles `event` and drops what it produces.
     fn handle(state: &mut State<u32, StdRng>, event: InEvent<u32>) {
@@ -428,6 +443,56 @@ mod tests {
         handle(&mut state, InEvent::PeerDisconnected(peer));
 
         assert!(!state.peer_topics.contains_key(&peer));
+    }
+
+    /// A closed connection must not make a topic disconnect the peer.
+    ///
+    /// The network layer dropped the peer before it raised the event. A topic
+    /// that held the peer as neighbor still asks to disconnect it, while another
+    /// topic may retry its join to the peer in the same batch. The disconnect
+    /// would drop that retry. Topics are handled in hash order, so the test
+    /// checks across seeds.
+    #[test]
+    fn peer_disconnected_sends_no_disconnect() {
+        let topic_a: TopicId = [1u8; 32].into();
+        let topic_b: TopicId = [2u8; 32].into();
+        let peer = 1u32;
+        for seed in 0..16 {
+            let mut state = State::new(
+                0u32,
+                PeerData::default(),
+                Config::default(),
+                StdRng::seed_from_u64(seed),
+            );
+            // The peer is our neighbor in `topic_a`: it joined us there.
+            handle(&mut state, InEvent::Command(topic_a, Command::Join(vec![])));
+            let join = Message {
+                topic: topic_a,
+                message: topic::Message::Swarm(hyparview::Message::Join(None)),
+            };
+            handle(&mut state, InEvent::RecvMessage(peer, join));
+            // In `topic_b`, our join to the peer is pending.
+            handle(
+                &mut state,
+                InEvent::Command(topic_b, Command::Join(vec![peer])),
+            );
+
+            let out: Vec<_> = state
+                .handle(InEvent::PeerDisconnected(peer), Instant::now(), None)
+                .collect();
+
+            assert!(
+                !out.iter()
+                    .any(|e| matches!(e, OutEvent::DisconnectPeer(p) if *p == peer)),
+                "the gone peer was disconnected (seed {seed})"
+            );
+            assert!(
+                out.iter()
+                    .any(|e| matches!(e, OutEvent::SendMessage(to, _) if *to == peer)),
+                "the join was not retried (seed {seed})"
+            );
+            assert!(!state.peer_topics.contains_key(&peer));
+        }
     }
 
     /// Leaving one topic must not disconnect a peer another topic still uses.
