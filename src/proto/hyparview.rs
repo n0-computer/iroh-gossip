@@ -467,6 +467,8 @@ where
         // only accept the request if it has a free slot in its active view, otherwise it will refuse the request."
         if !self.add_active(from, details.data, details.priority, do_reply, io) {
             self.send_disconnect(from, true, io);
+            // `add_active` stored the peer's data before it refused the peer.
+            self.forget_peer(&from);
         }
     }
 
@@ -952,6 +954,27 @@ mod tests {
         assert!(us.active_view.contains(&1));
         assert!(peer.active_view.contains(&0));
         assert!(us.pending_neighbor_requests.is_empty());
+    }
+
+    /// A peer whose neighbor request we refuse leaves no metadata behind.
+    #[test]
+    fn refused_request_forgets_peer() {
+        let mut state = new_state();
+        state.config.active_view_capacity = 1;
+        let io = &mut Io::new();
+        state.active_view.insert(1);
+        let request = Neighbor {
+            priority: Priority::Low,
+            data: Some(PeerData::new(vec![2])),
+        };
+
+        state.handle(InEvent::RecvMessage(2, Message::Neighbor(request)), io);
+
+        assert!(
+            !state.active_view.contains(&2),
+            "a low request filled a full view"
+        );
+        assert!(!has_metadata(&state, 2));
     }
 
     /// A peer evicted from a full passive view loses its metadata.
