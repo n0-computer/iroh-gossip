@@ -1,1 +1,0 @@
-rd_("kiroh_gossipcsim")
