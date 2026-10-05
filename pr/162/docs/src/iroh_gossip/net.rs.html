@@ -1757,9 +1757,9 @@
 <a href=#1757 id=1757 data-nosnippet>1757</a>            }
 <a href=#1758 id=1758 data-nosnippet>1758</a>        })
 <a href=#1759 id=1759 data-nosnippet>1759</a>        .<span class="kw">await</span>;
-<a href=#1760 id=1760 data-nosnippet>1760</a>        <span class="kw">let </span><span class="prelude-val">Err</span>(_still_quiet) = lost_neighbor <span class="kw">else </span>{
-<a href=#1761 id=1761 data-nosnippet>1761</a>            <span class="macro">panic!</span>(<span class="string">"{} after concurrent dials"</span>, lost_neighbor.expect(<span class="string">"checked"</span>));
-<a href=#1762 id=1762 data-nosnippet>1762</a>        };
+<a href=#1760 id=1760 data-nosnippet>1760</a>        <span class="kw">if let </span><span class="prelude-val">Ok</span>(what) = lost_neighbor {
+<a href=#1761 id=1761 data-nosnippet>1761</a>            <span class="macro">panic!</span>(<span class="string">"{what} after concurrent dials"</span>);
+<a href=#1762 id=1762 data-nosnippet>1762</a>        }
 <a href=#1763 id=1763 data-nosnippet>1763</a>        cancel.cancel();
 <a href=#1764 id=1764 data-nosnippet>1764</a>        <span class="prelude-val">Ok</span>(())
 <a href=#1765 id=1765 data-nosnippet>1765</a>    }
