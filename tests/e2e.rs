@@ -380,7 +380,6 @@ async fn concurrent_joins_keep_the_neighbors() -> Result {
 /// one open for as long as both nodes ran.
 #[tokio::test(flavor = "multi_thread")]
 #[traced_test]
-#[ignore = "not yet passing"]
 async fn repeated_joins_leave_no_connection_open() -> Result {
     let lookup = MemoryLookup::new();
     let (a, b) = (Node::spawn(&lookup).await?, Node::spawn(&lookup).await?);
@@ -714,7 +713,6 @@ async fn refused_peer_joins_once_accepted() -> Result {
 /// Peers that join and leave one after another leave no connection open (#145).
 #[tokio::test(flavor = "multi_thread")]
 #[traced_test]
-#[ignore = "not yet passing"]
 async fn churn_leaves_no_connection_open() -> Result {
     const ROUNDS: usize = 8;
     let lookup = MemoryLookup::new();
@@ -804,7 +802,6 @@ async fn repeated_joins_to_one_peer_make_one_neighbor() -> Result {
 /// evicts neighbors.
 #[tokio::test(flavor = "multi_thread")]
 #[traced_test]
-#[ignore = "not yet passing"]
 async fn open_connections_link_neighbors() -> Result {
     const JOINERS: usize = 8;
     let lookup = MemoryLookup::new();

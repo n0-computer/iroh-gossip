@@ -2,6 +2,7 @@
 
 use std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
+    future::Future,
     net::SocketAddr,
     pin::Pin,
     sync::Arc,
@@ -52,6 +53,13 @@ const TO_ACTOR_CAP: usize = 64;
 const IN_EVENT_CAP: usize = 1024;
 /// Channel capacity for broadcast subscriber event queue (one per topic)
 const TOPIC_EVENT_CAP: usize = 256;
+
+/// Close code for a connection both sides are done with.
+const CLOSE_DONE: u32 = 0;
+/// Close code for a connection our send loop failed on.
+const CLOSE_SEND_FAILED: u32 = 1;
+/// Close code for a connection our receive loop failed on.
+const CLOSE_RECV_FAILED: u32 = 2;
 
 /// Events emitted from the gossip protocol
 pub type ProtoEvent = proto::Event<PublicKey>;
@@ -568,7 +576,7 @@ impl Actor {
         task_result: Result<(), ConnectionLoopError>,
     ) {
         if conn.close_reason().is_none() {
-            conn.close(0u32.into(), b"close from disconnect");
+            conn.close(CLOSE_DONE.into(), b"done");
         }
         let reason = conn.close_reason().expect("just closed");
         let error = task_result.err();
@@ -683,13 +691,17 @@ impl Actor {
                     let state = self.peers.entry(peer_id).or_default();
                     match state {
                         PeerState::Active { active_send_tx, .. } => {
-                            if let Err(_err) = active_send_tx.send(message).await {
-                                // Removing the peer is handled by the in_event PeerDisconnected sent
-                                // in [`Self::handle_connection_task_finished`].
-                                warn!(
+                            if let Err(err) = active_send_tx.send(message).await {
+                                // The send loop ended, and its connection task finishes next,
+                                // which removes the peer. The protocol repeats what matters.
+                                let message = err.0;
+                                debug!(
                                     peer = %peer_id.fmt_short(),
-                                    "failed to send: connection task send loop terminated",
+                                    topic = %message.topic.fmt_short(),
+                                    kind = ?message.kind(),
+                                    "dropping message: the connection's send loop has ended",
                                 );
+                                trace!(?message, "dropped message");
                             }
                         }
                         PeerState::Pending { queue } => {
@@ -889,15 +901,42 @@ async fn connection_loop(
     debug!(?origin, "connection established");
 
     let mut send_loop = SendLoop::new(conn.clone(), send_rx, max_message_size);
-    let mut recv_loop = RecvLoop::new(from, conn, in_event_tx, max_message_size);
+    let mut recv_loop = RecvLoop::new(from, conn.clone(), in_event_tx, max_message_size);
 
-    let send_fut = send_loop.run(queue).instrument(error_span!("send"));
-    let recv_fut = recv_loop.run().instrument(error_span!("recv"));
+    let (send_done_tx, send_done_rx) = oneshot::channel();
+    let send_fut = async {
+        let res = send_loop.run(queue).await;
+        send_done_tx.send(()).ok();
+        res
+    };
+    let recv_fut = recv_loop.run(send_done_rx);
 
-    let (send_res, recv_res) = tokio::join!(send_fut, recv_fut);
+    // The peer may still use this connection, so `recv_loop` decides when it
+    // is done. A loop that failed is the exception. The other loop would keep
+    // running, so we close the connection and drop what the peer sent on it.
+    let (send_res, recv_res) = tokio::join!(
+        close_on_error(send_fut, &conn, CLOSE_SEND_FAILED, b"send failed")
+            .instrument(error_span!("send")),
+        close_on_error(recv_fut, &conn, CLOSE_RECV_FAILED, b"recv failed")
+            .instrument(error_span!("recv")),
+    );
     send_res?;
     recv_res?;
     Ok(())
+}
+
+/// Closes the connection if `fut` fails, which ends the other loop on it too.
+async fn close_on_error<T, E>(
+    fut: impl Future<Output = Result<T, E>>,
+    conn: &Connection,
+    code: u32,
+    reason: &[u8],
+) -> Result<T, E> {
+    let res = fut.await;
+    if res.is_err() {
+        conn.close(code.into(), reason);
+    }
+    res
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
@@ -1085,7 +1124,7 @@ pub(crate) mod tests {
     use n0_error::{AnyError, Result, StdResultExt};
     use n0_tracing_test::traced_test;
     use rand::{CryptoRng, RngExt};
-    use tokio::{spawn, time::timeout};
+    use tokio::{io::AsyncWriteExt, spawn, time::timeout};
     use tokio_util::sync::CancellationToken;
     use tracing::{info, instrument};
 
@@ -1531,6 +1570,127 @@ pub(crate) mod tests {
             .await
             .std_context("wait actor finish")?;
 
+        Ok(())
+    }
+
+    /// Returns a join for `topic` carrying `data_len` bytes of peer data.
+    ///
+    /// The protocol state builds it, as the message types are private to `proto`.
+    fn join_message(topic: TopicId, data_len: usize) -> ProtoMessage {
+        let me = SecretKey::generate().public();
+        let peer = SecretKey::generate().public();
+        let mut state = proto::State::new(
+            me,
+            PeerData::new(vec![0u8; data_len]),
+            Default::default(),
+            StdRng::seed_from_u64(1),
+        );
+        let join = InEvent::Command(topic, proto::Command::Join(vec![peer]));
+        let message = state
+            .handle(join, Instant::now(), None)
+            .find_map(|event| match event {
+                proto::OutEvent::SendMessage(_, message) => Some(message),
+                _ => None,
+            });
+        message.expect("a join sends a message")
+    }
+
+    /// A failed send loop closes the connection despite an open peer stream.
+    #[tokio::test]
+    #[traced_test]
+    async fn send_error_closes_connection() -> Result {
+        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
+        let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+        let ep1 = create_endpoint(rng, relay_map.clone(), None).await?;
+        let ep2 = create_endpoint(rng, relay_map, None).await?;
+        let ep2_id = ep2.id();
+        let ep2_addr = EndpointAddr::new(ep2_id).with_relay_url(relay_url);
+        let topic: TopicId = blake3::hash(b"send_error").into();
+
+        // The peer opens a topic stream and keeps it open, as a live neighbor does.
+        let _accept = AbortOnDropHandle::new(spawn(async move {
+            let incoming = ep2.accept().await.expect("endpoint closed");
+            let conn = incoming.await.expect("accept failed");
+            let mut stream = conn.open_uni().await.expect("open_uni");
+            util::StreamHeader { topic_id: topic }
+                .write(&mut stream, &mut Vec::new(), 1024)
+                .await
+                .expect("write header");
+            conn.closed().await;
+        }));
+
+        let conn = ep1
+            .connect(ep2_addr, GOSSIP_ALPN)
+            .await
+            .std_context("connect")?;
+        // The sender stays alive: the write error, not a closed channel, must end
+        // the send loop.
+        let (_send_tx, send_rx) = mpsc::channel(1);
+        let (in_event_tx, _in_event_rx) = mpsc::channel(16);
+        let too_large = join_message(topic, 4096);
+
+        let res = timeout(
+            Duration::from_secs(5),
+            connection_loop(
+                ep2_id,
+                conn,
+                ConnOrigin::Dial,
+                send_rx,
+                in_event_tx,
+                1024,
+                vec![too_large],
+            ),
+        )
+        .await
+        .std_context("connection loop still runs after the send loop failed")?;
+        assert!(res.is_err(), "the oversize write did not fail");
+        Ok(())
+    }
+
+    /// A failed receive loop closes the connection despite a live send loop.
+    #[tokio::test]
+    #[traced_test]
+    async fn recv_error_closes_connection() -> Result {
+        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
+        let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+        let ep1 = create_endpoint(rng, relay_map.clone(), None).await?;
+        let ep2 = create_endpoint(rng, relay_map, None).await?;
+        let ep2_id = ep2.id();
+        let ep2_addr = EndpointAddr::new(ep2_id).with_relay_url(relay_url);
+
+        // The peer opens a stream with a header over the size limit, and keeps
+        // the connection open.
+        let _accept = AbortOnDropHandle::new(spawn(async move {
+            let incoming = ep2.accept().await.expect("endpoint closed");
+            let conn = incoming.await.expect("accept failed");
+            let mut stream = conn.open_uni().await.expect("open_uni");
+            stream.write_u32(u32::MAX).await.expect("write length");
+            conn.closed().await;
+        }));
+
+        let conn = ep1
+            .connect(ep2_addr, GOSSIP_ALPN)
+            .await
+            .std_context("connect")?;
+        // The sender stays alive, so only the receive loop can end the connection.
+        let (_send_tx, send_rx) = mpsc::channel(1);
+        let (in_event_tx, _in_event_rx) = mpsc::channel(16);
+
+        let res = timeout(
+            Duration::from_secs(5),
+            connection_loop(
+                ep2_id,
+                conn,
+                ConnOrigin::Dial,
+                send_rx,
+                in_event_tx,
+                1024,
+                vec![],
+            ),
+        )
+        .await
+        .std_context("connection loop still runs after the receive loop failed")?;
+        assert!(res.is_err(), "the oversize header did not fail");
         Ok(())
     }
 
