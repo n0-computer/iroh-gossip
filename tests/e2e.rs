@@ -41,6 +41,10 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(3);
 /// That is the idle grace plus the wait for our finished streams to be
 /// acknowledged, five seconds each, and a margin.
 const SETTLE: Duration = Duration::from_secs(12);
+/// How long a join that its peer dropped takes to succeed.
+///
+/// The join is sent again after the neighbor request timeout of 10 s.
+const JOIN_RETRY_WITHIN: Duration = Duration::from_secs(20);
 
 /// Decides whether a node takes a connection, before gossip sees it.
 type AcceptFilter = Arc<dyn Fn(&Connection) -> bool + Send + Sync>;
@@ -767,6 +771,50 @@ async fn neighbor_request_over_a_slow_dial_connects() -> Result {
     sc.neighbor_up(b.id()).await?;
     sb.stays_up(c.id(), Duration::from_secs(3)).await?;
     exchange(&mut sb, &mut sc, b"01").await
+}
+
+/// A join to a node that is not on the topic leaves no connection once we leave.
+///
+/// The node never answers, so only our side can drop the other.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn join_to_a_node_off_the_topic_leaves_no_connection() -> Result {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (Node::spawn(&lookup).await?, Node::spawn(&lookup).await?);
+    let t = topic("off_the_topic");
+    let sb = Sub::new(&b, t, vec![a.id()]).await?;
+    let connected = || open_between(&a, &b) > 0;
+    eventually(PROMPT, "the join did not connect", connected).await?;
+
+    drop(sb);
+    let closed = || open_between(&a, &b) == 0;
+    eventually(SETTLE, "a connection was left open", closed).await
+}
+
+/// A join that gets no answer while its connection stays open is sent again.
+///
+/// B joins A before A subscribes to the topic, so A drops the join (#175). The
+/// connection stays open, so no close makes B retry, and B waited forever. A
+/// join on a connection that died after a newer one replaced it is lost the
+/// same way.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn unanswered_join_is_sent_again() -> Result {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (Node::spawn(&lookup).await?, Node::spawn(&lookup).await?);
+    let t = topic("unanswered_join");
+    let mut sb = Sub::new(&b, t, vec![a.id()]).await?;
+    let connected = || open_between(&a, &b) > 0;
+    eventually(PROMPT, "the join did not connect", connected).await?;
+
+    let mut sa = Sub::new(&a, t, vec![]).await?;
+    sb.wait(
+        JOIN_RETRY_WITHIN,
+        |e| matches!(e, Event::NeighborUp(p) if *p == a.id()),
+    )
+    .await?;
+    sa.neighbor_up(b.id()).await?;
+    exchange(&mut sa, &mut sb, b"01").await
 }
 
 /// Repeated joins to one peer before it answers make one neighbor.

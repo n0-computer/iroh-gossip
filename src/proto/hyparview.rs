@@ -16,6 +16,12 @@ use tracing::debug;
 
 use super::{util::IndexSet, PeerData, PeerIdentity, PeerInfo, IO};
 
+/// How often we retry a join that got no reply.
+///
+/// We retry when the join's connection closes, and when no reply came within
+/// [`Config::neighbor_request_timeout`].
+const JOIN_RETRIES: u8 = 2;
+
 /// Input event for HyParView
 #[derive(Debug)]
 pub enum InEvent<PI> {
@@ -65,6 +71,10 @@ pub enum Timer<PI> {
     ///
     /// The id tells it from the timer of an earlier `Neighbor` to the same peer.
     PendingNeighborRequest(PI, u64),
+    /// The timeout of a join to the peer, with the number of retries before it.
+    ///
+    /// The number tells it from the timer of an earlier attempt.
+    PendingJoin(PI, u8),
 }
 
 /// Messages that we can send and receive from peers within the topic.
@@ -266,6 +276,8 @@ pub struct State<PI, RG = ThreadRng> {
     pending_neighbor_requests: HashMap<PI, u64>,
     /// The id of the next neighbor request
     next_neighbor_request: u64,
+    /// Joins we sent and got no reply for yet, with how often we retried each.
+    pending_joins: HashMap<PI, u8>,
     /// The opaque user peer data we received for other peers
     peer_data: HashMap<PI, PeerData>,
     /// List of peers that are disconnecting, but which we want to keep in the passive set once the connection closes
@@ -289,6 +301,7 @@ where
             stats: Stats::default(),
             pending_neighbor_requests: Default::default(),
             next_neighbor_request: 0,
+            pending_joins: Default::default(),
             peer_data: Default::default(),
             alive_disconnect_peers: Default::default(),
         }
@@ -301,6 +314,14 @@ where
                 Timer::DoShuffle => self.handle_shuffle_timer(io),
                 Timer::PendingNeighborRequest(peer, id) => {
                     self.handle_pending_neighbor_timer(peer, id, io)
+                }
+                Timer::PendingJoin(peer, retries) => {
+                    // A join that got no reply in time may be lost: the peer
+                    // was not in the topic yet, or the connection died.
+                    if self.pending_joins.get(&peer) == Some(&retries) {
+                        debug!(other = ?peer, "join not answered in time, retry");
+                        self.retry_join(peer, io);
+                    }
                 }
             },
             InEvent::PeerDisconnected(peer) => self.handle_connection_closed(peer, io),
@@ -349,6 +370,12 @@ where
                 "{peer:?} is in both views"
             );
         }
+        for peer in self.pending_joins.keys() {
+            assert!(
+                !self.active_view.contains(peer),
+                "join to neighbor {peer:?} is pending"
+            );
+        }
         // Not yet holding:
         // for peer in self.peer_data.keys() {
         //     // A forwarded join stores the peer's data while our request to it is out.
@@ -387,10 +414,26 @@ where
     }
 
     fn handle_join(&mut self, peer: PI, io: &mut impl IO<PI>) {
+        // A join to a neighbor needs no answer we could miss. Tracking it would
+        // make us join the peer again when it leaves.
+        if !self.active_view.contains(&peer) {
+            self.pending_joins.entry(peer).or_insert(0);
+        }
+        self.send_join(peer, io);
+    }
+
+    /// Sends a join to `peer`, and arms its timeout if we track it.
+    fn send_join(&mut self, peer: PI, io: &mut impl IO<PI>) {
         io.push(OutEvent::SendMessage(
             peer,
             Message::Join(self.me_data.clone()),
         ));
+        if let Some(retries) = self.pending_joins.get(&peer) {
+            io.push(OutEvent::ScheduleTimer(
+                self.config.neighbor_request_timeout,
+                Timer::PendingJoin(peer, *retries),
+            ));
+        }
     }
 
     /// We received a disconnect message.
@@ -424,9 +467,35 @@ where
                 self.refill_active_from_passive(&[&peer], io);
             }
         }
+        // A join sent on the closed connection may be lost, so we retry it.
+        if self.pending_joins.contains_key(&peer) {
+            debug!(other = ?peer, "connection closed with join pending, retry");
+            self.retry_join(peer, io);
+        }
+    }
+
+    /// Sends a pending join to `peer` again, unless it ran out of retries.
+    fn retry_join(&mut self, peer: PI, io: &mut impl IO<PI>) {
+        let Some(retries) = self.pending_joins.get_mut(&peer) else {
+            return;
+        };
+        if *retries < JOIN_RETRIES {
+            *retries += 1;
+            self.send_join(peer, io);
+        } else {
+            debug!(other = ?peer, "join not answered after all retries, give up");
+            self.pending_joins.remove(&peer);
+            let wanted = self.active_view.contains(&peer)
+                || self.pending_neighbor_requests.contains_key(&peer);
+            if !wanted {
+                // The join was the topic's only use of the peer.
+                io.push(OutEvent::DisconnectPeer(peer));
+            }
+        }
     }
 
     fn handle_quit(&mut self, io: &mut impl IO<PI>) {
+        self.pending_joins.clear();
         for peer in self.active_view.clone().into_iter() {
             self.active_view.remove(&peer);
             self.send_disconnect(peer, false, io);
@@ -844,6 +913,7 @@ where
         io: &mut impl IO<PI>,
     ) {
         self.passive_view.remove(&peer);
+        self.pending_joins.remove(&peer);
         if self.active_view.insert(peer) {
             debug!(other = ?peer, "add to active view");
             io.push(OutEvent::EmitEvent(Event::NeighborUp(peer)));
@@ -1070,6 +1140,54 @@ mod tests {
             .count()
     }
 
+    /// A join lost to a closed connection is retried a bounded number of times.
+    #[test]
+    fn join_is_retried_when_the_connection_closes() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.handle(InEvent::RequestJoin(1), io);
+        assert_eq!(joins_sent(io, 1), 1);
+
+        for retry in 1..=JOIN_RETRIES as usize {
+            state.handle(InEvent::PeerDisconnected(1), io);
+            assert_eq!(joins_sent(io, 1), 1 + retry);
+        }
+        state.handle(InEvent::PeerDisconnected(1), io);
+        assert_eq!(joins_sent(io, 1), 1 + JOIN_RETRIES as usize);
+        assert!(state.pending_joins.is_empty());
+    }
+
+    /// A join that got no reply in time is retried, and a stale timer does nothing.
+    ///
+    /// The peer may not be in the topic yet (#175), or the join went on a
+    /// connection that died after a newer one replaced it. The connection then
+    /// stays open, so no close made us retry.
+    #[test]
+    fn unanswered_join_is_retried_after_its_timeout() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.handle(InEvent::RequestJoin(1), io);
+        let first = Timer::PendingJoin(1, 0);
+        assert_eq!(joins_sent(io, 1), 1);
+
+        state.handle(InEvent::TimerExpired(first.clone()), io);
+        assert_eq!(joins_sent(io, 1), 2, "no retry after the timeout");
+
+        // The retry armed a timer of its own, so the first one is stale.
+        state.handle(InEvent::TimerExpired(first), io);
+        assert_eq!(joins_sent(io, 1), 2, "a stale timer retried");
+        state.handle(InEvent::TimerExpired(Timer::PendingJoin(1, 1)), io);
+        assert_eq!(joins_sent(io, 1), 3);
+        state.handle(InEvent::TimerExpired(Timer::PendingJoin(1, 2)), io);
+        assert_eq!(joins_sent(io, 1), 1 + JOIN_RETRIES as usize);
+        assert!(state.pending_joins.is_empty(), "retried past the limit");
+        assert!(
+            io.iter()
+                .any(|event| matches!(event, TopicOut::DisconnectPeer(1))),
+            "the peer that never answered was kept"
+        );
+    }
+
     /// A join is not retried once the peer is a neighbor.
     ///
     /// Losing the connection then is an ordinary disconnect, not a lost join.
@@ -1089,6 +1207,25 @@ mod tests {
         state.handle(InEvent::PeerDisconnected(1), io);
 
         assert_eq!(joins_sent(io, 1), 0);
+    }
+
+    /// A join to a peer that is already a neighbor is not tracked.
+    ///
+    /// Otherwise we would join the peer again when it leaves. A peer that left
+    /// the topic would then hold the new connection open for nothing.
+    #[test]
+    fn join_to_a_neighbor_is_not_retried() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.handle(InEvent::RecvMessage(1, Message::Join(None)), io);
+        assert!(state.active_view.contains(&1));
+        state.handle(InEvent::RequestJoin(1), io);
+        io.clear();
+
+        state.handle(InEvent::PeerDisconnected(1), io);
+
+        assert_eq!(joins_sent(io, 1), 0);
+        assert!(state.pending_joins.is_empty());
     }
 
     /// A peer evicted from a full passive view loses its metadata.

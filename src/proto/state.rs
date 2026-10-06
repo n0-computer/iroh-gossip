@@ -283,20 +283,30 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
                 if let topic::InEvent::UpdatePeerData(data) = &event {
                     self.me_data = data.clone();
                 }
+                let disconnected = match &event {
+                    topic::InEvent::PeerDisconnected(peer) => Some(*peer),
+                    _ => None,
+                };
                 for (topic, state) in self.states.iter_mut() {
                     let out = state.handle(event.clone(), now);
                     for event in out {
+                        // The network layer dropped the peer already. A disconnect
+                        // would drop the join that another topic retries to it in
+                        // this batch.
+                        let gone = matches!(
+                            event,
+                            topic::OutEvent::DisconnectPeer(peer) if Some(peer) == disconnected
+                        );
+                        if gone {
+                            continue;
+                        }
                         handle_out_event(*topic, event, &mut self.peer_topics, &mut self.outbox);
                     }
                 }
-                // If the peer disconnected, make sure to clear its `peer_topics` entry here.
-                // `handle_out_event` does the same, but only for peers that we were neighbors
-                // with. Peers that only relayed a shuffle or forward join to us also have
-                // entries in `peer_topics`, so we clear them here explicitly. This has to
-                // stay after the loop: `handle_out_event` needs the entry to tell whether a
-                // topic's `DisconnectPeer` was the peer's last.
-                if let topic::InEvent::PeerDisconnected(peer) = &event {
-                    self.peer_topics.remove(peer);
+                // Clear the peer's `peer_topics` entry. A peer that only relayed a
+                // shuffle or forward join to us has one too.
+                if let Some(peer) = disconnected {
+                    self.peer_topics.remove(&peer);
                 }
             }
         }
@@ -438,7 +448,6 @@ mod tests {
     /// would drop that retry. The state handles topics in a random order, so
     /// the test runs several times.
     #[test]
-    #[ignore = "not yet passing"]
     fn peer_disconnected_sends_no_disconnect() {
         let topic_a: TopicId = [1u8; 32].into();
         let topic_b: TopicId = [2u8; 32].into();
