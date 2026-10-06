@@ -105,6 +105,18 @@ impl Ttl {
     }
 }
 
+#[cfg(test)]
+impl<PI> Message<PI> {
+    /// Returns a shuffle reply carrying `peers` without data, for tests outside this module.
+    pub(crate) fn test_shuffle_reply_with(peers: Vec<PI>) -> Self {
+        let nodes = peers
+            .into_iter()
+            .map(|id| PeerInfo { id, data: None })
+            .collect();
+        Message::ShuffleReply(ShuffleReply { nodes })
+    }
+}
+
 /// A message informing other peers that a new peer joined the swarm for this topic.
 ///
 /// Will be forwarded in a random walk until `ttl` reaches 0.
@@ -307,6 +319,50 @@ where
             ));
             self.shuffle_scheduled = true;
         }
+
+        #[cfg(test)]
+        self.check_invariants();
+    }
+
+    /// Panics if the per-peer bookkeeping disagrees with the views.
+    ///
+    /// Runs after every event in the unit tests. Every leak fixed so far
+    /// was an entry that outlived its peer's place in a view.
+    #[cfg(test)]
+    fn check_invariants(&self) {
+        let in_a_view =
+            |peer: &PI| self.active_view.contains(peer) || self.passive_view.contains(peer);
+        assert!(
+            self.active_view.len() <= self.config.active_view_capacity,
+            "active view over capacity: {:?}",
+            self.active_view
+        );
+        assert!(
+            self.passive_view.len() <= self.config.passive_view_capacity,
+            "passive view over capacity: {:?}",
+            self.passive_view
+        );
+        assert!(!in_a_view(&self.me), "we are in our own view");
+        for peer in self.active_view.iter() {
+            assert!(
+                !self.passive_view.contains(peer),
+                "{peer:?} is in both views"
+            );
+        }
+        // Not yet holding:
+        // for peer in self.peer_data.keys() {
+        //     // A forwarded join stores the peer's data while our request to it is out.
+        //     assert!(
+        //         in_a_view(peer) || self.pending_neighbor_requests.contains(peer),
+        //         "data kept for {peer:?}, which is in no view and not asked"
+        //     );
+        // }
+        // for peer in self.alive_disconnect_peers.iter() {
+        //     assert!(
+        //         self.passive_view.contains(peer),
+        //         "{peer:?} marked alive but not passive"
+        //     );
+        // }
     }
 
     fn handle_message(&mut self, from: PI, message: Message<PI>, io: &mut impl IO<PI>) {
@@ -982,7 +1038,6 @@ mod tests {
         assert!(us.pending_neighbor_requests.is_empty());
     }
 
-    /// A peer whose neighbor request we refuse leaves no metadata behind.
     #[test]
     fn refused_request_forgets_peer() {
         let mut state = new_state();
@@ -1001,6 +1056,39 @@ mod tests {
             "a low request filled a full view"
         );
         assert!(!has_metadata(&state, 2));
+    }
+
+    /// Counts the joins sent to `peer`.
+    fn joins_sent(io: &Io, peer: u32) -> usize {
+        io.iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    TopicOut::SendMessage(to, topic::Message::Swarm(Message::Join(_))) if *to == peer
+                )
+            })
+            .count()
+    }
+
+    /// A join is not retried once the peer is a neighbor.
+    ///
+    /// Losing the connection then is an ordinary disconnect, not a lost join.
+    #[test]
+    fn join_is_not_retried_once_the_peer_is_a_neighbor() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.handle(InEvent::RequestJoin(1), io);
+        let neighbor = Neighbor {
+            priority: Priority::High,
+            data: None,
+        };
+        state.handle(InEvent::RecvMessage(1, Message::Neighbor(neighbor)), io);
+        assert!(state.active_view.contains(&1));
+        io.clear();
+
+        state.handle(InEvent::PeerDisconnected(1), io);
+
+        assert_eq!(joins_sent(io, 1), 0);
     }
 
     /// A peer evicted from a full passive view loses its metadata.
@@ -1143,5 +1231,63 @@ mod tests {
             state.peer_data.contains_key(&1),
             "data of an active peer was dropped"
         );
+    }
+
+    /// A shuffle reply that names us stores no data about us.
+    #[test]
+    #[ignore = "not yet passing"]
+    fn shuffle_reply_naming_us_stores_nothing_about_us() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.handle(InEvent::RecvMessage(1, Message::Join(None)), io);
+        let us = PeerInfo {
+            id: 0,
+            data: Some(PeerData::new(vec![1])),
+        };
+        let reply = Message::ShuffleReply(ShuffleReply { nodes: vec![us] });
+
+        state.handle(InEvent::RecvMessage(1, reply), io);
+
+        assert!(!state.peer_data.contains_key(&0));
+    }
+
+    /// A neighbor that left alive and comes back loses its alive mark.
+    ///
+    /// The mark kept the peer in the passive view when its connection closed.
+    /// Kept on a neighbor, it made a later crash look like a graceful leave.
+    #[test]
+    #[ignore = "not yet passing"]
+    fn returning_neighbor_loses_the_alive_mark() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.handle(InEvent::RecvMessage(1, Message::Join(None)), io);
+        let leave = Message::Disconnect(Disconnect {
+            alive: true,
+            _respond: false,
+        });
+        state.handle(InEvent::RecvMessage(1, leave), io);
+        assert!(state.alive_disconnect_peers.contains(&1));
+
+        state.handle(InEvent::RecvMessage(1, Message::Join(None)), io);
+
+        assert!(state.active_view.contains(&1));
+        assert!(!state.alive_disconnect_peers.contains(&1));
+    }
+
+    /// A quit leaves nothing about any peer behind.
+    #[test]
+    #[ignore = "not yet passing"]
+    fn quit_leaves_nothing_behind() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.handle(InEvent::RecvMessage(1, Message::Join(None)), io);
+        let nodes = Message::test_shuffle_reply_with(vec![2, 3]);
+        state.handle(InEvent::RecvMessage(1, nodes), io);
+
+        state.handle(InEvent::Quit, io);
+
+        assert!(state.active_view.is_empty() && state.passive_view.is_empty());
+        assert!(state.peer_data.is_empty() && state.alive_disconnect_peers.is_empty());
+        assert!(state.pending_neighbor_requests.is_empty());
     }
 }

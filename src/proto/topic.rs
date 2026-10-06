@@ -324,7 +324,23 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
             .filter(|event| matches!(event, OutEvent::SendMessage(_, _)))
             .count();
 
+        #[cfg(test)]
+        self.check_invariants();
+
         self.outbox.drain(..)
+    }
+
+    /// Panics if Plumtree's peers are not exactly HyParView's neighbors.
+    #[cfg(test)]
+    fn check_invariants(&self) {
+        // Not yet holding:
+        // let gossip = &self.gossip;
+        // let peers: std::collections::BTreeSet<_> = gossip
+        //     .eager_push_peers
+        //     .union(&gossip.lazy_push_peers)
+        //     .collect();
+        // let neighbors: std::collections::BTreeSet<_> = self.swarm.active_view.iter().collect();
+        // assert_eq!(peers, neighbors, "Plumtree's peers are not the neighbors");
     }
 
     /// Get stats on how many messages were sent and received.

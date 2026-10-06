@@ -395,7 +395,7 @@ mod tests {
     use rand::rngs::StdRng;
 
     use super::*;
-    use crate::proto::plumtree;
+    use crate::proto::{hyparview, plumtree};
 
     /// Handles `event` and drops what it produces.
     fn handle(state: &mut State<u32, StdRng>, event: InEvent<u32>) {
@@ -428,6 +428,57 @@ mod tests {
         handle(&mut state, InEvent::PeerDisconnected(peer));
 
         assert!(!state.peer_topics.contains_key(&peer));
+    }
+
+    /// A closed connection must not make a topic disconnect the peer.
+    ///
+    /// The network layer dropped the peer before it raised the event. A topic
+    /// that held the peer as neighbor still asks to disconnect it, while another
+    /// topic may retry its join to the peer in the same batch. The disconnect
+    /// would drop that retry. The state handles topics in a random order, so
+    /// the test runs several times.
+    #[test]
+    #[ignore = "not yet passing"]
+    fn peer_disconnected_sends_no_disconnect() {
+        let topic_a: TopicId = [1u8; 32].into();
+        let topic_b: TopicId = [2u8; 32].into();
+        let peer = 1u32;
+        for seed in 0..16 {
+            let mut state = State::new(
+                0u32,
+                PeerData::default(),
+                Config::default(),
+                StdRng::seed_from_u64(seed),
+            );
+            // The peer is our neighbor in `topic_a`: it joined us there.
+            handle(&mut state, InEvent::Command(topic_a, Command::Join(vec![])));
+            let join = Message {
+                topic: topic_a,
+                message: topic::Message::Swarm(hyparview::Message::Join(None)),
+            };
+            handle(&mut state, InEvent::RecvMessage(peer, join));
+            // In `topic_b`, our join to the peer is pending.
+            handle(
+                &mut state,
+                InEvent::Command(topic_b, Command::Join(vec![peer])),
+            );
+
+            let out: Vec<_> = state
+                .handle(InEvent::PeerDisconnected(peer), Instant::now(), None)
+                .collect();
+
+            assert!(
+                !out.iter()
+                    .any(|e| matches!(e, OutEvent::DisconnectPeer(p) if *p == peer)),
+                "the gone peer was disconnected (seed {seed})"
+            );
+            assert!(
+                out.iter()
+                    .any(|e| matches!(e, OutEvent::SendMessage(to, _) if *to == peer)),
+                "the join was not retried (seed {seed})"
+            );
+            assert!(!state.peer_topics.contains_key(&peer));
+        }
     }
 
     /// Leaving one topic must not disconnect a peer another topic still uses.
