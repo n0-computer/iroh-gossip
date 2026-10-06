@@ -467,11 +467,17 @@ impl Actor {
             }
             Some(res) = self.connection_tasks.join_next(), if !self.connection_tasks.is_empty() => {
                 trace!(?i, "tick: connection_tasks");
-                let (peer_id, conn, result) = res.expect("connection task panicked");
+                let Some((peer_id, conn, result)) = util::task_output(res) else {
+                    debug!("connection task cancelled, the runtime shuts down");
+                    return false;
+                };
                 self.handle_connection_task_finished(peer_id, conn, result).await;
             }
             Some(res) = self.topic_event_forwarders.join_next(), if !self.topic_event_forwarders.is_empty() => {
-                let topic_id = res.expect("topic event forwarder panicked");
+                let Some(topic_id) = util::task_output(res) else {
+                    debug!("topic event forwarder cancelled, the runtime shuts down");
+                    return false;
+                };
                 if let Some(state) = self.topics.get_mut(&topic_id) {
                     if !state.still_needed() {
                         self.quit_queue.push_back(topic_id);
@@ -1681,6 +1687,30 @@ pub(crate) mod tests {
             };
             (ours, theirs).try_join().await
         }
+    }
+
+    /// A cancelled task gives `None`, and a finished one gives its output.
+    #[tokio::test]
+    async fn task_output_of_cancelled_and_finished_tasks() {
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async { 7 });
+        let finished = tasks.join_next().await.expect("one task");
+        assert_eq!(util::task_output(finished), Some(7));
+
+        tasks.spawn(std::future::pending::<i32>());
+        tasks.abort_all();
+        let cancelled = tasks.join_next().await.expect("one task");
+        assert_eq!(util::task_output(cancelled), None);
+    }
+
+    /// `task_output` resumes the panic of a task that panicked.
+    #[tokio::test]
+    #[should_panic(expected = "boom")]
+    async fn task_output_passes_a_panic_on() {
+        let mut tasks = JoinSet::<()>::new();
+        tasks.spawn(async { panic!("boom") });
+        let res = tasks.join_next().await.expect("one task");
+        util::task_output(res);
     }
 
     /// Accepts the peer's next stream and reads it to its end.

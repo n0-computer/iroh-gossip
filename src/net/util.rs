@@ -13,7 +13,7 @@ use iroh::{
 };
 use n0_error::{e, stack_error};
 use n0_future::{
-    task::JoinSet,
+    task::{JoinError, JoinSet},
     time::{sleep_until, Instant},
     FuturesUnordered, StreamExt,
 };
@@ -353,6 +353,21 @@ impl SendLoop {
         }
 
         Ok(())
+    }
+}
+
+/// Returns a finished task's output, or `None` if the task was cancelled.
+///
+/// We never cancel a task in our task sets, so a cancelled task means the
+/// runtime shuts down. A panic resumes in the caller.
+pub(crate) fn task_output<T>(res: Result<T, JoinError>) -> Option<T> {
+    match res {
+        Ok(output) => Some(output),
+        // `try_into_panic`, unlike `into_panic`, also exists on wasm.
+        Err(err) => match err.try_into_panic() {
+            Ok(panic) => std::panic::resume_unwind(panic),
+            Err(_cancelled) => None,
+        },
     }
 }
 
