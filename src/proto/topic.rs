@@ -273,7 +273,13 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
                     self.gossip
                         .handle(GossipIn::Broadcast(data, scope), now, io)
                 }
-                Command::Quit => self.swarm.handle(SwarmIn::Quit, io),
+                Command::Quit => {
+                    // The quit empties the active view without a `NeighborDown`.
+                    for peer in self.swarm.active_view.iter() {
+                        self.gossip.handle(GossipIn::NeighborDown(*peer), now, io);
+                    }
+                    self.swarm.handle(SwarmIn::Quit, io);
+                }
             },
             InEvent::RecvMessage(from, message) => {
                 self.stats.messages_received += 1;
@@ -333,14 +339,13 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
     /// Panics if Plumtree's peers are not exactly HyParView's neighbors.
     #[cfg(test)]
     fn check_invariants(&self) {
-        // Not yet holding:
-        // let gossip = &self.gossip;
-        // let peers: std::collections::BTreeSet<_> = gossip
-        //     .eager_push_peers
-        //     .union(&gossip.lazy_push_peers)
-        //     .collect();
-        // let neighbors: std::collections::BTreeSet<_> = self.swarm.active_view.iter().collect();
-        // assert_eq!(peers, neighbors, "Plumtree's peers are not the neighbors");
+        let gossip = &self.gossip;
+        let peers: std::collections::BTreeSet<_> = gossip
+            .eager_push_peers
+            .union(&gossip.lazy_push_peers)
+            .collect();
+        let neighbors: std::collections::BTreeSet<_> = self.swarm.active_view.iter().collect();
+        assert_eq!(peers, neighbors, "Plumtree's peers are not the neighbors");
     }
 
     /// Get stats on how many messages were sent and received.

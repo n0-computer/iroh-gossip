@@ -462,8 +462,14 @@ impl<PI: PeerIdentity> State<PI> {
         } else {
             self.stats.control_messages_received += 1;
         }
+        // Our peers are HyParView's neighbors, set only by `NeighborUp` and
+        // `NeighborDown`. A message from anyone else is a straggler from a former
+        // neighbor, as a peer's messages are not ordered across connections.
+        let from_peer =
+            self.eager_push_peers.contains(&sender) || self.lazy_push_peers.contains(&sender);
         match message {
-            Message::Gossip(details) => self.on_gossip(sender, details, now, io),
+            Message::Gossip(details) => self.on_gossip(sender, from_peer, details, now, io),
+            _ if !from_peer => debug!(peer = ?sender, "ignore control message from a non-neighbor"),
             Message::Prune => self.on_prune(sender),
             Message::IHave(details) => self.on_ihave(sender, details, io),
             Message::Graft(details) => self.on_graft(sender, details, io),
@@ -514,7 +520,14 @@ impl<PI: PeerIdentity> State<PI> {
     }
 
     /// Handle receiving a [`Message::Gossip`].
-    fn on_gossip(&mut self, sender: PI, message: Gossip, now: Instant, io: &mut impl IO<PI>) {
+    fn on_gossip(
+        &mut self,
+        sender: PI,
+        from_peer: bool,
+        message: Gossip,
+        now: Instant,
+        io: &mut impl IO<PI>,
+    ) {
         // Validate that the message id is the blake3 hash of the message content.
         if !message.validate() {
             // TODO: Do we want to take any measures against the sender if we received a message
@@ -529,7 +542,11 @@ impl<PI: PeerIdentity> State<PI> {
         // if we already received this message: move peer to lazy set
         // and notify peer about this.
         if self.received_messages.contains_key(&message.id) {
-            self.add_lazy(sender);
+            if from_peer {
+                self.add_lazy(sender);
+            }
+            // A non-neighbor that pushes to us still holds us as an eager peer,
+            // as an older version does. The `Prune` stops its pushes.
             io.push(OutEvent::SendMessage(sender, Message::Prune));
         // otherwise store the message, emit to application and forward to peers
         } else {
@@ -557,7 +574,7 @@ impl<PI: PeerIdentity> State<PI> {
                 self.graft_timer_scheduled.remove(&message.id);
                 let previous_ihaves = self.missing_messages.remove(&message.id);
                 // do the optimization step from the paper
-                if let Some(previous_ihaves) = previous_ihaves {
+                if let Some(previous_ihaves) = previous_ihaves.filter(|_| from_peer) {
                     self.optimize_tree(&sender, &message, previous_ihaves, io);
                 }
                 self.stats.max_last_delivery_hop =
@@ -975,7 +992,6 @@ mod test {
     /// Such a message is a straggler from a former neighbor. A `Graft` taken
     /// from one made it eager, and every later broadcast dialed it.
     #[test]
-    #[ignore = "not yet passing"]
     fn non_neighbor_does_not_become_a_peer() {
         let mut io: VecDeque<crate::proto::topic::OutEvent<u32>> = VecDeque::new();
         let mut state = State::new(1u32, Config::default(), 1024);
@@ -1009,7 +1025,19 @@ mod test {
 
         assert!(state.eager_push_peers.is_empty() && state.lazy_push_peers.is_empty());
         assert!(state.missing_messages.is_empty());
-        assert!(io.is_empty(), "answered a non-neighbor: {io:?}");
+        // Only the duplicate gets an answer: a `Prune`, so that an older peer
+        // stops pushing to us.
+        let answers: Vec<_> = io.iter().collect();
+        assert!(
+            matches!(
+                answers[..],
+                [crate::proto::topic::OutEvent::SendMessage(
+                    2,
+                    crate::proto::topic::Message::Gossip(Message::Prune)
+                )]
+            ),
+            "{answers:?}"
+        );
     }
 
     #[test]
