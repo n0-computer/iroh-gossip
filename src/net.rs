@@ -443,12 +443,7 @@ impl Actor {
                     Some(Err(err)) => {
                         warn!(peer = %peer_id.fmt_short(), "dial failed: {err}");
                         self.metrics.actor_tick_dialer_failure.inc();
-                        let peer_state = self.peers.get(&peer_id);
-                        let is_active = matches!(peer_state, Some(PeerState::Active { .. }));
-                        if !is_active {
-                            self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
-                                .await;
-                        }
+                        self.handle_dial_failure(peer_id).await;
                     }
                     None => {
                         warn!(peer = %peer_id.fmt_short(), "dial disconnected");
@@ -568,6 +563,22 @@ impl Actor {
         );
     }
 
+    /// Drops the state of a peer we failed to dial.
+    ///
+    /// We do not cancel a dial when the peer reaches us first, so the failure can
+    /// arrive while an inbound connection is live. We keep the peer in that case.
+    /// Removing it would drop `active_send_tx`, which stops the send loop and
+    /// closes a working connection.
+    async fn handle_dial_failure(&mut self, peer_id: EndpointId) {
+        if matches!(self.peers.get(&peer_id), Some(PeerState::Active { .. })) {
+            return;
+        }
+        // Remove before dispatching, so a redial queued from the event survives.
+        self.peers.remove(&peer_id);
+        self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
+            .await;
+    }
+
     #[tracing::instrument(name = "conn", skip_all, fields(peer = %peer_id.fmt_short()))]
     async fn handle_connection_task_finished(
         &mut self,
@@ -581,23 +592,27 @@ impl Actor {
         let reason = conn.close_reason().expect("just closed");
         let error = task_result.err();
         debug!(%reason, ?error, "connection closed");
-        if let Some(PeerState::Active {
+        let Some(PeerState::Active {
             active_conn_id,
             other_conns,
             ..
         }) = self.peers.get_mut(&peer_id)
-        {
-            if conn.stable_id() == *active_conn_id {
-                debug!("active send connection closed, mark peer as disconnected");
-                self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
-                    .await;
-            } else {
-                other_conns.retain(|x| *x != conn.stable_id());
-                debug!("remaining {} other connections", other_conns.len() + 1);
-            }
-        } else {
+        else {
             debug!("peer already marked as disconnected");
+            return;
+        };
+        if conn.stable_id() != *active_conn_id {
+            other_conns.retain(|x| *x != conn.stable_id());
+            debug!("remaining {} other connections", other_conns.len() + 1);
+            return;
         }
+        debug!("active send connection closed, mark peer as disconnected");
+        // The protocol emits `DisconnectPeer` only for peers it received a
+        // message from. For all others this is the only place that drops the
+        // state.
+        self.peers.remove(&peer_id);
+        self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
+            .await;
     }
 
     async fn handle_rpc_msg(&mut self, msg: RpcMessage, now: Instant) {
@@ -1570,6 +1585,52 @@ pub(crate) mod tests {
             .await
             .std_context("wait actor finish")?;
 
+        Ok(())
+    }
+
+    /// Builds an actor without running its event loop.
+    async fn t_actor() -> Result<Actor, BindError> {
+        let endpoint = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await?;
+        let metrics = Arc::new(Metrics::default());
+        let (actor, _rpc_tx, _local_tx) = Actor::new(
+            endpoint,
+            Default::default(),
+            metrics,
+            None,
+            Default::default(),
+        );
+        Ok(actor)
+    }
+
+    /// A failed dial must leave a peer that reached us first alone.
+    ///
+    /// We do not cancel a dial when an inbound connection arrives, so the failure
+    /// lands on a peer that is already `Active`.
+    #[tokio::test]
+    #[traced_test]
+    async fn dial_failure_keeps_active_peer() -> Result {
+        let mut actor = t_actor().await?;
+        let peer_id = SecretKey::generate().public();
+        let (active_send_tx, send_rx) = mpsc::channel(1);
+        actor.peers.insert(
+            peer_id,
+            PeerState::Active {
+                active_send_tx,
+                active_conn_id: 1,
+                other_conns: Vec::new(),
+            },
+        );
+
+        actor.handle_dial_failure(peer_id).await;
+
+        assert!(
+            matches!(actor.peers.get(&peer_id), Some(PeerState::Active { .. })),
+            "the live connection was dropped"
+        );
+        assert!(!send_rx.is_closed(), "the send loop was stopped");
         Ok(())
     }
 

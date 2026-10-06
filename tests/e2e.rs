@@ -660,7 +660,6 @@ async fn survivor_redials_a_peer_that_timed_out() -> Result {
 /// A join whose dial failed works once the peer's address is known.
 #[tokio::test(flavor = "multi_thread")]
 #[traced_test]
-#[ignore = "not yet passing"]
 async fn join_after_a_failed_dial_connects() -> Result {
     let (lookup_a, lookup_b) = (MemoryLookup::new(), MemoryLookup::new());
     let a = Node::spawn(&lookup_a).await?;
@@ -681,7 +680,6 @@ async fn join_after_a_failed_dial_connects() -> Result {
 /// A peer whose connections were refused joins once they are accepted.
 #[tokio::test(flavor = "multi_thread")]
 #[traced_test]
-#[ignore = "not yet passing"]
 async fn refused_peer_joins_once_accepted() -> Result {
     let lookup = MemoryLookup::new();
     let accept = Arc::new(AtomicBool::new(false));
