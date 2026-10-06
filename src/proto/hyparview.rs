@@ -625,9 +625,13 @@ where
     }
 
     fn refill_active_from_passive(&mut self, skip_peers: &[&PI], io: &mut impl IO<PI>) {
-        if self.active_view.len() + self.pending_neighbor_requests.len()
-            >= self.config.active_view_capacity
-        {
+        // A pending reply is to a peer already in the active view; count it once.
+        let pending_outside = self
+            .pending_neighbor_requests
+            .iter()
+            .filter(|peer| !self.active_view.contains(*peer))
+            .count();
+        if self.active_view.len() + pending_outside >= self.config.active_view_capacity {
             return;
         }
         // "When a node p suspects that one of the nodes present in its active view has failed
@@ -1019,6 +1023,27 @@ mod tests {
         state.handle(InEvent::TimerExpired(Timer::PendingNeighborRequest(1)), io);
 
         assert!(!has_metadata(&state, 1));
+    }
+
+    /// A pending reply to an active peer does not count twice against the active view.
+    ///
+    /// The active view has room, so losing a peer must refill it at once
+    /// rather than when the reply's timer fires.
+    #[test]
+    fn refill_counts_active_peer_once() {
+        let mut state = new_state();
+        state.config.active_view_capacity = 2;
+        let io = &mut Io::new();
+        state.active_view.insert(1);
+        state.passive_view.insert(3);
+        // Peer 2 joins: it becomes active, and our reply to it is pending.
+        state.handle(InEvent::RecvMessage(2, Message::Join(None)), io);
+        io.clear();
+
+        let reason = RemovalReason::DisconnectReceived { is_alive: false };
+        state.remove_active(&1, reason, io);
+
+        assert!(sent_neighbor(io, 3), "the active view was not refilled");
     }
 
     /// A timed-out neighbor request does not drop the data of an active peer.
