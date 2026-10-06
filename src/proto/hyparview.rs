@@ -117,6 +117,15 @@ impl Ttl {
 
 #[cfg(test)]
 impl<PI> Message<PI> {
+    /// Returns a `Disconnect` from a peer that stays alive, for tests outside this module.
+    #[cfg(feature = "net")]
+    pub(crate) fn test_disconnect() -> Self {
+        Message::Disconnect(Disconnect {
+            alive: true,
+            _respond: false,
+        })
+    }
+
     /// Returns a shuffle reply carrying `peers` without data, for tests outside this module.
     pub(crate) fn test_shuffle_reply_with(peers: Vec<PI>) -> Self {
         let nodes = peers

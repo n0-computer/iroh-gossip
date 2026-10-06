@@ -96,6 +96,14 @@ pub enum Message<PI> {
     Gossip(plumtree::Message),
 }
 
+#[cfg(all(test, feature = "net"))]
+impl<PI> Message<PI> {
+    /// Returns a `Disconnect`, for the network tests.
+    pub(crate) fn test_disconnect() -> Self {
+        Message::Swarm(hyparview::Message::test_disconnect())
+    }
+}
+
 impl<PI> Message<PI> {
     /// Get the kind of this message
     pub fn kind(&self) -> MessageKind {

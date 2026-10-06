@@ -1683,6 +1683,31 @@ pub(crate) mod tests {
         }
     }
 
+    /// Accepts the peer's next stream and reads it to its end.
+    async fn read_next_stream(conn: &Connection) -> Result<(TopicId, Vec<TopicMessage>)> {
+        let mut stream = conn.accept_uni().await.std_context("accept stream")?;
+        let mut buffer = BytesMut::new();
+        let header = util::StreamHeader::read(&mut stream, &mut buffer, TEST_FRAME_LIMIT)
+            .await
+            .std_context("read header")?;
+        let mut messages = Vec::new();
+        while let Some(message) = util::read_frame(&mut stream, &mut buffer, TEST_FRAME_LIMIT)
+            .await
+            .std_context("read frame")?
+        {
+            messages.push(message);
+        }
+        Ok((header.topic_id, messages))
+    }
+
+    /// Returns a `Disconnect` for `topic`.
+    fn disconnect_message(topic: TopicId) -> ProtoMessage {
+        ProtoMessage {
+            topic,
+            message: TopicMessage::test_disconnect(),
+        }
+    }
+
     /// Accepts the peer's next stream and reads its first message.
     async fn read_next_message(conn: &Connection) -> Result<(TopicId, TopicMessage)> {
         let mut stream = conn.accept_uni().await.std_context("accept stream")?;
@@ -1844,6 +1869,39 @@ pub(crate) mod tests {
             (topic, true),
             "the queued message did not arrive"
         );
+        Ok(())
+    }
+
+    /// A `Disconnect` ends its stream, and a rejoin goes on a new stream.
+    ///
+    /// The ended stream frees a stream for the peer's limit on open streams.
+    #[tokio::test]
+    #[traced_test]
+    async fn disconnect_ends_its_stream() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let topic: TopicId = blake3::hash(b"disconnect_ends_its_stream").into();
+        let queue = vec![
+            join_message(topic, 0),
+            disconnect_message(topic),
+            join_message(topic, 0),
+        ];
+        let (send_tx, send_rx) = mpsc::channel(1);
+        drop(send_tx);
+        let mut send_loop = SendLoop::new(conn, send_rx, 1024);
+        let _send = AbortOnDropHandle::new(spawn(async move { send_loop.run(queue).await }));
+
+        let (_, first) = timeout(Duration::from_secs(5), read_next_stream(&peer_conn))
+            .await
+            .std_context("the first stream did not end")??;
+        let (_, second) = timeout(Duration::from_secs(5), read_next_stream(&peer_conn))
+            .await
+            .std_context("the second stream did not end")??;
+
+        let first: Vec<bool> = first.iter().map(|m| m.is_disconnect()).collect();
+        let second: Vec<bool> = second.iter().map(|m| m.is_disconnect()).collect();
+        assert_eq!(first, vec![false, true], "first stream, by `is_disconnect`");
+        assert_eq!(second, vec![false], "second stream, by `is_disconnect`");
         Ok(())
     }
 
