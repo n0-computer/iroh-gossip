@@ -102,6 +102,11 @@ impl<PI> Message<PI> {
     pub(crate) fn test_disconnect() -> Self {
         Message::Swarm(hyparview::Message::test_disconnect())
     }
+
+    /// Returns a shuffle from `origin` carrying no nodes, for the network tests.
+    pub(crate) fn test_shuffle(origin: PI, ttl: u16) -> Self {
+        Message::Swarm(hyparview::Message::test_shuffle(origin, ttl))
+    }
 }
 
 impl<PI> Message<PI> {

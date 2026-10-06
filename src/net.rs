@@ -2347,6 +2347,92 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// The connection a shuffle reply opened closes once the origin reads the reply.
+    ///
+    /// The replying node is usually not a neighbor of the shuffle's origin. The
+    /// origin drops it after it reads the reply. That does not close the
+    /// connection while the reply stream is open, so the replying node has to
+    /// drop the origin as well.
+    #[tokio::test]
+    #[traced_test]
+    async fn shuffle_reply_connection_closes() -> Result {
+        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
+        let ct = CancellationToken::new();
+        let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+        let memory_lookup = MemoryLookup::new();
+        let (_go1, actor, ep1_handle) =
+            Gossip::t_new_with_actor(rng, Default::default(), relay_map.clone(), &ct).await?;
+        let _ep1_handle = AbortOnDropHandle::new(ep1_handle);
+        let mut actor = ManualActorLoop::new(actor).await;
+        actor
+            .endpoint
+            .address_lookup()
+            .expect("endpoint is not closed")
+            .add(memory_lookup.clone());
+        let ep1_addr = EndpointAddr::new(actor.endpoint.id()).with_relay_url(relay_url.clone());
+        let topic: TopicId = blake3::hash(b"shuffle_reply_closes").into();
+        actor
+            .handle_in_event(
+                InEvent::Command(topic, proto::Command::Join(vec![])),
+                Instant::now(),
+            )
+            .await;
+
+        // The origin of the shuffle reads the reply, then waits for the close.
+        let origin = create_endpoint(rng, relay_map.clone(), None).await?;
+        let origin_id = origin.id();
+        memory_lookup.add_endpoint_info(EndpointAddr::new(origin_id).with_relay_url(relay_url));
+        let mut origin_task = AbortOnDropHandle::new(spawn(async move {
+            let incoming = origin.accept().await.expect("endpoint closed");
+            let conn = incoming.await.expect("accept failed");
+            let mut stream = conn.accept_uni().await.expect("accept_uni");
+            let mut buf = bytes::BytesMut::new();
+            util::StreamHeader::read(&mut stream, &mut buf, 1024)
+                .await
+                .expect("header");
+            let reply: Option<proto::topic::Message<PublicKey>> =
+                util::read_frame(&mut stream, &mut buf, 1024)
+                    .await
+                    .expect("frame");
+            conn.closed().await;
+            reply.is_some()
+        }));
+
+        // A third node forwards the shuffle to us with its walk at an end.
+        let ep3 = create_endpoint(rng, relay_map, None).await?;
+        let conn = ep3
+            .connect(ep1_addr, GOSSIP_ALPN)
+            .await
+            .std_context("connect")?;
+        let mut stream = conn.open_uni().await.std_context("open_uni")?;
+        let mut buf = Vec::new();
+        util::StreamHeader { topic_id: topic }
+            .write(&mut stream, &mut buf, 1024)
+            .await
+            .std_context("header")?;
+        let shuffle = proto::topic::Message::test_shuffle(origin_id, 0);
+        util::write_frame(&mut stream, &shuffle, &mut buf, 1024)
+            .await
+            .std_context("frame")?;
+
+        let replied = timeout(util::IDLE_GRACE * 2 + Duration::from_secs(5), async {
+            loop {
+                tokio::select! {
+                    _ = actor.step() => {}
+                    res = &mut origin_task => return res.expect("origin task"),
+                }
+            }
+        })
+        .await
+        .std_context("the reply connection was not closed")?;
+        assert!(replied, "the shuffle reply did not arrive");
+        assert!(
+            !actor.peers.contains_key(&origin_id),
+            "the origin's state was kept"
+        );
+        Ok(())
+    }
+
     /// Test that endpoints can reconnect to each other.
     ///
     /// This test will create two endpoints subscribed to the same topic. The second endpoint will

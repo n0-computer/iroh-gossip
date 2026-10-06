@@ -117,6 +117,15 @@ impl Ttl {
 
 #[cfg(test)]
 impl<PI> Message<PI> {
+    /// Returns a shuffle from `origin` carrying no nodes, for tests outside this module.
+    pub(crate) fn test_shuffle(origin: PI, ttl: u16) -> Self {
+        Message::Shuffle(Shuffle {
+            origin,
+            nodes: Vec::new(),
+            ttl: Ttl(ttl),
+        })
+    }
+
     /// Returns a `Disconnect` from a peer that stays alive, for tests outside this module.
     #[cfg(feature = "net")]
     pub(crate) fn test_disconnect() -> Self {
@@ -658,6 +667,17 @@ where
                 self.add_passive(node.id, node.data, io);
             }
             self.send_shuffle_reply(shuffle.origin, len, io);
+            // The reply usually goes to a peer that is not our neighbor, over a
+            // connection opened for it. The origin drops us once it read the
+            // reply. But it cannot close the connection while our stream is
+            // open, so we drop the origin too, unless we want something from it.
+            let origin = shuffle.origin;
+            if !self.active_view.contains(&origin)
+                && !self.pending_neighbor_requests.contains_key(&origin)
+                && !self.pending_joins.contains_key(&origin)
+            {
+                io.push(OutEvent::DisconnectPeer(origin));
+            }
         } else if let Some(node) = self
             .active_view
             .pick_random_without(&[&shuffle.origin, &from], &mut self.rng)
@@ -1128,6 +1148,68 @@ mod tests {
         assert!(us.active_view.contains(&1));
         assert!(peer.active_view.contains(&0));
         assert!(us.pending_neighbor_requests.is_empty());
+    }
+
+    /// Counts the shuffle replies sent to `peer`.
+    fn shuffle_replies_sent(io: &Io, peer: u32) -> usize {
+        io.iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    TopicOut::SendMessage(to, topic::Message::Swarm(Message::ShuffleReply(_))) if *to == peer
+                )
+            })
+            .count()
+    }
+
+    /// After a shuffle reply to a non-neighbor, we disconnect it.
+    ///
+    /// The reply goes over a connection opened for it. The origin drops us once
+    /// it read the reply, but cannot close the connection while our stream is
+    /// open.
+    #[test]
+    fn shuffle_reply_disconnects_a_non_neighbor() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.handle(InEvent::RecvMessage(1, Message::Join(None)), io);
+        assert!(state.active_view.contains(&1));
+        io.clear();
+
+        state.handle(InEvent::RecvMessage(1, Message::test_shuffle(2, 0)), io);
+
+        assert_eq!(shuffle_replies_sent(io, 2), 1);
+        let reply_at = io
+            .iter()
+            .position(|event| matches!(event, TopicOut::SendMessage(2, _)))
+            .expect("checked");
+        let disconnect_at = io
+            .iter()
+            .position(|event| matches!(event, TopicOut::DisconnectPeer(2)))
+            .expect("the origin was not disconnected");
+        assert!(reply_at < disconnect_at, "disconnected before the reply");
+        assert!(
+            !io.iter()
+                .any(|event| matches!(event, TopicOut::DisconnectPeer(1))),
+            "the forwarding neighbor was disconnected"
+        );
+    }
+
+    /// A shuffle reply to a neighbor leaves the neighbor alone.
+    #[test]
+    fn shuffle_reply_keeps_a_neighbor() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.handle(InEvent::RecvMessage(1, Message::Join(None)), io);
+        io.clear();
+
+        state.handle(InEvent::RecvMessage(1, Message::test_shuffle(1, 0)), io);
+
+        assert_eq!(shuffle_replies_sent(io, 1), 1);
+        assert!(
+            !io.iter()
+                .any(|event| matches!(event, TopicOut::DisconnectPeer(1))),
+            "the neighbor was disconnected"
+        );
     }
 
     #[test]
