@@ -26,7 +26,7 @@ use n0_future::{
 use rand::{rngs::StdRng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard};
 use tracing::{debug, error, error_span, trace, warn, Instrument};
 
 use self::{
@@ -549,7 +549,9 @@ impl Actor {
                 }
             );
         let queue = state.accept_conn(send_tx, conn_id);
+        let unwanted = state.unwanted().token.clone();
         if dropped {
+            // Dropping the state also cancels the token.
             self.peers.remove(&peer_id);
         }
 
@@ -567,6 +569,7 @@ impl Actor {
                     in_event_tx,
                     max_message_size,
                     queue,
+                    unwanted,
                 )
                 .await;
                 (peer_id, conn, res)
@@ -731,7 +734,9 @@ impl Actor {
                                 trace!(?message, "dropped message");
                             }
                         }
-                        PeerState::Pending { queue, disconnect } => {
+                        PeerState::Pending {
+                            queue, disconnect, ..
+                        } => {
                             // The protocol wants to talk to the peer again.
                             *disconnect = false;
                             if queue.is_empty() {
@@ -819,27 +824,58 @@ enum PeerState {
         /// If so, the queue goes out on the dialed connection. We then drop that
         /// connection instead of making it the peer's active one.
         disconnect: bool,
+        unwanted: Unwanted,
     },
     Active {
         active_send_tx: mpsc::Sender<ProtoMessage>,
         active_conn_id: ConnId,
         other_conns: Vec<ConnId>,
+        unwanted: Unwanted,
     },
 }
 
+/// A token cancelled once we drop the peer's state, shared by its connections.
+///
+/// A connection to a peer we no longer want closes on our terms, even if the
+/// peer keeps a stream open.
+#[derive(Debug, Clone)]
+struct Unwanted {
+    token: CancellationToken,
+    _guard: Arc<DropGuard>,
+}
+
+impl Unwanted {
+    fn new() -> Self {
+        let token = CancellationToken::new();
+        Self {
+            _guard: Arc::new(token.clone().drop_guard()),
+            token,
+        }
+    }
+}
+
 impl PeerState {
+    fn unwanted(&self) -> &Unwanted {
+        match self {
+            PeerState::Pending { unwanted, .. } | PeerState::Active { unwanted, .. } => unwanted,
+        }
+    }
+
     fn accept_conn(
         &mut self,
         send_tx: mpsc::Sender<ProtoMessage>,
         conn_id: ConnId,
     ) -> Vec<ProtoMessage> {
         match self {
-            PeerState::Pending { queue, .. } => {
+            PeerState::Pending {
+                queue, unwanted, ..
+            } => {
                 let queue = std::mem::take(queue);
                 *self = PeerState::Active {
                     active_send_tx: send_tx,
                     active_conn_id: conn_id,
                     other_conns: Vec::new(),
+                    unwanted: unwanted.clone(),
                 };
                 queue
             }
@@ -847,6 +883,7 @@ impl PeerState {
                 active_send_tx,
                 active_conn_id,
                 other_conns,
+                ..
             } => {
                 // We already have an active connection. We keep the old connection intact,
                 // but only use the new connection for sending from now on.
@@ -867,6 +904,7 @@ impl Default for PeerState {
         PeerState::Pending {
             queue: Vec::new(),
             disconnect: false,
+            unwanted: Unwanted::new(),
         }
     }
 }
@@ -939,6 +977,8 @@ impl<T> From<mpsc::error::SendError<T>> for ConnectionLoopError {
     }
 }
 
+// Each argument is state the two loops share. A struct would only wrap them.
+#[allow(clippy::too_many_arguments)]
 async fn connection_loop(
     from: PublicKey,
     conn: Connection,
@@ -947,6 +987,7 @@ async fn connection_loop(
     in_event_tx: mpsc::Sender<InEvent>,
     max_message_size: usize,
     queue: Vec<ProtoMessage>,
+    unwanted: CancellationToken,
 ) -> Result<(), ConnectionLoopError> {
     debug!(?origin, "connection established");
 
@@ -959,7 +1000,7 @@ async fn connection_loop(
         send_done_tx.send(()).ok();
         res
     };
-    let recv_fut = recv_loop.run(send_done_rx);
+    let recv_fut = recv_loop.run(send_done_rx, unwanted);
 
     // The peer may still use this connection, so `recv_loop` decides when it
     // is done. A loop that failed is the exception. The other loop would keep
@@ -1785,6 +1826,7 @@ pub(crate) mod tests {
                 active_send_tx,
                 active_conn_id: 1,
                 other_conns: Vec::new(),
+                unwanted: Unwanted::new(),
             },
         );
 
@@ -1815,6 +1857,7 @@ pub(crate) mod tests {
             PeerState::Pending {
                 queue: vec![join_message(topic, 0)],
                 disconnect: true,
+                unwanted: Unwanted::new(),
             },
         );
 
@@ -1828,6 +1871,93 @@ pub(crate) mod tests {
             .await
             .std_context("the queue did not go out")??;
         assert!(!message.is_disconnect(), "the queued join is missing");
+        Ok(())
+    }
+
+    /// A connection that a newer one replaced keeps delivering while the peer uses it.
+    ///
+    /// Two peers that dial each other can each keep a different connection, so a
+    /// peer we still want may send on the one we replaced. Only an unwanted peer
+    /// loses its connections after the grace.
+    #[tokio::test]
+    #[traced_test]
+    async fn replaced_connection_delivers_while_the_peer_uses_it() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (first, peer_first) = pair.connect().await?;
+        let (second, _peer_second) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
+        let topic: TopicId = blake3::hash(b"replaced_connection_delivers").into();
+        let mut actor = t_actor().await?;
+        actor.handle_connection(peer_id, ConnOrigin::Accept, first);
+        actor.handle_connection(peer_id, ConnOrigin::Accept, second);
+
+        let mut stream = peer_first.open_uni().await.std_context("open stream")?;
+        let mut buffer = Vec::new();
+        util::StreamHeader { topic_id: topic }
+            .write(&mut stream, &mut buffer, TEST_FRAME_LIMIT)
+            .await
+            .std_context("write header")?;
+        let join = join_message(topic, 0).message;
+        util::write_frame(&mut stream, &join, &mut buffer, TEST_FRAME_LIMIT)
+            .await
+            .std_context("write frame")?;
+        tokio::time::sleep(util::IDLE_GRACE + Duration::from_secs(1)).await;
+        util::write_frame(&mut stream, &join, &mut buffer, TEST_FRAME_LIMIT)
+            .await
+            .std_context("write after the grace")?;
+
+        for _ in 0..2 {
+            let event = timeout(Duration::from_secs(5), actor.in_event_rx.recv())
+                .await
+                .std_context("a message did not arrive")?;
+            assert!(
+                matches!(event, Some(InEvent::RecvMessage(peer, _)) if peer == peer_id),
+                "{event:?}"
+            );
+        }
+        assert!(peer_first.close_reason().is_none(), "the connection closed");
+        Ok(())
+    }
+
+    /// A connection to a peer we dropped closes even if the peer keeps a stream open.
+    ///
+    /// The peer may still hold us as a neighbor. Once our send loop ended and the
+    /// grace passed, its open stream no longer keeps the connection open. The
+    /// close tells the peer we are gone.
+    #[tokio::test]
+    #[traced_test]
+    async fn unwanted_peer_with_open_stream_closes() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
+        let topic: TopicId = blake3::hash(b"unwanted_peer_with_open_stream").into();
+        let mut actor = t_actor().await?;
+        actor.handle_connection(peer_id, ConnOrigin::Dial, conn);
+        let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
+        let mut buffer = Vec::new();
+        util::StreamHeader { topic_id: topic }
+            .write(&mut stream, &mut buffer, TEST_FRAME_LIMIT)
+            .await
+            .std_context("write header")?;
+        let join = join_message(topic, 0).message;
+        util::write_frame(&mut stream, &join, &mut buffer, TEST_FRAME_LIMIT)
+            .await
+            .std_context("write frame")?;
+
+        disconnect_peer(&mut actor.peers, peer_id);
+
+        let ended = timeout(
+            util::IDLE_GRACE + Duration::from_secs(3),
+            actor.connection_tasks.join_next(),
+        )
+        .await
+        .std_context("the connection stayed open")?;
+        let (peer, conn, res) = ended.expect("one task").expect("no panic");
+        actor.handle_connection_task_finished(peer, conn, res).await;
+        timeout(Duration::from_secs(1), peer_conn.closed())
+            .await
+            .std_context("the peer did not see the close")?;
+        drop(stream);
         Ok(())
     }
 
@@ -1875,6 +2005,7 @@ pub(crate) mod tests {
             PeerState::Pending {
                 queue: vec![join_message(topic, 0)],
                 disconnect: true,
+                unwanted: Unwanted::new(),
             },
         );
         actor.handle_connection(ep2_id, ConnOrigin::Dial, conn);
@@ -2066,6 +2197,7 @@ pub(crate) mod tests {
                 in_event_tx,
                 1024,
                 vec![too_large],
+                CancellationToken::new(),
             ),
         )
         .await
@@ -2113,6 +2245,7 @@ pub(crate) mod tests {
                 in_event_tx,
                 1024,
                 vec![],
+                CancellationToken::new(),
             ),
         )
         .await
