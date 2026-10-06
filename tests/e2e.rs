@@ -543,7 +543,6 @@ async fn repeated_vanish_and_restart() -> Result {
 /// connection, and both sides lost each other for good (#131).
 #[tokio::test(flavor = "multi_thread")]
 #[traced_test]
-#[ignore = "not yet passing"]
 async fn oversized_broadcast_keeps_the_neighbors() -> Result {
     let lookup = MemoryLookup::new();
     let (a, b) = (Node::spawn(&lookup).await?, Node::spawn(&lookup).await?);
@@ -565,7 +564,6 @@ async fn oversized_broadcast_keeps_the_neighbors() -> Result {
 /// send either.
 #[tokio::test(flavor = "multi_thread")]
 #[traced_test]
-#[ignore = "not yet passing"]
 async fn oversized_broadcast_in_a_swarm_keeps_the_neighbors() -> Result {
     let lookup = MemoryLookup::new();
     let (a, b, c) = (

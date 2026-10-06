@@ -23,7 +23,7 @@ use tokio::{
     sync::{mpsc, oneshot},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, trace, Instrument};
+use tracing::{debug, trace, warn, Instrument};
 
 use super::{InEvent, ProtoMessage};
 use crate::proto::{util::TimerMap, TopicId};
@@ -345,7 +345,14 @@ impl SendLoop {
         };
         let stream = entry.get_mut();
 
-        write_frame(stream, message, &mut self.buffer, self.max_message_size).await?;
+        match write_frame(stream, message, &mut self.buffer, self.max_message_size).await {
+            // Refused before any byte went out, so the stream and the peer are fine.
+            Err(WriteError::TooLarge { .. }) => {
+                warn!(topic=%topic_id.fmt_short(), max = self.max_message_size, "message too large, dropped");
+                return Ok(());
+            }
+            res => res?,
+        }
 
         if is_last {
             trace!(topic=%topic_id.fmt_short(), "stream closing");
@@ -451,7 +458,8 @@ pub async fn write_frame<T: Serialize>(
     max_message_size: usize,
 ) -> Result<(), WriteError> {
     let len = postcard::experimental::serialized_size(&message)?;
-    if len >= max_message_size {
+    // The same bound as on read, so a frame either end accepts goes through.
+    if len > max_message_size {
         return Err(e!(WriteError::TooLarge));
     }
     buffer.clear();

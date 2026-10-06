@@ -158,7 +158,10 @@ pub struct Builder {
 
 impl Builder {
     /// Sets the maximum message size in bytes.
-    /// By default this is `4096` bytes.
+    ///
+    /// By default this is `4096` bytes. The limit applies to the encoded message,
+    /// which is a few dozen bytes longer than its content. A message over the
+    /// limit is dropped with a warning, and its connection stays open.
     pub fn max_message_size(mut self, size: usize) -> Self {
         self.config.max_message_size = size;
         self
@@ -2157,52 +2160,142 @@ pub(crate) mod tests {
     #[tokio::test]
     #[traced_test]
     async fn send_error_closes_connection() -> Result {
-        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
-        let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
-        let ep1 = create_endpoint(rng, relay_map.clone(), None).await?;
-        let ep2 = create_endpoint(rng, relay_map, None).await?;
-        let ep2_id = ep2.id();
-        let ep2_addr = EndpointAddr::new(ep2_id).with_relay_url(relay_url);
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
         let topic: TopicId = blake3::hash(b"send_error").into();
 
-        // The peer opens a topic stream and keeps it open, as a live neighbor does.
-        let _accept = AbortOnDropHandle::new(spawn(async move {
-            let incoming = ep2.accept().await.expect("endpoint closed");
-            let conn = incoming.await.expect("accept failed");
-            let mut stream = conn.open_uni().await.expect("open_uni");
+        // The peer keeps a topic stream open, as a live neighbor does, and stops
+        // the stream we open. That fails our next write.
+        let _peer = AbortOnDropHandle::new(spawn(async move {
+            let mut ours = peer_conn.open_uni().await.expect("open_uni");
             util::StreamHeader { topic_id: topic }
-                .write(&mut stream, &mut Vec::new(), 1024)
+                .write(&mut ours, &mut Vec::new(), TEST_FRAME_LIMIT)
                 .await
                 .expect("write header");
-            conn.closed().await;
+            let mut theirs = peer_conn.accept_uni().await.expect("accept_uni");
+            theirs.stop(0u32.into()).expect("stop");
+            peer_conn.closed().await;
         }));
-
-        let conn = ep1
-            .connect(ep2_addr, GOSSIP_ALPN)
-            .await
-            .std_context("connect")?;
         // The sender stays alive: the write error, not a closed channel, must end
         // the send loop.
-        let (_send_tx, send_rx) = mpsc::channel(1);
+        let (send_tx, send_rx) = mpsc::channel(1);
+        let _feed = AbortOnDropHandle::new(spawn(async move {
+            while send_tx.send(join_message(topic, 0)).await.is_ok() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }));
         let (in_event_tx, _in_event_rx) = mpsc::channel(16);
-        let too_large = join_message(topic, 4096);
 
         let res = timeout(
             Duration::from_secs(5),
             connection_loop(
-                ep2_id,
+                peer_id,
                 conn,
                 ConnOrigin::Dial,
                 send_rx,
                 in_event_tx,
-                1024,
-                vec![too_large],
+                TEST_FRAME_LIMIT,
+                vec![],
                 CancellationToken::new(),
             ),
         )
         .await
         .std_context("connection loop still runs after the send loop failed")?;
-        assert!(res.is_err(), "the oversize write did not fail");
+        assert!(res.is_err(), "the write to a stopped stream did not fail");
+        Ok(())
+    }
+
+    /// A frame of exactly the size limit goes through.
+    ///
+    /// Write and read must agree on the bound, or a frame one end accepts
+    /// fails at the other end.
+    #[tokio::test]
+    #[traced_test]
+    async fn frame_of_the_size_limit_goes_through() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let topic: TopicId = blake3::hash(b"frame_of_the_size_limit").into();
+        let message = join_message(topic, 64).message;
+        let limit = postcard::experimental::serialized_size(&message).std_context("size")?;
+
+        let mut stream = conn.open_uni().await.std_context("open stream")?;
+        let mut buffer = Vec::new();
+        util::write_frame(&mut stream, &message, &mut buffer, limit)
+            .await
+            .std_context("write")?;
+        stream.finish().std_context("finish")?;
+
+        let mut stream = peer_conn.accept_uni().await.std_context("accept")?;
+        let read: Option<TopicMessage> = util::read_frame(&mut stream, &mut BytesMut::new(), limit)
+            .await
+            .std_context("read")?;
+        assert!(read.is_some(), "the frame did not arrive");
+        Ok(())
+    }
+
+    /// A frame one byte over the size limit is refused on read.
+    #[tokio::test]
+    #[traced_test]
+    async fn frame_over_the_size_limit_is_refused() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let topic: TopicId = blake3::hash(b"frame_over_the_size_limit").into();
+        let message = join_message(topic, 64).message;
+        let size = postcard::experimental::serialized_size(&message).std_context("size")?;
+
+        let mut stream = conn.open_uni().await.std_context("open stream")?;
+        util::write_frame(&mut stream, &message, &mut Vec::new(), size)
+            .await
+            .std_context("write")?;
+        stream.finish().std_context("finish")?;
+
+        let mut stream = peer_conn.accept_uni().await.std_context("accept")?;
+        let read: Result<Option<TopicMessage>, _> =
+            util::read_frame(&mut stream, &mut BytesMut::new(), size - 1).await;
+        assert!(
+            matches!(read, Err(util::ReadError::TooLarge { .. })),
+            "{read:?}"
+        );
+        Ok(())
+    }
+
+    /// The send task drops a message over the size limit, and the connection stays.
+    #[tokio::test]
+    #[traced_test]
+    async fn oversized_message_is_dropped() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
+        let topic: TopicId = blake3::hash(b"oversized_message").into();
+        let (send_tx, send_rx) = mpsc::channel(2);
+        let (in_event_tx, _in_event_rx) = mpsc::channel(16);
+        let task = AbortOnDropHandle::new(spawn(connection_loop(
+            peer_id,
+            conn,
+            ConnOrigin::Dial,
+            send_rx,
+            in_event_tx,
+            1024,
+            vec![],
+            CancellationToken::new(),
+        )));
+
+        send_tx
+            .send(join_message(topic, 4096))
+            .await
+            .std_context("send")?;
+        send_tx
+            .send(join_message(topic, 16))
+            .await
+            .std_context("send")?;
+
+        let (_, message) = timeout(Duration::from_secs(5), read_next_message(&peer_conn))
+            .await
+            .std_context("nothing arrived after the oversized message")??;
+        let size = postcard::experimental::serialized_size(&message).std_context("size")?;
+        assert!(size < 1024, "the oversized message went out");
+        assert!(!task.is_finished(), "the connection ended");
         Ok(())
     }
 
