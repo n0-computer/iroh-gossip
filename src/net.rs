@@ -35,7 +35,7 @@ use self::{
 use crate::{
     api::{self, Command, Event, GossipApi, RpcMessage},
     metrics::Metrics,
-    proto::{self, HyparviewConfig, PeerData, PlumtreeConfig, Scope, TopicId},
+    proto::{self, state::MessageKind, HyparviewConfig, PeerData, PlumtreeConfig, Scope, TopicId},
 };
 
 mod address_lookup;
@@ -45,7 +45,11 @@ mod util;
 pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/1";
 
 /// Channel capacity for the send queue (one per connection)
-const SEND_QUEUE_CAP: usize = 64;
+///
+/// The actor never waits for room, so the queue has to hold a burst from one
+/// step, such as the `Disconnect`s of many topics that quit at once. With
+/// messages of at most 4 KiB, a peer that does not read holds 4 MiB at most.
+const SEND_QUEUE_CAP: usize = 1024;
 /// Channel capacity for the ToActor message queue (single)
 const TO_ACTOR_CAP: usize = 64;
 /// Channel capacity for the InEvent message queue (single)
@@ -672,6 +676,8 @@ impl Actor {
             debug!(?event, "handle in_event");
         };
         let out = self.state.handle(event, now, Some(&self.metrics));
+        // Peers whose send queue was full with a control message.
+        let mut blocked = Vec::new();
         for event in out {
             if matches!(event, OutEvent::ScheduleTimer(_, _)) {
                 trace!(?event, "handle out_event");
@@ -683,13 +689,29 @@ impl Actor {
                     let state = self.peers.entry(peer_id).or_default();
                     match state {
                         PeerState::Active { active_send_tx, .. } => {
-                            if let Err(_err) = active_send_tx.send(message).await {
-                                // Removing the peer is handled by the in_event PeerDisconnected sent
-                                // in [`Self::handle_connection_task_finished`].
-                                warn!(
-                                    peer = %peer_id.fmt_short(),
-                                    "failed to send: connection task send loop terminated",
-                                );
+                            // Waiting for room would stop the actor, and with it every
+                            // topic, for as long as this one peer does not read.
+                            match active_send_tx.try_send(message) {
+                                Ok(()) => {}
+                                Err(mpsc::error::TrySendError::Full(message)) => {
+                                    if matches!(message.kind(), MessageKind::Data) {
+                                        // Plumtree repairs a lost message through
+                                        // `IHave` and `Graft`.
+                                        debug!(peer = %peer_id.fmt_short(), "send queue full, drop data message");
+                                    } else if !blocked.contains(&peer_id) {
+                                        // HyParView takes a peer that blocks as failed.
+                                        warn!(peer = %peer_id.fmt_short(), "send queue full with a control message, drop the peer");
+                                        blocked.push(peer_id);
+                                    }
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => {
+                                    // `handle_connection_task_finished` drops the peer
+                                    // and reports it gone.
+                                    warn!(
+                                        peer = %peer_id.fmt_short(),
+                                        "failed to send: connection task send loop terminated",
+                                    );
+                                }
                             }
                         }
                         PeerState::Pending { queue } => {
@@ -750,6 +772,13 @@ impl Actor {
                     }
                 },
             }
+        }
+        for peer_id in blocked {
+            // Dropping the state ends the peer's send loop. The protocol learns
+            // that the peer is gone at once, not when its connection closes.
+            self.peers.remove(&peer_id);
+            let gone = InEvent::PeerDisconnected(peer_id);
+            Box::pin(self.handle_in_event_inner(gone, now)).await;
         }
     }
 }
@@ -1386,6 +1415,50 @@ pub(crate) mod tests {
                 .unwrap()
                 .unwrap();
         }
+    }
+
+    /// A peer whose send loop does not read leaves the actor running (#47).
+    ///
+    /// The actor waited for room in the peer's full queue. While it waited,
+    /// no topic made progress, and the peer was never dropped.
+    #[tokio::test]
+    #[traced_test]
+    async fn full_send_queue_fails_the_peer_without_waiting() -> Result {
+        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
+        let ct = CancellationToken::new();
+        let (relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+        let (_gossip, mut actor, _ep_handle) =
+            Gossip::t_new_with_actor(rng, Default::default(), relay_map, &ct).await?;
+        let peer = SecretKey::generate().public();
+        // A send loop that never reads, with room for one message.
+        let (active_send_tx, _send_rx) = mpsc::channel(1);
+        actor.peers.insert(
+            peer,
+            PeerState::Active {
+                active_send_tx,
+                active_conn_id: 0,
+                other_conns: Vec::new(),
+            },
+        );
+
+        // Each join sends a control message to the peer. The second one finds
+        // the queue full.
+        for name in [b"first".as_slice(), b"second".as_slice()] {
+            let topic: TopicId = blake3::hash(name).into();
+            let join = InEvent::Command(topic, ProtoCommand::Join(vec![peer]));
+            timeout(
+                Duration::from_secs(1),
+                actor.handle_in_event(join, Instant::now()),
+            )
+            .await
+            .std_context("the actor waited for the full queue")?;
+        }
+
+        assert!(
+            !matches!(actor.peers.get(&peer), Some(PeerState::Active { .. })),
+            "the blocked peer was kept"
+        );
+        Ok(())
     }
 
     /// Test that when a gossip topic is no longer needed it's actually unsubscribed.
