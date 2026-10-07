@@ -6,7 +6,7 @@
 //! [paper]: https://asc.di.fct.unl.pt/~jleitao/pdf/dsn07-leitao.pdf
 //! [impl]: https://gist.github.com/Horusiath/84fac596101b197da0546d1697580d99
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map, HashMap, HashSet};
 
 use derive_more::{From, Sub};
 use n0_future::time::Duration;
@@ -61,7 +61,10 @@ pub enum Event<PI> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Timer<PI> {
     DoShuffle,
-    PendingNeighborRequest(PI),
+    /// The timeout of the `Neighbor` to the peer with the given id.
+    ///
+    /// The id tells it from the timer of an earlier `Neighbor` to the same peer.
+    PendingNeighborRequest(PI, u64),
 }
 
 /// Messages that we can send and receive from peers within the topic.
@@ -247,8 +250,10 @@ pub struct State<PI, RG = ThreadRng> {
     rng: RG,
     /// Statistics
     pub(crate) stats: Stats,
-    /// The set of neighbor requests we sent out but did not yet receive a reply for
-    pending_neighbor_requests: HashSet<PI>,
+    /// The neighbor requests we sent out but did not yet receive a reply for, with their ids
+    pending_neighbor_requests: HashMap<PI, u64>,
+    /// The id of the next neighbor request
+    next_neighbor_request: u64,
     /// The opaque user peer data we received for other peers
     peer_data: HashMap<PI, PeerData>,
     /// List of peers that are disconnecting, but which we want to keep in the passive set once the connection closes
@@ -271,6 +276,7 @@ where
             rng,
             stats: Stats::default(),
             pending_neighbor_requests: Default::default(),
+            next_neighbor_request: 0,
             peer_data: Default::default(),
             alive_disconnect_peers: Default::default(),
         }
@@ -281,7 +287,9 @@ where
             InEvent::RecvMessage(from, message) => self.handle_message(from, message, io),
             InEvent::TimerExpired(timer) => match timer {
                 Timer::DoShuffle => self.handle_shuffle_timer(io),
-                Timer::PendingNeighborRequest(peer) => self.handle_pending_neighbor_timer(peer, io),
+                Timer::PendingNeighborRequest(peer, id) => {
+                    self.handle_pending_neighbor_timer(peer, id, io)
+                }
             },
             InEvent::PeerDisconnected(peer) => self.handle_connection_closed(peer, io),
             InEvent::RequestJoin(peer) => self.handle_join(peer, io),
@@ -347,7 +355,7 @@ where
 
     /// A connection was closed by the peer.
     fn handle_connection_closed(&mut self, peer: PI, io: &mut impl IO<PI>) {
-        let requested = self.pending_neighbor_requests.remove(&peer);
+        let requested = self.pending_neighbor_requests.remove(&peer).is_some();
         if self.active_view.contains(&peer) {
             self.remove_active(&peer, RemovalReason::ConnectionClosed, io);
         } else {
@@ -444,7 +452,7 @@ where
             // in p’s active view, p will forward the request to a random node in its active view
             // (different from the one from which the request was received)."
             if !self.active_view.contains(&peer_id)
-                && !self.pending_neighbor_requests.contains(&peer_id)
+                && !self.pending_neighbor_requests.contains_key(&peer_id)
             {
                 match self
                     .active_view
@@ -468,7 +476,7 @@ where
     fn on_neighbor(&mut self, from: PI, details: Neighbor, io: &mut impl IO<PI>) {
         // A `Neighbor` is a reply if we have a request out to the peer, and a
         // request otherwise. See `send_neighbor` for the full picture.
-        let is_reply = self.pending_neighbor_requests.remove(&from);
+        let is_reply = self.pending_neighbor_requests.remove(&from).is_some();
         let do_reply = !is_reply;
         // "A node q that receives a high priority neighbor request will always accept the request, even
         // if it has to drop a random member from its active view (again, the member that is dropped will
@@ -637,7 +645,7 @@ where
         // A pending reply is to a peer already in the active view; count it once.
         let pending_outside = self
             .pending_neighbor_requests
-            .iter()
+            .keys()
             .filter(|peer| !self.active_view.contains(*peer))
             .count();
         if self.active_view.len() + pending_outside >= self.config.active_view_capacity {
@@ -650,7 +658,7 @@ where
         // at random and a new attempt is made. The procedure is repeated until a connection is established
         // with success." (p7)
         let mut skip_peers = skip_peers.to_vec();
-        skip_peers.extend(self.pending_neighbor_requests.iter());
+        skip_peers.extend(self.pending_neighbor_requests.keys());
 
         if let Some(node) = self
             .passive_view
@@ -670,9 +678,11 @@ where
     /// For a request, the peer is taken as failed and dropped from the passive
     /// view. For a reply, which is never answered, the peer is in the active
     /// view and keeps its data; the entry is cleared, and the refill below
-    /// only acts if the active view has room.
-    fn handle_pending_neighbor_timer(&mut self, peer: PI, io: &mut impl IO<PI>) {
-        if self.pending_neighbor_requests.remove(&peer) {
+    /// only acts if the active view has room. A timer whose `id` is not the
+    /// pending one belongs to an earlier `Neighbor`, and does nothing.
+    fn handle_pending_neighbor_timer(&mut self, peer: PI, id: u64, io: &mut impl IO<PI>) {
+        if self.pending_neighbor_requests.get(&peer) == Some(&id) {
+            self.pending_neighbor_requests.remove(&peer);
             self.passive_view.remove(&peer);
             self.forget_peer(&peer);
             self.refill_active_from_passive(&[], io);
@@ -797,7 +807,10 @@ where
     /// extra `Neighbor` is taken as the reply and not answered. The entry for a
     /// reply is cleared by the timer alone.
     fn send_neighbor(&mut self, peer: PI, priority: Priority, io: &mut impl IO<PI>) {
-        if self.pending_neighbor_requests.insert(peer) {
+        if let hash_map::Entry::Vacant(entry) = self.pending_neighbor_requests.entry(peer) {
+            let id = self.next_neighbor_request;
+            self.next_neighbor_request += 1;
+            entry.insert(id);
             let message = Message::Neighbor(Neighbor {
                 priority,
                 data: self.me_data.clone(),
@@ -805,7 +818,7 @@ where
             io.push(OutEvent::SendMessage(peer, message));
             io.push(OutEvent::ScheduleTimer(
                 self.config.neighbor_request_timeout,
-                Timer::PendingNeighborRequest(peer),
+                Timer::PendingNeighborRequest(peer, id),
             ));
         }
     }
@@ -867,7 +880,7 @@ mod tests {
         let mut state = new_state();
         let io = &mut Io::new();
         state.active_view.insert(1);
-        state.pending_neighbor_requests.insert(1);
+        state.pending_neighbor_requests.insert(1, 0);
 
         state.handle(InEvent::RecvMessage(1, Message::Join(None)), io);
 
@@ -886,7 +899,7 @@ mod tests {
         state.handle(InEvent::RecvMessage(1, Message::Join(None)), io);
 
         assert!(sent_neighbor(io, 1));
-        let timer = topic::Timer::Swarm(Timer::PendingNeighborRequest(1));
+        let timer = topic::Timer::Swarm(Timer::PendingNeighborRequest(1, 0));
         assert!(
             io.iter()
                 .any(|event| matches!(event, TopicOut::ScheduleTimer(_, t) if *t == timer)),
@@ -944,7 +957,7 @@ mod tests {
         assert!(contact.active_view.contains(&1));
         assert!(joiner.active_view.contains(&0));
         assert!(contact.pending_neighbor_requests.is_empty());
-        assert!(joiner.pending_neighbor_requests.contains(&0));
+        assert!(joiner.pending_neighbor_requests.contains_key(&0));
     }
 
     /// A request to a peer that crosses with the peer's join settles.
@@ -1020,6 +1033,39 @@ mod tests {
         assert!(!has_metadata(&state, 1));
     }
 
+    /// The timer of an earlier `Neighbor` leaves a later one to the same peer alone (#174).
+    ///
+    /// The timer was keyed by the peer only, so it ended the new request
+    /// early and dropped the peer from the passive view.
+    #[test]
+    fn stale_neighbor_timer_keeps_a_new_request() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.passive_view.insert(1);
+        state.send_neighbor(1, Priority::Low, io);
+        let first = io
+            .iter()
+            .find_map(|event| match event {
+                TopicOut::ScheduleTimer(_, topic::Timer::Swarm(timer)) => Some(timer.clone()),
+                _ => None,
+            })
+            .expect("the request armed a timer");
+        let disconnect = Disconnect {
+            alive: true,
+            _respond: false,
+        };
+        state.handle(InEvent::RecvMessage(1, Message::Disconnect(disconnect)), io);
+        state.send_neighbor(1, Priority::Low, io);
+
+        state.handle(InEvent::TimerExpired(first), io);
+
+        assert!(
+            state.pending_neighbor_requests.contains_key(&1),
+            "the new request ended"
+        );
+        assert!(state.passive_view.contains(&1), "the peer was dropped");
+    }
+
     /// A request whose dial failed is replaced by one to another passive peer.
     ///
     /// The request timer is long enough for a slow dial, so it must not be
@@ -1043,11 +1089,14 @@ mod tests {
     fn neighbor_request_timeout_forgets_peer() {
         let mut state = new_state();
         let io = &mut Io::new();
-        state.pending_neighbor_requests.insert(1);
+        state.pending_neighbor_requests.insert(1, 0);
         state.passive_view.insert(1);
         seed_metadata(&mut state, 1);
 
-        state.handle(InEvent::TimerExpired(Timer::PendingNeighborRequest(1)), io);
+        state.handle(
+            InEvent::TimerExpired(Timer::PendingNeighborRequest(1, 0)),
+            io,
+        );
 
         assert!(!has_metadata(&state, 1));
     }
@@ -1081,11 +1130,14 @@ mod tests {
     fn neighbor_request_timeout_keeps_active_peer() {
         let mut state = new_state();
         let io = &mut Io::new();
-        state.pending_neighbor_requests.insert(1);
+        state.pending_neighbor_requests.insert(1, 0);
         state.active_view.insert(1);
         state.peer_data.insert(1, PeerData::new(vec![1]));
 
-        state.handle(InEvent::TimerExpired(Timer::PendingNeighborRequest(1)), io);
+        state.handle(
+            InEvent::TimerExpired(Timer::PendingNeighborRequest(1, 0)),
+            io,
+        );
 
         assert!(
             state.peer_data.contains_key(&1),
