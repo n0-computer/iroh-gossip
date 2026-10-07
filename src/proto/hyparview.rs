@@ -191,7 +191,10 @@ pub struct Config {
     pub shuffle_passive_view_count: usize,
     /// Interval duration for shuffle requests
     pub shuffle_interval: Duration,
-    /// Timeout after which a `Neighbor` request is considered failed
+    /// Timeout after which a neighbor request is considered failed.
+    ///
+    /// It runs from when we send the request, so it covers a dial to the peer
+    /// on a slow network. A dial that fails ends the request earlier.
     pub neighbor_request_timeout: Duration,
 }
 impl Default for Config {
@@ -214,8 +217,8 @@ impl Default for Config {
             shuffle_passive_view_count: 4,
             // Wild guess
             shuffle_interval: Duration::from_secs(60),
-            // Wild guess
-            neighbor_request_timeout: Duration::from_millis(500),
+            // A dial and a round trip on a slow network, with room to spare.
+            neighbor_request_timeout: Duration::from_secs(10),
         }
     }
 }
@@ -344,12 +347,18 @@ where
 
     /// A connection was closed by the peer.
     fn handle_connection_closed(&mut self, peer: PI, io: &mut impl IO<PI>) {
-        self.pending_neighbor_requests.remove(&peer);
+        let requested = self.pending_neighbor_requests.remove(&peer);
         if self.active_view.contains(&peer) {
             self.remove_active(&peer, RemovalReason::ConnectionClosed, io);
-        } else if !self.alive_disconnect_peers.remove(&peer) {
-            self.passive_view.remove(&peer);
-            self.peer_data.remove(&peer);
+        } else {
+            if !self.alive_disconnect_peers.remove(&peer) {
+                self.passive_view.remove(&peer);
+                self.peer_data.remove(&peer);
+            }
+            // The request failed with its dial, long before its timer fires.
+            if requested {
+                self.refill_active_from_passive(&[&peer], io);
+            }
         }
     }
 
@@ -1009,6 +1018,24 @@ mod tests {
         state.remove_active(&1, reason, io);
 
         assert!(!has_metadata(&state, 1));
+    }
+
+    /// A request whose dial failed is replaced by one to another passive peer.
+    ///
+    /// The request timer is long enough for a slow dial, so it must not be
+    /// what moves on from a peer we cannot reach.
+    #[test]
+    fn failed_dial_of_a_request_refills_at_once() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.passive_view.insert(1);
+        state.passive_view.insert(2);
+        state.send_neighbor(1, Priority::High, io);
+        io.clear();
+
+        state.handle(InEvent::PeerDisconnected(1), io);
+
+        assert!(sent_neighbor(io, 2), "no request to another passive peer");
     }
 
     /// A passive peer whose neighbor request timed out loses its metadata.
