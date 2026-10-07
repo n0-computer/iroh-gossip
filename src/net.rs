@@ -538,25 +538,38 @@ impl Actor {
         let (send_tx, send_rx) = mpsc::channel(SEND_QUEUE_CAP);
         let conn_id = conn.stable_id();
 
+        let known = self.peers.contains_key(&peer_id);
         let state = self.peers.entry(peer_id).or_default();
-        // The protocol disconnected the peer while we dialed it. The queue still
-        // goes out, and then the send loop ends, as nothing holds the sender. A
-        // connection the peer opened is one it is about to use, so we drop only
-        // our own dial.
-        let dropped = origin == ConnOrigin::Dial
-            && matches!(
-                state,
-                PeerState::Pending {
-                    disconnect: true,
-                    ..
-                }
-            );
-        let queue = state.accept_conn(send_tx, conn_id);
-        let unwanted = state.unwanted().token.clone();
-        if dropped {
-            // Dropping the state also cancels the token.
-            self.peers.remove(&peer_id);
-        }
+        let disconnected = matches!(
+            state,
+            PeerState::Pending {
+                disconnect: true,
+                ..
+            }
+        );
+        let (queue, unwanted) = if origin == ConnOrigin::Dial && state.take_unwanted_dial() {
+            // The peer connected to us after the protocol dropped it, and took
+            // the queue. Nothing sends on our dial, and it closes after the grace.
+            debug!(peer = %peer_id.fmt_short(), "dial completed after the peer was dropped, close it");
+            drop(send_tx);
+            (Vec::new(), Unwanted::new().token.clone())
+        } else {
+            let queue = state.accept_conn(send_tx, conn_id);
+            if disconnected && origin == ConnOrigin::Accept {
+                // The peer opened a connection while we dialed it, after the
+                // protocol dropped it. The peer is about to use this connection,
+                // but our dial is unwanted once it completes.
+                state.mark_unwanted_dial();
+            }
+            let unwanted = state.unwanted().token.clone();
+            // The protocol disconnected the peer while we dialed it, or its state
+            // is gone. The queue still goes out, and then the send loop ends, as
+            // nothing holds the sender. Dropping the state also cancels the token.
+            if origin == ConnOrigin::Dial && (disconnected || !known) {
+                self.peers.remove(&peer_id);
+            }
+            (queue, unwanted)
+        };
 
         let max_message_size = self.state.max_message_size();
         let in_event_tx = self.in_event_tx.clone();
@@ -588,7 +601,8 @@ impl Actor {
     /// Removing it would drop `active_send_tx`, which stops the send loop and
     /// closes a working connection.
     async fn handle_dial_failure(&mut self, peer_id: EndpointId) {
-        if matches!(self.peers.get(&peer_id), Some(PeerState::Active { .. })) {
+        if let Some(state @ PeerState::Active { .. }) = self.peers.get_mut(&peer_id) {
+            state.take_unwanted_dial();
             return;
         }
         // Remove before dispatching, so a redial queued from the event survives.
@@ -834,6 +848,10 @@ enum PeerState {
         active_conn_id: ConnId,
         other_conns: Vec<ConnId>,
         unwanted: Unwanted,
+        /// Whether our dial that still runs is for a peer the protocol dropped.
+        ///
+        /// The peer's connection took over, so the dial must not replace it.
+        unwanted_dial: bool,
     },
 }
 
@@ -858,6 +876,21 @@ impl Unwanted {
 }
 
 impl PeerState {
+    /// Notes that our running dial is unwanted once it completes.
+    fn mark_unwanted_dial(&mut self) {
+        if let PeerState::Active { unwanted_dial, .. } = self {
+            *unwanted_dial = true;
+        }
+    }
+
+    /// Returns whether our dial is unwanted, and clears the note.
+    fn take_unwanted_dial(&mut self) -> bool {
+        match self {
+            PeerState::Active { unwanted_dial, .. } => std::mem::take(unwanted_dial),
+            PeerState::Pending { .. } => false,
+        }
+    }
+
     fn unwanted(&self) -> &Unwanted {
         match self {
             PeerState::Pending { unwanted, .. } | PeerState::Active { unwanted, .. } => unwanted,
@@ -879,6 +912,7 @@ impl PeerState {
                     active_conn_id: conn_id,
                     other_conns: Vec::new(),
                     unwanted: unwanted.clone(),
+                    unwanted_dial: false,
                 };
                 queue
             }
@@ -1696,6 +1730,7 @@ pub(crate) mod tests {
     struct TestPair {
         ep1: Endpoint,
         ep2: Endpoint,
+        ep1_addr: EndpointAddr,
         ep2_addr: EndpointAddr,
         _relay: Box<dyn Any + Send>,
     }
@@ -1708,10 +1743,12 @@ pub(crate) mod tests {
                 .std_context("relay")?;
             let ep1 = create_endpoint(rng, relay_map.clone(), None).await?;
             let ep2 = create_endpoint(rng, relay_map, None).await?;
+            let ep1_addr = EndpointAddr::new(ep1.id()).with_relay_url(relay_url.clone());
             let ep2_addr = EndpointAddr::new(ep2.id()).with_relay_url(relay_url);
             Ok(Self {
                 ep1,
                 ep2,
+                ep1_addr,
                 ep2_addr,
                 _relay: Box::new(relay),
             })
@@ -1731,6 +1768,41 @@ pub(crate) mod tests {
             };
             (ours, theirs).try_join().await
         }
+
+        /// Connects the second endpoint to the first, returning the first's side first.
+        async fn connect_back(&self) -> Result<(Connection, Connection)> {
+            let ours = async {
+                let incoming = self.ep1.accept().await.std_context("endpoint closed")?;
+                incoming.await.std_context("accept")
+            };
+            let theirs = async {
+                self.ep2
+                    .connect(self.ep1_addr.clone(), GOSSIP_ALPN)
+                    .await
+                    .std_context("connect")
+            };
+            (ours, theirs).try_join().await
+        }
+    }
+
+    /// Opens a stream for `topic` and writes `messages` to it, leaving it open.
+    async fn open_stream(
+        conn: &Connection,
+        topic: TopicId,
+        messages: &[proto::topic::Message<PublicKey>],
+    ) -> Result<iroh::endpoint::SendStream> {
+        let mut stream = conn.open_uni().await.std_context("open stream")?;
+        let mut buffer = Vec::new();
+        util::StreamHeader { topic_id: topic }
+            .write(&mut stream, &mut buffer, TEST_FRAME_LIMIT)
+            .await
+            .std_context("write header")?;
+        for message in messages {
+            util::write_frame(&mut stream, message, &mut buffer, TEST_FRAME_LIMIT)
+                .await
+                .std_context("write frame")?;
+        }
+        Ok(stream)
     }
 
     /// A cancelled task gives `None`, and a finished one gives its output.
@@ -1830,6 +1902,7 @@ pub(crate) mod tests {
                 active_conn_id: 1,
                 other_conns: Vec::new(),
                 unwanted: Unwanted::new(),
+                unwanted_dial: false,
             },
         );
 
@@ -1961,6 +2034,92 @@ pub(crate) mod tests {
             .await
             .std_context("the peer did not see the close")?;
         drop(stream);
+        Ok(())
+    }
+
+    /// A dial that completes after the peer's state is gone closes.
+    ///
+    /// The peer's state goes when its other connection closes or the protocol
+    /// drops it. Nothing wants the dialed connection, so it closes after the
+    /// grace, even if the peer opens a stream on it.
+    #[tokio::test]
+    #[traced_test]
+    async fn dial_for_a_peer_without_state_closes() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
+        let topic: TopicId = blake3::hash(b"dial_without_state").into();
+        let mut actor = t_actor().await?;
+
+        actor.handle_connection(peer_id, ConnOrigin::Dial, conn);
+        let _stream = open_stream(&peer_conn, topic, &[join_message(topic, 0).message]).await?;
+
+        assert!(!actor.peers.contains_key(&peer_id), "the dial got a state");
+        let ended = timeout(
+            util::IDLE_GRACE + Duration::from_secs(3),
+            actor.connection_tasks.join_next(),
+        )
+        .await
+        .std_context("the connection stayed open")?;
+        let (peer, conn, res) = ended.expect("one task").expect("no panic");
+        actor.handle_connection_task_finished(peer, conn, res).await;
+        timeout(Duration::from_secs(1), peer_conn.closed())
+            .await
+            .std_context("the peer did not see the close")?;
+        Ok(())
+    }
+
+    /// A dial that the peer's connection overtook after a disconnect does not replace it.
+    ///
+    /// The peer's connection took the queue and is the active one. Our dial
+    /// became the active connection with nothing to send, and stayed open.
+    #[tokio::test]
+    #[traced_test]
+    async fn overtaken_dial_of_a_dropped_peer_closes() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (dialed, dialed_theirs) = pair.connect().await?;
+        let (inbound, _inbound_theirs) = pair.connect_back().await?;
+        let peer_id = pair.ep2.id();
+        let topic: TopicId = blake3::hash(b"overtaken_dial").into();
+        let mut actor = t_actor().await?;
+        actor.peers.insert(
+            peer_id,
+            PeerState::Pending {
+                queue: Vec::new(),
+                disconnect: true,
+                unwanted: Unwanted::new(),
+            },
+        );
+
+        let inbound_id = inbound.stable_id();
+        let dialed_id = dialed.stable_id();
+        actor.handle_connection(peer_id, ConnOrigin::Accept, inbound);
+        actor.handle_connection(peer_id, ConnOrigin::Dial, dialed);
+        let _stream = open_stream(&dialed_theirs, topic, &[join_message(topic, 0).message]).await?;
+
+        assert!(
+            matches!(
+                actor.peers.get(&peer_id),
+                Some(PeerState::Active { active_conn_id, .. }) if *active_conn_id == inbound_id
+            ),
+            "the dial replaced the peer's connection"
+        );
+        let ended = timeout(
+            util::IDLE_GRACE + Duration::from_secs(3),
+            actor.connection_tasks.join_next(),
+        )
+        .await
+        .std_context("the dial stayed open")?;
+        let (peer, conn, res) = ended.expect("one task").expect("no panic");
+        assert_eq!(
+            conn.stable_id(),
+            dialed_id,
+            "the peer's connection ended first"
+        );
+        actor.handle_connection_task_finished(peer, conn, res).await;
+        timeout(Duration::from_secs(1), dialed_theirs.closed())
+            .await
+            .std_context("the peer did not see the close")?;
         Ok(())
     }
 
