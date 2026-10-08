@@ -510,7 +510,6 @@ fn churn_rounds_broken(mut sim: Simulator, churn: usize, rounds: usize) -> usize
 /// bootstrap peers the application joined with are the only addresses left.
 /// Without the maintenance pass the peer is still alone a minute later.
 #[test]
-#[ignore = "fails: a peer that loses its only neighbor never rejoins"]
 fn hyparview_isolated_peer_rejoins_through_its_bootstrap_peer() {
     // Peer 1 joins through peer 0, and they are each other's only peer.
     let mut sim = swarm(2, 0);
