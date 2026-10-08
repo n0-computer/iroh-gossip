@@ -91,7 +91,9 @@ impl<PI> Timer<PI> {
     pub(crate) fn is_membership_cycle(&self) -> bool {
         matches!(
             self.timer,
-            topic::Timer::Swarm(super::hyparview::Timer::DoShuffle)
+            topic::Timer::Swarm(
+                super::hyparview::Timer::DoShuffle | super::hyparview::Timer::DoMaintenance
+            )
         )
     }
 }

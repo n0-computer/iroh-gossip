@@ -6,7 +6,7 @@
 //! [paper]: https://asc.di.fct.unl.pt/~jleitao/pdf/dsn07-leitao.pdf
 //! [impl]: https://gist.github.com/Horusiath/84fac596101b197da0546d1697580d99
 
-use std::collections::{hash_map, HashMap, HashSet};
+use std::collections::{hash_map, HashMap, HashSet, VecDeque};
 
 use derive_more::{From, Sub};
 use n0_future::time::Duration;
@@ -15,6 +15,24 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use super::{util::IndexSet, PeerData, PeerIdentity, PeerInfo, IO};
+
+/// Interval of the check that refills a short active view.
+///
+/// The HyParView paper has no such check. Partisan runs the same check, its
+/// "random promotion", every 5s.
+const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Maximum number of maintenance passes between two rejoins.
+///
+/// An isolated node rejoins in its 1st, 2nd, 4th, and 8th maintenance pass
+/// alone, and then in every 12th: at first after 5s, and later once a minute.
+const MAX_REJOIN_INTERVALS: u32 = 12;
+
+/// Maximum number of contacts a topic remembers for a rejoin.
+///
+/// The topic keeps the contacts of the latest joins. An isolated node sends a
+/// join to each of them.
+const MAX_BOOTSTRAP_PEERS: usize = 8;
 
 /// Input event for HyParView
 #[derive(Debug)]
@@ -61,6 +79,7 @@ pub enum Event<PI> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Timer<PI> {
     DoShuffle,
+    DoMaintenance,
     /// The timeout of the `Neighbor` to the peer with the given id.
     ///
     /// The id tells it from the timer of an earlier `Neighbor` to the same peer.
@@ -245,8 +264,15 @@ pub struct State<PI, RG = ThreadRng> {
     pub(crate) passive_view: IndexSet<PI>,
     /// Protocol configuration (cannot change at runtime)
     config: Config,
-    /// Whether a shuffle timer is currently scheduled
-    shuffle_scheduled: bool,
+    /// Whether the shuffle and maintenance timers are scheduled
+    timers_scheduled: bool,
+    /// The latest peers the application asked us to join, oldest first.
+    ///
+    /// A node with empty views has nobody else left to dial. See
+    /// [`MAX_BOOTSTRAP_PEERS`].
+    bootstrap_peers: VecDeque<PI>,
+    /// Maintenance passes in a row with both views empty, see [`MAX_REJOIN_INTERVALS`].
+    passes_alone: u32,
     /// Random number generator
     rng: RG,
     /// Statistics
@@ -273,7 +299,9 @@ where
             active_view: IndexSet::new(),
             passive_view: IndexSet::new(),
             config,
-            shuffle_scheduled: false,
+            timers_scheduled: false,
+            bootstrap_peers: VecDeque::new(),
+            passes_alone: 0,
             rng,
             stats: Stats::default(),
             pending_neighbor_requests: Default::default(),
@@ -288,6 +316,7 @@ where
             InEvent::RecvMessage(from, message) => self.handle_message(from, message, io),
             InEvent::TimerExpired(timer) => match timer {
                 Timer::DoShuffle => self.handle_shuffle_timer(io),
+                Timer::DoMaintenance => self.handle_maintenance_timer(io),
                 Timer::PendingNeighborRequest(peer, id) => {
                     self.handle_pending_neighbor_timer(peer, id, io)
                 }
@@ -301,12 +330,16 @@ where
         }
 
         // this will only happen on the first call
-        if !self.shuffle_scheduled {
+        if !self.timers_scheduled {
+            self.timers_scheduled = true;
             io.push(OutEvent::ScheduleTimer(
                 self.config.shuffle_interval,
                 Timer::DoShuffle,
             ));
-            self.shuffle_scheduled = true;
+            io.push(OutEvent::ScheduleTimer(
+                MAINTENANCE_INTERVAL,
+                Timer::DoMaintenance,
+            ));
         }
     }
 
@@ -342,6 +375,16 @@ where
     }
 
     fn handle_join(&mut self, peer: PI, io: &mut impl IO<PI>) {
+        self.bootstrap_peers.retain(|known| *known != peer);
+        self.bootstrap_peers.push_back(peer);
+        if self.bootstrap_peers.len() > MAX_BOOTSTRAP_PEERS {
+            self.bootstrap_peers.pop_front();
+        }
+        self.join(peer, io);
+    }
+
+    /// Sends a join to `peer`.
+    fn join(&self, peer: PI, io: &mut impl IO<PI>) {
         io.push(OutEvent::SendMessage(
             peer,
             Message::Join(self.me_data.clone()),
@@ -600,6 +643,47 @@ where
             self.config.shuffle_interval,
             Timer::DoShuffle,
         ));
+    }
+
+    /// Refills the active view if it is short, and rejoins if both views are empty.
+    ///
+    /// A refill otherwise starts only when a neighbor leaves, and it stops once
+    /// the passive view has no peer left to try. A node with no neighbors cannot
+    /// shuffle either, so its passive view stays empty. Only the bootstrap
+    /// peers can get it back into the swarm.
+    fn handle_maintenance_timer(&mut self, io: &mut impl IO<PI>) {
+        if self.active_view.is_empty() && self.passive_view.is_empty() {
+            self.passes_alone += 1;
+            let n = self.passes_alone;
+            let rejoin = if n < MAX_REJOIN_INTERVALS {
+                n.is_power_of_two()
+            } else {
+                n.is_multiple_of(MAX_REJOIN_INTERVALS)
+            };
+            if rejoin {
+                debug!("no neighbors and no passive peers, rejoin");
+                for peer in self.bootstrap_peers.iter() {
+                    self.join(*peer, io);
+                }
+            }
+        } else {
+            self.passes_alone = 0;
+            if self.is_short() {
+                self.refill_active_from_passive(&[], io);
+            }
+        }
+        io.push(OutEvent::ScheduleTimer(
+            MAINTENANCE_INTERVAL,
+            Timer::DoMaintenance,
+        ));
+    }
+
+    /// Returns whether the active view is below half its capacity.
+    ///
+    /// One slot short is the normal state: the peer that would fill it is
+    /// usually full itself. Partisan refills below half its capacity.
+    fn is_short(&self) -> bool {
+        self.active_view.len() < self.config.active_view_capacity.div_ceil(2)
     }
 
     fn passive_is_full(&self) -> bool {
@@ -1225,5 +1309,160 @@ mod tests {
             !disconnected(io, 1),
             "closed the connection of a new neighbor"
         );
+    }
+
+    /// Returns the peers that got a join.
+    fn joined(io: &Io) -> Vec<u32> {
+        io.iter()
+            .filter_map(|event| match event {
+                TopicOut::SendMessage(peer, topic::Message::Swarm(Message::Join(_))) => Some(*peer),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A node that loses its last neighbor, with an empty passive view,
+    /// rejoins through the peers the application joined.
+    #[test]
+    fn maintenance_rejoins_when_isolated() {
+        let mut state = new_state();
+        state.handle(InEvent::RequestJoin(1), &mut Io::new());
+        let accept = Message::Neighbor(Neighbor {
+            priority: Priority::High,
+            data: None,
+        });
+        state.handle(InEvent::RecvMessage(1, accept), &mut Io::new());
+        assert!(state.active_view.contains(&1));
+
+        state.handle(InEvent::PeerDisconnected(1), &mut Io::new());
+        assert!(state.active_view.is_empty() && state.passive_view.is_empty());
+
+        let io = &mut Io::new();
+        state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
+        assert_eq!(joined(io), vec![1], "no rejoin through the bootstrap peer");
+    }
+
+    /// An isolated node rejoins less often the longer it stays alone.
+    #[test]
+    fn rejoins_back_off() {
+        let mut state = new_state();
+        state.handle(InEvent::RequestJoin(1), &mut Io::new());
+        let mut rejoins = Vec::new();
+        for tick in 0..60 {
+            let io = &mut Io::new();
+            state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
+            assert!(io.iter().any(|event| matches!(
+                event,
+                TopicOut::ScheduleTimer(delay, topic::Timer::Swarm(Timer::DoMaintenance))
+                    if *delay == MAINTENANCE_INTERVAL
+            )));
+            if !joined(io).is_empty() {
+                rejoins.push(tick);
+            }
+        }
+        assert_eq!(rejoins, vec![0, 1, 3, 7, 11, 23, 35, 47, 59]);
+    }
+
+    /// Recovery must reset a long isolation backoff before a later failure.
+    #[test]
+    fn rejoin_backoff_resets_after_recovery() {
+        let mut state = new_state();
+        state.handle(InEvent::RequestJoin(1), &mut Io::new());
+        for _ in 0..60 {
+            state.handle(InEvent::TimerExpired(Timer::DoMaintenance), &mut Io::new());
+        }
+        assert_eq!(state.passes_alone, 60);
+        state.handle(
+            InEvent::RecvMessage(
+                1,
+                Message::Neighbor(Neighbor {
+                    priority: Priority::High,
+                    data: None,
+                }),
+            ),
+            &mut Io::new(),
+        );
+        state.handle(InEvent::TimerExpired(Timer::DoMaintenance), &mut Io::new());
+        assert_eq!(state.passes_alone, 0);
+        state.handle(InEvent::PeerDisconnected(1), &mut Io::new());
+        let io = &mut Io::new();
+        state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
+        assert_eq!(joined(io), vec![1]);
+    }
+
+    /// A node below half its active view capacity refills from its passive view.
+    #[test]
+    fn maintenance_refills_a_short_active_view() {
+        let mut state = new_state();
+        state.active_view.insert(1);
+        for peer in 10..20 {
+            state.passive_view.insert(peer);
+        }
+
+        let io = &mut Io::new();
+        state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
+        let requested: Vec<u32> = (10..20).filter(|peer| sent_neighbor(io, *peer)).collect();
+        assert_eq!(requested.len(), 1, "expected one neighbor request: {io:?}");
+    }
+
+    /// A node with half its active view or more sends nothing.
+    ///
+    /// One slot short is the normal state. Requests there would only be refused.
+    #[test]
+    fn maintenance_is_quiet_on_a_healthy_view() {
+        let mut state = new_state();
+        for peer in 1..=3 {
+            state.active_view.insert(peer);
+        }
+        for peer in 10..20 {
+            state.passive_view.insert(peer);
+        }
+
+        let io = &mut Io::new();
+        state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
+        assert!(
+            !io.iter()
+                .any(|event| matches!(event, TopicOut::SendMessage(..))),
+            "a healthy node sent messages: {io:?}"
+        );
+    }
+
+    /// The remembered bootstrap contacts stay within their bound, newest first.
+    ///
+    /// An application can pass every peer it discovers to a join. Before, the
+    /// topic kept all of them for good, and an isolated node sent a join to each.
+    #[test]
+    fn bootstrap_contacts_stay_bounded() {
+        let mut state = new_state();
+        let max = MAX_BOOTSTRAP_PEERS as u32;
+        for peer in 1..=max + 5 {
+            state.handle(InEvent::RequestJoin(peer), &mut Io::new());
+        }
+        assert_eq!(state.bootstrap_peers.len(), MAX_BOOTSTRAP_PEERS);
+        assert!(
+            !state.bootstrap_peers.contains(&5),
+            "the oldest contacts go first"
+        );
+        // A repeated contact moves to the newest place instead of growing the set.
+        state.handle(InEvent::RequestJoin(7), &mut Io::new());
+        assert_eq!(state.bootstrap_peers.len(), MAX_BOOTSTRAP_PEERS);
+        state.handle(InEvent::RequestJoin(max + 6), &mut Io::new());
+        assert!(
+            !state.bootstrap_peers.contains(&6),
+            "the oldest contact goes"
+        );
+        assert!(
+            state.bootstrap_peers.contains(&7),
+            "a repeated contact stays"
+        );
+
+        // An isolated node rejoins through every remembered contact.
+        let io = &mut Io::new();
+        state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
+        let mut rejoined = joined(io);
+        rejoined.sort();
+        let mut expected: Vec<u32> = state.bootstrap_peers.iter().copied().collect();
+        expected.sort();
+        assert_eq!(rejoined, expected);
     }
 }
