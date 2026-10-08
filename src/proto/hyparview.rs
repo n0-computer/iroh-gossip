@@ -315,6 +315,11 @@ pub struct State<PI, RG = ThreadRng> {
     peer_data: HashMap<PI, PeerData>,
     /// List of peers that are disconnecting, but which we want to keep in the passive set once the connection closes
     alive_disconnect_peers: HashSet<PI>,
+    /// Passive peers that refused our neighbor request since the last maintenance pass.
+    ///
+    /// A refill skips them. Else a node short of neighbors, whose passive peers
+    /// are all full, asks them in turn without end.
+    refused: HashSet<PI>,
 }
 
 impl<PI, RG> State<PI, RG>
@@ -338,6 +343,7 @@ where
             next_neighbor_request: 0,
             peer_data: Default::default(),
             alive_disconnect_peers: Default::default(),
+            refused: Default::default(),
         }
     }
 
@@ -425,7 +431,7 @@ where
             Message::Join(data) => self.on_join(from, data, io),
             Message::ForwardJoin(details) => self.on_forward_join(from, details, io),
             Message::Shuffle(details) => self.on_shuffle(from, details, io),
-            Message::ShuffleReply(details) => self.on_shuffle_reply(details, io),
+            Message::ShuffleReply(details) => self.on_shuffle_reply(from, details, io),
             Message::Neighbor(details) => self.on_neighbor(from, details, io),
             Message::Disconnect(details) => self.on_disconnect(from, details, io),
         }
@@ -464,7 +470,10 @@ where
 
     /// We received a disconnect message.
     fn on_disconnect(&mut self, peer: PI, details: Disconnect, io: &mut impl IO<PI>) {
-        self.pending_neighbor_requests.remove(&peer);
+        let requested = self.pending_neighbor_requests.remove(&peer).is_some();
+        if requested && !self.active_view.contains(&peer) {
+            self.refused.insert(peer);
+        }
         if self.active_view.contains(&peer) {
             self.remove_active(
                 &peer,
@@ -504,6 +513,7 @@ where
         self.passive_view = IndexSet::new();
         self.peer_data.clear();
         self.alive_disconnect_peers.clear();
+        self.refused.clear();
     }
 
     fn send_disconnect(&mut self, peer: PI, alive: bool, io: &mut impl IO<PI>) {
@@ -684,11 +694,17 @@ where
         io.push(OutEvent::SendMessage(to, message));
     }
 
-    fn on_shuffle_reply(&mut self, message: ShuffleReply<PI>, io: &mut impl IO<PI>) {
+    fn on_shuffle_reply(&mut self, from: PI, message: ShuffleReply<PI>, io: &mut impl IO<PI>) {
         for node in message.nodes {
             self.add_passive(node.id, node.data, io);
         }
-        self.refill_active_from_passive(&[], io);
+        // A peer that refuses our request sends this reply first. Only a short
+        // node goes on to the next passive peer at once, and skips the peers in
+        // `refused`.
+        let refusal = self.pending_neighbor_requests.contains_key(&from);
+        if !refusal || self.is_short() {
+            self.refill_active_from_passive(&[], io);
+        }
     }
 
     fn handle_shuffle_timer(&mut self, io: &mut impl IO<PI>) {
@@ -732,6 +748,7 @@ where
     /// shuffle either, so its passive view stays empty. Only the bootstrap
     /// peers can get it back into the swarm.
     fn handle_maintenance_timer(&mut self, io: &mut impl IO<PI>) {
+        self.refused.clear();
         if self.active_view.is_empty() && self.passive_view.is_empty() {
             self.passes_alone += 1;
             let n = self.passes_alone;
@@ -834,6 +851,7 @@ where
         // with success." (p7)
         let mut skip_peers = skip_peers.to_vec();
         skip_peers.extend(self.pending_neighbor_requests.keys());
+        skip_peers.extend(self.refused.iter());
 
         if let Some(node) = self
             .passive_view
@@ -1683,5 +1701,75 @@ mod tests {
         let mut expected: Vec<u32> = state.bootstrap_peers.iter().copied().collect();
         expected.sort();
         assert_eq!(rejoined, expected);
+    }
+
+    /// A node asks each passive peer once between two maintenance passes.
+    ///
+    /// A peer with a full active view refuses with a `ShuffleReply` and a
+    /// `Disconnect`. The `ShuffleReply` starts a refill. If the refill could
+    /// pick peers that refused, a node short of neighbors whose passive peers
+    /// are all full would ask them in turn without end.
+    #[test]
+    fn refused_peers_are_asked_again_only_after_maintenance() {
+        let mut state = new_state();
+        state.active_view.insert(1);
+        for peer in 10..13 {
+            state.passive_view.insert(peer);
+        }
+        let mut asked = Vec::new();
+        state.handle(InEvent::TimerExpired(Timer::DoMaintenance), &mut Io::new());
+        for _ in 0..10 {
+            let Some(peer) = state.pending_neighbor_requests.keys().next().copied() else {
+                break;
+            };
+            asked.push(peer);
+            let reply = Message::ShuffleReply(ShuffleReply {
+                nodes: (10..13).map(|id| (id, None).into()).collect(),
+            });
+            let refusal = Message::Disconnect(Disconnect {
+                alive: true,
+                _respond: false,
+            });
+            state.handle(InEvent::RecvMessage(peer, reply), &mut Io::new());
+            state.handle(InEvent::RecvMessage(peer, refusal), &mut Io::new());
+            state.handle(InEvent::PeerDisconnected(peer), &mut Io::new());
+        }
+        asked.sort();
+        assert_eq!(asked, vec![10, 11, 12], "each passive peer once");
+        assert!(state.pending_neighbor_requests.is_empty());
+        assert!((10..13).all(|peer| state.passive_view.contains(&peer)));
+
+        let io = &mut Io::new();
+        state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
+        let requested: Vec<u32> = (10..13).filter(|peer| sent_neighbor(io, *peer)).collect();
+        assert_eq!(requested.len(), 1, "the next pass asks again");
+    }
+
+    /// A node with half its active view or more stops at a refusal.
+    ///
+    /// One slot short is the normal state, and the next passive peer is
+    /// usually full too.
+    #[test]
+    fn healthy_node_stops_at_a_refusal() {
+        let mut state = new_state();
+        for peer in 1..=3 {
+            state.active_view.insert(peer);
+        }
+        for peer in 10..13 {
+            state.passive_view.insert(peer);
+        }
+        state.pending_neighbor_requests.insert(10, 0);
+        let io = &mut Io::new();
+        let reply = Message::ShuffleReply(ShuffleReply {
+            nodes: (10..13).map(|id| (id, None).into()).collect(),
+        });
+        let refusal = Message::Disconnect(Disconnect {
+            alive: true,
+            _respond: false,
+        });
+        state.handle(InEvent::RecvMessage(10, reply), io);
+        state.handle(InEvent::RecvMessage(10, refusal), io);
+        let requested: Vec<u32> = (11..13).filter(|peer| sent_neighbor(io, *peer)).collect();
+        assert!(requested.is_empty(), "asked {requested:?} after a refusal");
     }
 }

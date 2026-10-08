@@ -615,7 +615,6 @@ fn hyparview_heals_without_waiting_for_a_shuffle() {
 /// The paper's own count, 9999 payload messages for 10,000 nodes (Table 1), is
 /// RMR 0: one payload per recipient, a spanning tree.
 #[test]
-#[ignore = "fails on some seeds: the settled tree carries redundant payloads"]
 fn plumtree_redundancy_drops_to_zero_after_two_rounds() {
     let peers = swarm_size(PEERS);
     const ROUNDS: usize = 20;
