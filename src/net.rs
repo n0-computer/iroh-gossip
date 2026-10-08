@@ -25,8 +25,8 @@ use n0_future::{
 };
 use rand::{rngs::StdRng, SeedableRng};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc, oneshot};
-use tokio_util::sync::{CancellationToken, DropGuard};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, error_span, trace, warn, Instrument};
 
 use self::{
@@ -304,6 +304,8 @@ struct Actor {
     topics: HashMap<TopicId, TopicState>,
     /// Map of peers to their state.
     peers: HashMap<EndpointId, PeerState>,
+    /// Whether we hold state for a peer, kept while its state or a connection uses it.
+    wanted: HashMap<EndpointId, watch::Sender<bool>>,
     /// Stream of commands from topic handles.
     command_rx: stream_group::Keyed<TopicCommandStream>,
     /// Internal queue of topic to close because all handles were dropped.
@@ -350,6 +352,7 @@ impl Actor {
             timers: Timers::new(),
             command_rx: StreamGroup::new().keyed(),
             peers: Default::default(),
+            wanted: Default::default(),
             topics: Default::default(),
             quit_queue: Default::default(),
             connection_tasks: Default::default(),
@@ -447,6 +450,7 @@ impl Actor {
                         warn!(peer = %peer_id.fmt_short(), "dial failed: {err}");
                         self.metrics.actor_tick_dialer_failure.inc();
                         self.handle_dial_failure(peer_id).await;
+                        self.forget_wanted(peer_id);
                     }
                     None => {
                         warn!(peer = %peer_id.fmt_short(), "dial disconnected");
@@ -475,6 +479,7 @@ impl Actor {
                     return false;
                 };
                 self.handle_connection_task_finished(peer_id, conn, result).await;
+                self.forget_wanted(peer_id);
             }
             Some(res) = self.topic_event_forwarders.join_next(), if !self.topic_event_forwarders.is_empty() => {
                 let Some(topic_id) = util::task_output(res) else {
@@ -539,7 +544,7 @@ impl Actor {
         let conn_id = conn.stable_id();
 
         let known = self.peers.contains_key(&peer_id);
-        let state = self.peers.entry(peer_id).or_default();
+        let state = peer_state(&mut self.peers, &mut self.wanted, peer_id);
         let disconnected = matches!(
             state,
             PeerState::Pending {
@@ -547,12 +552,12 @@ impl Actor {
                 ..
             }
         );
-        let (queue, unwanted) = if origin == ConnOrigin::Dial && state.take_unwanted_dial() {
+        let (queue, wanted) = if origin == ConnOrigin::Dial && state.take_unwanted_dial() {
             // The peer connected to us after the protocol dropped it, and took
             // the queue. Nothing sends on our dial, and it closes after the grace.
             debug!(peer = %peer_id.fmt_short(), "dial completed after the peer was dropped, close it");
             drop(send_tx);
-            (Vec::new(), Unwanted::new().token.clone())
+            (Vec::new(), watch::channel(false).1)
         } else {
             let queue = state.accept_conn(send_tx, conn_id);
             if disconnected && origin == ConnOrigin::Accept {
@@ -561,14 +566,14 @@ impl Actor {
                 // but our dial is unwanted once it completes.
                 state.mark_unwanted_dial();
             }
-            let unwanted = state.unwanted().token.clone();
+            let wanted = state.wanted().subscribe();
             // The protocol disconnected the peer while we dialed it, or its state
             // is gone. The queue still goes out, and then the send loop ends, as
-            // nothing holds the sender. Dropping the state also cancels the token.
+            // nothing holds the sender. Dropping the state also clears `wanted`.
             if origin == ConnOrigin::Dial && (disconnected || !known) {
                 self.peers.remove(&peer_id);
             }
-            (queue, unwanted)
+            (queue, wanted)
         };
 
         let max_message_size = self.state.max_message_size();
@@ -585,13 +590,24 @@ impl Actor {
                     in_event_tx,
                     max_message_size,
                     queue,
-                    unwanted,
+                    wanted,
                 )
                 .await;
                 (peer_id, conn, res)
             }
             .instrument(error_span!("conn", peer = %peer_id.fmt_short())),
         );
+    }
+
+    /// Drops the `wanted` flag of `peer_id` once neither a state nor a connection uses it.
+    fn forget_wanted(&mut self, peer_id: EndpointId) {
+        let unused = self
+            .wanted
+            .get(&peer_id)
+            .is_some_and(|tx| tx.receiver_count() == 0);
+        if unused && !self.peers.contains_key(&peer_id) {
+            self.wanted.remove(&peer_id);
+        }
     }
 
     /// Drops the state of a peer we failed to dial.
@@ -735,7 +751,7 @@ impl Actor {
             };
             match event {
                 OutEvent::SendMessage(peer_id, message) => {
-                    let state = self.peers.entry(peer_id).or_default();
+                    let state = peer_state(&mut self.peers, &mut self.wanted, peer_id);
                     match state {
                         PeerState::Active { active_send_tx, .. } => {
                             if let Err(err) = active_send_tx.send(message).await {
@@ -818,6 +834,29 @@ impl Actor {
 
 type ConnId = usize;
 
+/// Returns the state of `peer_id`, and creates it if there is none.
+fn peer_state<'a>(
+    peers: &'a mut HashMap<EndpointId, PeerState>,
+    wanted: &mut HashMap<EndpointId, watch::Sender<bool>>,
+    peer_id: EndpointId,
+) -> &'a mut PeerState {
+    peers
+        .entry(peer_id)
+        .or_insert_with(|| PeerState::new(want(wanted, peer_id)))
+}
+
+/// Sets the `wanted` flag of `peer_id`, for a new state of the peer.
+///
+/// The peer's connections that outlived its old state see the flag, so a peer
+/// we want again keeps them.
+fn want(wanted: &mut HashMap<EndpointId, watch::Sender<bool>>, peer_id: EndpointId) -> Wanted {
+    let tx = wanted
+        .entry(peer_id)
+        .or_insert_with(|| watch::channel(true).0);
+    tx.send_replace(true);
+    Wanted(Arc::new(WantedGuard(tx.clone())))
+}
+
 /// Drops the peer's state, which ends the send loops of its connections.
 ///
 /// A peer we still dial keeps its state, so that the queue goes out when the
@@ -841,13 +880,13 @@ enum PeerState {
         /// If so, the queue goes out on the dialed connection. We then drop that
         /// connection instead of making it the peer's active one.
         disconnect: bool,
-        unwanted: Unwanted,
+        wanted: Wanted,
     },
     Active {
         active_send_tx: mpsc::Sender<ProtoMessage>,
         active_conn_id: ConnId,
         other_conns: Vec<ConnId>,
-        unwanted: Unwanted,
+        wanted: Wanted,
         /// Whether our dial that still runs is for a peer the protocol dropped.
         ///
         /// The peer's connection took over, so the dial must not replace it.
@@ -855,23 +894,27 @@ enum PeerState {
     },
 }
 
-/// A token cancelled once we drop the peer's state, shared by its connections.
+/// Keeps the peer's `wanted` flag set while we hold state for the peer.
 ///
-/// A connection to a peer we no longer want closes on our terms, even if the
+/// The peer's connections read the flag. While it is set, none closes for
+/// idling. Once it is clear, each closes after its send loop ended, even if the
 /// peer keeps a stream open.
 #[derive(Debug, Clone)]
-struct Unwanted {
-    token: CancellationToken,
-    _guard: Arc<DropGuard>,
+struct Wanted(Arc<WantedGuard>);
+
+impl Wanted {
+    fn subscribe(&self) -> watch::Receiver<bool> {
+        self.0 .0.subscribe()
+    }
 }
 
-impl Unwanted {
-    fn new() -> Self {
-        let token = CancellationToken::new();
-        Self {
-            _guard: Arc::new(token.clone().drop_guard()),
-            token,
-        }
+/// Clears the peer's `wanted` flag on drop.
+#[derive(Debug)]
+struct WantedGuard(watch::Sender<bool>);
+
+impl Drop for WantedGuard {
+    fn drop(&mut self) {
+        self.0.send_replace(false);
     }
 }
 
@@ -891,9 +934,17 @@ impl PeerState {
         }
     }
 
-    fn unwanted(&self) -> &Unwanted {
+    fn new(wanted: Wanted) -> Self {
+        PeerState::Pending {
+            queue: Vec::new(),
+            disconnect: false,
+            wanted,
+        }
+    }
+
+    fn wanted(&self) -> &Wanted {
         match self {
-            PeerState::Pending { unwanted, .. } | PeerState::Active { unwanted, .. } => unwanted,
+            PeerState::Pending { wanted, .. } | PeerState::Active { wanted, .. } => wanted,
         }
     }
 
@@ -903,15 +954,13 @@ impl PeerState {
         conn_id: ConnId,
     ) -> Vec<ProtoMessage> {
         match self {
-            PeerState::Pending {
-                queue, unwanted, ..
-            } => {
+            PeerState::Pending { queue, wanted, .. } => {
                 let queue = std::mem::take(queue);
                 *self = PeerState::Active {
                     active_send_tx: send_tx,
                     active_conn_id: conn_id,
                     other_conns: Vec::new(),
-                    unwanted: unwanted.clone(),
+                    wanted: wanted.clone(),
                     unwanted_dial: false,
                 };
                 queue
@@ -932,16 +981,6 @@ impl PeerState {
                 *active_conn_id = conn_id;
                 Vec::new()
             }
-        }
-    }
-}
-
-impl Default for PeerState {
-    fn default() -> Self {
-        PeerState::Pending {
-            queue: Vec::new(),
-            disconnect: false,
-            unwanted: Unwanted::new(),
         }
     }
 }
@@ -1024,7 +1063,7 @@ async fn connection_loop(
     in_event_tx: mpsc::Sender<InEvent>,
     max_message_size: usize,
     queue: Vec<ProtoMessage>,
-    unwanted: CancellationToken,
+    wanted: watch::Receiver<bool>,
 ) -> Result<(), ConnectionLoopError> {
     debug!(?origin, "connection established");
 
@@ -1037,7 +1076,7 @@ async fn connection_loop(
         send_done_tx.send(()).ok();
         res
     };
-    let recv_fut = recv_loop.run(send_done_rx, unwanted);
+    let recv_fut = recv_loop.run(send_done_rx, wanted);
 
     // The peer may still use this connection, so `recv_loop` decides when it
     // is done. A loop that failed is the exception. The other loop would keep
@@ -1895,13 +1934,14 @@ pub(crate) mod tests {
         let mut actor = t_actor().await?;
         let peer_id = SecretKey::generate().public();
         let (active_send_tx, send_rx) = mpsc::channel(1);
+        let wanted = want(&mut actor.wanted, peer_id);
         actor.peers.insert(
             peer_id,
             PeerState::Active {
                 active_send_tx,
                 active_conn_id: 1,
                 other_conns: Vec::new(),
-                unwanted: Unwanted::new(),
+                wanted,
                 unwanted_dial: false,
             },
         );
@@ -1928,12 +1968,13 @@ pub(crate) mod tests {
         let peer_id = pair.ep2.id();
         let topic: TopicId = blake3::hash(b"inbound_during_disconnected_dial").into();
         let mut actor = t_actor().await?;
+        let wanted = want(&mut actor.wanted, peer_id);
         actor.peers.insert(
             peer_id,
             PeerState::Pending {
                 queue: vec![join_message(topic, 0)],
                 disconnect: true,
-                unwanted: Unwanted::new(),
+                wanted,
             },
         );
 
@@ -1992,6 +2033,73 @@ pub(crate) mod tests {
             );
         }
         assert!(peer_first.close_reason().is_none(), "the connection closed");
+        Ok(())
+    }
+
+    /// A replaced connection without a stream stays open while we want the peer.
+    ///
+    /// Two peers that dial each other can each keep a different connection. The
+    /// peer may not have opened a stream on its connection yet. Once we drop the
+    /// peer, the connection closes after the grace.
+    #[tokio::test]
+    #[traced_test]
+    async fn replaced_connection_stays_while_the_peer_is_wanted() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (first, peer_first) = pair.connect().await?;
+        let (second, _peer_second) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
+        let mut actor = t_actor().await?;
+        actor.handle_connection(peer_id, ConnOrigin::Accept, first);
+        actor.handle_connection(peer_id, ConnOrigin::Accept, second);
+
+        tokio::time::sleep(util::IDLE_GRACE + Duration::from_secs(1)).await;
+        assert!(
+            actor.connection_tasks.try_join_next().is_none(),
+            "a connection closed"
+        );
+        assert!(
+            peer_first.close_reason().is_none(),
+            "the replaced connection closed"
+        );
+
+        disconnect_peer(&mut actor.peers, peer_id);
+        for _ in 0..2 {
+            let ended = timeout(
+                util::IDLE_GRACE + Duration::from_secs(3),
+                actor.connection_tasks.join_next(),
+            )
+            .await
+            .std_context("a connection stayed open")?;
+            let (peer, conn, res) = ended.expect("two tasks").expect("no panic");
+            actor.handle_connection_task_finished(peer, conn, res).await;
+        }
+        actor.forget_wanted(peer_id);
+        assert!(actor.wanted.is_empty(), "the flag outlived the peer");
+        timeout(Duration::from_secs(1), peer_first.closed())
+            .await
+            .std_context("the peer did not see the close")?;
+        Ok(())
+    }
+
+    /// A peer we want again keeps the connection that outlived its old state.
+    #[tokio::test]
+    #[traced_test]
+    async fn peer_wanted_again_keeps_its_connection() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
+        let mut actor = t_actor().await?;
+        actor.handle_connection(peer_id, ConnOrigin::Accept, conn);
+
+        disconnect_peer(&mut actor.peers, peer_id);
+        peer_state(&mut actor.peers, &mut actor.wanted, peer_id);
+
+        tokio::time::sleep(util::IDLE_GRACE + Duration::from_secs(1)).await;
+        assert!(
+            actor.connection_tasks.try_join_next().is_none(),
+            "the connection closed"
+        );
+        assert!(peer_conn.close_reason().is_none(), "the connection closed");
         Ok(())
     }
 
@@ -2082,12 +2190,13 @@ pub(crate) mod tests {
         let peer_id = pair.ep2.id();
         let topic: TopicId = blake3::hash(b"overtaken_dial").into();
         let mut actor = t_actor().await?;
+        let wanted = want(&mut actor.wanted, peer_id);
         actor.peers.insert(
             peer_id,
             PeerState::Pending {
                 queue: Vec::new(),
                 disconnect: true,
-                unwanted: Unwanted::new(),
+                wanted,
             },
         );
 
@@ -2162,12 +2271,13 @@ pub(crate) mod tests {
             .connect(ep2_addr, GOSSIP_ALPN)
             .await
             .std_context("connect")?;
+        let wanted = want(&mut actor.wanted, ep2_id);
         actor.peers.insert(
             ep2_id,
             PeerState::Pending {
                 queue: vec![join_message(topic, 0)],
                 disconnect: true,
-                unwanted: Unwanted::new(),
+                wanted,
             },
         );
         actor.handle_connection(ep2_id, ConnOrigin::Dial, conn);
@@ -2356,7 +2466,7 @@ pub(crate) mod tests {
                 in_event_tx,
                 TEST_FRAME_LIMIT,
                 vec![],
-                CancellationToken::new(),
+                watch::channel(true).1,
             ),
         )
         .await
@@ -2437,7 +2547,7 @@ pub(crate) mod tests {
             in_event_tx,
             1024,
             vec![],
-            CancellationToken::new(),
+            watch::channel(true).1,
         )));
 
         send_tx
@@ -2497,7 +2607,7 @@ pub(crate) mod tests {
                 in_event_tx,
                 1024,
                 vec![],
-                CancellationToken::new(),
+                watch::channel(true).1,
             ),
         )
         .await

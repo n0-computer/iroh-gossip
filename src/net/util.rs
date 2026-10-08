@@ -20,9 +20,8 @@ use n0_future::{
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch},
 };
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn, Instrument};
 
 use super::{InEvent, ProtoMessage};
@@ -95,10 +94,9 @@ impl StreamHeader {
 /// arrives. A peer slower than this has stalled.
 pub(crate) const STREAM_FINISH_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How long a connection we stopped sending on waits for a stream from the peer.
+/// How long a connection waits to close after its send loop ended and we dropped the peer.
 ///
-/// The peer opens its streams lazily, so its first stream can still be on its
-/// way when our send loop ends.
+/// A peer that we want again within this time keeps the connection.
 pub(crate) const IDLE_GRACE: Duration = STREAM_FINISH_TIMEOUT;
 
 pub(crate) struct RecvLoop {
@@ -126,23 +124,22 @@ impl RecvLoop {
     /// Reads messages until the connection is done.
     ///
     /// That is when the peer closes it, or [`IDLE_GRACE`] after our send loop
-    /// ended with no stream from the peer open. For an unwanted peer, open
-    /// streams do not keep the connection. A peer we still want can use a
-    /// connection we stopped sending on: two peers that dialed each other can
-    /// keep different connections.
+    /// ended while `wanted` is false. While we hold state for the peer, the peer
+    /// can use a connection we stopped sending on: two peers that dialed each
+    /// other can keep different connections. Once we dropped the peer, its open
+    /// streams do not keep the connection.
     pub(crate) async fn run(
         &mut self,
         send_done: oneshot::Receiver<()>,
-        unwanted: CancellationToken,
+        mut wanted: watch::Receiver<bool>,
     ) -> Result<(), ReadError> {
         let mut read_futures = FuturesUnordered::new();
         let mut conn_is_closed = false;
+        let mut wanted_open = true;
         let closed = self.conn.closed();
         tokio::pin!(closed);
         tokio::pin!(send_done);
-        let became_unwanted = unwanted.cancelled();
-        tokio::pin!(became_unwanted);
-        // Reset whenever our send loop has ended and no stream is open.
+        // Reset whenever our send loop has ended and we stopped wanting the peer.
         let idle = sleep_until(Instant::now());
         tokio::pin!(idle);
         while !conn_is_closed || !read_futures.is_empty() {
@@ -153,13 +150,15 @@ impl RecvLoop {
                 _ = &mut send_done, if !send_done.is_terminated() => {
                     idle.as_mut().reset(Instant::now() + IDLE_GRACE);
                 }
-                _ = &mut became_unwanted, if !unwanted.is_cancelled() => {
-                    if send_done.is_terminated() {
+                res = wanted.changed(), if wanted_open => {
+                    // A closed channel keeps its last value.
+                    wanted_open = res.is_ok();
+                    if !*wanted.borrow_and_update() {
                         idle.as_mut().reset(Instant::now() + IDLE_GRACE);
                     }
                 }
-                _ = &mut idle, if send_done.is_terminated() && (read_futures.is_empty() || unwanted.is_cancelled()) && !conn_is_closed => {
-                    debug!(unwanted = unwanted.is_cancelled(), "nothing keeps the connection since our send loop ended, close");
+                _ = &mut idle, if send_done.is_terminated() && !*wanted.borrow() && !conn_is_closed => {
+                    debug!("our send loop ended and we dropped the peer, close");
                     break;
                 }
                 stream = self.conn.accept_uni(), if !conn_is_closed => {
@@ -185,9 +184,6 @@ impl RecvLoop {
                         }
                         Ok((state, None)) => debug!(topic=%state.header.topic_id.fmt_short(), "stream closed"),
                         Err(err) => debug!("recv stream closed with error: {err:#}"),
-                    }
-                    if send_done.is_terminated() && read_futures.is_empty() && !unwanted.is_cancelled() {
-                        idle.as_mut().reset(Instant::now() + IDLE_GRACE);
                     }
                 }
             }
