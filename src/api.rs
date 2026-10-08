@@ -177,6 +177,11 @@ impl GossipSender {
     }
 
     /// Broadcasts a message to all endpoints.
+    ///
+    /// A message whose encoding is over [`Builder::max_message_size`] does not go
+    /// out: gossip drops it with a warning, and this returns `Ok` anyway.
+    ///
+    /// [`Builder::max_message_size`]: crate::net::Builder::max_message_size
     pub async fn broadcast(&self, message: Bytes) -> Result<(), ApiError> {
         self.send(Command::Broadcast(message)).await?;
         Ok(())

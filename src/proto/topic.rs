@@ -87,6 +87,15 @@ pub trait IO<PI: Clone> {
     }
 }
 
+/// Returns the largest encoded Plumtree message that fits a frame.
+///
+/// A frame holds the enum tag of [`Message`] and the Plumtree message, as the
+/// stream header carries the topic. It must be shorter than `max_message_size`,
+/// as nodes up to 0.101 refuse to write a frame of that size.
+pub(crate) fn max_plumtree_size(max_message_size: usize) -> usize {
+    max_message_size - 2
+}
+
 /// A protocol message for a particular topic
 #[derive(From, Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum Message<PI> {
@@ -241,11 +250,13 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
             config.max_message_size >= MIN_MAX_MESSAGE_SIZE,
             "max_message_size must be at least {MIN_MAX_MESSAGE_SIZE}"
         );
-        let max_payload_size =
-            config.max_message_size - super::Message::<PI>::postcard_header_size();
         Self {
             swarm: hyparview::State::new(me, me_data, config.membership, rng),
-            gossip: plumtree::State::new(me, config.broadcast, max_payload_size),
+            gossip: plumtree::State::new(
+                me,
+                config.broadcast,
+                max_plumtree_size(config.max_message_size),
+            ),
             me,
             outbox: VecDeque::new(),
             stats: Stats::default(),
@@ -360,4 +371,37 @@ pub struct Stats {
     pub messages_sent: usize,
     /// Number of messages received
     pub messages_received: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A broadcast goes out if its frame fits the limit at every round, and not otherwise.
+    #[test]
+    fn broadcast_fits_the_frame_limit_at_every_round() {
+        let content = Bytes::from(vec![1; 1024]);
+        let goes_out = |max_message_size: usize| {
+            let now = Instant::now();
+            let config = Config {
+                max_message_size,
+                ..Config::default()
+            };
+            let mut state = State::with_rng(0u32, None, config, rand::rng());
+            let join = InEvent::RecvMessage(1, Message::Swarm(hyparview::Message::Join(None)));
+            state.handle(join, now).for_each(drop);
+            let broadcast = InEvent::Command(Command::Broadcast(content.clone(), Scope::Swarm));
+            let sent = state.handle(broadcast, now).any(|event| {
+                matches!(
+                    event,
+                    OutEvent::SendMessage(1, Message::Gossip(plumtree::Message::Gossip(_)))
+                )
+            });
+            sent
+        };
+        // The frame holds the enum tag of the topic message, and must be shorter than the limit.
+        let limit = plumtree::max_gossip_size(content.len(), Scope::Swarm) + 2;
+        assert!(goes_out(limit));
+        assert!(!goes_out(limit - 1));
+    }
 }
