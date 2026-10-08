@@ -276,6 +276,18 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
 
                 if quit {
                     self.states.remove(&topic);
+                    // The topic uses no peer anymore. A peer it only sent to, such
+                    // as the contact of a join with no answer, has no other way out.
+                    let mut unused = Vec::new();
+                    for (peer, topics) in self.peer_topics.iter_mut() {
+                        if topics.remove(&topic) && topics.is_empty() {
+                            unused.push(*peer);
+                        }
+                    }
+                    for peer in unused {
+                        self.peer_topics.remove(&peer);
+                        self.outbox.push(OutEvent::DisconnectPeer(peer));
+                    }
                 }
             }
             // when a peer disconnected on the network level, forward event to all states
@@ -287,6 +299,12 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
                     topic::InEvent::PeerDisconnected(peer) => Some(*peer),
                     _ => None,
                 };
+                // Clear the peer's `peer_topics` entry first, so that a retried join
+                // below adds it again. A peer that only relayed a shuffle or forward
+                // join to us has one too.
+                if let Some(peer) = disconnected {
+                    self.peer_topics.remove(&peer);
+                }
                 for (topic, state) in self.states.iter_mut() {
                     let out = state.handle(event.clone(), now);
                     for event in out {
@@ -302,11 +320,6 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
                         }
                         handle_out_event(*topic, event, &mut self.peer_topics, &mut self.outbox);
                     }
-                }
-                // Clear the peer's `peer_topics` entry. A peer that only relayed a
-                // shuffle or forward join to us has one too.
-                if let Some(peer) = disconnected {
-                    self.peer_topics.remove(&peer);
                 }
             }
         }
@@ -329,6 +342,12 @@ fn handle_out_event<PI: PeerIdentity>(
     trace!("out: {event:?}");
     match event {
         topic::OutEvent::SendMessage(to, message) => {
+            // A topic uses a peer from its first message to it. Else the
+            // disconnect of a peer that a topic only sent to finds no entry. Only
+            // HyParView sends to a peer that is not a neighbor yet.
+            if matches!(message, topic::Message::Swarm(_)) {
+                conns.entry(to).or_default().insert(topic);
+            }
             outbox.push(OutEvent::SendMessage(to, Message { topic, message }))
         }
         topic::OutEvent::EmitEvent(event) => outbox.push(OutEvent::EmitEvent(topic, event)),
@@ -412,6 +431,33 @@ mod tests {
         state.handle(event, Instant::now(), None).for_each(drop);
     }
 
+    /// Quitting a topic disconnects a peer the topic only sent a join to.
+    ///
+    /// The peer is not on the topic and never answers, so nothing else ever
+    /// dropped it.
+    #[test]
+    fn quit_disconnects_a_peer_it_only_sent_to() {
+        let mut state = State::new(
+            0u32,
+            PeerData::default(),
+            Config::default(),
+            StdRng::seed_from_u64(1),
+        );
+        let topic: TopicId = [0u8; 32].into();
+        handle(&mut state, InEvent::Command(topic, Command::Join(vec![1])));
+
+        let out: Vec<_> = state
+            .handle(InEvent::Command(topic, Command::Quit), Instant::now(), None)
+            .collect();
+
+        assert!(
+            out.iter()
+                .any(|event| matches!(event, OutEvent::DisconnectPeer(1))),
+            "{out:?}"
+        );
+        assert!(state.peer_topics.is_empty());
+    }
+
     /// A peer that never became a neighbor is removed from `peer_topics`.
     ///
     /// Such a peer only relayed a message to us. No topic disconnects it, so
@@ -486,8 +532,58 @@ mod tests {
                     .any(|e| matches!(e, OutEvent::SendMessage(to, _) if *to == peer)),
                 "the join was not retried (seed {seed})"
             );
-            assert!(!state.peer_topics.contains_key(&peer));
+            // Only the retry in `topic_b` uses the peer now.
+            assert_eq!(
+                state.peer_topics.get(&peer),
+                Some(&HashSet::from([topic_b]))
+            );
         }
+    }
+
+    /// A join retried after a closed connection disconnects the peer when it gives up.
+    ///
+    /// The retry sends to the peer again, so the topic uses it again. If the
+    /// close cleared the topic's entry after the retry, the disconnect at the
+    /// end would find no entry and the connection would stay open.
+    #[test]
+    fn join_retried_after_a_close_disconnects_when_it_gives_up() {
+        let mut state = State::new(
+            0u32,
+            PeerData::default(),
+            Config::default(),
+            StdRng::seed_from_u64(1),
+        );
+        let topic: TopicId = [0u8; 32].into();
+        let peer = 1u32;
+        handle(
+            &mut state,
+            InEvent::Command(topic, Command::Join(vec![peer])),
+        );
+
+        let mut out: Vec<_> = state
+            .handle(InEvent::PeerDisconnected(peer), Instant::now(), None)
+            .collect();
+        assert!(
+            state.peer_topics.contains_key(&peer),
+            "the retry is not tracked"
+        );
+        for _ in 0..8 {
+            if out
+                .iter()
+                .any(|e| matches!(e, OutEvent::DisconnectPeer(p) if *p == peer))
+            {
+                return;
+            }
+            let timer = out.iter().find_map(|e| match e {
+                OutEvent::ScheduleTimer(_, timer) => Some(timer.clone()),
+                _ => None,
+            });
+            let timer = timer.expect("no join timer left, and no disconnect");
+            out = state
+                .handle(InEvent::TimerExpired(timer), Instant::now(), None)
+                .collect();
+        }
+        panic!("the join never gave up");
     }
 
     /// Leaving one topic must not disconnect a peer another topic still uses.
@@ -509,6 +605,39 @@ mod tests {
         let event = topic::OutEvent::DisconnectPeer(peer);
         handle_out_event(topic_b, event, &mut conns, &mut outbox);
         assert!(matches!(outbox[..], [OutEvent::DisconnectPeer(p)] if p == peer));
+        assert!(!conns.contains_key(&peer));
+    }
+
+    /// A disconnect reaches the network layer for a peer we only sent to.
+    ///
+    /// A shuffle reply goes to a peer we never received from, and the topic
+    /// disconnects it right after.
+    #[test]
+    fn disconnect_peer_after_sending_only() {
+        let topic: TopicId = [1u8; 32].into();
+        let peer = 1u32;
+        let mut conns = ConnsMap::default();
+        let mut outbox = Outbox::new();
+
+        let reply = hyparview::Message::test_shuffle_reply_with(Vec::new());
+        let message = topic::Message::Swarm(reply);
+        handle_out_event(
+            topic,
+            topic::OutEvent::SendMessage(peer, message),
+            &mut conns,
+            &mut outbox,
+        );
+        handle_out_event(
+            topic,
+            topic::OutEvent::DisconnectPeer(peer),
+            &mut conns,
+            &mut outbox,
+        );
+
+        assert!(
+            matches!(outbox[..], [OutEvent::SendMessage(..), OutEvent::DisconnectPeer(p)] if p == peer),
+            "{outbox:?}"
+        );
         assert!(!conns.contains_key(&peer));
     }
 }

@@ -826,6 +826,10 @@ where
             self.pending_neighbor_requests.remove(&peer);
             self.passive_view.remove(&peer);
             self.forget_peer(&peer);
+            if !self.active_view.contains(&peer) {
+                // The request was the topic's only use of the peer.
+                io.push(OutEvent::DisconnectPeer(peer));
+            }
             self.refill_active_from_passive(&[], io);
         }
     }
@@ -1342,6 +1346,11 @@ mod tests {
         );
 
         assert!(!has_metadata(&state, 1));
+        assert!(
+            io.iter()
+                .any(|event| matches!(event, TopicOut::DisconnectPeer(1))),
+            "the peer that did not answer was kept"
+        );
     }
 
     /// A pending reply to an active peer does not count twice against the active view.

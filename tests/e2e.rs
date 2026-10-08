@@ -729,11 +729,14 @@ async fn churn_leaves_no_connection_open() -> Result {
         drop(sub);
         left.push(node);
     }
+    // Both directions: a or b may have dialed a node that left.
     let all_closed = || {
         left.iter()
-            .all(|node| a.open_from(node.id()) == 0 && b.open_from(node.id()) == 0)
+            .all(|node| open_between(&a, node) == 0 && open_between(&b, node) == 0)
     };
-    eventually(SETTLE, "a connection was left open", all_closed).await?;
+    // A neighbor request to a node that left times out after 10 s, and only
+    // then does the requester drop the node.
+    eventually(SETTLE * 2, "a connection was left open", all_closed).await?;
     exchange(&mut sa, &mut sb, b"01").await
 }
 
