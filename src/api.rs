@@ -15,7 +15,7 @@ use n0_error::{e, stack_error};
 use n0_future::{Stream, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
-use crate::proto::{DeliveryScope, TopicId};
+use crate::proto::{topic, DeliveryScope, Scope, TopicId};
 
 /// Default channel capacity for topic subscription channels (one per topic)
 const TOPIC_EVENTS_DEFAULT_CAP: usize = 2048;
@@ -45,6 +45,14 @@ pub enum ApiError {
     /// The gossip topic was closed.
     #[error("topic closed")]
     Closed,
+    /// The message does not fit the max message size, with its encoding.
+    #[error(
+        "message of {size} bytes does not fit the max message size of {max_message_size} bytes"
+    )]
+    TooLarge {
+        size: usize,
+        max_message_size: usize,
+    },
 }
 
 impl From<irpc::channel::SendError> for ApiError {
@@ -81,14 +89,20 @@ impl From<irpc::channel::oneshot::RecvError> for ApiError {
 #[derive(Debug, Clone)]
 pub struct GossipApi {
     client: Client<Request>,
+    /// The max message size of the gossip instance, unknown to an RPC client.
+    max_message_size: Option<usize>,
 }
 
 impl GossipApi {
     #[cfg(feature = "net")]
-    pub(crate) fn local(tx: tokio::sync::mpsc::Sender<RpcMessage>) -> Self {
+    pub(crate) fn local(
+        tx: tokio::sync::mpsc::Sender<RpcMessage>,
+        max_message_size: usize,
+    ) -> Self {
         let local = irpc::LocalSender::<Request>::from(tx);
         Self {
             client: local.into(),
+            max_message_size: Some(max_message_size),
         }
     }
 
@@ -96,7 +110,10 @@ impl GossipApi {
     #[cfg(feature = "rpc")]
     pub fn connect(endpoint: noq::Endpoint, addr: std::net::SocketAddr) -> Self {
         let inner = irpc::Client::noq(endpoint, addr);
-        Self { client: inner }
+        Self {
+            client: inner,
+            max_message_size: None,
+        }
     }
 
     /// Listen on a noq endpoint for incoming RPC connections.
@@ -133,7 +150,7 @@ impl GossipApi {
             .client
             .bidi_streaming(req, TOPIC_COMMANDS_CAP, opts.subscription_capacity)
             .await?;
-        Ok(GossipTopic::new(tx, rx))
+        Ok(GossipTopic::new(tx, rx, self.max_message_size))
     }
 
     /// Join a gossip topic with the default options and wait for at least one active connection.
@@ -169,21 +186,59 @@ impl GossipApi {
 
 /// Sender for a gossip topic.
 #[derive(Debug, Clone)]
-pub struct GossipSender(mpsc::Sender<Command>);
+pub struct GossipSender {
+    sender: mpsc::Sender<Command>,
+    max_message_size: Option<usize>,
+}
 
 impl GossipSender {
-    pub(crate) fn new(sender: mpsc::Sender<Command>) -> Self {
-        Self(sender)
+    pub(crate) fn new(sender: mpsc::Sender<Command>, max_message_size: Option<usize>) -> Self {
+        Self {
+            sender,
+            max_message_size,
+        }
+    }
+
+    /// Returns an error if the message does not fit a frame at every hop.
+    ///
+    /// An RPC client does not know the max message size of the server.
+    fn check_size(&self, message: &Bytes, scope: Scope) -> Result<(), ApiError> {
+        match self.max_message_size {
+            Some(max_message_size)
+                if !topic::broadcast_fits(message.len(), scope, max_message_size) =>
+            {
+                Err(e!(ApiError::TooLarge {
+                    size: message.len(),
+                    max_message_size
+                }))
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Broadcasts a message to all endpoints.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiError::TooLarge`] if the encoded message does not fit
+    /// [`Builder::max_message_size`] at every hop. The encoding adds about 40
+    /// bytes. An RPC client does not know the limit of its server: there the
+    /// server drops such a message with a warning, and this returns `Ok`.
+    ///
+    /// [`Builder::max_message_size`]: crate::net::Builder::max_message_size
     pub async fn broadcast(&self, message: Bytes) -> Result<(), ApiError> {
+        self.check_size(&message, Scope::Swarm)?;
         self.send(Command::Broadcast(message)).await?;
         Ok(())
     }
 
     /// Broadcasts a message to our direct neighbors.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiError::TooLarge`] as [`Self::broadcast`] does.
     pub async fn broadcast_neighbors(&self, message: Bytes) -> Result<(), ApiError> {
+        self.check_size(&message, Scope::Neighbors)?;
         self.send(Command::BroadcastNeighbors(message)).await?;
         Ok(())
     }
@@ -195,7 +250,7 @@ impl GossipSender {
     }
 
     async fn send(&self, command: Command) -> Result<(), irpc::channel::SendError> {
-        self.0.send(command).await?;
+        self.sender.send(command).await?;
         Ok(())
     }
 }
@@ -215,8 +270,12 @@ pub struct GossipTopic {
 }
 
 impl GossipTopic {
-    pub(crate) fn new(sender: mpsc::Sender<Command>, receiver: mpsc::Receiver<Event>) -> Self {
-        let sender = GossipSender::new(sender);
+    pub(crate) fn new(
+        sender: mpsc::Sender<Command>,
+        receiver: mpsc::Receiver<Event>,
+        max_message_size: Option<usize>,
+    ) -> Self {
+        let sender = GossipSender::new(sender, max_message_size);
         Self {
             sender,
             receiver: GossipReceiver::new(receiver),
@@ -229,11 +288,19 @@ impl GossipTopic {
     }
 
     /// Sends a message to all peers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiError::TooLarge`] as [`GossipSender::broadcast`] does.
     pub async fn broadcast(&mut self, message: Bytes) -> Result<(), ApiError> {
         self.sender.broadcast(message).await
     }
 
     /// Sends a message to our direct neighbors in the swarm.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiError::TooLarge`] as [`GossipSender::broadcast`] does.
     pub async fn broadcast_neighbors(&mut self, message: Bytes) -> Result<(), ApiError> {
         self.sender.broadcast_neighbors(message).await
     }

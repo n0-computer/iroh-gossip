@@ -187,6 +187,28 @@ impl DeliveryScope {
     }
 }
 
+/// Returns the largest encoded size of a [`Message::Gossip`] with `content_len` bytes of content.
+///
+/// Each hop counts the round of a broadcast to the swarm one up, so its encoding
+/// grows on the way. This assumes the largest round.
+pub(crate) fn max_gossip_size(content_len: usize, scope: Scope) -> usize {
+    let scope = match scope {
+        Scope::Swarm => DeliveryScope::Swarm(Round(u16::MAX)),
+        Scope::Neighbors => DeliveryScope::Neighbors,
+    };
+    let empty = Message::Gossip(Gossip {
+        id: MessageId([0; 32]),
+        content: Bytes::new(),
+        scope,
+    });
+    let empty_size = postcard::experimental::serialized_size(&empty).expect("encodes");
+    // The content adds its bytes, and its length prefix grows from one byte.
+    let prefix_size = (usize::BITS - content_len.leading_zeros())
+        .div_ceil(7)
+        .max(1) as usize;
+    empty_size - 1 + prefix_size + content_len
+}
+
 /// The broadcast scope of a gossip message.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Ord, PartialOrd, Copy)]
 pub enum Scope {
@@ -465,6 +487,12 @@ impl<PI: PeerIdentity> State<PI> {
     /// Will be pushed in full to eager peers.
     /// Pushing the message id to the lazy peers is delayed by a timer.
     fn broadcast(&mut self, content: Bytes, scope: Scope, now: Instant, io: &mut impl IO<PI>) {
+        // A message over the limit, at any hop, cannot go out, so we neither cache
+        // nor announce it.
+        if max_gossip_size(content.len(), scope) > self.max_message_size {
+            warn!(max = self.max_message_size, "broadcast too large, dropped");
+            return;
+        }
         let id = MessageId::from_content(&content);
         let scope = match scope {
             Scope::Neighbors => DeliveryScope::Neighbors,
@@ -932,5 +960,30 @@ mod test {
         let now = now + config.message_cache_retention;
         state.handle(InEvent::TimerExpired(Timer::EvictCache), now, &mut io);
         assert_eq!(state.cache.len(), 0);
+    }
+
+    /// `max_gossip_size` is the size at the largest round, and no less at any other.
+    #[test]
+    fn max_gossip_size_covers_every_round() {
+        let size = |content: &Bytes, scope| {
+            let message = Message::Gossip(Gossip {
+                id: MessageId::from_content(content),
+                content: content.clone(),
+                scope,
+            });
+            postcard::experimental::serialized_size(&message).expect("encodes")
+        };
+        for len in [0, 127, 128, 4000, 20_000] {
+            let content = Bytes::from(vec![0; len]);
+            let max = max_gossip_size(len, Scope::Swarm);
+            for round in [0, 127, 128, 16_383, 16_384] {
+                assert!(size(&content, DeliveryScope::Swarm(Round(round))) <= max);
+            }
+            assert_eq!(size(&content, DeliveryScope::Swarm(Round(u16::MAX))), max);
+            assert_eq!(
+                size(&content, DeliveryScope::Neighbors),
+                max_gossip_size(len, Scope::Neighbors)
+            );
+        }
     }
 }
