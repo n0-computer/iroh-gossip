@@ -1265,7 +1265,7 @@ pub(crate) mod tests {
     use n0_error::{AnyError, Result, StdResultExt};
     use n0_tracing_test::traced_test;
     use rand::{CryptoRng, RngExt};
-    use tokio::{io::AsyncWriteExt, spawn, time::timeout};
+    use tokio::{spawn, time::timeout};
     use tokio_util::sync::CancellationToken;
     use tracing::{info, instrument};
 
@@ -2621,51 +2621,38 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// A failed receive loop closes the connection despite a live send loop.
+    /// A receive loop that ended closes the connection despite a live send loop.
+    ///
+    /// The receive loop ends once the actor takes no more messages. A bad
+    /// stream header does not end it: it drops only its stream.
     #[tokio::test]
     #[traced_test]
-    async fn recv_error_closes_connection() -> Result {
-        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
-        let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
-        let ep1 = create_endpoint(rng, relay_map.clone(), None).await?;
-        let ep2 = create_endpoint(rng, relay_map, None).await?;
-        let ep2_id = ep2.id();
-        let ep2_addr = EndpointAddr::new(ep2_id).with_relay_url(relay_url);
+    async fn ended_receive_loop_closes_connection() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let topic: TopicId = blake3::hash(b"ended_receive_loop").into();
+        let join = join_message(topic, 0).message;
+        let _stream = open_stream(&peer_conn, topic, &[join]).await?;
 
-        // The peer opens a stream with a header over the size limit, and keeps
-        // the connection open.
-        let _accept = AbortOnDropHandle::new(spawn(async move {
-            let incoming = ep2.accept().await.expect("endpoint closed");
-            let conn = incoming.await.expect("accept failed");
-            let mut stream = conn.open_uni().await.expect("open_uni");
-            stream.write_u32(u32::MAX).await.expect("write length");
-            conn.closed().await;
-        }));
-
-        let conn = ep1
-            .connect(ep2_addr, GOSSIP_ALPN)
-            .await
-            .std_context("connect")?;
         // The sender stays alive, so only the receive loop can end the connection.
         let (_send_tx, send_rx) = mpsc::channel(1);
-        let (in_event_tx, _in_event_rx) = mpsc::channel(16);
-
-        let res = timeout(
+        let (in_event_tx, in_event_rx) = mpsc::channel(16);
+        drop(in_event_rx);
+        timeout(
             Duration::from_secs(5),
             connection_loop(
-                ep2_id,
+                pair.ep2.id(),
                 conn,
                 ConnOrigin::Dial,
                 send_rx,
                 in_event_tx,
-                1024,
+                TEST_FRAME_LIMIT,
                 vec![],
                 watch::channel(true).1,
             ),
         )
         .await
-        .std_context("connection loop still runs after the receive loop failed")?;
-        assert!(res.is_err(), "the oversize header did not fail");
+        .std_context("connection loop still runs after the receive loop ended")??;
         Ok(())
     }
 
@@ -2753,6 +2740,39 @@ pub(crate) mod tests {
             !actor.peers.contains_key(&origin_id),
             "the origin's state was kept"
         );
+        Ok(())
+    }
+
+    /// A stream with a header that does not decode does not end the other streams.
+    #[tokio::test]
+    #[traced_test]
+    async fn bad_header_drops_only_its_stream() -> Result {
+        let (_ours, conn, peer_conn, _peer) = connected_pair().await?;
+        let (in_event_tx, mut in_event_rx) = mpsc::channel(4);
+        let mut recv_loop = RecvLoop::new(peer_conn.remote_id(), conn, in_event_tx, 1024);
+        let _recv = AbortOnDropHandle::new(spawn(async move { recv_loop.run().await }));
+
+        // A complete frame of three bytes, too short for a topic id.
+        let mut bad = peer_conn.open_uni().await.std_context("open stream")?;
+        bad.write_all(&[0, 0, 0, 3, 1, 2, 3])
+            .await
+            .std_context("write bad header")?;
+        bad.finish().std_context("finish")?;
+        let topic: TopicId = [1; 32].into();
+        let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
+        let mut buffer = Vec::new();
+        util::StreamHeader::new(topic)
+            .write(&mut stream, &mut buffer, 1024)
+            .await
+            .std_context("write header")?;
+        util::write_frame(&mut stream, &peer_join(topic).message, &mut buffer, 1024)
+            .await
+            .std_context("write frame")?;
+
+        let event = timeout(Duration::from_secs(2), in_event_rx.recv())
+            .await
+            .std_context("the bad header ended the receive loop")?;
+        assert!(matches!(event, Some(InEvent::RecvMessage(..))), "{event:?}");
         Ok(())
     }
 
