@@ -1795,6 +1795,77 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// A stream whose header was incomplete at the close still delivers its message.
+    ///
+    /// The loop picks its next branch at random, so a single round can miss the bug.
+    #[tokio::test]
+    #[traced_test]
+    async fn pending_header_is_read_after_a_close() -> Result {
+        for round in 0..4 {
+            let (_ours, conn, peer_conn, _peer) = connected_pair().await?;
+            let (in_event_tx, mut in_event_rx) = mpsc::channel(2);
+            let mut recv_loop =
+                RecvLoop::new(peer_conn.remote_id(), conn.clone(), in_event_tx, 1024);
+            // We poll it by hand, so that it sees the rest of the header only after the close.
+            let run = recv_loop.run();
+            tokio::pin!(run);
+
+            let topic: TopicId = [1; 32].into();
+            let mut partial = peer_conn.open_uni().await.std_context("open stream")?;
+            partial
+                .write_all(&[0, 0])
+                .await
+                .std_context("write partial header")?;
+            // The loop accepts streams in order, so this message means it has the partial one.
+            let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
+            let mut buffer = Vec::new();
+            util::StreamHeader { topic_id: topic }
+                .write(&mut stream, &mut buffer, 1024)
+                .await
+                .std_context("write header")?;
+            util::write_frame(&mut stream, &peer_join(topic).message, &mut buffer, 1024)
+                .await
+                .std_context("write frame")?;
+            stream.finish().std_context("finish")?;
+            tokio::select! {
+                res = &mut run => panic!("the recv loop ended: {res:?}"),
+                event = in_event_rx.recv() => {
+                    assert!(matches!(event, Some(InEvent::RecvMessage(..))), "{event:?}");
+                }
+            }
+            // Let the loop see the end of the full stream, so that only the header remains.
+            stream.stopped().await.std_context("stopped")?;
+            let res = n0_future::future::poll_once(&mut run).await;
+            assert!(res.is_none(), "the recv loop ended: {res:?}");
+
+            partial
+                .write_all(&[0, 32])
+                .await
+                .std_context("write header length")?;
+            partial
+                .write_all(&[1; 32])
+                .await
+                .std_context("write topic")?;
+            util::write_frame(&mut partial, &peer_join(topic).message, &mut buffer, 1024)
+                .await
+                .std_context("write frame")?;
+            partial.finish().std_context("finish")?;
+            partial.stopped().await.std_context("stopped")?;
+            peer_conn.close(0u32.into(), b"done");
+            conn.closed().await;
+
+            timeout(Duration::from_secs(2), &mut run)
+                .await
+                .std_context("the recv loop did not end")??;
+            let event = in_event_rx.try_recv();
+            assert!(
+                matches!(event, Ok(InEvent::RecvMessage(..))),
+                "round {round}: {event:?}"
+            );
+        }
+        Ok(())
+    }
+
     /// A close handles the messages queued before it, not those that arrive meanwhile.
     ///
     /// Other connections can refill the queue as fast as the actor handles it.

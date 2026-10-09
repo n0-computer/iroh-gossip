@@ -117,7 +117,7 @@ impl RecvLoop {
         let mut conn_is_closed = false;
         let closed = self.conn.closed();
         tokio::pin!(closed);
-        while !conn_is_closed || !read_futures.is_empty() {
+        while !conn_is_closed || !header_futures.is_empty() || !read_futures.is_empty() {
             tokio::select! {
                 _ = &mut closed, if !conn_is_closed => {
                     conn_is_closed = true;
