@@ -220,8 +220,9 @@ impl Default for Config {
             shuffle_passive_view_count: 4,
             // Wild guess
             shuffle_interval: Duration::from_secs(60),
-            // A dial and a round trip on a slow network, with room to spare.
-            neighbor_request_timeout: Duration::from_secs(10),
+            // A dial and a round trip on a slow network. Each dead candidate
+            // holds a refill slot this long.
+            neighbor_request_timeout: Duration::from_secs(3),
         }
     }
 }
