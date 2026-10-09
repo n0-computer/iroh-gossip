@@ -133,7 +133,14 @@ impl RecvLoop {
                     header_futures.push(RecvStreamState::new(stream, self.max_message_size));
                 }
                 Some(state) = header_futures.next(), if !header_futures.is_empty() => {
-                    let state = state?;
+                    // A bad header loses only its stream, as a bad frame does.
+                    let state = match state {
+                        Ok(state) => state,
+                        Err(err) => {
+                            debug!("stream header failed: {err:#}");
+                            continue;
+                        }
+                    };
                     debug!(topic=%state.header.topic_id.fmt_short(), "stream opened");
                     read_futures.push(state.next());
                 }

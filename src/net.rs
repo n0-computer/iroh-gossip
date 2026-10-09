@@ -1758,6 +1758,39 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// A stream with a header that does not decode does not end the other streams.
+    #[tokio::test]
+    #[traced_test]
+    async fn bad_header_drops_only_its_stream() -> Result {
+        let (_ours, conn, peer_conn, _peer) = connected_pair().await?;
+        let (in_event_tx, mut in_event_rx) = mpsc::channel(4);
+        let mut recv_loop = RecvLoop::new(peer_conn.remote_id(), conn, in_event_tx, 1024);
+        let _recv = AbortOnDropHandle::new(spawn(async move { recv_loop.run().await }));
+
+        // A complete frame of three bytes, too short for a topic id.
+        let mut bad = peer_conn.open_uni().await.std_context("open stream")?;
+        bad.write_all(&[0, 0, 0, 3, 1, 2, 3])
+            .await
+            .std_context("write bad header")?;
+        bad.finish().std_context("finish")?;
+        let topic: TopicId = [1; 32].into();
+        let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
+        let mut buffer = Vec::new();
+        util::StreamHeader { topic_id: topic }
+            .write(&mut stream, &mut buffer, 1024)
+            .await
+            .std_context("write header")?;
+        util::write_frame(&mut stream, &peer_join(topic).message, &mut buffer, 1024)
+            .await
+            .std_context("write frame")?;
+
+        let event = timeout(Duration::from_secs(2), in_event_rx.recv())
+            .await
+            .std_context("the bad header ended the receive loop")?;
+        assert!(matches!(event, Some(InEvent::RecvMessage(..))), "{event:?}");
+        Ok(())
+    }
+
     /// Test that endpoints can reconnect to each other.
     ///
     /// This test will create two endpoints subscribed to the same topic. The second endpoint will
