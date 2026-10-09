@@ -877,7 +877,6 @@ fn plumtree_delivery_is_total_with_concurrent_senders() {
 /// of 100%" (Figure 3a). This fails the same half percent per round, with no
 /// time to heal before the broadcast.
 #[test]
-#[ignore = "fails on some seeds: a failed request dial stalls the refill"]
 fn plumtree_delivery_holds_under_a_constant_failure_rate() {
     let peers = swarm_size(400);
     const ROUNDS: usize = 100;
