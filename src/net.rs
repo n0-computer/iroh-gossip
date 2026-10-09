@@ -464,11 +464,17 @@ impl Actor {
             }
             Some(res) = self.connection_tasks.join_next(), if !self.connection_tasks.is_empty() => {
                 trace!(?i, "tick: connection_tasks");
-                let (peer_id, conn, result) = res.expect("connection task panicked");
+                let Some((peer_id, conn, result)) = task_output(res) else {
+                    debug!("connection task cancelled, the runtime shuts down");
+                    return false;
+                };
                 self.handle_connection_task_finished(peer_id, conn, result).await;
             }
             Some(res) = self.topic_event_forwarders.join_next(), if !self.topic_event_forwarders.is_empty() => {
-                let topic_id = res.expect("topic event forwarder panicked");
+                let Some(topic_id) = task_output(res) else {
+                    debug!("topic task cancelled, the runtime shuts down");
+                    return false;
+                };
                 if let Some(state) = self.topics.get_mut(&topic_id) {
                     if !state.still_needed() {
                         self.quit_queue.push_back(topic_id);
@@ -874,6 +880,21 @@ enum ConnectionLoopError {
 impl<T> From<mpsc::error::SendError<T>> for ConnectionLoopError {
     fn from(_value: mpsc::error::SendError<T>) -> Self {
         e!(ConnectionLoopError::ActorDropped)
+    }
+}
+
+/// Returns a finished task's output, or `None` if the runtime cancelled the task.
+///
+/// A task cancelled at runtime shutdown is no bug, so it must not panic the actor (#140).
+/// A panic in the task panics the caller with the same payload.
+fn task_output<T>(res: Result<T, task::JoinError>) -> Option<T> {
+    match res {
+        Ok(output) => Some(output),
+        Err(err) if err.is_cancelled() => None,
+        #[cfg(not(target_family = "wasm"))]
+        Err(err) => std::panic::resume_unwind(err.into_panic()),
+        #[cfg(target_family = "wasm")]
+        Err(err) => panic!("task failed: {err}"),
     }
 }
 
@@ -1532,6 +1553,23 @@ pub(crate) mod tests {
             .std_context("wait actor finish")?;
 
         Ok(())
+    }
+
+    /// A cancelled task gives `None`, and a finished one its output.
+    #[tokio::test]
+    async fn task_output_of_cancelled_and_finished_tasks() {
+        let task = task::spawn(std::future::pending::<u32>());
+        task.abort();
+        assert!(task_output(task.await).is_none());
+        assert_eq!(task_output(task::spawn(async { 42u32 }).await), Some(42));
+    }
+
+    /// A panic in a task panics the caller with the same payload.
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    #[should_panic(expected = "original child panic")]
+    async fn task_output_passes_a_panic_on() {
+        task_output(task::spawn(async { panic!("original child panic") }).await);
     }
 
     /// Test that endpoints can reconnect to each other.
