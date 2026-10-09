@@ -10,11 +10,19 @@ use std::collections::{hash_map, HashMap, HashSet, VecDeque};
 
 use derive_more::{From, Sub};
 use n0_future::time::Duration;
-use rand::{rngs::ThreadRng, Rng};
+use rand::{rngs::ThreadRng, Rng, RngExt};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use super::{util::IndexSet, PeerData, PeerIdentity, PeerInfo, IO};
+
+/// Delay before the first shuffle.
+///
+/// The interval doubles after each shuffle up to [`Config::shuffle_interval`].
+/// A join leaves the passive view small and lopsided: it holds only the peers
+/// that `ForwardJoin` walks passed by. The first shuffles fill it. The HyParView
+/// paper shuffles at a fixed period, without jitter.
+const INITIAL_SHUFFLE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Interval of the check that refills a short active view.
 ///
@@ -213,7 +221,10 @@ pub struct Config {
     pub shuffle_active_view_count: usize,
     /// Number of passive peers to be included in a `Shuffle` request.
     pub shuffle_passive_view_count: usize,
-    /// Interval duration for shuffle requests
+    /// Interval between shuffle requests, once the first shuffles are done.
+    ///
+    /// Shuffles keep the passive view a live sample of the swarm. A node
+    /// falls back on its passive view when its neighbors fail.
     pub shuffle_interval: Duration,
     /// Timeout after which a neighbor request is considered failed.
     ///
@@ -268,6 +279,8 @@ pub struct State<PI, RG = ThreadRng> {
     config: Config,
     /// Whether the shuffle and maintenance timers are scheduled
     timers_scheduled: bool,
+    /// Delay before the next shuffle, see [`INITIAL_SHUFFLE_INTERVAL`].
+    next_shuffle_interval: Duration,
     /// The latest peers the application asked us to join, oldest first.
     ///
     /// A node with empty views has nobody else left to dial. See
@@ -305,6 +318,7 @@ where
             me_data,
             active_view: IndexSet::new(),
             passive_view: IndexSet::new(),
+            next_shuffle_interval: INITIAL_SHUFFLE_INTERVAL.min(config.shuffle_interval),
             config,
             timers_scheduled: false,
             bootstrap_peers: VecDeque::new(),
@@ -340,10 +354,7 @@ where
         // this will only happen on the first call
         if !self.timers_scheduled {
             self.timers_scheduled = true;
-            io.push(OutEvent::ScheduleTimer(
-                self.config.shuffle_interval,
-                Timer::DoShuffle,
-            ));
+            self.schedule_shuffle(io);
             io.push(OutEvent::ScheduleTimer(
                 MAINTENANCE_INTERVAL,
                 Timer::DoMaintenance,
@@ -657,10 +668,7 @@ where
             };
             io.push(OutEvent::SendMessage(*node, Message::Shuffle(message)));
         }
-        io.push(OutEvent::ScheduleTimer(
-            self.config.shuffle_interval,
-            Timer::DoShuffle,
-        ));
+        self.schedule_shuffle(io);
     }
 
     /// Refills the active view if it is short, and rejoins if both views are empty.
@@ -694,6 +702,20 @@ where
         io.push(OutEvent::ScheduleTimer(
             MAINTENANCE_INTERVAL,
             Timer::DoMaintenance,
+        ));
+    }
+
+    /// Schedules the next shuffle, with the interval doubled up to its maximum.
+    ///
+    /// The delay varies by 25 percent either way. Else the nodes of a swarm
+    /// that started together shuffle at the same moments for good.
+    fn schedule_shuffle(&mut self, io: &mut impl IO<PI>) {
+        let interval = self.next_shuffle_interval;
+        self.next_shuffle_interval = (interval * 2).min(self.config.shuffle_interval);
+        let jitter = self.rng.random_range(0.75..1.25);
+        io.push(OutEvent::ScheduleTimer(
+            interval.mul_f64(jitter),
+            Timer::DoShuffle,
         ));
     }
 
@@ -1554,5 +1576,40 @@ mod tests {
         state.handle(InEvent::RecvMessage(10, refusal), io);
         let requested: Vec<u32> = (11..13).filter(|peer| sent_neighbor(io, *peer)).collect();
         assert!(requested.is_empty(), "asked {requested:?} after a refusal");
+    }
+
+    /// The first shuffle comes soon after joining, and the interval backs
+    /// off to the configured one.
+    #[test]
+    fn shuffle_interval_backs_off_to_the_configured_one() {
+        let mut state = new_state();
+        let mut delays = Vec::new();
+        let mut handle = |event: InEvent<u32>| {
+            let mut io = Io::new();
+            state.handle(event, &mut io);
+            delays.extend(io.into_iter().filter_map(|event| match event {
+                TopicOut::ScheduleTimer(delay, topic::Timer::Swarm(Timer::DoShuffle)) => {
+                    Some(delay)
+                }
+                _ => None,
+            }));
+        };
+        handle(InEvent::RequestJoin(1));
+        for _ in 0..7 {
+            handle(InEvent::TimerExpired(Timer::DoShuffle));
+        }
+
+        let nominal = [1, 2, 4, 8, 16, 32, 60, 60].map(Duration::from_secs);
+        assert_eq!(delays.len(), nominal.len());
+        for (delay, nominal) in delays.iter().zip(nominal) {
+            assert!(
+                *delay >= nominal.mul_f64(0.75) && *delay <= nominal.mul_f64(1.25),
+                "delay {delay:?} is not within jitter of {nominal:?}, all delays {delays:?}"
+            );
+        }
+        assert!(
+            delays[6] != delays[7],
+            "the delays should vary, got {delays:?}"
+        );
     }
 }
