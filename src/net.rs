@@ -672,6 +672,10 @@ impl Actor {
     }
 
     async fn handle_in_event_inner(&mut self, event: InEvent, now: Instant) {
+        // Drop the state first, so that a message the event causes dials anew.
+        if let InEvent::PeerDisconnected(peer) = &event {
+            self.peers.remove(peer);
+        }
         if matches!(event, InEvent::TimerExpired(_)) {
             trace!(?event, "handle in_event");
         } else {
