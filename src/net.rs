@@ -1043,6 +1043,7 @@ async fn connection_loop(
     let mut send_loop = SendLoop::new(conn.clone(), send_rx, max_message_size);
     let sending = send_loop.sending();
     let mut recv_loop = RecvLoop::new(from, conn, in_event_tx, max_message_size);
+    let mut handles_close = recv_loop.handles_close();
 
     let send_fut = send_loop.run(queue).instrument(error_span!("send"));
     let recv_fut = recv_loop.run().instrument(error_span!("recv"));
@@ -1059,7 +1060,14 @@ async fn connection_loop(
     };
     tokio::select! {
         res = loops => res,
-        _ = retire(wanted, sending) => {
+        // An old node would lose its later messages to us after a close, see
+        // `StreamHeader::handles_close`.
+        _ = async {
+            if handles_close.wait_for(|known| *known).await.is_err() {
+                std::future::pending::<()>().await;
+            }
+            retire(wanted, sending).await
+        } => {
             debug!("no topic uses the peer, close");
             Ok(())
         }
@@ -1793,7 +1801,7 @@ pub(crate) mod tests {
     ) -> Result<iroh::endpoint::SendStream> {
         let mut stream = conn.open_uni().await.std_context("open stream")?;
         let mut buffer = Vec::new();
-        util::StreamHeader { topic_id: topic }
+        util::StreamHeader::new(topic)
             .write(&mut stream, &mut buffer, TEST_FRAME_LIMIT)
             .await
             .std_context("write header")?;
@@ -2018,6 +2026,57 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// Opens a stream with our header, as a new node does on each stream.
+    ///
+    /// The header tells the other side that the peer handles a close.
+    async fn show_that_it_handles_a_close(conn: &Connection, topic: TopicId) {
+        let mut stream = conn.open_uni().await.expect("open stream");
+        util::StreamHeader::new(topic)
+            .write(&mut stream, &mut Vec::new(), TEST_FRAME_LIMIT)
+            .await
+            .expect("write header");
+        stream.finish().expect("finish");
+    }
+
+    /// An unused connection to a peer whose header has no flags stays open.
+    ///
+    /// Nodes up to 0.101 send the topic alone. Such a node would lose its later
+    /// messages to us if we closed a connection that is no neighbor link of it.
+    #[tokio::test]
+    #[traced_test]
+    async fn unused_connection_from_an_old_peer_stays() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
+        let topic: TopicId = blake3::hash(b"old_peer").into();
+        let mut actor = t_actor().await?;
+        actor.handle_connection(peer_id, ConnOrigin::Accept, conn);
+        let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
+        let mut buffer = Vec::new();
+        util::write_frame(&mut stream, &topic, &mut buffer, TEST_FRAME_LIMIT)
+            .await
+            .std_context("write header")?;
+        let join = join_message(topic, 0).message;
+        util::write_frame(&mut stream, &join, &mut buffer, TEST_FRAME_LIMIT)
+            .await
+            .std_context("write frame")?;
+        let event = timeout(Duration::from_secs(5), actor.in_event_rx.recv())
+            .await
+            .std_context("the message did not arrive")?;
+        assert!(
+            matches!(event, Some(InEvent::RecvMessage(peer, _)) if peer == peer_id),
+            "{event:?}"
+        );
+
+        tokio::time::sleep(IDLE_GRACE + Duration::from_secs(1)).await;
+        assert!(
+            actor.connection_tasks.try_join_next().is_none(),
+            "the connection closed"
+        );
+        assert!(peer_conn.close_reason().is_none(), "the connection closed");
+        Ok(())
+    }
+
     /// An inbound connection that no topic uses closes, even with a partial header.
     #[tokio::test]
     #[traced_test]
@@ -2026,6 +2085,7 @@ pub(crate) mod tests {
         let (conn, peer_conn) = pair.connect().await?;
         let mut actor = t_actor().await?;
         actor.handle_connection(pair.ep2.id(), ConnOrigin::Accept, conn);
+        show_that_it_handles_a_close(&peer_conn, [0; 32].into()).await;
         let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
         stream
             .write_all(&[0, 0, 0, 32, 0])
@@ -2106,7 +2166,7 @@ pub(crate) mod tests {
     async fn replaced_connection_stays_while_the_peer_is_wanted() -> Result {
         let pair = TestPair::new(1).await?;
         let (first, peer_first) = pair.connect().await?;
-        let (second, _peer_second) = pair.connect().await?;
+        let (second, peer_second) = pair.connect().await?;
         let peer_id = pair.ep2.id();
         let topic: TopicId = blake3::hash(b"replaced_connection_stays").into();
         let mut actor = t_actor().await?;
@@ -2114,9 +2174,10 @@ pub(crate) mod tests {
         actor.handle_connection(peer_id, ConnOrigin::Accept, second);
         set_wanted(&actor, peer_id, true);
 
+        show_that_it_handles_a_close(&peer_second, topic).await;
         let mut stream = peer_first.open_uni().await.std_context("open stream")?;
         let mut buffer = Vec::new();
-        util::StreamHeader { topic_id: topic }
+        util::StreamHeader::new(topic)
             .write(&mut stream, &mut buffer, TEST_FRAME_LIMIT)
             .await
             .std_context("write header")?;
@@ -2323,6 +2384,7 @@ pub(crate) mod tests {
                 util::read_frame(&mut stream, &mut buf, 1024)
                     .await
                     .expect("frame");
+            show_that_it_handles_a_close(&conn, header.topic_id).await;
             conn.closed().await;
             (header.topic_id, message.is_some())
         });
@@ -2563,13 +2625,14 @@ pub(crate) mod tests {
             let conn = incoming.await.expect("accept failed");
             let mut stream = conn.accept_uni().await.expect("accept_uni");
             let mut buf = bytes::BytesMut::new();
-            util::StreamHeader::read(&mut stream, &mut buf, 1024)
+            let header = util::StreamHeader::read(&mut stream, &mut buf, 1024)
                 .await
                 .expect("header");
             let reply: Option<proto::topic::Message<PublicKey>> =
                 util::read_frame(&mut stream, &mut buf, 1024)
                     .await
                     .expect("frame");
+            show_that_it_handles_a_close(&conn, header.topic_id).await;
             conn.closed().await;
             reply.is_some()
         }));
@@ -2582,7 +2645,7 @@ pub(crate) mod tests {
             .std_context("connect")?;
         let mut stream = conn.open_uni().await.std_context("open_uni")?;
         let mut buf = Vec::new();
-        util::StreamHeader { topic_id: topic }
+        util::StreamHeader::new(topic)
             .write(&mut stream, &mut buf, 1024)
             .await
             .std_context("header")?;
