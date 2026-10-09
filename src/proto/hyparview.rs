@@ -16,10 +16,10 @@ use tracing::debug;
 
 use super::{util::IndexSet, PeerData, PeerIdentity, PeerInfo, IO};
 
-/// How often we send a join again that got no reply.
-const JOIN_RETRIES: u8 = 2;
-
 /// How long we wait for the answer to a join.
+///
+/// Longer than the grace after which a peer closes a connection that it does
+/// not use, so that a join the peer dropped is sent again after the close.
 const JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Input event for HyParView
@@ -31,6 +31,8 @@ pub enum InEvent<PI> {
     TimerExpired(Timer<PI>),
     /// A peer was disconnected on the IO layer.
     PeerDisconnected(PI),
+    /// A dial to a peer failed, so the peer is not reachable now.
+    DialFailed(PI),
     /// Send a join request to a peer.
     RequestJoin(PI),
     /// Update the peer data that is transmitted on join requests.
@@ -293,8 +295,8 @@ pub struct State<PI, RG = ThreadRng> {
     pending_neighbor_requests: HashMap<PI, u64>,
     /// The id of the next neighbor request
     next_neighbor_request: u64,
-    /// Joins without a reply yet, with their retries and the id of the last attempt.
-    pending_joins: HashMap<PI, (u8, u64)>,
+    /// Joins without a reply yet, with whether we resent them after a close, and the last id.
+    pending_joins: HashMap<PI, (bool, u64)>,
     /// The id of the next join attempt
     next_join: u64,
     /// The opaque user peer data we received for other peers
@@ -336,17 +338,21 @@ where
                     self.handle_pending_neighbor_timer(peer, id, io)
                 }
                 Timer::PendingJoin(peer, id) => {
-                    // The peer was not in the topic yet, or the join's connection died.
+                    // A join that got no reply in time is lost, as the connection to the
+                    // peer still runs. Sending it again over the same connection is no
+                    // better, so we give up.
                     if self
                         .pending_joins
                         .get(&peer)
                         .is_some_and(|(_, last)| *last == id)
                     {
-                        self.retry_join(peer, io);
+                        self.pending_joins.remove(&peer);
+                        self.release_if_unused(peer, io);
                     }
                 }
             },
-            InEvent::PeerDisconnected(peer) => self.handle_connection_closed(peer, io),
+            InEvent::PeerDisconnected(peer) => self.handle_connection_closed(peer, false, io),
+            InEvent::DialFailed(peer) => self.handle_connection_closed(peer, true, io),
             InEvent::RequestJoin(peer) => self.handle_join(peer, io),
             InEvent::UpdatePeerData(data) => {
                 self.me_data = Some(data);
@@ -447,7 +453,7 @@ where
                 Message::Join(self.me_data.clone()),
             ));
         } else {
-            self.pending_joins.entry(peer).or_insert((0, 0));
+            self.pending_joins.entry(peer).or_insert((false, 0));
             self.send_join(peer, io);
         }
     }
@@ -469,13 +475,16 @@ where
         ));
     }
 
-    /// Sends a pending join again, or gives up on it after [`JOIN_RETRIES`].
-    fn retry_join(&mut self, peer: PI, io: &mut impl IO<PI>) {
-        let Some((retries, _)) = self.pending_joins.get_mut(&peer) else {
+    /// Sends a pending join again once after a close, or gives up on it.
+    ///
+    /// The join may have gone out on the closed connection. A new dial reaches the peer if it
+    /// still runs. A failed dial means that it does not, and a dial again does not help.
+    fn retry_join(&mut self, peer: PI, dial_failed: bool, io: &mut impl IO<PI>) {
+        let Some((retried, _)) = self.pending_joins.get_mut(&peer) else {
             return;
         };
-        if *retries < JOIN_RETRIES {
-            *retries += 1;
+        if !dial_failed && !*retried {
+            *retried = true;
             self.send_join(peer, io);
         } else {
             self.pending_joins.remove(&peer);
@@ -499,8 +508,8 @@ where
         }
     }
 
-    /// A connection was closed by the peer.
-    fn handle_connection_closed(&mut self, peer: PI, io: &mut impl IO<PI>) {
+    /// A connection to the peer closed, or a dial to it failed.
+    fn handle_connection_closed(&mut self, peer: PI, dial_failed: bool, io: &mut impl IO<PI>) {
         self.pending_neighbor_requests.remove(&peer);
         if self.active_view.contains(&peer) {
             self.remove_active(&peer, RemovalReason::ConnectionClosed, io);
@@ -508,8 +517,7 @@ where
             self.passive_view.remove(&peer);
             self.peer_data.remove(&peer);
         }
-        // The join may have gone out on the closed connection.
-        self.retry_join(peer, io);
+        self.retry_join(peer, dial_failed, io);
     }
 
     fn handle_quit(&mut self, io: &mut impl IO<PI>) {
@@ -1231,23 +1239,31 @@ mod tests {
             .count()
     }
 
-    /// How often a lost join is sent again, in the design these tests come from.
-    const JOIN_RETRIES: usize = 2;
-
-    /// A join lost to a closed connection is retried a bounded number of times.
+    /// A join lost to a closed connection is sent once more, and a failed dial ends it.
     #[test]
-    fn join_is_retried_when_the_connection_closes() {
+    fn join_is_retried_once_when_the_connection_closes() {
         let mut state = new_state();
         let io = &mut Io::new();
         state.handle(InEvent::RequestJoin(1), io);
         assert_eq!(joins_sent(io, 1), 1);
 
-        for retry in 1..=JOIN_RETRIES {
-            state.handle(InEvent::PeerDisconnected(1), io);
-            assert_eq!(joins_sent(io, 1), 1 + retry);
-        }
         state.handle(InEvent::PeerDisconnected(1), io);
-        assert_eq!(joins_sent(io, 1), 1 + JOIN_RETRIES);
+        assert_eq!(joins_sent(io, 1), 2, "no retry after the close");
+        state.handle(InEvent::PeerDisconnected(1), io);
+        assert_eq!(joins_sent(io, 1), 2, "retried twice");
+        assert!(state.pending_joins.is_empty());
+    }
+
+    /// A join whose dial failed is not sent again, as a new dial would fail too.
+    #[test]
+    fn failed_dial_ends_a_join() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.handle(InEvent::RequestJoin(1), io);
+        state.handle(InEvent::DialFailed(1), io);
+
+        assert_eq!(joins_sent(io, 1), 1, "the join was dialed again");
+        assert!(state.pending_joins.is_empty());
     }
 
     /// A join is not retried once the peer is a neighbor.
@@ -1488,26 +1504,27 @@ mod tests {
             .expect("a join timeout")
     }
 
-    /// A join that got no reply in time is sent again, then the peer is dropped.
+    /// A join that got no reply in time ends, and its peer is dropped.
+    ///
+    /// The connection to the peer still runs, so the join is not sent again.
     #[test]
-    fn unanswered_join_is_retried_after_its_timeout() {
+    fn unanswered_join_ends_after_its_timeout() {
         let mut state = new_state();
         let mut io = Io::new();
         state.handle(InEvent::RequestJoin(1), &mut io);
-        for retry in 0..=JOIN_RETRIES {
-            let timer = join_timeout(&io);
-            io.clear();
-            state.handle(InEvent::TimerExpired(timer), &mut io);
-            assert_eq!(joins_sent(&io, 1), usize::from(retry < JOIN_RETRIES));
-        }
+        let timer = join_timeout(&io);
+        io.clear();
+        state.handle(InEvent::TimerExpired(timer), &mut io);
+
+        assert_eq!(joins_sent(&io, 1), 0);
         assert!(io
             .iter()
             .any(|event| matches!(event, TopicOut::DisconnectPeer(1))));
     }
 
-    /// The timer of an earlier join does not retry a newer join to the same peer.
+    /// The timer of an earlier join does not end a newer join to the same peer.
     #[test]
-    fn stale_join_timeout_does_not_retry_a_new_join() {
+    fn stale_join_timeout_does_not_end_a_new_join() {
         let mut state = new_state();
         let mut io = Io::new();
         state.handle(InEvent::RequestJoin(1), &mut io);
@@ -1515,11 +1532,13 @@ mod tests {
         state.handle(InEvent::Quit, &mut io);
         state.handle(InEvent::RequestJoin(1), &mut io);
         let current = join_timeout(&io);
-        io.clear();
         state.handle(InEvent::TimerExpired(old), &mut io);
-        assert_eq!(joins_sent(&io, 1), 0);
+        assert!(
+            !state.pending_joins.is_empty(),
+            "a stale timer ended the join"
+        );
         state.handle(InEvent::TimerExpired(current), &mut io);
-        assert_eq!(joins_sent(&io, 1), 1);
+        assert!(state.pending_joins.is_empty());
     }
 
     /// A timed-out neighbor request does not drop a peer we still wait on for a join.

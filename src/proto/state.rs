@@ -98,6 +98,8 @@ pub enum InEvent<PI> {
     TimerExpired(Timer<PI>),
     /// Peer disconnected on the network level.
     PeerDisconnected(PI),
+    /// A dial to a peer failed on the network level.
+    DialFailed(PI),
     /// Update the opaque peer data about yourself.
     UpdatePeerData(PeerData),
 }
@@ -139,6 +141,7 @@ impl<PI> From<InEvent<PI>> for InEventMapped<PI> {
                 Self::TopicEvent(topic, topic::InEvent::TimerExpired(timer))
             }
             InEvent::PeerDisconnected(peer) => Self::All(topic::InEvent::PeerDisconnected(peer)),
+            InEvent::DialFailed(peer) => Self::All(topic::InEvent::DialFailed(peer)),
             InEvent::UpdatePeerData(data) => Self::All(topic::InEvent::UpdatePeerData(data)),
         }
     }
@@ -320,7 +323,9 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
                 // The network layer dropped the peer already. Clear its entry before a
                 // retried join adds it again, and drop the disconnects that would undo it.
                 let gone = match &event {
-                    topic::InEvent::PeerDisconnected(peer) => Some(*peer),
+                    topic::InEvent::PeerDisconnected(peer) | topic::InEvent::DialFailed(peer) => {
+                        Some(*peer)
+                    }
                     _ => None,
                 };
                 if let Some(peer) = gone {
@@ -740,17 +745,17 @@ mod tests {
         handle(&mut state, InEvent::Command(topic, Command::Join(vec![1])));
         assert!(state.peer_topics.contains_key(&1));
 
-        // A join is sent again after each of the first two closes.
-        for _ in 0..3 {
+        // A join is sent again once, after the first close.
+        for _ in 0..2 {
             handle(&mut state, InEvent::PeerDisconnected(1));
         }
 
         assert!(state.peer_topics.is_empty());
     }
 
-    /// A timer of a topic we quit does nothing to the topic we joined again.
+    /// The join timer of a topic we quit does not end the join of the topic we joined again.
     #[test]
-    fn timer_from_a_quit_topic_does_not_retry_its_replacement() {
+    fn timer_from_a_quit_topic_does_not_end_its_replacement_join() {
         let mut state = State::new(
             0u32,
             PeerData::default(),
@@ -780,9 +785,9 @@ mod tests {
         let current = join_timer(state.handle(join, now, None).collect());
         assert!(!state
             .handle(InEvent::TimerExpired(old), now, None)
-            .any(|event| matches!(event, OutEvent::SendMessage(..))));
+            .any(|event| matches!(event, OutEvent::DisconnectPeer(1))));
         assert!(state
             .handle(InEvent::TimerExpired(current), now, None)
-            .any(|event| matches!(event, OutEvent::SendMessage(1, _))));
+            .any(|event| matches!(event, OutEvent::DisconnectPeer(1))));
     }
 }

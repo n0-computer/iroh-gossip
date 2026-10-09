@@ -445,7 +445,7 @@ impl Actor {
                         let peer_state = self.peers.get(&peer_id);
                         let is_active = matches!(peer_state, Some(PeerState::Active { .. }));
                         if !is_active {
-                            self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
+                            self.handle_in_event(InEvent::DialFailed(peer_id), Instant::now())
                                 .await;
                         }
                     }
@@ -710,12 +710,15 @@ impl Actor {
 
     async fn handle_in_event_inner(&mut self, event: InEvent, now: Instant) {
         // Drop the state first, so that a message the event causes dials anew.
-        if let InEvent::PeerDisconnected(peer) = &event {
+        if let InEvent::PeerDisconnected(peer) | InEvent::DialFailed(peer) = &event {
             self.peers.remove(peer);
         }
         // The peers whose use by the topics may change, so their flag in `wanted` too.
         let mut touched = Vec::new();
-        if let InEvent::RecvMessage(peer, _) | InEvent::PeerDisconnected(peer) = &event {
+        if let InEvent::RecvMessage(peer, _)
+        | InEvent::PeerDisconnected(peer)
+        | InEvent::DialFailed(peer) = &event
+        {
             touched.push(*peer);
         }
         if matches!(event, InEvent::TimerExpired(_)) {
@@ -1989,7 +1992,7 @@ pub(crate) mod tests {
         disconnect_peer(&mut actor.peers, peer);
         // A failed dial of a peer that is not active reports it gone.
         actor
-            .handle_in_event(InEvent::PeerDisconnected(peer), Instant::now())
+            .handle_in_event(InEvent::DialFailed(peer), Instant::now())
             .await;
         assert!(!actor.peers.contains_key(&peer));
         Ok(())

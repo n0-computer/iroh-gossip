@@ -44,7 +44,8 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(3);
 const SETTLE: Duration = Duration::from_secs(12);
 /// How long a join that its peer dropped takes to succeed.
 ///
-/// The join is sent again after the neighbor request timeout of 10 s.
+/// The peer closes the connection that no topic of it uses after 5 s, and the
+/// join is sent again on a new connection.
 const JOIN_RETRY_WITHIN: Duration = Duration::from_secs(20);
 
 /// Decides whether a node takes a connection, before gossip sees it.
@@ -702,12 +703,11 @@ async fn join_to_a_node_off_the_topic_leaves_no_connection() -> Result {
     eventually(SETTLE, "a connection was left open", closed).await
 }
 
-/// A join that gets no answer while its connection stays open is sent again.
+/// A join that the peer dropped is sent again once the peer closes the connection.
 ///
-/// B joins A before A subscribes to the topic, so A drops the join (#175). The
-/// connection stays open, so no close makes B retry, and B waited forever. A
-/// join on a connection that died after a newer one replaced it is lost the
-/// same way.
+/// B joins A before A subscribes to the topic, so A drops the join (#175). No
+/// topic of A uses B, so A closes the connection after its grace. B then sends
+/// the join once more, on a new connection.
 #[tokio::test(flavor = "multi_thread")]
 #[traced_test]
 async fn unanswered_join_is_sent_again() -> Result {
