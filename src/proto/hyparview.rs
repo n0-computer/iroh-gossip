@@ -356,18 +356,12 @@ where
 
     /// A connection was closed by the peer.
     fn handle_connection_closed(&mut self, peer: PI, io: &mut impl IO<PI>) {
-        let requested = self.pending_neighbor_requests.remove(&peer).is_some();
+        self.pending_neighbor_requests.remove(&peer);
         if self.active_view.contains(&peer) {
             self.remove_active(&peer, RemovalReason::ConnectionClosed, io);
-        } else {
-            if !self.alive_disconnect_peers.remove(&peer) {
-                self.passive_view.remove(&peer);
-                self.peer_data.remove(&peer);
-            }
-            // The request failed with its dial, long before its timer fires.
-            if requested {
-                self.refill_active_from_passive(&[&peer], io);
-            }
+        } else if !self.alive_disconnect_peers.remove(&peer) {
+            self.passive_view.remove(&peer);
+            self.peer_data.remove(&peer);
         }
     }
 
@@ -1065,24 +1059,6 @@ mod tests {
             "the new request ended"
         );
         assert!(state.passive_view.contains(&1), "the peer was dropped");
-    }
-
-    /// A request whose dial failed is replaced by one to another passive peer.
-    ///
-    /// The request timer is long enough for a slow dial, so it must not be
-    /// what moves on from a peer we cannot reach.
-    #[test]
-    fn failed_dial_of_a_request_refills_at_once() {
-        let mut state = new_state();
-        let io = &mut Io::new();
-        state.passive_view.insert(1);
-        state.passive_view.insert(2);
-        state.send_neighbor(1, Priority::High, io);
-        io.clear();
-
-        state.handle(InEvent::PeerDisconnected(1), io);
-
-        assert!(sent_neighbor(io, 2), "no request to another passive peer");
     }
 
     /// A passive peer whose neighbor request timed out loses its metadata.
