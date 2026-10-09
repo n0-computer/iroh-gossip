@@ -497,7 +497,6 @@ async fn repeated_vanish_and_restart() -> Result {
 /// Shutting down twice, or twice at once, succeeds.
 #[tokio::test(flavor = "multi_thread")]
 #[traced_test]
-#[ignore = "not yet passing"]
 async fn repeated_shutdown_succeeds() -> Result {
     let lookup = MemoryLookup::new();
     let a = Node::spawn(&lookup).await?;
