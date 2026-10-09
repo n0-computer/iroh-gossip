@@ -82,6 +82,8 @@ impl<PI: Serialize> Message<PI> {
 #[derive(Clone, Debug)]
 pub struct Timer<PI> {
     topic: TopicId,
+    /// The instance of the topic that armed the timer.
+    instance: u64,
     timer: topic::Timer<PI>,
 }
 
@@ -133,7 +135,7 @@ impl<PI> From<InEvent<PI>> for InEventMapped<PI> {
             InEvent::Command(topic, command) => {
                 Self::TopicEvent(topic, topic::InEvent::Command(command))
             }
-            InEvent::TimerExpired(Timer { topic, timer }) => {
+            InEvent::TimerExpired(Timer { topic, timer, .. }) => {
                 Self::TopicEvent(topic, topic::InEvent::TimerExpired(timer))
             }
             InEvent::PeerDisconnected(peer) => Self::All(topic::InEvent::PeerDisconnected(peer)),
@@ -159,6 +161,9 @@ pub struct State<PI, R> {
     states: HashMap<TopicId, topic::State<PI, R>>,
     outbox: Outbox<PI>,
     peer_topics: ConnsMap<PI>,
+    /// The instance of each joined topic, so that the timers of a former one do nothing.
+    instances: HashMap<TopicId, u64>,
+    next_instance: u64,
 }
 
 impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
@@ -185,6 +190,8 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
             states: Default::default(),
             outbox: Default::default(),
             peer_topics: Default::default(),
+            instances: Default::default(),
+            next_instance: 0,
         }
     }
 
@@ -241,6 +248,13 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
             track_in_event(&event, metrics);
         }
 
+        // A timer of a topic we quit, or of its former instance, is stale.
+        if let InEvent::TimerExpired(timer) = &event {
+            if self.instances.get(&timer.topic) != Some(&timer.instance) {
+                return self.outbox.drain(..);
+            }
+        }
+
         let event: InEventMapped<PI> = event.into();
 
         match event {
@@ -248,6 +262,8 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
                 // when receiving a join command, initialize state if it doesn't exist
                 if matches!(&event, topic::InEvent::Command(Command::Join(_peers))) {
                     if let hash_map::Entry::Vacant(e) = self.states.entry(topic) {
+                        self.next_instance += 1;
+                        self.instances.insert(topic, self.next_instance);
                         e.insert(topic::State::with_rng(
                             self.me,
                             Some(self.me_data.clone()),
@@ -276,6 +292,11 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
 
                 if quit {
                     self.states.remove(&topic);
+                    self.instances.remove(&topic);
+                    self.peer_topics.retain(|_, topics| {
+                        topics.remove(&topic);
+                        !topics.is_empty()
+                    });
                 }
             }
             // when a peer disconnected on the network level, forward event to all states
@@ -301,6 +322,12 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
             }
         }
 
+        for event in self.outbox.iter_mut() {
+            if let OutEvent::ScheduleTimer(_, timer) = event {
+                timer.instance = self.instances.get(&timer.topic).copied().unwrap_or(0);
+            }
+        }
+
         // track metrics
         if let Some(metrics) = &metrics {
             track_out_events(&self.outbox, metrics);
@@ -323,7 +350,13 @@ fn handle_out_event<PI: PeerIdentity>(
         }
         topic::OutEvent::EmitEvent(event) => outbox.push(OutEvent::EmitEvent(topic, event)),
         topic::OutEvent::ScheduleTimer(delay, timer) => {
-            outbox.push(OutEvent::ScheduleTimer(delay, Timer { topic, timer }))
+            // `State::handle` sets the instance.
+            let timer = Timer {
+                topic,
+                instance: 0,
+                timer,
+            };
+            outbox.push(OutEvent::ScheduleTimer(delay, timer))
         }
         topic::OutEvent::DisconnectPeer(peer) => {
             // The connection is shared by every topic that uses the peer.

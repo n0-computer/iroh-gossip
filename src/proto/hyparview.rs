@@ -368,20 +368,19 @@ where
                 "{peer:?} is in both views"
             );
         }
-        // Not yet holding:
-        // for peer in self.peer_data.keys() {
-        //     // A forwarded join stores the peer's data while our request to it is out.
-        //     assert!(
-        //         in_a_view(peer) || self.pending_neighbor_requests.contains(peer),
-        //         "data kept for {peer:?}, which is in no view and not asked"
-        //     );
-        // }
-        // for peer in self.alive_disconnect_peers.iter() {
-        //     assert!(
-        //         self.passive_view.contains(peer),
-        //         "{peer:?} marked alive but not passive"
-        //     );
-        // }
+        for peer in self.peer_data.keys() {
+            // A forwarded join stores the peer's data while our request to it is out.
+            assert!(
+                in_a_view(peer) || self.pending_neighbor_requests.contains_key(peer),
+                "data kept for {peer:?}, which is in no view and not asked"
+            );
+        }
+        for peer in self.alive_disconnect_peers.iter() {
+            assert!(
+                self.passive_view.contains(peer),
+                "{peer:?} marked alive but not passive"
+            );
+        }
     }
 
     fn handle_message(&mut self, from: PI, message: Message<PI>, io: &mut impl IO<PI>) {
@@ -444,6 +443,10 @@ where
             self.active_view.remove(&peer);
             self.send_disconnect(peer, false, io);
         }
+        self.pending_neighbor_requests.clear();
+        self.passive_view = IndexSet::new();
+        self.peer_data.clear();
+        self.alive_disconnect_peers.clear();
     }
 
     fn send_disconnect(&mut self, peer: PI, alive: bool, io: &mut impl IO<PI>) {
@@ -565,6 +568,9 @@ where
     }
 
     fn insert_peer_info(&mut self, peer_info: PeerInfo<PI>, io: &mut impl IO<PI>) {
+        if peer_info.id == self.me {
+            return;
+        }
         if let Some(data) = peer_info.data {
             let old = self.peer_data.remove(&peer_info.id);
             let same = matches!(old, Some(old) if old == data);
@@ -857,6 +863,7 @@ where
         io: &mut impl IO<PI>,
     ) {
         self.passive_view.remove(&peer);
+        self.alive_disconnect_peers.remove(&peer);
         if self.active_view.insert(peer) {
             debug!(other = ?peer, "add to active view");
             io.push(OutEvent::EmitEvent(Event::NeighborUp(peer)));
@@ -1266,7 +1273,6 @@ mod tests {
 
     /// A shuffle reply that names us stores no data about us.
     #[test]
-    #[ignore = "not yet passing"]
     fn shuffle_reply_naming_us_stores_nothing_about_us() {
         let mut state = new_state();
         let io = &mut Io::new();
@@ -1287,7 +1293,6 @@ mod tests {
     /// The mark kept the peer in the passive view when its connection closed.
     /// Kept on a neighbor, it made a later crash look like a graceful leave.
     #[test]
-    #[ignore = "not yet passing"]
     fn returning_neighbor_loses_the_alive_mark() {
         let mut state = new_state();
         let io = &mut Io::new();
@@ -1307,7 +1312,6 @@ mod tests {
 
     /// A quit leaves nothing about any peer behind.
     #[test]
-    #[ignore = "not yet passing"]
     fn quit_leaves_nothing_behind() {
         let mut state = new_state();
         let io = &mut Io::new();

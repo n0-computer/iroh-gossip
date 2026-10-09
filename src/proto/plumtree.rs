@@ -445,10 +445,9 @@ impl<PI: PeerIdentity> State<PI> {
                 "announcements queued for {peer:?}, which is no peer"
             );
         }
-        // Not yet holding:
-        // for (id, ihaves) in self.missing_messages.iter() {
-        //     assert!(!ihaves.is_empty(), "no announcer left for missing {id:?}");
-        // }
+        for (id, ihaves) in self.missing_messages.iter() {
+            assert!(!ihaves.is_empty(), "no announcer left for missing {id:?}");
+        }
     }
 
     /// Get access to the [`Stats`] of the plumtree.
@@ -463,8 +462,13 @@ impl<PI: PeerIdentity> State<PI> {
         } else {
             self.stats.control_messages_received += 1;
         }
+        // A message from a non-neighbor is a straggler from a former one. Deliver
+        // its payload, but let it change nothing else.
+        let from_peer =
+            self.eager_push_peers.contains(&sender) || self.lazy_push_peers.contains(&sender);
         match message {
-            Message::Gossip(details) => self.on_gossip(sender, details, now, io),
+            Message::Gossip(details) => self.on_gossip(sender, from_peer, details, now, io),
+            _ if !from_peer => {}
             Message::Prune => self.on_prune(sender),
             Message::IHave(details) => self.on_ihave(sender, details, io),
             Message::Graft(details) => self.on_graft(sender, details, io),
@@ -515,7 +519,14 @@ impl<PI: PeerIdentity> State<PI> {
     }
 
     /// Handle receiving a [`Message::Gossip`].
-    fn on_gossip(&mut self, sender: PI, message: Gossip, now: Instant, io: &mut impl IO<PI>) {
+    fn on_gossip(
+        &mut self,
+        sender: PI,
+        from_peer: bool,
+        message: Gossip,
+        now: Instant,
+        io: &mut impl IO<PI>,
+    ) {
         // Validate that the message id is the blake3 hash of the message content.
         if !message.validate() {
             // TODO: Do we want to take any measures against the sender if we received a message
@@ -530,8 +541,10 @@ impl<PI: PeerIdentity> State<PI> {
         // if we already received this message: move peer to lazy set
         // and notify peer about this.
         if self.received_messages.contains_key(&message.id) {
-            self.add_lazy(sender);
-            io.push(OutEvent::SendMessage(sender, Message::Prune));
+            if from_peer {
+                self.add_lazy(sender);
+                io.push(OutEvent::SendMessage(sender, Message::Prune));
+            }
         // otherwise store the message, emit to application and forward to peers
         } else {
             if let DeliveryScope::Swarm(prev_round) = message.scope {
@@ -558,7 +571,7 @@ impl<PI: PeerIdentity> State<PI> {
                 self.graft_timer_scheduled.remove(&message.id);
                 let previous_ihaves = self.missing_messages.remove(&message.id);
                 // do the optimization step from the paper
-                if let Some(previous_ihaves) = previous_ihaves {
+                if let Some(previous_ihaves) = previous_ihaves.filter(|_| from_peer) {
                     self.optimize_tree(&sender, &message, previous_ihaves, io);
                 }
                 self.stats.max_last_delivery_hop =
@@ -654,6 +667,13 @@ impl<PI: PeerIdentity> State<PI> {
             .missing_messages
             .get_mut(&id)
             .and_then(|entries| entries.pop_front());
+        if self
+            .missing_messages
+            .get(&id)
+            .is_some_and(VecDeque::is_empty)
+        {
+            self.missing_messages.remove(&id);
+        }
         if let Some((peer, round)) = entry {
             self.add_eager(peer);
             let message = Message::Graft(Graft {
@@ -969,7 +989,6 @@ mod test {
     /// Such a message is a straggler from a former neighbor. A `Graft` taken
     /// from one made it eager, and every later broadcast dialed it.
     #[test]
-    #[ignore = "not yet passing"]
     fn non_neighbor_does_not_become_a_peer() {
         let mut io: VecDeque<crate::proto::topic::OutEvent<u32>> = VecDeque::new();
         let mut state = State::new(1u32, Config::default(), 1024);
@@ -1079,7 +1098,6 @@ mod test {
 
     /// A missing message leaves no entry once we asked its last announcer.
     #[test]
-    #[ignore = "not yet passing"]
     fn last_graft_leaves_no_missing_entry() {
         let mut io = VecDeque::new();
         let mut state = State::new(1u32, Config::default(), 1024);
@@ -1099,7 +1117,6 @@ mod test {
 
     /// A late payload from a non-neighbor does not make it a peer, even with a better `IHave`.
     #[test]
-    #[ignore = "not yet passing"]
     fn late_payload_with_a_better_ihave_does_not_readd_its_sender() {
         let now = Instant::now();
         let mut state = State::new(0u32, Config::default(), 1024);
