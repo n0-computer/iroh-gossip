@@ -576,7 +576,11 @@ impl Actor {
     ) {
         // The receive loop sends its messages before its task ends. Handle the ones
         // still queued first, so that a message never comes after its own close.
-        while let Ok(event) = self.in_event_rx.try_recv() {
+        // Only those: other connections can refill the queue while we handle it.
+        for _ in 0..self.in_event_rx.len() {
+            let Ok(event) = self.in_event_rx.try_recv() else {
+                break;
+            };
             self.handle_in_event(event, Instant::now()).await;
         }
         if conn.close_reason().is_none() {
@@ -1788,6 +1792,54 @@ pub(crate) mod tests {
             .await
             .std_context("the bad header ended the receive loop")?;
         assert!(matches!(event, Some(InEvent::RecvMessage(..))), "{event:?}");
+        Ok(())
+    }
+
+    /// A close handles the messages queued before it, not those that arrive meanwhile.
+    ///
+    /// Other connections can refill the queue as fast as the actor handles it.
+    #[tokio::test(flavor = "multi_thread")]
+    #[traced_test]
+    async fn close_does_not_wait_for_an_empty_queue() -> Result {
+        let (ours, conn, _peer_conn, _peer) = connected_pair().await?;
+        let peer = conn.remote_id();
+        let (mut actor, _rpc_tx, _local_tx) = Actor::new(
+            ours,
+            Default::default(),
+            Default::default(),
+            None,
+            Default::default(),
+        );
+        conn.close(0u32.into(), b"done");
+        actor.handle_connection(peer, ConnOrigin::Accept, conn);
+        let (peer, conn, result) = actor
+            .connection_tasks
+            .join_next()
+            .await
+            .expect("one task")
+            .expect("no panic");
+
+        // Another connection: it sends ten full queues, as fast as the actor takes them.
+        let in_event_tx = actor.in_event_tx.clone();
+        let other = SecretKey::generate().public();
+        let producer = AbortOnDropHandle::new(spawn(async move {
+            for _ in 0..10 * IN_EVENT_CAP {
+                in_event_tx
+                    .send(InEvent::PeerDisconnected(other))
+                    .await
+                    .expect("actor alive");
+            }
+        }));
+        while actor.in_event_rx.len() < IN_EVENT_CAP {
+            tokio::task::yield_now().await;
+        }
+        actor
+            .handle_connection_task_finished(peer, conn, result)
+            .await;
+        assert!(
+            !producer.is_finished(),
+            "the close waited for an empty queue"
+        );
         Ok(())
     }
 
