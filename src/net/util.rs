@@ -17,7 +17,7 @@ use n0_future::{
     time::{sleep_until, Instant},
     FuturesUnordered, StreamExt,
 };
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Serialize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::{mpsc, watch},
@@ -55,18 +55,39 @@ pub(crate) enum WriteError {
     TooLarge {},
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// The first frame of a stream: the topic of its messages, and a byte of flags.
+///
+/// Nodes up to 0.101 send the topic alone, and ignore the flags when they read
+/// a header, as they ignore the rest of a frame.
+#[derive(Debug)]
 pub(crate) struct StreamHeader {
     pub(crate) topic_id: TopicId,
+    /// Whether the sender drops its state for a peer whose connection closes.
+    ///
+    /// A node without it loses every later message to a peer that closes a
+    /// connection that is no neighbor link of the node. So we close no
+    /// connection on which the peer did not send it.
+    pub(crate) handles_close: bool,
 }
 
+/// The flag of [`StreamHeader::handles_close`].
+const HANDLES_CLOSE: u8 = 1;
+
 impl StreamHeader {
+    /// Returns the header that we send on a stream for `topic_id`.
+    pub(crate) fn new(topic_id: TopicId) -> Self {
+        Self {
+            topic_id,
+            handles_close: true,
+        }
+    }
+
     pub(crate) async fn read(
         stream: &mut RecvStream,
         buffer: &mut BytesMut,
         max_message_size: usize,
     ) -> Result<Self, ReadError> {
-        let header: Self = read_frame(stream, buffer, max_message_size)
+        let frame = read_lp(stream, buffer, max_message_size)
             .await?
             .ok_or_else(|| {
                 ReadError::from(io::Error::new(
@@ -74,7 +95,15 @@ impl StreamHeader {
                     "stream ended before header",
                 ))
             })?;
-        Ok(header)
+        Self::decode(&frame)
+    }
+
+    fn decode(frame: &[u8]) -> Result<Self, ReadError> {
+        let (topic_id, rest) = postcard::take_from_bytes::<TopicId>(frame)?;
+        Ok(Self {
+            topic_id,
+            handles_close: rest.first().is_some_and(|flags| flags & HANDLES_CLOSE != 0),
+        })
     }
 
     pub(crate) async fn write(
@@ -83,7 +112,8 @@ impl StreamHeader {
         buffer: &mut Vec<u8>,
         max_message_size: usize,
     ) -> Result<(), WriteError> {
-        write_frame(stream, &self, buffer, max_message_size).await?;
+        let flags = if self.handles_close { HANDLES_CLOSE } else { 0 };
+        write_frame(stream, &(self.topic_id, flags), buffer, max_message_size).await?;
         Ok(())
     }
 }
@@ -93,6 +123,8 @@ pub(crate) struct RecvLoop {
     conn: Connection,
     max_message_size: usize,
     in_event_tx: mpsc::Sender<InEvent>,
+    /// Whether a stream header of the peer had [`StreamHeader::handles_close`].
+    handles_close: watch::Sender<bool>,
 }
 
 impl RecvLoop {
@@ -107,7 +139,13 @@ impl RecvLoop {
             conn,
             max_message_size,
             in_event_tx,
+            handles_close: watch::channel(false).0,
         }
+    }
+
+    /// Returns whether the peer handles a close of this connection, as it learns it.
+    pub(crate) fn handles_close(&self) -> watch::Receiver<bool> {
+        self.handles_close.subscribe()
     }
 
     pub(crate) async fn run(&mut self) -> Result<(), ReadError> {
@@ -130,6 +168,9 @@ impl RecvLoop {
                     };
                     let state = RecvStreamState::new(stream, self.max_message_size).await?;
                     debug!(topic=%state.header.topic_id.fmt_short(), "stream opened");
+                    if state.header.handles_close {
+                        self.handles_close.send_replace(true);
+                    }
                     read_futures.push(state.next());
                 }
                 Some(res) = read_futures.next(), if !read_futures.is_empty() => {
@@ -325,7 +366,7 @@ impl SendLoop {
             hash_map::Entry::Occupied(entry) => entry,
             hash_map::Entry::Vacant(entry) => {
                 let mut stream = self.conn.open_uni().await?;
-                let header = StreamHeader { topic_id };
+                let header = StreamHeader::new(topic_id);
                 header
                     .write(&mut stream, &mut self.buffer, self.max_message_size)
                     .await?;
@@ -476,5 +517,37 @@ impl<T> Timers<T> {
     /// Pops the earliest timer that expires at or before `now`.
     pub fn pop_before(&mut self, now: Instant) -> Option<(Instant, T)> {
         self.map.pop_before(now)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde::Deserialize;
+
+    use super::*;
+
+    /// The header as nodes up to 0.101 encode and decode it.
+    #[derive(Debug, Serialize, Deserialize)]
+    struct OldStreamHeader {
+        topic_id: TopicId,
+    }
+
+    /// Old and new nodes read the stream headers of each other.
+    #[test]
+    fn stream_header_works_across_versions() {
+        let topic_id: TopicId = [7; 32].into();
+        let new = postcard::to_stdvec(&(topic_id, HANDLES_CLOSE)).expect("encode");
+        let old = postcard::to_stdvec(&OldStreamHeader { topic_id }).expect("encode");
+
+        let read_by_old: OldStreamHeader = postcard::from_bytes(&new).expect("old reads new");
+        assert_eq!(read_by_old.topic_id, topic_id);
+
+        let header = StreamHeader::decode(&old).expect("new reads old");
+        assert_eq!(header.topic_id, topic_id);
+        assert!(!header.handles_close);
+
+        let header = StreamHeader::decode(&new).expect("new reads new");
+        assert_eq!(header.topic_id, topic_id);
+        assert!(header.handles_close);
     }
 }
