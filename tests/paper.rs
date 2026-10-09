@@ -317,7 +317,6 @@ fn hyparview_failed_neighbors_leave_active_views_at_once() {
 /// No shuffle and no maintenance pass runs after the failure. Only the
 /// reactive repair of 4.3 and the broadcast repair of Plumtree heal the swarm.
 #[test]
-#[ignore = "fails on some seeds: the first shuffle comes a minute after a join"]
 fn hyparview_delivers_through_failure_without_waiting_to_heal() {
     let peers = swarm_size(PEERS);
     const MESSAGES: usize = 30;
@@ -375,7 +374,6 @@ fn hyparview_delivers_through_failure_without_waiting_to_heal() {
 /// Measured over 50 seeds at 80 percent: one seed loses one survivor, and
 /// delivery averages 99.97 percent.
 #[test]
-#[ignore = "fails on some seeds: the first shuffle comes a minute after a join"]
 fn hyparview_survives_massive_simultaneous_failure() {
     let peers = swarm_size(400);
 
@@ -549,7 +547,6 @@ fn hyparview_isolated_peer_rejoins_through_its_bootstrap_peer() {
 /// connected, and that every survivor has at least two neighbors, as in a
 /// healthy swarm. A broadcast at that moment must reach every survivor.
 #[test]
-#[ignore = "fails on some seeds: the first shuffle comes a minute after a join"]
 fn hyparview_heals_without_waiting_for_a_shuffle() {
     let peers = swarm_size(PEERS);
     /// One-way link latencies allowed until the overlay is whole again.
@@ -921,7 +918,6 @@ fn plumtree_delivery_holds_under_a_constant_failure_rate() {
 /// several links. The test uses 400ms, and
 /// `plumtree_graft_timeout_below_the_eager_path_costs_redundancy` pins down why.
 #[test]
-#[ignore = "fails on some seeds: the first shuffle comes a minute after a join"]
 fn plumtree_recovers_from_massive_failure() {
     let peers = swarm_size(400);
     const ROUNDS: usize = 15;
