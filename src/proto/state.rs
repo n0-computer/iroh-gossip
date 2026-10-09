@@ -82,6 +82,8 @@ impl<PI: Serialize> Message<PI> {
 #[derive(Clone, Debug)]
 pub struct Timer<PI> {
     topic: TopicId,
+    /// The instance of the topic that armed the timer.
+    instance: u64,
     timer: topic::Timer<PI>,
 }
 
@@ -133,7 +135,7 @@ impl<PI> From<InEvent<PI>> for InEventMapped<PI> {
             InEvent::Command(topic, command) => {
                 Self::TopicEvent(topic, topic::InEvent::Command(command))
             }
-            InEvent::TimerExpired(Timer { topic, timer }) => {
+            InEvent::TimerExpired(Timer { topic, timer, .. }) => {
                 Self::TopicEvent(topic, topic::InEvent::TimerExpired(timer))
             }
             InEvent::PeerDisconnected(peer) => Self::All(topic::InEvent::PeerDisconnected(peer)),
@@ -159,6 +161,9 @@ pub struct State<PI, R> {
     states: HashMap<TopicId, topic::State<PI, R>>,
     outbox: Outbox<PI>,
     peer_topics: ConnsMap<PI>,
+    /// The instance of each joined topic, so that the timers of a former one do nothing.
+    instances: HashMap<TopicId, u64>,
+    next_instance: u64,
 }
 
 impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
@@ -185,6 +190,8 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
             states: Default::default(),
             outbox: Default::default(),
             peer_topics: Default::default(),
+            instances: Default::default(),
+            next_instance: 0,
         }
     }
 
@@ -215,6 +222,12 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
         self.states.iter()
     }
 
+    /// Returns whether a topic uses `peer`, so that its connections must stay.
+    #[cfg(feature = "net")]
+    pub(crate) fn uses_peer(&self, peer: &PI) -> bool {
+        self.peer_topics.contains_key(peer)
+    }
+
     /// Check if a topic has any active (connected) peers.
     pub fn has_active_peers(&self, topic: &TopicId) -> bool {
         self.state(topic)
@@ -241,6 +254,12 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
             track_in_event(&event, metrics);
         }
 
+        // A timer of a topic we quit, or of its former instance, is stale.
+        if let InEvent::TimerExpired(timer) = &event {
+            if self.instances.get(&timer.topic) != Some(&timer.instance) {
+                return self.outbox.drain(..);
+            }
+        }
         let event: InEventMapped<PI> = event.into();
 
         match event {
@@ -248,6 +267,8 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
                 // when receiving a join command, initialize state if it doesn't exist
                 if matches!(&event, topic::InEvent::Command(Command::Join(_peers))) {
                     if let hash_map::Entry::Vacant(e) = self.states.entry(topic) {
+                        self.next_instance += 1;
+                        self.instances.insert(topic, self.next_instance);
                         e.insert(topic::State::with_rng(
                             self.me,
                             Some(self.me_data.clone()),
@@ -263,9 +284,9 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
 
                 // pass the event to the state handler
                 if let Some(state) = self.states.get_mut(&topic) {
-                    // when receiving messages, update our conn map to take note that this topic state may want
-                    // to keep this connection
-                    if let topic::InEvent::RecvMessage(from, _message) = &event {
+                    // A HyParView message makes the topic use the peer. A Plumtree message
+                    // does not: it can be a straggler from a peer that we dropped.
+                    if let topic::InEvent::RecvMessage(from, topic::Message::Swarm(_)) = &event {
                         self.peer_topics.entry(*from).or_default().insert(topic);
                     }
                     let out = state.handle(event, now);
@@ -276,6 +297,19 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
 
                 if quit {
                     self.states.remove(&topic);
+                    self.instances.remove(&topic);
+                    // A peer the topic only sent to, such as an unanswered join, has no
+                    // other way out.
+                    let mut unused = Vec::new();
+                    for (peer, topics) in self.peer_topics.iter_mut() {
+                        if topics.remove(&topic) && topics.is_empty() {
+                            unused.push(*peer);
+                        }
+                    }
+                    for peer in unused {
+                        self.peer_topics.remove(&peer);
+                        self.outbox.push(OutEvent::DisconnectPeer(peer));
+                    }
                 }
             }
             // when a peer disconnected on the network level, forward event to all states
@@ -301,6 +335,12 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
             }
         }
 
+        for event in self.outbox.iter_mut() {
+            if let OutEvent::ScheduleTimer(_, timer) = event {
+                timer.instance = self.instances.get(&timer.topic).copied().unwrap_or(0);
+            }
+        }
+
         // track metrics
         if let Some(metrics) = &metrics {
             track_out_events(&self.outbox, metrics);
@@ -319,11 +359,21 @@ fn handle_out_event<PI: PeerIdentity>(
     trace!("out: {event:?}");
     match event {
         topic::OutEvent::SendMessage(to, message) => {
+            // HyParView may send to a peer that is no neighbor yet. The topic uses it from then on.
+            if matches!(message, topic::Message::Swarm(_)) {
+                conns.entry(to).or_default().insert(topic);
+            }
             outbox.push(OutEvent::SendMessage(to, Message { topic, message }))
         }
         topic::OutEvent::EmitEvent(event) => outbox.push(OutEvent::EmitEvent(topic, event)),
         topic::OutEvent::ScheduleTimer(delay, timer) => {
-            outbox.push(OutEvent::ScheduleTimer(delay, Timer { topic, timer }))
+            // `State::handle` sets the instance.
+            let timer = Timer {
+                topic,
+                instance: 0,
+                timer,
+            };
+            outbox.push(OutEvent::ScheduleTimer(delay, timer))
         }
         topic::OutEvent::DisconnectPeer(peer) => {
             // The connection is shared by every topic that uses the peer.
@@ -395,20 +445,47 @@ mod tests {
     use rand::rngs::StdRng;
 
     use super::*;
-    use crate::proto::plumtree;
+    use crate::proto::{hyparview, plumtree};
 
     /// Handles `event` and drops what it produces.
     fn handle(state: &mut State<u32, StdRng>, event: InEvent<u32>) {
         state.handle(event, Instant::now(), None).for_each(drop);
     }
 
-    /// A peer that never became a neighbor is removed from `peer_topics`.
+    /// Quitting a topic disconnects a peer the topic only sent a join to.
     ///
-    /// Such a peer only relayed a message to us. No topic disconnects it, so
-    /// nothing else removes the entry. We only ever see such a peer's messages
-    /// for topics we joined, so the test joins the topic first.
+    /// The peer is not on the topic and never answers, so nothing else ever
+    /// dropped it.
     #[test]
-    fn peer_disconnected_prunes_peer_topics() {
+    fn quit_disconnects_a_peer_it_only_sent_to() {
+        let mut state = State::new(
+            0u32,
+            PeerData::default(),
+            Config::default(),
+            StdRng::seed_from_u64(1),
+        );
+        let topic: TopicId = [0u8; 32].into();
+        handle(&mut state, InEvent::Command(topic, Command::Join(vec![1])));
+
+        let out: Vec<_> = state
+            .handle(InEvent::Command(topic, Command::Quit), Instant::now(), None)
+            .collect();
+
+        assert!(
+            out.iter()
+                .any(|event| matches!(event, OutEvent::DisconnectPeer(1))),
+            "{out:?}"
+        );
+        assert!(state.peer_topics.is_empty());
+    }
+
+    /// A Plumtree message from a non-neighbor makes no topic use the peer.
+    ///
+    /// It is a straggler from a peer that we dropped. If it made an entry, the
+    /// entry would keep the peer's connection open. We only ever see such a
+    /// peer's messages for topics we joined, so the test joins the topic first.
+    #[test]
+    fn plumtree_message_from_a_non_neighbor_uses_no_peer() {
         let mut state = State::new(
             0u32,
             PeerData::default(),
@@ -423,11 +500,71 @@ mod tests {
             message: topic::Message::Gossip(plumtree::Message::Prune),
         };
         handle(&mut state, InEvent::RecvMessage(peer, message));
-        assert!(state.peer_topics.contains_key(&peer));
-
-        handle(&mut state, InEvent::PeerDisconnected(peer));
-
         assert!(!state.peer_topics.contains_key(&peer));
+    }
+
+    /// A timer of a topic that we quit does nothing to the topic we joined again.
+    ///
+    /// The new topic state starts its request ids at zero again, so the old
+    /// timer has the id of the new request.
+    #[test]
+    fn timer_from_a_quit_topic_does_nothing_to_its_replacement() {
+        let mut state = State::new(
+            0u32,
+            PeerData::default(),
+            Config::default(),
+            StdRng::seed_from_u64(0),
+        );
+        let topic: TopicId = [1; 32].into();
+        let join = || InEvent::Command(topic, Command::Join(vec![]));
+        // A shuffle reply names peer 2, and the refill sends it a `Neighbor`.
+        let reply = || {
+            let reply = hyparview::Message::test_shuffle_reply_with(vec![2]);
+            InEvent::RecvMessage(
+                1,
+                Message {
+                    topic,
+                    message: topic::Message::Swarm(reply),
+                },
+            )
+        };
+        let now = Instant::now();
+        let request_timer = |out: Vec<OutEvent<u32>>| {
+            out.into_iter()
+                .find_map(|event| match event {
+                    OutEvent::ScheduleTimer(_, timer)
+                        if matches!(
+                            &timer.timer,
+                            topic::Timer::Swarm(hyparview::Timer::PendingNeighborRequest(2, _))
+                        ) =>
+                    {
+                        Some(timer)
+                    }
+                    _ => None,
+                })
+                .expect("a neighbor request to peer 2")
+        };
+        handle(&mut state, join());
+        let old = request_timer(state.handle(reply(), now, None).collect());
+        handle(&mut state, InEvent::Command(topic, Command::Quit));
+        handle(&mut state, join());
+        let current = request_timer(state.handle(reply(), now, None).collect());
+        let disconnects = |out: &[OutEvent<u32>]| {
+            out.iter()
+                .any(|event| matches!(event, OutEvent::DisconnectPeer(2)))
+        };
+
+        let out: Vec<_> = state
+            .handle(InEvent::TimerExpired(old), now, None)
+            .collect();
+        assert!(
+            !disconnects(&out),
+            "the old timer ended the new request: {out:?}"
+        );
+        let out: Vec<_> = state
+            .handle(InEvent::TimerExpired(current), now, None)
+            .collect();
+        assert!(disconnects(&out), "the request did not time out: {out:?}");
     }
 
     /// Leaving one topic must not disconnect a peer another topic still uses.
@@ -450,5 +587,59 @@ mod tests {
         handle_out_event(topic_b, event, &mut conns, &mut outbox);
         assert!(matches!(outbox[..], [OutEvent::DisconnectPeer(p)] if p == peer));
         assert!(!conns.contains_key(&peer));
+    }
+
+    /// A disconnect reaches the network layer for a peer we only sent to.
+    ///
+    /// A shuffle reply goes to a peer we never received from, and the topic
+    /// disconnects it right after.
+    #[test]
+    fn disconnect_peer_after_sending_only() {
+        let topic: TopicId = [1u8; 32].into();
+        let peer = 1u32;
+        let mut conns = ConnsMap::default();
+        let mut outbox = Outbox::new();
+
+        let reply = hyparview::Message::test_shuffle_reply_with(Vec::new());
+        let message = topic::Message::Swarm(reply);
+        handle_out_event(
+            topic,
+            topic::OutEvent::SendMessage(peer, message),
+            &mut conns,
+            &mut outbox,
+        );
+        handle_out_event(
+            topic,
+            topic::OutEvent::DisconnectPeer(peer),
+            &mut conns,
+            &mut outbox,
+        );
+
+        assert!(
+            matches!(outbox[..], [OutEvent::SendMessage(..), OutEvent::DisconnectPeer(p)] if p == peer),
+            "{outbox:?}"
+        );
+        assert!(!conns.contains_key(&peer));
+    }
+
+    /// A closed connection ends the use of the peer by every topic.
+    ///
+    /// A join whose dial fails gets no `DisconnectPeer` from the topic, as the
+    /// peer never was a neighbor. Only the close clears its entry.
+    #[test]
+    fn peer_disconnected_prunes_a_peer_we_only_sent_to() {
+        let mut state = State::new(
+            0u32,
+            PeerData::default(),
+            Config::default(),
+            StdRng::seed_from_u64(1),
+        );
+        let topic: TopicId = [0u8; 32].into();
+        handle(&mut state, InEvent::Command(topic, Command::Join(vec![1])));
+        assert!(state.peer_topics.contains_key(&1));
+
+        handle(&mut state, InEvent::PeerDisconnected(1));
+
+        assert!(state.peer_topics.is_empty());
     }
 }

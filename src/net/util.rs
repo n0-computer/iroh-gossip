@@ -20,9 +20,9 @@ use n0_future::{
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    sync::mpsc,
+    sync::{mpsc, watch},
 };
-use tracing::{debug, trace, Instrument};
+use tracing::{debug, trace, warn, Instrument};
 
 use super::{InEvent, ProtoMessage};
 use crate::proto::{util::TimerMap, TopicId};
@@ -202,6 +202,8 @@ pub(crate) struct SendLoop {
     max_message_size: usize,
     finishing: JoinSet<()>,
     send_rx: mpsc::Receiver<ProtoMessage>,
+    /// Whether a message is queued or written, or a stream is not yet finished.
+    sending: watch::Sender<bool>,
 }
 
 impl SendLoop {
@@ -217,27 +219,49 @@ impl SendLoop {
             streams: Default::default(),
             finishing: Default::default(),
             send_rx,
+            sending: watch::channel(false).0,
         }
     }
 
+    /// Returns whether the loop still has data to send, as it changes.
+    pub(crate) fn sending(&self) -> watch::Receiver<bool> {
+        self.sending.subscribe()
+    }
+
+    fn set_sending(&self, sending: bool) {
+        self.sending
+            .send_if_modified(|current| std::mem::replace(current, sending) != sending);
+    }
+
     pub(crate) async fn run(&mut self, queue: Vec<ProtoMessage>) -> Result<(), WriteError> {
+        self.set_sending(!queue.is_empty());
         for msg in queue {
-            self.write_message(&msg).await?;
+            self.send(&msg).await?;
         }
         let conn_clone = self.conn.clone();
         let closed = conn_clone.closed();
         tokio::pin!(closed);
         loop {
+            self.set_sending(!self.send_rx.is_empty() || !self.finishing.is_empty());
             tokio::select! {
                 biased;
                 _ = &mut closed => break,
-                Some(msg) = self.send_rx.recv() => self.write_message(&msg).await?,
+                msg = self.send_rx.recv() => match msg {
+                    Some(msg) => {
+                        self.set_sending(true);
+                        self.send(&msg).await?
+                    }
+                    // The actor dropped the sender.
+                    None => break,
+                },
                 _ = self.finishing.join_next(), if !self.finishing.is_empty() => {}
-                else => break,
             }
         }
+        // Nothing reads the queue anymore, so the actor must not fill it.
+        self.send_rx.close();
 
         // Close remaining streams.
+        self.set_sending(!self.streams.is_empty() || !self.finishing.is_empty());
         for (topic_id, mut stream) in self.streams.drain() {
             stream.finish().ok();
             self.finishing.spawn(
@@ -254,7 +278,7 @@ impl SendLoop {
                 self.finishing.len()
             );
             // Wait for the remote to acknowledge all streams are finished.
-            if let Err(_elapsed) = n0_future::time::timeout(Duration::from_secs(5), async move {
+            if let Err(_elapsed) = n0_future::time::timeout(Duration::from_secs(5), async {
                 while self.finishing.join_next().await.is_some() {}
             })
             .await
@@ -262,7 +286,28 @@ impl SendLoop {
                 debug!("not all send streams finished within timeout, abort")
             }
         }
+        self.set_sending(false);
         debug!("send loop closed");
+        Ok(())
+    }
+
+    /// Writes a message, and drops only its stream if the write fails while the connection runs.
+    ///
+    /// The peer stops a stream that it cannot read, for example on a frame over its
+    /// size limit or with a message type that it does not know. The message is lost,
+    /// and the next message of the topic opens a new stream. Returns the error only
+    /// if the connection is gone.
+    async fn send(&mut self, message: &ProtoMessage) -> Result<(), WriteError> {
+        let Err(err) = self.write_message(message).await else {
+            return Ok(());
+        };
+        if self.conn.close_reason().is_some() {
+            return Err(err);
+        }
+        warn!(topic = %message.topic.fmt_short(), "write failed, drop the stream: {err:#}");
+        if let Some(mut stream) = self.streams.remove(&message.topic) {
+            stream.reset(0u32.into()).ok();
+        }
         Ok(())
     }
 

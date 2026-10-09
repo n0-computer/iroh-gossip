@@ -95,6 +95,7 @@ tokio = { version = "1", features = [
     "macros",
     "net",
     "fs",
+    "test-util",
 ] }
 clap = { version = "4", features = ["derive"] }
 humantime-serde = { version = "1.1.1" }
@@ -145,6 +146,11 @@ examples = ["net"]
 name = "sim"
 path = "tests/sim.rs"
 required-features = ["test-utils"]
+
+[[test]]
+name = "e2e"
+path = "tests/e2e.rs"
+required-features = ["net"]
 
 [[bin]]
 name = "sim"
