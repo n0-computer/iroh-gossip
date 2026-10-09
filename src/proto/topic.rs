@@ -96,6 +96,24 @@ pub(crate) fn max_plumtree_size(max_message_size: usize) -> usize {
     max_message_size - 2
 }
 
+/// Returns the largest content that a broadcast takes, so that it fits a frame at every hop.
+///
+/// A broadcast to the neighbors encodes no larger than one to the swarm, so the
+/// limit holds for both.
+#[cfg(feature = "net")]
+pub(crate) fn max_content_size(max_message_size: usize) -> usize {
+    (0..=max_plumtree_size(max_message_size))
+        .rev()
+        .find(|len| broadcast_fits(*len, Scope::Swarm, max_message_size))
+        .unwrap_or(0)
+}
+
+/// Returns whether a broadcast with `content_len` bytes of content fits a frame at every hop.
+#[cfg(feature = "net")]
+pub(crate) fn broadcast_fits(content_len: usize, scope: Scope, max_message_size: usize) -> bool {
+    plumtree::max_gossip_size(content_len, scope) <= max_plumtree_size(max_message_size)
+}
+
 /// A protocol message for a particular topic
 #[derive(From, Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum Message<PI> {
