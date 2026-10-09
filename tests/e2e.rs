@@ -42,6 +42,11 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(3);
 /// grace, five seconds each, and a margin. A send that blocks can hold a
 /// connection up to 20 s, but no test here blocks one.
 const SETTLE: Duration = Duration::from_secs(12);
+/// How long a join that its peer dropped takes to succeed.
+///
+/// The peer closes the connection that no topic of it uses after 5 s, and the
+/// join is sent again on a new connection.
+const JOIN_RETRY_WITHIN: Duration = Duration::from_secs(20);
 
 /// Decides whether a node takes a connection, before gossip sees it.
 type AcceptFilter = Arc<dyn Fn(&Connection) -> bool + Send + Sync>;
@@ -696,6 +701,31 @@ async fn join_to_a_node_off_the_topic_leaves_no_connection() -> Result {
     drop(sb);
     let closed = || open_between(&a, &b) == 0;
     eventually(SETTLE, "a connection was left open", closed).await
+}
+
+/// A join that the peer dropped is sent again once the peer closes the connection.
+///
+/// B joins A before A subscribes to the topic, so A drops the join (#175). No
+/// topic of A uses B, so A closes the connection after its grace. B then sends
+/// the join once more, on a new connection.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn unanswered_join_is_sent_again() -> Result {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (Node::spawn(&lookup).await?, Node::spawn(&lookup).await?);
+    let t = topic("unanswered_join");
+    let mut sb = Sub::new(&b, t, vec![a.id()]).await?;
+    let connected = || open_between(&a, &b) > 0;
+    eventually(PROMPT, "the join did not connect", connected).await?;
+
+    let mut sa = Sub::new(&a, t, vec![]).await?;
+    sb.wait(
+        JOIN_RETRY_WITHIN,
+        |e| matches!(e, Event::NeighborUp(p) if *p == a.id()),
+    )
+    .await?;
+    sa.neighbor_up(b.id()).await?;
+    exchange(&mut sa, &mut sb, b"01").await
 }
 
 /// Repeated joins to one peer before it answers make one neighbor.

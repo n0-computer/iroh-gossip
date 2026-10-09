@@ -98,6 +98,8 @@ pub enum InEvent<PI> {
     TimerExpired(Timer<PI>),
     /// Peer disconnected on the network level.
     PeerDisconnected(PI),
+    /// A dial to a peer failed on the network level.
+    DialFailed(PI),
     /// Update the opaque peer data about yourself.
     UpdatePeerData(PeerData),
 }
@@ -139,6 +141,7 @@ impl<PI> From<InEvent<PI>> for InEventMapped<PI> {
                 Self::TopicEvent(topic, topic::InEvent::TimerExpired(timer))
             }
             InEvent::PeerDisconnected(peer) => Self::All(topic::InEvent::PeerDisconnected(peer)),
+            InEvent::DialFailed(peer) => Self::All(topic::InEvent::DialFailed(peer)),
             InEvent::UpdatePeerData(data) => Self::All(topic::InEvent::UpdatePeerData(data)),
         }
     }
@@ -317,20 +320,25 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
                 if let topic::InEvent::UpdatePeerData(data) = &event {
                     self.me_data = data.clone();
                 }
+                // The network layer dropped the peer already. Clear its entry before a
+                // retried join adds it again, and drop the disconnects that would undo it.
+                let gone = match &event {
+                    topic::InEvent::PeerDisconnected(peer) | topic::InEvent::DialFailed(peer) => {
+                        Some(*peer)
+                    }
+                    _ => None,
+                };
+                if let Some(peer) = gone {
+                    self.peer_topics.remove(&peer);
+                }
                 for (topic, state) in self.states.iter_mut() {
                     let out = state.handle(event.clone(), now);
                     for event in out {
+                        if matches!(event, topic::OutEvent::DisconnectPeer(p) if Some(p) == gone) {
+                            continue;
+                        }
                         handle_out_event(*topic, event, &mut self.peer_topics, &mut self.outbox);
                     }
-                }
-                // If the peer disconnected, make sure to clear its `peer_topics` entry here.
-                // `handle_out_event` does the same, but only for peers that we were neighbors
-                // with. Peers that only relayed a shuffle or forward join to us also have
-                // entries in `peer_topics`, so we clear them here explicitly. This has to
-                // stay after the loop: `handle_out_event` needs the entry to tell whether a
-                // topic's `DisconnectPeer` was the peer's last.
-                if let topic::InEvent::PeerDisconnected(peer) = &event {
-                    self.peer_topics.remove(peer);
                 }
             }
         }
@@ -503,6 +511,106 @@ mod tests {
         assert!(!state.peer_topics.contains_key(&peer));
     }
 
+    /// A closed connection must not make a topic disconnect the peer.
+    ///
+    /// The network layer dropped the peer before it raised the event. A topic
+    /// that held the peer as neighbor still asks to disconnect it, while another
+    /// topic may retry its join to the peer in the same batch. The disconnect
+    /// would drop that retry. The state handles topics in a random order, so
+    /// the test runs several times.
+    #[test]
+    fn peer_disconnected_sends_no_disconnect() {
+        let topic_a: TopicId = [1u8; 32].into();
+        let topic_b: TopicId = [2u8; 32].into();
+        let peer = 1u32;
+        for seed in 0..16 {
+            let mut state = State::new(
+                0u32,
+                PeerData::default(),
+                Config::default(),
+                StdRng::seed_from_u64(seed),
+            );
+            // The peer is our neighbor in `topic_a`: it joined us there.
+            handle(&mut state, InEvent::Command(topic_a, Command::Join(vec![])));
+            let join = Message {
+                topic: topic_a,
+                message: topic::Message::Swarm(hyparview::Message::Join(None)),
+            };
+            handle(&mut state, InEvent::RecvMessage(peer, join));
+            // In `topic_b`, our join to the peer is pending.
+            handle(
+                &mut state,
+                InEvent::Command(topic_b, Command::Join(vec![peer])),
+            );
+
+            let out: Vec<_> = state
+                .handle(InEvent::PeerDisconnected(peer), Instant::now(), None)
+                .collect();
+
+            assert!(
+                !out.iter()
+                    .any(|e| matches!(e, OutEvent::DisconnectPeer(p) if *p == peer)),
+                "the gone peer was disconnected (seed {seed})"
+            );
+            assert!(
+                out.iter()
+                    .any(|e| matches!(e, OutEvent::SendMessage(to, _) if *to == peer)),
+                "the join was not retried (seed {seed})"
+            );
+            // Only the retry in `topic_b` uses the peer now.
+            assert_eq!(
+                state.peer_topics.get(&peer),
+                Some(&HashSet::from([topic_b]))
+            );
+        }
+    }
+
+    /// A join retried after a closed connection disconnects the peer when it gives up.
+    ///
+    /// The retry sends to the peer again, so the topic uses it again. If the
+    /// close cleared the topic's entry after the retry, the disconnect at the
+    /// end would find no entry and the connection would stay open.
+    #[test]
+    fn join_retried_after_a_close_disconnects_when_it_gives_up() {
+        let mut state = State::new(
+            0u32,
+            PeerData::default(),
+            Config::default(),
+            StdRng::seed_from_u64(1),
+        );
+        let topic: TopicId = [0u8; 32].into();
+        let peer = 1u32;
+        handle(
+            &mut state,
+            InEvent::Command(topic, Command::Join(vec![peer])),
+        );
+
+        let mut out: Vec<_> = state
+            .handle(InEvent::PeerDisconnected(peer), Instant::now(), None)
+            .collect();
+        assert!(
+            state.peer_topics.contains_key(&peer),
+            "the retry is not tracked"
+        );
+        for _ in 0..8 {
+            if out
+                .iter()
+                .any(|e| matches!(e, OutEvent::DisconnectPeer(p) if *p == peer))
+            {
+                return;
+            }
+            let timer = out.iter().find_map(|e| match e {
+                OutEvent::ScheduleTimer(_, timer) => Some(timer.clone()),
+                _ => None,
+            });
+            let timer = timer.expect("no join timer left, and no disconnect");
+            out = state
+                .handle(InEvent::TimerExpired(timer), Instant::now(), None)
+                .collect();
+        }
+        panic!("the join never gave up");
+    }
+
     /// A timer of a topic that we quit does nothing to the topic we joined again.
     ///
     /// The new topic state starts its request ids at zero again, so the old
@@ -624,8 +732,7 @@ mod tests {
 
     /// A closed connection ends the use of the peer by every topic.
     ///
-    /// A join whose dial fails gets no `DisconnectPeer` from the topic, as the
-    /// peer never was a neighbor. Only the close clears its entry.
+    /// After the last close the join gives up, and the peer has no entry left.
     #[test]
     fn peer_disconnected_prunes_a_peer_we_only_sent_to() {
         let mut state = State::new(
@@ -638,8 +745,49 @@ mod tests {
         handle(&mut state, InEvent::Command(topic, Command::Join(vec![1])));
         assert!(state.peer_topics.contains_key(&1));
 
-        handle(&mut state, InEvent::PeerDisconnected(1));
+        // A join is sent again once, after the first close.
+        for _ in 0..2 {
+            handle(&mut state, InEvent::PeerDisconnected(1));
+        }
 
         assert!(state.peer_topics.is_empty());
+    }
+
+    /// The join timer of a topic we quit does not end the join of the topic we joined again.
+    #[test]
+    fn timer_from_a_quit_topic_does_not_end_its_replacement_join() {
+        let mut state = State::new(
+            0u32,
+            PeerData::default(),
+            Config::default(),
+            StdRng::seed_from_u64(0),
+        );
+        let topic = [1; 32].into();
+        let join = InEvent::Command(topic, Command::Join(vec![1]));
+        let now = Instant::now();
+        let join_timer = |out: Vec<OutEvent<u32>>| {
+            out.into_iter()
+                .find_map(|event| match event {
+                    OutEvent::ScheduleTimer(_, timer)
+                        if matches!(
+                            &timer.timer,
+                            topic::Timer::Swarm(swarm) if *swarm != hyparview::Timer::DoShuffle
+                        ) =>
+                    {
+                        Some(timer)
+                    }
+                    _ => None,
+                })
+                .expect("join timer")
+        };
+        let old = join_timer(state.handle(join.clone(), now, None).collect());
+        handle(&mut state, InEvent::Command(topic, Command::Quit));
+        let current = join_timer(state.handle(join, now, None).collect());
+        assert!(!state
+            .handle(InEvent::TimerExpired(old), now, None)
+            .any(|event| matches!(event, OutEvent::DisconnectPeer(1))));
+        assert!(state
+            .handle(InEvent::TimerExpired(current), now, None)
+            .any(|event| matches!(event, OutEvent::DisconnectPeer(1))));
     }
 }
