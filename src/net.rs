@@ -360,6 +360,28 @@ impl Actor {
         }
     }
 
+    /// Handles a message from the [`Gossip`] handle, and returns `false` to stop the actor.
+    async fn handle_local_message(&mut self, msg: Option<LocalActorMessage>) -> bool {
+        match msg {
+            Some(LocalActorMessage::Shutdown { reply }) => {
+                debug!("received shutdown message, quit all topics");
+                self.quit_queue.extend(self.topics.keys().copied());
+                self.process_quit_queue().await;
+                debug!("all topics quit, stop gossip actor");
+                reply.send(()).ok();
+                false
+            }
+            Some(LocalActorMessage::HandleConnection(conn)) => {
+                self.handle_connection(conn.remote_id(), ConnOrigin::Accept, conn);
+                true
+            }
+            None => {
+                debug!("all gossip handles dropped, stop gossip actor");
+                false
+            }
+        }
+    }
+
     /// Performs the initial actor setup to run the [`Actor::event_loop`].
     ///
     /// This updates our current address and return it. It also returns the home relay stream and
@@ -380,26 +402,19 @@ impl Actor {
         i: usize,
     ) -> bool {
         self.metrics.actor_tick_main.inc();
+        // A shutdown waits at most for one tick. Each tick still runs the select
+        // below, so other local messages starve no other branch.
+        if let Ok(msg) = self.local_rx.try_recv() {
+            if !self.handle_local_message(Some(msg)).await {
+                return false;
+            }
+        }
         // Not biased: a publisher that always has a command ready would starve the
         // branches after it, such as received messages, timers and closed connections.
         tokio::select! {
-            conn = self.local_rx.recv() => {
-                match conn {
-                    Some(LocalActorMessage::Shutdown { reply }) => {
-                        debug!("received shutdown message, quit all topics");
-                        self.quit_queue.extend(self.topics.keys().copied());
-                        self.process_quit_queue().await;
-                        debug!("all topics quit, stop gossip actor");
-                        reply.send(()).ok();
-                        return false;
-                    },
-                    Some(LocalActorMessage::HandleConnection(conn)) => {
-                        self.handle_connection(conn.remote_id(), ConnOrigin::Accept, conn);
-                    }
-                    None => {
-                        debug!("all gossip handles dropped, stop gossip actor");
-                        return false;
-                    }
+            msg = self.local_rx.recv() => {
+                if !self.handle_local_message(msg).await {
+                    return false;
                 }
             }
             msg = self.rpc_rx.recv() => {
@@ -1622,6 +1637,30 @@ pub(crate) mod tests {
         message.expect("a join sends a message")
     }
 
+    /// Joins a topic with a publisher that always has a command ready.
+    async fn publish_forever(actor: &mut Actor) {
+        let topic = [1; 32].into();
+        actor.topics.insert(topic, TopicState::default());
+        actor
+            .handle_in_event(
+                InEvent::Command(topic, ProtoCommand::Join(vec![])),
+                Instant::now(),
+            )
+            .await;
+        let commands = n0_future::stream::iter(std::iter::repeat_with(|| {
+            Ok(Command::Broadcast(Bytes::new()))
+        }));
+        let key = actor
+            .command_rx
+            .insert(TopicCommandStream::new(topic, Box::pin(commands)));
+        actor
+            .topics
+            .get_mut(&topic)
+            .expect("inserted above")
+            .command_rx_keys
+            .insert(key);
+    }
+
     /// A publisher that always has a command ready does not starve a finished connection.
     #[tokio::test]
     #[traced_test]
@@ -1635,29 +1674,9 @@ pub(crate) mod tests {
             None,
             Default::default(),
         );
-        let topic = [1; 32].into();
-        actor.topics.insert(topic, TopicState::default());
-        actor
-            .handle_in_event(
-                InEvent::Command(topic, ProtoCommand::Join(vec![])),
-                Instant::now(),
-            )
-            .await;
+        publish_forever(&mut actor).await;
         conn.close(0u32.into(), b"done");
         actor.handle_connection(peer, ConnOrigin::Accept, conn);
-        // Keep commands ready throughout the test, as a continuous publisher does.
-        let commands = n0_future::stream::iter(std::iter::repeat_with(|| {
-            Ok(Command::Broadcast(Bytes::new()))
-        }));
-        let key = actor
-            .command_rx
-            .insert(TopicCommandStream::new(topic, Box::pin(commands)));
-        actor
-            .topics
-            .get_mut(&topic)
-            .expect("inserted above")
-            .command_rx_keys
-            .insert(key);
         let mut addresses = n0_future::stream::pending();
         for i in 0..256 {
             actor.event_loop(&mut addresses, i).await;
@@ -1667,6 +1686,38 @@ pub(crate) mod tests {
             }
         }
         panic!("publishing starved the finished connection");
+    }
+
+    /// A shutdown comes before the commands of a busy publisher.
+    ///
+    /// Without a priority, the actor picks its next branch at random, so a single
+    /// round can miss the bug.
+    #[tokio::test]
+    #[traced_test]
+    async fn shutdown_comes_before_a_busy_publisher() -> Result {
+        let (ours, _conn, _peer_conn, _peer) = connected_pair().await?;
+        for round in 0..8 {
+            let (mut actor, _rpc_tx, local_tx) = Actor::new(
+                ours.clone(),
+                Default::default(),
+                Default::default(),
+                None,
+                Default::default(),
+            );
+            publish_forever(&mut actor).await;
+            let (reply, mut reply_rx) = oneshot::channel();
+            local_tx
+                .send(LocalActorMessage::Shutdown { reply })
+                .await
+                .std_context("send shutdown")?;
+            let mut addresses = n0_future::stream::pending();
+            assert!(
+                !actor.event_loop(&mut addresses, 0).await,
+                "round {round}: the actor did not stop"
+            );
+            reply_rx.try_recv().std_context("no shutdown reply")?;
+        }
+        Ok(())
     }
 
     /// A message that a connection delivered before its close is handled before the close.
