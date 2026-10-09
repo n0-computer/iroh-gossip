@@ -2420,29 +2420,33 @@ pub(crate) mod tests {
         message.expect("a join sends a message")
     }
 
-    /// A failed send loop closes the connection despite an open peer stream.
+    /// A stream that the peer stops is dropped, and the connection stays.
+    ///
+    /// The peer stops a stream that it cannot read, for example a frame over its
+    /// size limit. The next message of the topic goes out on a new stream.
     #[tokio::test]
     #[traced_test]
-    async fn send_error_closes_connection() -> Result {
+    async fn stopped_stream_keeps_the_connection() -> Result {
         let pair = TestPair::new(1).await?;
         let (conn, peer_conn) = pair.connect().await?;
         let peer_id = pair.ep2.id();
-        let topic: TopicId = blake3::hash(b"send_error").into();
+        let topic: TopicId = blake3::hash(b"stopped_stream").into();
 
-        // The peer keeps a topic stream open, as a live neighbor does, and stops
-        // the stream we open. That fails our next write.
-        let _peer = AbortOnDropHandle::new(spawn(async move {
-            let mut ours = peer_conn.open_uni().await.expect("open_uni");
-            util::StreamHeader { topic_id: topic }
-                .write(&mut ours, &mut Vec::new(), TEST_FRAME_LIMIT)
+        // The peer stops the first stream we open, and reads the next one.
+        let peer = AbortOnDropHandle::new(spawn(async move {
+            let mut first = peer_conn.accept_uni().await.expect("accept_uni");
+            first.stop(0u32.into()).expect("stop");
+            let mut next = peer_conn.accept_uni().await.expect("accept_uni");
+            let mut buffer = BytesMut::new();
+            let header = util::StreamHeader::read(&mut next, &mut buffer, TEST_FRAME_LIMIT)
                 .await
-                .expect("write header");
-            let mut theirs = peer_conn.accept_uni().await.expect("accept_uni");
-            theirs.stop(0u32.into()).expect("stop");
-            peer_conn.closed().await;
+                .expect("read header");
+            let message: Option<TopicMessage> =
+                util::read_frame(&mut next, &mut buffer, TEST_FRAME_LIMIT)
+                    .await
+                    .expect("read frame");
+            (header.topic_id, message.is_some(), peer_conn)
         }));
-        // The sender stays alive: the write error, not a closed channel, must end
-        // the send loop.
         let (send_tx, send_rx) = mpsc::channel(1);
         let _feed = AbortOnDropHandle::new(spawn(async move {
             while send_tx.send(join_message(topic, 0)).await.is_ok() {
@@ -2450,23 +2454,24 @@ pub(crate) mod tests {
             }
         }));
         let (in_event_tx, _in_event_rx) = mpsc::channel(16);
+        let _conn_loop = AbortOnDropHandle::new(spawn(connection_loop(
+            peer_id,
+            conn,
+            ConnOrigin::Dial,
+            send_rx,
+            in_event_tx,
+            TEST_FRAME_LIMIT,
+            vec![],
+            watch::channel(true).1,
+        )));
 
-        let res = timeout(
-            Duration::from_secs(5),
-            connection_loop(
-                peer_id,
-                conn,
-                ConnOrigin::Dial,
-                send_rx,
-                in_event_tx,
-                TEST_FRAME_LIMIT,
-                vec![],
-                watch::channel(true).1,
-            ),
-        )
-        .await
-        .std_context("connection loop still runs after the send loop failed")?;
-        assert!(res.is_err(), "the write to a stopped stream did not fail");
+        let (read_topic, read_message, peer_conn) = timeout(Duration::from_secs(5), peer)
+            .await
+            .std_context("no message on a new stream")?
+            .std_context("peer task")?;
+        assert_eq!(read_topic, topic);
+        assert!(read_message, "the new stream had no message");
+        assert!(peer_conn.close_reason().is_none(), "the connection closed");
         Ok(())
     }
 

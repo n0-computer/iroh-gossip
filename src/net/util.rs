@@ -22,7 +22,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::{mpsc, watch},
 };
-use tracing::{debug, trace, Instrument};
+use tracing::{debug, trace, warn, Instrument};
 
 use super::{InEvent, ProtoMessage};
 use crate::proto::{util::TimerMap, TopicId};
@@ -236,7 +236,7 @@ impl SendLoop {
     pub(crate) async fn run(&mut self, queue: Vec<ProtoMessage>) -> Result<(), WriteError> {
         self.set_sending(!queue.is_empty());
         for msg in queue {
-            self.write_message(&msg).await?;
+            self.send(&msg).await?;
         }
         let conn_clone = self.conn.clone();
         let closed = conn_clone.closed();
@@ -249,7 +249,7 @@ impl SendLoop {
                 msg = self.send_rx.recv() => match msg {
                     Some(msg) => {
                         self.set_sending(true);
-                        self.write_message(&msg).await?
+                        self.send(&msg).await?
                     }
                     // The actor dropped the sender.
                     None => break,
@@ -288,6 +288,26 @@ impl SendLoop {
         }
         self.set_sending(false);
         debug!("send loop closed");
+        Ok(())
+    }
+
+    /// Writes a message, and drops only its stream if the write fails while the connection runs.
+    ///
+    /// The peer stops a stream that it cannot read, for example on a frame over its
+    /// size limit or with a message type that it does not know. The message is lost,
+    /// and the next message of the topic opens a new stream. Returns the error only
+    /// if the connection is gone.
+    async fn send(&mut self, message: &ProtoMessage) -> Result<(), WriteError> {
+        let Err(err) = self.write_message(message).await else {
+            return Ok(());
+        };
+        if self.conn.close_reason().is_some() {
+            return Err(err);
+        }
+        warn!(topic = %message.topic.fmt_short(), "write failed, drop the stream: {err:#}");
+        if let Some(mut stream) = self.streams.remove(&message.topic) {
+            stream.reset(0u32.into()).ok();
+        }
         Ok(())
     }
 
