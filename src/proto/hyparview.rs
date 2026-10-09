@@ -1121,4 +1121,25 @@ mod tests {
             "data of an active peer was dropped"
         );
     }
+
+    /// An unrelated passive reply must not close the connection on which a
+    /// Neighbor acceptance is still due. This is the race discussed in #178.
+    #[test]
+    #[ignore = "fails: passive replies close a connection with a pending Neighbor"]
+    fn passive_reply_keeps_a_pending_neighbor_connection() {
+        let mut state = new_state();
+        state.passive_view.insert(1);
+        state.send_neighbor(1, Priority::High, &mut Io::new());
+        let io = &mut Io::new();
+        state.handle(
+            InEvent::RecvMessage(1, Message::ShuffleReply(ShuffleReply { nodes: vec![] })),
+            io,
+        );
+        assert!(state.pending_neighbor_requests.contains_key(&1));
+        assert!(
+            !io.iter()
+                .any(|event| matches!(event, TopicOut::DisconnectPeer(1))),
+            "a passive reply closed the connection before the Neighbor reply"
+        );
+    }
 }
