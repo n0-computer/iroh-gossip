@@ -340,7 +340,10 @@ pub struct Stats {
     ///
     /// See [`Message::Prune`], [`Message::Graft`], [`Message::IHave`].
     pub control_messages_received: u64,
-    /// Max round seen so far.
+    /// Most hops that a message took to reach us, counting the link it came over.
+    ///
+    /// A message from its source took one hop. Plumtree 2.3 calls the largest
+    /// value over all recipients the last delivery hop.
     pub max_last_delivery_hop: u16,
 }
 
@@ -560,8 +563,10 @@ impl<PI: PeerIdentity> State<PI> {
                 if let Some(previous_ihaves) = previous_ihaves {
                     self.optimize_tree(&sender, &message, previous_ihaves, io);
                 }
-                self.stats.max_last_delivery_hop =
-                    self.stats.max_last_delivery_hop.max(prev_round.0);
+                self.stats.max_last_delivery_hop = self
+                    .stats
+                    .max_last_delivery_hop
+                    .max(prev_round.0.saturating_add(1));
             }
 
             // emit event to application
@@ -776,6 +781,21 @@ impl<PI: PeerIdentity> State<PI> {
 mod test {
     use super::*;
     use crate::proto::topic;
+
+    /// A control frame already in flight when a neighbor leaves must not add
+    /// that peer back to the broadcast view without a membership handshake.
+    #[test]
+    #[ignore = "fails: a late Prune recreates a departed peer"]
+    fn late_prune_does_not_recreate_a_departed_peer() {
+        let mut state = State::new(1u32, Config::default(), 1024);
+        let now = Instant::now();
+        let mut io = VecDeque::new();
+        state.handle(InEvent::NeighborUp(2), now, &mut io);
+        state.handle(InEvent::NeighborDown(2), now, &mut io);
+        state.handle(InEvent::RecvMessage(2, Message::Prune), now, &mut io);
+        assert!(!state.eager_push_peers.contains(&2));
+        assert!(!state.lazy_push_peers.contains(&2));
+    }
 
     /// Announcements queued for a neighbor that then goes down must not be sent.
     #[test]
