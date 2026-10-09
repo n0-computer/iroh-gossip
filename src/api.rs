@@ -45,6 +45,14 @@ pub enum ApiError {
     /// The gossip topic was closed.
     #[error("topic closed")]
     Closed,
+    /// The message content is over the limit, see [`GossipSender::max_content_size`].
+    #[error("message of {size} bytes is over the limit of {max_content} bytes")]
+    TooLarge {
+        /// The size of the content.
+        size: usize,
+        /// The largest content that a broadcast takes.
+        max_content: usize,
+    },
 }
 
 impl From<irpc::channel::SendError> for ApiError {
@@ -81,14 +89,20 @@ impl From<irpc::channel::oneshot::RecvError> for ApiError {
 #[derive(Debug, Clone)]
 pub struct GossipApi {
     client: Client<Request>,
+    /// The largest content that a broadcast takes, unknown to an RPC client.
+    max_content: Option<usize>,
 }
 
 impl GossipApi {
     #[cfg(feature = "net")]
-    pub(crate) fn local(tx: tokio::sync::mpsc::Sender<RpcMessage>) -> Self {
+    pub(crate) fn local(
+        tx: tokio::sync::mpsc::Sender<RpcMessage>,
+        max_message_size: usize,
+    ) -> Self {
         let local = irpc::LocalSender::<Request>::from(tx);
         Self {
             client: local.into(),
+            max_content: Some(crate::proto::topic::max_content_size(max_message_size)),
         }
     }
 
@@ -96,7 +110,10 @@ impl GossipApi {
     #[cfg(feature = "rpc")]
     pub fn connect(endpoint: noq::Endpoint, addr: std::net::SocketAddr) -> Self {
         let inner = irpc::Client::noq(endpoint, addr);
-        Self { client: inner }
+        Self {
+            client: inner,
+            max_content: None,
+        }
     }
 
     /// Listen on a noq endpoint for incoming RPC connections.
@@ -133,7 +150,7 @@ impl GossipApi {
             .client
             .bidi_streaming(req, TOPIC_COMMANDS_CAP, opts.subscription_capacity)
             .await?;
-        Ok(GossipTopic::new(tx, rx))
+        Ok(GossipTopic::new(tx, rx, self.max_content))
     }
 
     /// Join a gossip topic with the default options and wait for at least one active connection.
@@ -169,26 +186,62 @@ impl GossipApi {
 
 /// Sender for a gossip topic.
 #[derive(Debug, Clone)]
-pub struct GossipSender(mpsc::Sender<Command>);
+pub struct GossipSender {
+    sender: mpsc::Sender<Command>,
+    max_content: Option<usize>,
+}
 
 impl GossipSender {
-    pub(crate) fn new(sender: mpsc::Sender<Command>) -> Self {
-        Self(sender)
+    pub(crate) fn new(sender: mpsc::Sender<Command>, max_content: Option<usize>) -> Self {
+        Self {
+            sender,
+            max_content,
+        }
+    }
+
+    /// Returns the largest message content that [`Self::broadcast`] takes.
+    ///
+    /// It is [`Builder::max_message_size`] less the encoding, about 40 bytes,
+    /// and holds for [`Self::broadcast_neighbors`] too. An RPC client does not
+    /// know the limit of its server, and gets `None`.
+    ///
+    /// [`Builder::max_message_size`]: crate::net::Builder::max_message_size
+    pub fn max_content_size(&self) -> Option<usize> {
+        self.max_content
+    }
+
+    /// Returns an error if the message content is over the limit.
+    fn check_size(&self, message: &Bytes) -> Result<(), ApiError> {
+        match self.max_content {
+            Some(max_content) if message.len() > max_content => Err(e!(ApiError::TooLarge {
+                size: message.len(),
+                max_content
+            })),
+            _ => Ok(()),
+        }
     }
 
     /// Broadcasts a message to all endpoints.
     ///
-    /// A message whose encoding is over [`Builder::max_message_size`] does not go
-    /// out: gossip drops it with a warning, and this returns `Ok` anyway.
+    /// # Errors
     ///
-    /// [`Builder::max_message_size`]: crate::net::Builder::max_message_size
+    /// Returns [`ApiError::TooLarge`] if the content is over
+    /// [`Self::max_content_size`]. An RPC client does not know the limit of its
+    /// server: there the server drops such a message with a warning, and this
+    /// returns `Ok`.
     pub async fn broadcast(&self, message: Bytes) -> Result<(), ApiError> {
+        self.check_size(&message)?;
         self.send(Command::Broadcast(message)).await?;
         Ok(())
     }
 
     /// Broadcasts a message to our direct neighbors.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiError::TooLarge`] as [`Self::broadcast`] does.
     pub async fn broadcast_neighbors(&self, message: Bytes) -> Result<(), ApiError> {
+        self.check_size(&message)?;
         self.send(Command::BroadcastNeighbors(message)).await?;
         Ok(())
     }
@@ -200,7 +253,7 @@ impl GossipSender {
     }
 
     async fn send(&self, command: Command) -> Result<(), irpc::channel::SendError> {
-        self.0.send(command).await?;
+        self.sender.send(command).await?;
         Ok(())
     }
 }
@@ -220,12 +273,23 @@ pub struct GossipTopic {
 }
 
 impl GossipTopic {
-    pub(crate) fn new(sender: mpsc::Sender<Command>, receiver: mpsc::Receiver<Event>) -> Self {
-        let sender = GossipSender::new(sender);
+    pub(crate) fn new(
+        sender: mpsc::Sender<Command>,
+        receiver: mpsc::Receiver<Event>,
+        max_content: Option<usize>,
+    ) -> Self {
+        let sender = GossipSender::new(sender, max_content);
         Self {
             sender,
             receiver: GossipReceiver::new(receiver),
         }
+    }
+
+    /// Returns the largest message content that [`Self::broadcast`] takes.
+    ///
+    /// See [`GossipSender::max_content_size`].
+    pub fn max_content_size(&self) -> Option<usize> {
+        self.sender.max_content_size()
     }
 
     /// Splits `self` into [`GossipSender`] and [`GossipReceiver`] parts.
@@ -234,11 +298,19 @@ impl GossipTopic {
     }
 
     /// Sends a message to all peers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiError::TooLarge`] as [`GossipSender::broadcast`] does.
     pub async fn broadcast(&mut self, message: Bytes) -> Result<(), ApiError> {
         self.sender.broadcast(message).await
     }
 
     /// Sends a message to our direct neighbors in the swarm.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiError::TooLarge`] as [`GossipSender::broadcast`] does.
     pub async fn broadcast_neighbors(&mut self, message: Bytes) -> Result<(), ApiError> {
         self.sender.broadcast_neighbors(message).await
     }
