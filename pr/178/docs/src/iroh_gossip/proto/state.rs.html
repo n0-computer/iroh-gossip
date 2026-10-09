@@ -622,41 +622,24 @@
 <a href=#622 id=622 data-nosnippet>622</a>        <span class="macro">assert!</span>(!conns.contains_key(<span class="kw-2">&amp;</span>peer));
 <a href=#623 id=623 data-nosnippet>623</a>    }
 <a href=#624 id=624 data-nosnippet>624</a>
-<a href=#625 id=625 data-nosnippet>625</a>    <span class="doccomment">/// A quit topic's straggler messages do not keep the peer's connection.
-<a href=#626 id=626 data-nosnippet>626</a>    </span><span class="attr">#[test]
-<a href=#627 id=627 data-nosnippet>627</a>    </span><span class="kw">fn </span>straggler_does_not_pin_connection_after_topics_quit() {
-<a href=#628 id=628 data-nosnippet>628</a>        <span class="kw">let </span><span class="kw-2">mut </span>state = State::new(
-<a href=#629 id=629 data-nosnippet>629</a>            <span class="number">0u32</span>,
-<a href=#630 id=630 data-nosnippet>630</a>            PeerData::default(),
-<a href=#631 id=631 data-nosnippet>631</a>            Config::default(),
-<a href=#632 id=632 data-nosnippet>632</a>            StdRng::seed_from_u64(<span class="number">0</span>),
-<a href=#633 id=633 data-nosnippet>633</a>        );
-<a href=#634 id=634 data-nosnippet>634</a>        <span class="kw">let </span>(ghost, active): (TopicId, TopicId) = ([<span class="number">1</span>; <span class="number">32</span>].into(), [<span class="number">2</span>; <span class="number">32</span>].into());
-<a href=#635 id=635 data-nosnippet>635</a>        handle(<span class="kw-2">&amp;mut </span>state, InEvent::Command(ghost, Command::Join(<span class="macro">vec!</span>[])));
-<a href=#636 id=636 data-nosnippet>636</a>        handle(<span class="kw-2">&amp;mut </span>state, InEvent::Command(active, Command::Join(<span class="macro">vec!</span>[])));
-<a href=#637 id=637 data-nosnippet>637</a>        <span class="kw">let </span>prune = Message {
-<a href=#638 id=638 data-nosnippet>638</a>            topic: ghost,
-<a href=#639 id=639 data-nosnippet>639</a>            message: topic::Message::Gossip(plumtree::Message::Prune),
-<a href=#640 id=640 data-nosnippet>640</a>        };
-<a href=#641 id=641 data-nosnippet>641</a>        handle(<span class="kw-2">&amp;mut </span>state, InEvent::RecvMessage(<span class="number">1</span>, prune));
-<a href=#642 id=642 data-nosnippet>642</a>        <span class="kw">let </span>join = Message {
-<a href=#643 id=643 data-nosnippet>643</a>            topic: active,
-<a href=#644 id=644 data-nosnippet>644</a>            message: topic::Message::Swarm(hyparview::Message::Join(<span class="prelude-val">None</span>)),
-<a href=#645 id=645 data-nosnippet>645</a>        };
-<a href=#646 id=646 data-nosnippet>646</a>        handle(<span class="kw-2">&amp;mut </span>state, InEvent::RecvMessage(<span class="number">1</span>, join));
-<a href=#647 id=647 data-nosnippet>647</a>        handle(<span class="kw-2">&amp;mut </span>state, InEvent::Command(ghost, Command::Quit));
-<a href=#648 id=648 data-nosnippet>648</a>        <span class="kw">let </span>out: Vec&lt;<span class="kw">_</span>&gt; = state
-<a href=#649 id=649 data-nosnippet>649</a>            .handle(
-<a href=#650 id=650 data-nosnippet>650</a>                InEvent::Command(active, Command::Quit),
-<a href=#651 id=651 data-nosnippet>651</a>                Instant::now(),
-<a href=#652 id=652 data-nosnippet>652</a>                <span class="prelude-val">None</span>,
-<a href=#653 id=653 data-nosnippet>653</a>            )
-<a href=#654 id=654 data-nosnippet>654</a>            .collect();
-<a href=#655 id=655 data-nosnippet>655</a>        <span class="macro">assert!</span>(state.topics().next().is_none());
-<a href=#656 id=656 data-nosnippet>656</a>        <span class="macro">assert!</span>(
-<a href=#657 id=657 data-nosnippet>657</a>            out.iter()
-<a href=#658 id=658 data-nosnippet>658</a>                .any(|event| <span class="macro">matches!</span>(event, OutEvent::DisconnectPeer(<span class="number">1</span>))),
-<a href=#659 id=659 data-nosnippet>659</a>            <span class="string">"a removed topic still pins the peer connection: {out:?}"
-<a href=#660 id=660 data-nosnippet>660</a>        </span>);
-<a href=#661 id=661 data-nosnippet>661</a>    }
-<a href=#662 id=662 data-nosnippet>662</a>}</code></pre></div></section></main></body></html>
+<a href=#625 id=625 data-nosnippet>625</a>    <span class="doccomment">/// A closed connection ends the use of the peer by every topic.
+<a href=#626 id=626 data-nosnippet>626</a>    ///
+<a href=#627 id=627 data-nosnippet>627</a>    /// A join whose dial fails gets no `DisconnectPeer` from the topic, as the
+<a href=#628 id=628 data-nosnippet>628</a>    /// peer never was a neighbor. Only the close clears its entry.
+<a href=#629 id=629 data-nosnippet>629</a>    </span><span class="attr">#[test]
+<a href=#630 id=630 data-nosnippet>630</a>    </span><span class="kw">fn </span>peer_disconnected_prunes_a_peer_we_only_sent_to() {
+<a href=#631 id=631 data-nosnippet>631</a>        <span class="kw">let </span><span class="kw-2">mut </span>state = State::new(
+<a href=#632 id=632 data-nosnippet>632</a>            <span class="number">0u32</span>,
+<a href=#633 id=633 data-nosnippet>633</a>            PeerData::default(),
+<a href=#634 id=634 data-nosnippet>634</a>            Config::default(),
+<a href=#635 id=635 data-nosnippet>635</a>            StdRng::seed_from_u64(<span class="number">1</span>),
+<a href=#636 id=636 data-nosnippet>636</a>        );
+<a href=#637 id=637 data-nosnippet>637</a>        <span class="kw">let </span>topic: TopicId = [<span class="number">0u8</span>; <span class="number">32</span>].into();
+<a href=#638 id=638 data-nosnippet>638</a>        handle(<span class="kw-2">&amp;mut </span>state, InEvent::Command(topic, Command::Join(<span class="macro">vec!</span>[<span class="number">1</span>])));
+<a href=#639 id=639 data-nosnippet>639</a>        <span class="macro">assert!</span>(state.peer_topics.contains_key(<span class="kw-2">&amp;</span><span class="number">1</span>));
+<a href=#640 id=640 data-nosnippet>640</a>
+<a href=#641 id=641 data-nosnippet>641</a>        handle(<span class="kw-2">&amp;mut </span>state, InEvent::PeerDisconnected(<span class="number">1</span>));
+<a href=#642 id=642 data-nosnippet>642</a>
+<a href=#643 id=643 data-nosnippet>643</a>        <span class="macro">assert!</span>(state.peer_topics.is_empty());
+<a href=#644 id=644 data-nosnippet>644</a>    }
+<a href=#645 id=645 data-nosnippet>645</a>}</code></pre></div></section></main></body></html>
