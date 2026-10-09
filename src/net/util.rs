@@ -88,6 +88,12 @@ impl StreamHeader {
     }
 }
 
+/// The maximum number of stream headers that a [`RecvLoop`] reads at the same time.
+///
+/// At this limit, the loop accepts no new stream until a header is complete.
+/// A peer that keeps many partial headers thus delays only its own streams.
+pub(crate) const MAX_PENDING_HEADERS: usize = 16;
+
 pub(crate) struct RecvLoop {
     remote_endpoint_id: EndpointId,
     conn: Connection,
@@ -111,16 +117,18 @@ impl RecvLoop {
     }
 
     pub(crate) async fn run(&mut self) -> Result<(), ReadError> {
+        // Headers are read apart, so that a partial one blocks no other stream.
+        let mut header_futures = FuturesUnordered::new();
         let mut read_futures = FuturesUnordered::new();
         let mut conn_is_closed = false;
         let closed = self.conn.closed();
         tokio::pin!(closed);
-        while !conn_is_closed || !read_futures.is_empty() {
+        while !conn_is_closed || !header_futures.is_empty() || !read_futures.is_empty() {
             tokio::select! {
                 _ = &mut closed, if !conn_is_closed => {
                     conn_is_closed = true;
                 }
-                stream = self.conn.accept_uni(), if !conn_is_closed => {
+                stream = self.conn.accept_uni(), if !conn_is_closed && header_futures.len() < MAX_PENDING_HEADERS => {
                     let stream = match stream {
                         Ok(stream) => stream,
                         Err(_) => {
@@ -128,7 +136,17 @@ impl RecvLoop {
                             continue;
                         }
                     };
-                    let state = RecvStreamState::new(stream, self.max_message_size).await?;
+                    header_futures.push(RecvStreamState::new(stream, self.max_message_size));
+                }
+                Some(state) = header_futures.next(), if !header_futures.is_empty() => {
+                    // A bad header loses only its stream, as a bad frame does.
+                    let state = match state {
+                        Ok(state) => state,
+                        Err(err) => {
+                            debug!("stream header failed: {err:#}");
+                            continue;
+                        }
+                    };
                     debug!(topic=%state.header.topic_id.fmt_short(), "stream opened");
                     read_futures.push(state.next());
                 }
