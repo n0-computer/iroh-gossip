@@ -388,55 +388,57 @@
 <a href=#388 id=388 data-nosnippet>388</a>    max_message_size: usize,
 <a href=#389 id=389 data-nosnippet>389</a>) -&gt; <span class="prelude-ty">Result</span>&lt;(), WriteError&gt; {
 <a href=#390 id=390 data-nosnippet>390</a>    <span class="kw">let </span>len = postcard::experimental::serialized_size(<span class="kw-2">&amp;</span>message)<span class="question-mark">?</span>;
-<a href=#391 id=391 data-nosnippet>391</a>    <span class="kw">if </span>len &gt; max_message_size {
-<a href=#392 id=392 data-nosnippet>392</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(<span class="macro">e!</span>(WriteError::TooLarge));
-<a href=#393 id=393 data-nosnippet>393</a>    }
-<a href=#394 id=394 data-nosnippet>394</a>    buffer.clear();
-<a href=#395 id=395 data-nosnippet>395</a>    buffer.resize(len, <span class="number">0u8</span>);
-<a href=#396 id=396 data-nosnippet>396</a>    <span class="kw">let </span>slice = postcard::to_slice(<span class="kw-2">&amp;</span>message, buffer)<span class="question-mark">?</span>;
-<a href=#397 id=397 data-nosnippet>397</a>    stream.write_u32(len <span class="kw">as </span>u32).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#398 id=398 data-nosnippet>398</a>    stream.write_all(slice).<span class="kw">await</span>.map_err(io::Error::other)<span class="question-mark">?</span>;
-<a href=#399 id=399 data-nosnippet>399</a>    <span class="prelude-val">Ok</span>(())
-<a href=#400 id=400 data-nosnippet>400</a>}
-<a href=#401 id=401 data-nosnippet>401</a>
-<a href=#402 id=402 data-nosnippet>402</a><span class="doccomment">/// A [`TimerMap`] with an async method to wait for the next timer expiration.
-<a href=#403 id=403 data-nosnippet>403</a></span><span class="attr">#[derive(Debug)]
-<a href=#404 id=404 data-nosnippet>404</a></span><span class="kw">pub struct </span>Timers&lt;T&gt; {
-<a href=#405 id=405 data-nosnippet>405</a>    map: TimerMap&lt;T&gt;,
-<a href=#406 id=406 data-nosnippet>406</a>}
-<a href=#407 id=407 data-nosnippet>407</a>
-<a href=#408 id=408 data-nosnippet>408</a><span class="kw">impl</span>&lt;T&gt; Default <span class="kw">for </span>Timers&lt;T&gt; {
-<a href=#409 id=409 data-nosnippet>409</a>    <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
-<a href=#410 id=410 data-nosnippet>410</a>        <span class="self">Self </span>{
-<a href=#411 id=411 data-nosnippet>411</a>            map: TimerMap::default(),
-<a href=#412 id=412 data-nosnippet>412</a>        }
-<a href=#413 id=413 data-nosnippet>413</a>    }
-<a href=#414 id=414 data-nosnippet>414</a>}
-<a href=#415 id=415 data-nosnippet>415</a>
-<a href=#416 id=416 data-nosnippet>416</a><span class="kw">impl</span>&lt;T&gt; Timers&lt;T&gt; {
-<a href=#417 id=417 data-nosnippet>417</a>    <span class="doccomment">/// Creates a new timer map.
-<a href=#418 id=418 data-nosnippet>418</a>    </span><span class="kw">pub fn </span>new() -&gt; <span class="self">Self </span>{
-<a href=#419 id=419 data-nosnippet>419</a>        <span class="self">Self</span>::default()
-<a href=#420 id=420 data-nosnippet>420</a>    }
-<a href=#421 id=421 data-nosnippet>421</a>
-<a href=#422 id=422 data-nosnippet>422</a>    <span class="doccomment">/// Inserts a new entry at the specified instant
-<a href=#423 id=423 data-nosnippet>423</a>    </span><span class="kw">pub fn </span>insert(<span class="kw-2">&amp;mut </span><span class="self">self</span>, instant: Instant, item: T) {
-<a href=#424 id=424 data-nosnippet>424</a>        <span class="self">self</span>.map.insert(instant, item);
-<a href=#425 id=425 data-nosnippet>425</a>    }
-<a href=#426 id=426 data-nosnippet>426</a>
-<a href=#427 id=427 data-nosnippet>427</a>    <span class="doccomment">/// Waits for the next timer to elapse.
-<a href=#428 id=428 data-nosnippet>428</a>    </span><span class="kw">pub async fn </span>wait_next(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; Instant {
-<a href=#429 id=429 data-nosnippet>429</a>        <span class="kw">match </span><span class="self">self</span>.map.first() {
-<a href=#430 id=430 data-nosnippet>430</a>            <span class="prelude-val">None </span>=&gt; std::future::pending::&lt;Instant&gt;().<span class="kw">await</span>,
-<a href=#431 id=431 data-nosnippet>431</a>            <span class="prelude-val">Some</span>(instant) =&gt; {
-<a href=#432 id=432 data-nosnippet>432</a>                sleep_until(<span class="kw-2">*</span>instant).<span class="kw">await</span>;
-<a href=#433 id=433 data-nosnippet>433</a>                <span class="kw-2">*</span>instant
-<a href=#434 id=434 data-nosnippet>434</a>            }
-<a href=#435 id=435 data-nosnippet>435</a>        }
-<a href=#436 id=436 data-nosnippet>436</a>    }
-<a href=#437 id=437 data-nosnippet>437</a>
-<a href=#438 id=438 data-nosnippet>438</a>    <span class="doccomment">/// Pops the earliest timer that expires at or before `now`.
-<a href=#439 id=439 data-nosnippet>439</a>    </span><span class="kw">pub fn </span>pop_before(<span class="kw-2">&amp;mut </span><span class="self">self</span>, now: Instant) -&gt; <span class="prelude-ty">Option</span>&lt;(Instant, T)&gt; {
-<a href=#440 id=440 data-nosnippet>440</a>        <span class="self">self</span>.map.pop_before(now)
-<a href=#441 id=441 data-nosnippet>441</a>    }
-<a href=#442 id=442 data-nosnippet>442</a>}</code></pre></div></section></main></body></html>
+<a href=#391 id=391 data-nosnippet>391</a>    <span class="comment">// A frame must be shorter than the limit. Nodes up to 0.101 read a frame of
+<a href=#392 id=392 data-nosnippet>392</a>    // the limit, but refuse to write one, so they could not forward it.
+<a href=#393 id=393 data-nosnippet>393</a>    </span><span class="kw">if </span>len &gt;= max_message_size {
+<a href=#394 id=394 data-nosnippet>394</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(<span class="macro">e!</span>(WriteError::TooLarge));
+<a href=#395 id=395 data-nosnippet>395</a>    }
+<a href=#396 id=396 data-nosnippet>396</a>    buffer.clear();
+<a href=#397 id=397 data-nosnippet>397</a>    buffer.resize(len, <span class="number">0u8</span>);
+<a href=#398 id=398 data-nosnippet>398</a>    <span class="kw">let </span>slice = postcard::to_slice(<span class="kw-2">&amp;</span>message, buffer)<span class="question-mark">?</span>;
+<a href=#399 id=399 data-nosnippet>399</a>    stream.write_u32(len <span class="kw">as </span>u32).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#400 id=400 data-nosnippet>400</a>    stream.write_all(slice).<span class="kw">await</span>.map_err(io::Error::other)<span class="question-mark">?</span>;
+<a href=#401 id=401 data-nosnippet>401</a>    <span class="prelude-val">Ok</span>(())
+<a href=#402 id=402 data-nosnippet>402</a>}
+<a href=#403 id=403 data-nosnippet>403</a>
+<a href=#404 id=404 data-nosnippet>404</a><span class="doccomment">/// A [`TimerMap`] with an async method to wait for the next timer expiration.
+<a href=#405 id=405 data-nosnippet>405</a></span><span class="attr">#[derive(Debug)]
+<a href=#406 id=406 data-nosnippet>406</a></span><span class="kw">pub struct </span>Timers&lt;T&gt; {
+<a href=#407 id=407 data-nosnippet>407</a>    map: TimerMap&lt;T&gt;,
+<a href=#408 id=408 data-nosnippet>408</a>}
+<a href=#409 id=409 data-nosnippet>409</a>
+<a href=#410 id=410 data-nosnippet>410</a><span class="kw">impl</span>&lt;T&gt; Default <span class="kw">for </span>Timers&lt;T&gt; {
+<a href=#411 id=411 data-nosnippet>411</a>    <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
+<a href=#412 id=412 data-nosnippet>412</a>        <span class="self">Self </span>{
+<a href=#413 id=413 data-nosnippet>413</a>            map: TimerMap::default(),
+<a href=#414 id=414 data-nosnippet>414</a>        }
+<a href=#415 id=415 data-nosnippet>415</a>    }
+<a href=#416 id=416 data-nosnippet>416</a>}
+<a href=#417 id=417 data-nosnippet>417</a>
+<a href=#418 id=418 data-nosnippet>418</a><span class="kw">impl</span>&lt;T&gt; Timers&lt;T&gt; {
+<a href=#419 id=419 data-nosnippet>419</a>    <span class="doccomment">/// Creates a new timer map.
+<a href=#420 id=420 data-nosnippet>420</a>    </span><span class="kw">pub fn </span>new() -&gt; <span class="self">Self </span>{
+<a href=#421 id=421 data-nosnippet>421</a>        <span class="self">Self</span>::default()
+<a href=#422 id=422 data-nosnippet>422</a>    }
+<a href=#423 id=423 data-nosnippet>423</a>
+<a href=#424 id=424 data-nosnippet>424</a>    <span class="doccomment">/// Inserts a new entry at the specified instant
+<a href=#425 id=425 data-nosnippet>425</a>    </span><span class="kw">pub fn </span>insert(<span class="kw-2">&amp;mut </span><span class="self">self</span>, instant: Instant, item: T) {
+<a href=#426 id=426 data-nosnippet>426</a>        <span class="self">self</span>.map.insert(instant, item);
+<a href=#427 id=427 data-nosnippet>427</a>    }
+<a href=#428 id=428 data-nosnippet>428</a>
+<a href=#429 id=429 data-nosnippet>429</a>    <span class="doccomment">/// Waits for the next timer to elapse.
+<a href=#430 id=430 data-nosnippet>430</a>    </span><span class="kw">pub async fn </span>wait_next(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; Instant {
+<a href=#431 id=431 data-nosnippet>431</a>        <span class="kw">match </span><span class="self">self</span>.map.first() {
+<a href=#432 id=432 data-nosnippet>432</a>            <span class="prelude-val">None </span>=&gt; std::future::pending::&lt;Instant&gt;().<span class="kw">await</span>,
+<a href=#433 id=433 data-nosnippet>433</a>            <span class="prelude-val">Some</span>(instant) =&gt; {
+<a href=#434 id=434 data-nosnippet>434</a>                sleep_until(<span class="kw-2">*</span>instant).<span class="kw">await</span>;
+<a href=#435 id=435 data-nosnippet>435</a>                <span class="kw-2">*</span>instant
+<a href=#436 id=436 data-nosnippet>436</a>            }
+<a href=#437 id=437 data-nosnippet>437</a>        }
+<a href=#438 id=438 data-nosnippet>438</a>    }
+<a href=#439 id=439 data-nosnippet>439</a>
+<a href=#440 id=440 data-nosnippet>440</a>    <span class="doccomment">/// Pops the earliest timer that expires at or before `now`.
+<a href=#441 id=441 data-nosnippet>441</a>    </span><span class="kw">pub fn </span>pop_before(<span class="kw-2">&amp;mut </span><span class="self">self</span>, now: Instant) -&gt; <span class="prelude-ty">Option</span>&lt;(Instant, T)&gt; {
+<a href=#442 id=442 data-nosnippet>442</a>        <span class="self">self</span>.map.pop_before(now)
+<a href=#443 id=443 data-nosnippet>443</a>    }
+<a href=#444 id=444 data-nosnippet>444</a>}</code></pre></div></section></main></body></html>
