@@ -88,6 +88,12 @@ impl StreamHeader {
     }
 }
 
+/// The maximum number of stream headers that a [`RecvLoop`] reads at the same time.
+///
+/// At this limit, the loop accepts no new stream until a header is complete.
+/// A peer that keeps many partial headers thus delays only its own streams.
+pub(crate) const MAX_PENDING_HEADERS: usize = 16;
+
 pub(crate) struct RecvLoop {
     remote_endpoint_id: EndpointId,
     conn: Connection,
@@ -122,7 +128,7 @@ impl RecvLoop {
                 _ = &mut closed, if !conn_is_closed => {
                     conn_is_closed = true;
                 }
-                stream = self.conn.accept_uni(), if !conn_is_closed => {
+                stream = self.conn.accept_uni(), if !conn_is_closed && header_futures.len() < MAX_PENDING_HEADERS => {
                     let stream = match stream {
                         Ok(stream) => stream,
                         Err(_) => {

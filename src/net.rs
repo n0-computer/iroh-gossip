@@ -1866,6 +1866,53 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// A peer with too many partial headers waits until one of them is complete.
+    #[tokio::test]
+    #[traced_test]
+    async fn partial_headers_are_limited() -> Result {
+        let (_ours, conn, peer_conn, _peer) = connected_pair().await?;
+        let (in_event_tx, mut in_event_rx) = mpsc::channel(4);
+        let mut recv_loop = RecvLoop::new(peer_conn.remote_id(), conn, in_event_tx, 1024);
+        let _recv = AbortOnDropHandle::new(spawn(async move { recv_loop.run().await }));
+
+        let mut partials = Vec::new();
+        for _ in 0..util::MAX_PENDING_HEADERS {
+            let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
+            stream
+                .write_all(&[0, 0])
+                .await
+                .std_context("write partial header")?;
+            partials.push(stream);
+        }
+        let topic: TopicId = [1; 32].into();
+        let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
+        let mut buffer = Vec::new();
+        util::StreamHeader { topic_id: topic }
+            .write(&mut stream, &mut buffer, 1024)
+            .await
+            .std_context("write header")?;
+        util::write_frame(&mut stream, &peer_join(topic).message, &mut buffer, 1024)
+            .await
+            .std_context("write frame")?;
+        let event = timeout(Duration::from_millis(500), in_event_rx.recv()).await;
+        assert!(event.is_err(), "the loop read more headers than its limit");
+
+        let partial = &mut partials[0];
+        partial
+            .write_all(&[0, 32])
+            .await
+            .std_context("write header length")?;
+        partial
+            .write_all(&[1; 32])
+            .await
+            .std_context("write topic")?;
+        let event = timeout(Duration::from_secs(2), in_event_rx.recv())
+            .await
+            .std_context("a complete header did not free its place")?;
+        assert!(matches!(event, Some(InEvent::RecvMessage(..))), "{event:?}");
+        Ok(())
+    }
+
     /// A close handles the messages queued before it, not those that arrive meanwhile.
     ///
     /// Other connections can refill the queue as fast as the actor handles it.
