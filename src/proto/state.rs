@@ -254,7 +254,6 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
                 return self.outbox.drain(..);
             }
         }
-
         let event: InEventMapped<PI> = event.into();
 
         match event {
@@ -279,9 +278,9 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
 
                 // pass the event to the state handler
                 if let Some(state) = self.states.get_mut(&topic) {
-                    // when receiving messages, update our conn map to take note that this topic state may want
-                    // to keep this connection
-                    if let topic::InEvent::RecvMessage(from, _message) = &event {
+                    // A HyParView message makes the topic use the peer. A Plumtree message
+                    // does not: it can be a straggler from a peer that we dropped.
+                    if let topic::InEvent::RecvMessage(from, topic::Message::Swarm(_)) = &event {
                         self.peer_topics.entry(*from).or_default().insert(topic);
                     }
                     let out = state.handle(event, now);
@@ -293,10 +292,18 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
                 if quit {
                     self.states.remove(&topic);
                     self.instances.remove(&topic);
-                    self.peer_topics.retain(|_, topics| {
-                        topics.remove(&topic);
-                        !topics.is_empty()
-                    });
+                    // A peer the topic only sent to, such as an unanswered join, has no
+                    // other way out.
+                    let mut unused = Vec::new();
+                    for (peer, topics) in self.peer_topics.iter_mut() {
+                        if topics.remove(&topic) && topics.is_empty() {
+                            unused.push(*peer);
+                        }
+                    }
+                    for peer in unused {
+                        self.peer_topics.remove(&peer);
+                        self.outbox.push(OutEvent::DisconnectPeer(peer));
+                    }
                 }
             }
             // when a peer disconnected on the network level, forward event to all states
@@ -346,6 +353,10 @@ fn handle_out_event<PI: PeerIdentity>(
     trace!("out: {event:?}");
     match event {
         topic::OutEvent::SendMessage(to, message) => {
+            // HyParView may send to a peer that is no neighbor yet. The topic uses it from then on.
+            if matches!(message, topic::Message::Swarm(_)) {
+                conns.entry(to).or_default().insert(topic);
+            }
             outbox.push(OutEvent::SendMessage(to, Message { topic, message }))
         }
         topic::OutEvent::EmitEvent(event) => outbox.push(OutEvent::EmitEvent(topic, event)),
@@ -440,7 +451,6 @@ mod tests {
     /// The peer is not on the topic and never answers, so nothing else ever
     /// dropped it.
     #[test]
-    #[ignore = "not yet passing"]
     fn quit_disconnects_a_peer_it_only_sent_to() {
         let mut state = State::new(
             0u32,
@@ -463,41 +473,12 @@ mod tests {
         assert!(state.peer_topics.is_empty());
     }
 
-    /// A peer that never became a neighbor is removed from `peer_topics`.
-    ///
-    /// Such a peer only relayed a message to us. No topic disconnects it, so
-    /// nothing else removes the entry. We only ever see such a peer's messages
-    /// for topics we joined, so the test joins the topic first.
-    #[test]
-    fn peer_disconnected_prunes_peer_topics() {
-        let mut state = State::new(
-            0u32,
-            PeerData::default(),
-            Config::default(),
-            StdRng::seed_from_u64(1),
-        );
-        let topic: TopicId = [0u8; 32].into();
-        let peer = 1u32;
-        handle(&mut state, InEvent::Command(topic, Command::Join(vec![])));
-        let message = Message {
-            topic,
-            message: topic::Message::Gossip(plumtree::Message::Prune),
-        };
-        handle(&mut state, InEvent::RecvMessage(peer, message));
-        assert!(state.peer_topics.contains_key(&peer));
-
-        handle(&mut state, InEvent::PeerDisconnected(peer));
-
-        assert!(!state.peer_topics.contains_key(&peer));
-    }
-
     /// A Plumtree message from a non-neighbor makes no topic use the peer.
     ///
     /// It is a straggler from a peer that we dropped. If it made an entry, the
     /// entry would keep the peer's connection open. We only ever see such a
     /// peer's messages for topics we joined, so the test joins the topic first.
     #[test]
-    #[ignore = "not yet passing"]
     fn plumtree_message_from_a_non_neighbor_uses_no_peer() {
         let mut state = State::new(
             0u32,
@@ -521,7 +502,6 @@ mod tests {
     /// The new topic state starts its request ids at zero again, so the old
     /// timer has the id of the new request.
     #[test]
-    #[ignore = "not yet passing"]
     fn timer_from_a_quit_topic_does_nothing_to_its_replacement() {
         let mut state = State::new(
             0u32,
@@ -608,7 +588,6 @@ mod tests {
     /// A shuffle reply goes to a peer we never received from, and the topic
     /// disconnects it right after.
     #[test]
-    #[ignore = "not yet passing"]
     fn disconnect_peer_after_sending_only() {
         let topic: TopicId = [1u8; 32].into();
         let peer = 1u32;
@@ -642,7 +621,6 @@ mod tests {
     /// A join whose dial fails gets no `DisconnectPeer` from the topic, as the
     /// peer never was a neighbor. Only the close clears its entry.
     #[test]
-    #[ignore = "not yet passing"]
     fn peer_disconnected_prunes_a_peer_we_only_sent_to() {
         let mut state = State::new(
             0u32,

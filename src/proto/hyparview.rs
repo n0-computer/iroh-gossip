@@ -397,10 +397,20 @@ where
             Message::Disconnect(details) => self.on_disconnect(from, details, io),
         }
 
-        // Disconnect from passive nodes right after receiving a message.
-        // TODO(frando): I'm not sure anymore that this is correct. Maybe remove?
-        if !is_disconnect && !self.active_view.contains(&from) {
-            io.push(OutEvent::DisconnectPeer(from));
+        // Disconnect from passive nodes right after receiving a message, a
+        // `Disconnect` included.
+        self.release_if_unused(from, io);
+    }
+
+    /// Disconnects `peer` unless it is a neighbor or we wait for its `Neighbor` reply.
+    ///
+    /// The reply can be on its way, and a closed connection would lose it. A join
+    /// is not tracked: its reply, a `Neighbor`, makes the peer used again if it
+    /// arrives within the grace before the close.
+    fn release_if_unused(&self, peer: PI, io: &mut impl IO<PI>) {
+        if !self.active_view.contains(&peer) && !self.pending_neighbor_requests.contains_key(&peer)
+        {
+            io.push(OutEvent::DisconnectPeer(peer));
         }
     }
 
@@ -595,6 +605,8 @@ where
                 self.add_passive(node.id, node.data, io);
             }
             self.send_shuffle_reply(shuffle.origin, len, io);
+            // The origin is usually no neighbor, and the reply its only use.
+            self.release_if_unused(shuffle.origin, io);
         } else if let Some(node) = self
             .active_view
             .pick_random_without(&[&shuffle.origin, &from], &mut self.rng)
@@ -760,6 +772,7 @@ where
             self.pending_neighbor_requests.remove(&peer);
             self.passive_view.remove(&peer);
             self.forget_peer(&peer);
+            self.release_if_unused(peer, io);
             self.refill_active_from_passive(&[], io);
         }
     }
@@ -1076,7 +1089,6 @@ mod tests {
     /// it read the reply, but cannot close the connection while our stream is
     /// open.
     #[test]
-    #[ignore = "not yet passing"]
     fn shuffle_reply_disconnects_a_non_neighbor() {
         let mut state = new_state();
         let io = &mut Io::new();
@@ -1206,7 +1218,6 @@ mod tests {
 
     /// A passive peer whose neighbor request timed out loses its metadata.
     #[test]
-    #[ignore = "not yet passing"]
     fn neighbor_request_timeout_forgets_peer() {
         let mut state = new_state();
         let io = &mut Io::new();
@@ -1338,7 +1349,6 @@ mod tests {
     /// the reply makes the peer our neighbor over a closed connection, and
     /// no close event ever removes it.
     #[test]
-    #[ignore = "not yet passing"]
     fn message_from_a_peer_we_wait_for_keeps_the_connection() {
         let forward_join = || {
             Message::ForwardJoin(ForwardJoin {
@@ -1365,7 +1375,6 @@ mod tests {
     /// arrives from a peer that we dropped already. Without the disconnect,
     /// the message would leave the peer in use and its connection open.
     #[test]
-    #[ignore = "not yet passing"]
     fn disconnect_from_a_non_neighbor_releases_it() {
         let mut state = new_state();
         let io = &mut Io::new();
