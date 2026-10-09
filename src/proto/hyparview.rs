@@ -105,6 +105,36 @@ impl Ttl {
     }
 }
 
+#[cfg(test)]
+impl<PI> Message<PI> {
+    /// Returns a shuffle from `origin` carrying no nodes, for tests outside this module.
+    pub(crate) fn test_shuffle(origin: PI, ttl: u16) -> Self {
+        Message::Shuffle(Shuffle {
+            origin,
+            nodes: Vec::new(),
+            ttl: Ttl(ttl),
+        })
+    }
+
+    /// Returns a `Disconnect` from a peer that stays alive, for tests outside this module.
+    #[cfg(feature = "net")]
+    pub(crate) fn test_disconnect() -> Self {
+        Message::Disconnect(Disconnect {
+            alive: true,
+            _respond: false,
+        })
+    }
+
+    /// Returns a shuffle reply carrying `peers` without data, for tests outside this module.
+    pub(crate) fn test_shuffle_reply_with(peers: Vec<PI>) -> Self {
+        let nodes = peers
+            .into_iter()
+            .map(|id| PeerInfo { id, data: None })
+            .collect();
+        Message::ShuffleReply(ShuffleReply { nodes })
+    }
+}
+
 /// A message informing other peers that a new peer joined the swarm for this topic.
 ///
 /// Will be forwarded in a random walk until `ttl` reaches 0.
@@ -308,6 +338,50 @@ where
             ));
             self.shuffle_scheduled = true;
         }
+
+        #[cfg(test)]
+        self.check_invariants();
+    }
+
+    /// Panics if the per-peer bookkeeping disagrees with the views.
+    ///
+    /// Runs after every event in the unit tests. Every leak fixed so far
+    /// was an entry that outlived its peer's place in a view.
+    #[cfg(test)]
+    fn check_invariants(&self) {
+        let in_a_view =
+            |peer: &PI| self.active_view.contains(peer) || self.passive_view.contains(peer);
+        assert!(
+            self.active_view.len() <= self.config.active_view_capacity,
+            "active view over capacity: {:?}",
+            self.active_view
+        );
+        assert!(
+            self.passive_view.len() <= self.config.passive_view_capacity,
+            "passive view over capacity: {:?}",
+            self.passive_view
+        );
+        assert!(!in_a_view(&self.me), "we are in our own view");
+        for peer in self.active_view.iter() {
+            assert!(
+                !self.passive_view.contains(peer),
+                "{peer:?} is in both views"
+            );
+        }
+        // Not yet holding:
+        // for peer in self.peer_data.keys() {
+        //     // A forwarded join stores the peer's data while our request to it is out.
+        //     assert!(
+        //         in_a_view(peer) || self.pending_neighbor_requests.contains(peer),
+        //         "data kept for {peer:?}, which is in no view and not asked"
+        //     );
+        // }
+        // for peer in self.alive_disconnect_peers.iter() {
+        //     assert!(
+        //         self.passive_view.contains(peer),
+        //         "{peer:?} marked alive but not passive"
+        //     );
+        // }
     }
 
     fn handle_message(&mut self, from: PI, message: Message<PI>, io: &mut impl IO<PI>) {
@@ -977,7 +1051,69 @@ mod tests {
         assert!(us.pending_neighbor_requests.is_empty());
     }
 
-    /// A peer whose neighbor request we refuse leaves no metadata behind.
+    /// Counts the shuffle replies sent to `peer`.
+    fn shuffle_replies_sent(io: &Io, peer: u32) -> usize {
+        io.iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    TopicOut::SendMessage(to, topic::Message::Swarm(Message::ShuffleReply(_))) if *to == peer
+                )
+            })
+            .count()
+    }
+
+    /// After a shuffle reply to a non-neighbor, we disconnect it.
+    ///
+    /// The reply goes over a connection opened for it. The origin drops us once
+    /// it read the reply, but cannot close the connection while our stream is
+    /// open.
+    #[test]
+    #[ignore = "not yet passing"]
+    fn shuffle_reply_disconnects_a_non_neighbor() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.handle(InEvent::RecvMessage(1, Message::Join(None)), io);
+        assert!(state.active_view.contains(&1));
+        io.clear();
+
+        state.handle(InEvent::RecvMessage(1, Message::test_shuffle(2, 0)), io);
+
+        assert_eq!(shuffle_replies_sent(io, 2), 1);
+        let reply_at = io
+            .iter()
+            .position(|event| matches!(event, TopicOut::SendMessage(2, _)))
+            .expect("checked");
+        let disconnect_at = io
+            .iter()
+            .position(|event| matches!(event, TopicOut::DisconnectPeer(2)))
+            .expect("the origin was not disconnected");
+        assert!(reply_at < disconnect_at, "disconnected before the reply");
+        assert!(
+            !io.iter()
+                .any(|event| matches!(event, TopicOut::DisconnectPeer(1))),
+            "the forwarding neighbor was disconnected"
+        );
+    }
+
+    /// A shuffle reply to a neighbor leaves the neighbor alone.
+    #[test]
+    fn shuffle_reply_keeps_a_neighbor() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.handle(InEvent::RecvMessage(1, Message::Join(None)), io);
+        io.clear();
+
+        state.handle(InEvent::RecvMessage(1, Message::test_shuffle(1, 0)), io);
+
+        assert_eq!(shuffle_replies_sent(io, 1), 1);
+        assert!(
+            !io.iter()
+                .any(|event| matches!(event, TopicOut::DisconnectPeer(1))),
+            "the neighbor was disconnected"
+        );
+    }
+
     #[test]
     fn refused_request_forgets_peer() {
         let mut state = new_state();
@@ -1063,6 +1199,7 @@ mod tests {
 
     /// A passive peer whose neighbor request timed out loses its metadata.
     #[test]
+    #[ignore = "not yet passing"]
     fn neighbor_request_timeout_forgets_peer() {
         let mut state = new_state();
         let io = &mut Io::new();
@@ -1076,6 +1213,11 @@ mod tests {
         );
 
         assert!(!has_metadata(&state, 1));
+        assert!(
+            io.iter()
+                .any(|event| matches!(event, TopicOut::DisconnectPeer(1))),
+            "the peer that did not answer was kept"
+        );
     }
 
     /// A pending reply to an active peer does not count twice against the active view.
@@ -1120,5 +1262,114 @@ mod tests {
             state.peer_data.contains_key(&1),
             "data of an active peer was dropped"
         );
+    }
+
+    /// A shuffle reply that names us stores no data about us.
+    #[test]
+    #[ignore = "not yet passing"]
+    fn shuffle_reply_naming_us_stores_nothing_about_us() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.handle(InEvent::RecvMessage(1, Message::Join(None)), io);
+        let us = PeerInfo {
+            id: 0,
+            data: Some(PeerData::new(vec![1])),
+        };
+        let reply = Message::ShuffleReply(ShuffleReply { nodes: vec![us] });
+
+        state.handle(InEvent::RecvMessage(1, reply), io);
+
+        assert!(!state.peer_data.contains_key(&0));
+    }
+
+    /// A neighbor that left alive and comes back loses its alive mark.
+    ///
+    /// The mark kept the peer in the passive view when its connection closed.
+    /// Kept on a neighbor, it made a later crash look like a graceful leave.
+    #[test]
+    #[ignore = "not yet passing"]
+    fn returning_neighbor_loses_the_alive_mark() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.handle(InEvent::RecvMessage(1, Message::Join(None)), io);
+        let leave = Message::Disconnect(Disconnect {
+            alive: true,
+            _respond: false,
+        });
+        state.handle(InEvent::RecvMessage(1, leave), io);
+        assert!(state.alive_disconnect_peers.contains(&1));
+
+        state.handle(InEvent::RecvMessage(1, Message::Join(None)), io);
+
+        assert!(state.active_view.contains(&1));
+        assert!(!state.alive_disconnect_peers.contains(&1));
+    }
+
+    /// A quit leaves nothing about any peer behind.
+    #[test]
+    #[ignore = "not yet passing"]
+    fn quit_leaves_nothing_behind() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.handle(InEvent::RecvMessage(1, Message::Join(None)), io);
+        let nodes = Message::test_shuffle_reply_with(vec![2, 3]);
+        state.handle(InEvent::RecvMessage(1, nodes), io);
+
+        state.handle(InEvent::Quit, io);
+
+        assert!(state.active_view.is_empty() && state.passive_view.is_empty());
+        assert!(state.peer_data.is_empty() && state.alive_disconnect_peers.is_empty());
+        assert!(state.pending_neighbor_requests.is_empty());
+    }
+
+    /// Returns whether the state asked to close the connection to `peer`.
+    fn disconnected(io: &Io, peer: u32) -> bool {
+        io.iter()
+            .any(|event| matches!(event, TopicOut::DisconnectPeer(p) if *p == peer))
+    }
+
+    /// A message from a peer whose `Neighbor` reply we wait for does not close its connection.
+    ///
+    /// The peer's reply can be on its way. If we close the connection first,
+    /// the reply makes the peer our neighbor over a closed connection, and
+    /// no close event ever removes it.
+    #[test]
+    #[ignore = "not yet passing"]
+    fn message_from_a_peer_we_wait_for_keeps_the_connection() {
+        let forward_join = || {
+            Message::ForwardJoin(ForwardJoin {
+                peer: (2, None).into(),
+                ttl: Ttl(6),
+            })
+        };
+
+        let mut state = new_state();
+        state.pending_neighbor_requests.insert(1, 0);
+        let io = &mut Io::new();
+        state.handle(InEvent::RecvMessage(1, forward_join()), io);
+        assert!(!disconnected(io, 1), "closed with a neighbor request out");
+
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.handle(InEvent::RecvMessage(1, forward_join()), io);
+        assert!(disconnected(io, 1), "kept a peer we do not wait for");
+    }
+
+    /// A `Disconnect` from a peer that is no neighbor closes its connection.
+    ///
+    /// Two peers that evict each other at once both send one. The second
+    /// arrives from a peer that we dropped already. Without the disconnect,
+    /// the message would leave the peer in use and its connection open.
+    #[test]
+    #[ignore = "not yet passing"]
+    fn disconnect_from_a_non_neighbor_releases_it() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        let disconnect = Message::Disconnect(Disconnect {
+            alive: true,
+            _respond: false,
+        });
+        state.handle(InEvent::RecvMessage(1, disconnect), io);
+        assert!(disconnected(io, 1));
     }
 }

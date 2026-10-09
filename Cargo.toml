@@ -146,6 +146,11 @@ name = "sim"
 path = "tests/sim.rs"
 required-features = ["test-utils"]
 
+[[test]]
+name = "e2e"
+path = "tests/e2e.rs"
+required-features = ["net"]
+
 [[bin]]
 name = "sim"
 required-features = ["simulator"]

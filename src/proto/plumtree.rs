@@ -421,6 +421,34 @@ impl<PI: PeerIdentity> State<PI> {
                 Timer::EvictCache => self.on_evict_cache_timer(now, io),
             },
         }
+
+        #[cfg(test)]
+        self.check_invariants();
+    }
+
+    /// Panics if the per-peer bookkeeping disagrees with the peer sets.
+    ///
+    /// Runs after every event in the unit tests. Announcers in
+    /// `missing_messages` may be peers we do not hold yet: views converge in
+    /// their own time, and a graft makes them eager.
+    #[cfg(test)]
+    fn check_invariants(&self) {
+        for peer in self.eager_push_peers.iter() {
+            assert!(
+                !self.lazy_push_peers.contains(peer),
+                "{peer:?} is both eager and lazy"
+            );
+        }
+        for peer in self.lazy_push_queue.keys() {
+            assert!(
+                self.lazy_push_peers.contains(peer) || self.eager_push_peers.contains(peer),
+                "announcements queued for {peer:?}, which is no peer"
+            );
+        }
+        // Not yet holding:
+        // for (id, ihaves) in self.missing_messages.iter() {
+        //     assert!(!ihaves.is_empty(), "no announcer left for missing {id:?}");
+        // }
     }
 
     /// Get access to the [`Stats`] of the plumtree.
@@ -741,6 +769,7 @@ impl<PI: PeerIdentity> State<PI> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::proto::topic;
 
     /// Announcements queued for a neighbor that then goes down must not be sent.
     #[test]
@@ -764,12 +793,84 @@ mod test {
         assert!(io.is_empty(), "sent to a peer that went down: {io:?}");
     }
 
+    /// A message that missed the eager path reaches us through an `IHave` and a `Graft`.
+    ///
+    /// A lazy peer announces the message. When the graft timer fires, we ask
+    /// that peer for it with a `Graft`, and the peer becomes eager. The peer
+    /// answers the `Graft` with the message, and makes us eager too.
+    #[test]
+    fn missed_gossip_is_repaired_by_graft() {
+        let now = Instant::now();
+        let content: Bytes = b"repair".to_vec().into();
+        let id = MessageId::from_content(&content);
+
+        let mut sender = State::new(2u32, Config::default(), 1024);
+        let mut sender_io = VecDeque::new();
+        sender.handle(InEvent::NeighborUp(1), now, &mut sender_io);
+        sender.handle(InEvent::RecvMessage(1, Message::Prune), now, &mut sender_io);
+        sender.handle(
+            InEvent::Broadcast(content, Scope::Swarm),
+            now,
+            &mut sender_io,
+        );
+        sender_io.clear();
+
+        let mut receiver = State::new(1u32, Config::default(), 1024);
+        let mut io = VecDeque::new();
+        receiver.handle(InEvent::NeighborUp(2), now, &mut io);
+        receiver.handle(InEvent::RecvMessage(2, Message::Prune), now, &mut io);
+        let ihave = Message::IHave(vec![IHave {
+            id,
+            round: Round(1),
+        }]);
+        receiver.handle(InEvent::RecvMessage(2, ihave), now, &mut io);
+        io.clear();
+        receiver.handle(InEvent::TimerExpired(Timer::SendGraft(id)), now, &mut io);
+
+        let graft = io
+            .iter()
+            .find_map(|event| match event {
+                topic::OutEvent::SendMessage(2, topic::Message::Gossip(Message::Graft(graft))) => {
+                    Some(graft.clone())
+                }
+                _ => None,
+            })
+            .expect("no graft to the announcer");
+        assert!(
+            receiver.eager_push_peers.contains(&2),
+            "the announcer is not eager"
+        );
+
+        sender.handle(
+            InEvent::RecvMessage(1, Message::Graft(graft)),
+            now,
+            &mut sender_io,
+        );
+        let answered = sender_io.iter().any(|event| {
+            matches!(
+                event,
+                topic::OutEvent::SendMessage(1, topic::Message::Gossip(Message::Gossip(gossip)))
+                    if gossip.id == id
+            )
+        });
+        assert!(answered, "the graft was not answered: {sender_io:?}");
+        assert!(
+            sender.eager_push_peers.contains(&1),
+            "the grafting peer is not eager"
+        );
+    }
+
     #[test]
     fn optimize_tree() {
         let mut io = VecDeque::new();
         let config: Config = Default::default();
         let mut state = State::new(1, config.clone(), 1024);
         let now = Instant::now();
+        // Peers 2 and 3 are neighbors, and 2 pruned us, so it is lazy.
+        state.handle(InEvent::NeighborUp(2), now, &mut io);
+        state.handle(InEvent::NeighborUp(3), now, &mut io);
+        state.handle(InEvent::RecvMessage(2, Message::Prune), now, &mut io);
+        io.clear();
 
         // we receive an IHave message from peer 2
         // it has `round: 2` which means that the the peer that sent us the IHave was
@@ -863,6 +964,48 @@ mod test {
         assert_eq!(io, expected);
     }
 
+    /// A message from a non-neighbor leaves the peer sets alone.
+    ///
+    /// Such a message is a straggler from a former neighbor. A `Graft` taken
+    /// from one made it eager, and every later broadcast dialed it.
+    #[test]
+    #[ignore = "not yet passing"]
+    fn non_neighbor_does_not_become_a_peer() {
+        let mut io: VecDeque<crate::proto::topic::OutEvent<u32>> = VecDeque::new();
+        let mut state = State::new(1u32, Config::default(), 1024);
+        let now = Instant::now();
+        let content: Bytes = b"hi".to_vec().into();
+        let id = MessageId::from_content(&content);
+        let gossip = Message::Gossip(Gossip {
+            id,
+            content: content.clone(),
+            scope: DeliveryScope::Swarm(Round(1)),
+        });
+        let graft = Message::Graft(Graft {
+            id: Some(id),
+            round: Round(1),
+        });
+        let ihave = Message::IHave(vec![IHave {
+            id,
+            round: Round(1),
+        }]);
+
+        state.handle(InEvent::RecvMessage(2, gossip.clone()), now, &mut io);
+        assert!(
+            io.iter()
+                .any(|event| matches!(event, crate::proto::topic::OutEvent::EmitEvent(_))),
+            "the gossip was not delivered"
+        );
+        io.clear();
+        for message in [gossip, graft, ihave, Message::Prune] {
+            state.handle(InEvent::RecvMessage(2, message), now, &mut io);
+        }
+
+        assert!(state.eager_push_peers.is_empty() && state.lazy_push_peers.is_empty());
+        assert!(state.missing_messages.is_empty());
+        assert!(io.is_empty(), "answered a non-neighbor: {io:?}");
+    }
+
     #[test]
     fn spoofed_messages_are_ignored() {
         let config: Config = Default::default();
@@ -932,5 +1075,66 @@ mod test {
         let now = now + config.message_cache_retention;
         state.handle(InEvent::TimerExpired(Timer::EvictCache), now, &mut io);
         assert_eq!(state.cache.len(), 0);
+    }
+
+    /// A missing message leaves no entry once we asked its last announcer.
+    #[test]
+    #[ignore = "not yet passing"]
+    fn last_graft_leaves_no_missing_entry() {
+        let mut io = VecDeque::new();
+        let mut state = State::new(1u32, Config::default(), 1024);
+        let now = Instant::now();
+        state.handle(InEvent::NeighborUp(2), now, &mut io);
+        let id = MessageId::from_content(b"hi");
+        let ihave = Message::IHave(vec![IHave {
+            id,
+            round: Round(1),
+        }]);
+        state.handle(InEvent::RecvMessage(2, ihave), now, &mut io);
+
+        state.handle(InEvent::TimerExpired(Timer::SendGraft(id)), now, &mut io);
+
+        assert!(state.missing_messages.is_empty());
+    }
+
+    /// A late payload from a non-neighbor does not make it a peer, even with a better `IHave`.
+    #[test]
+    #[ignore = "not yet passing"]
+    fn late_payload_with_a_better_ihave_does_not_readd_its_sender() {
+        let now = Instant::now();
+        let mut state = State::new(0u32, Config::default(), 1024);
+        let mut io = VecDeque::new();
+        state.handle(InEvent::NeighborUp(1), now, &mut io);
+        let content = Bytes::from_static(b"late payload");
+        let id = MessageId::from_content(&content);
+        state.handle(
+            InEvent::RecvMessage(
+                1,
+                Message::IHave(vec![IHave {
+                    id,
+                    round: Round(0),
+                }]),
+            ),
+            now,
+            &mut io,
+        );
+        io.clear();
+        state.handle(
+            InEvent::RecvMessage(
+                2,
+                Message::Gossip(Gossip {
+                    id,
+                    content,
+                    scope: DeliveryScope::Swarm(Round(100)),
+                }),
+            ),
+            now,
+            &mut io,
+        );
+        assert!(!state.lazy_push_peers.contains(&2));
+        assert!(!state.eager_push_peers.contains(&2));
+        assert!(io
+            .iter()
+            .any(|event| matches!(event, topic::OutEvent::EmitEvent(topic::Event::Received(_)))));
     }
 }

@@ -96,6 +96,19 @@ pub enum Message<PI> {
     Gossip(plumtree::Message),
 }
 
+#[cfg(all(test, feature = "net"))]
+impl<PI> Message<PI> {
+    /// Returns a `Disconnect`, for the network tests.
+    pub(crate) fn test_disconnect() -> Self {
+        Message::Swarm(hyparview::Message::test_disconnect())
+    }
+
+    /// Returns a shuffle from `origin` carrying no nodes, for the network tests.
+    pub(crate) fn test_shuffle(origin: PI, ttl: u16) -> Self {
+        Message::Swarm(hyparview::Message::test_shuffle(origin, ttl))
+    }
+}
+
 impl<PI> Message<PI> {
     /// Get the kind of this message
     pub fn kind(&self) -> MessageKind {
@@ -324,7 +337,23 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
             .filter(|event| matches!(event, OutEvent::SendMessage(_, _)))
             .count();
 
+        #[cfg(test)]
+        self.check_invariants();
+
         self.outbox.drain(..)
+    }
+
+    /// Panics if Plumtree's peers are not exactly HyParView's neighbors.
+    #[cfg(test)]
+    fn check_invariants(&self) {
+        // Not yet holding:
+        // let gossip = &self.gossip;
+        // let peers: std::collections::BTreeSet<_> = gossip
+        //     .eager_push_peers
+        //     .union(&gossip.lazy_push_peers)
+        //     .collect();
+        // let neighbors: std::collections::BTreeSet<_> = self.swarm.active_view.iter().collect();
+        // assert_eq!(peers, neighbors, "Plumtree's peers are not the neighbors");
     }
 
     /// Get stats on how many messages were sent and received.
