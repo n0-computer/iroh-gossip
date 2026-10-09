@@ -222,6 +222,12 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
         self.states.iter()
     }
 
+    /// Returns whether a topic uses `peer`, so that its connections must stay.
+    #[cfg(feature = "net")]
+    pub(crate) fn uses_peer(&self, peer: &PI) -> bool {
+        self.peer_topics.contains_key(peer)
+    }
+
     /// Check if a topic has any active (connected) peers.
     pub fn has_active_peers(&self, topic: &TopicId) -> bool {
         self.state(topic)
