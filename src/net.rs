@@ -152,8 +152,10 @@ impl Builder {
     /// Sets the maximum message size in bytes.
     ///
     /// By default this is `4096` bytes. The limit applies to the encoded message,
-    /// which is a few dozen bytes longer than its content. A message over the limit is
-    /// dropped with a warning, and its connection stays open.
+    /// which is about 40 bytes longer than its content. [`GossipSender::broadcast`]
+    /// refuses a message over the limit.
+    ///
+    /// [`GossipSender::broadcast`]: crate::api::GossipSender::broadcast
     pub fn max_message_size(mut self, size: usize) -> Self {
         self.config.max_message_size = size;
         self
@@ -208,7 +210,7 @@ impl Builder {
 
         let actor_handle = task::spawn(actor.run().instrument(error_span!("gossip", %me)));
 
-        let api = GossipApi::local(rpc_tx);
+        let api = GossipApi::local(rpc_tx, max_message_size);
 
         Gossip {
             inner: Inner {
@@ -1193,7 +1195,7 @@ pub(crate) mod tests {
             let _actor_handle = AbortOnDropHandle::new(task::spawn(n0_future::future::pending()));
             let gossip = Self {
                 inner: Inner {
-                    api: GossipApi::local(to_actor_tx),
+                    api: GossipApi::local(to_actor_tx, max_message_size),
                     local_tx: conn_tx,
                     _actor_handle,
                     max_message_size,
@@ -1751,6 +1753,43 @@ pub(crate) mod tests {
         let size = postcard::experimental::serialized_size(&message).std_context("size")?;
         assert!(size < 1024, "the oversized message went out");
         assert!(!task.is_finished(), "the connection ended");
+        Ok(())
+    }
+
+    /// `broadcast` refuses a message that does not fit a frame at every hop.
+    #[tokio::test]
+    #[traced_test]
+    async fn broadcast_refuses_an_oversized_message() -> Result {
+        const MAX: usize = 1024;
+        let endpoint = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await?;
+        let gossip = Gossip::builder().max_message_size(MAX).spawn(endpoint);
+        let topic = gossip.subscribe([1; 32].into(), vec![]).await?;
+        let (sender, _receiver) = topic.split();
+        let largest = |scope| {
+            (0..MAX)
+                .rev()
+                .find(|len| proto::topic::broadcast_fits(*len, scope, MAX))
+                .expect("some content fits")
+        };
+
+        let fits = largest(Scope::Swarm);
+        sender.broadcast(vec![0; fits].into()).await?;
+        let refused = sender.broadcast(vec![0; fits + 1].into()).await;
+        assert!(
+            matches!(refused, Err(ApiError::TooLarge { size, .. }) if size == fits + 1),
+            "{refused:?}"
+        );
+
+        let fits = largest(Scope::Neighbors);
+        sender.broadcast_neighbors(vec![0; fits].into()).await?;
+        let refused = sender.broadcast_neighbors(vec![0; fits + 1].into()).await;
+        assert!(
+            matches!(refused, Err(ApiError::TooLarge { .. })),
+            "{refused:?}"
+        );
         Ok(())
     }
 

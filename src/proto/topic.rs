@@ -96,6 +96,12 @@ pub(crate) fn max_plumtree_size(max_message_size: usize) -> usize {
     max_message_size - 2
 }
 
+/// Returns whether a broadcast with `content_len` bytes of content fits a frame at every hop.
+#[cfg(any(feature = "net", feature = "rpc"))]
+pub(crate) fn broadcast_fits(content_len: usize, scope: Scope, max_message_size: usize) -> bool {
+    plumtree::max_gossip_size(content_len, scope) <= max_plumtree_size(max_message_size)
+}
+
 /// A protocol message for a particular topic
 #[derive(From, Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum Message<PI> {
