@@ -111,6 +111,8 @@ impl RecvLoop {
     }
 
     pub(crate) async fn run(&mut self) -> Result<(), ReadError> {
+        // Headers are read apart, so that a partial one blocks no other stream.
+        let mut header_futures = FuturesUnordered::new();
         let mut read_futures = FuturesUnordered::new();
         let mut conn_is_closed = false;
         let closed = self.conn.closed();
@@ -128,7 +130,10 @@ impl RecvLoop {
                             continue;
                         }
                     };
-                    let state = RecvStreamState::new(stream, self.max_message_size).await?;
+                    header_futures.push(RecvStreamState::new(stream, self.max_message_size));
+                }
+                Some(state) = header_futures.next(), if !header_futures.is_empty() => {
+                    let state = state?;
                     debug!(topic=%state.header.topic_id.fmt_short(), "stream opened");
                     read_futures.push(state.next());
                 }

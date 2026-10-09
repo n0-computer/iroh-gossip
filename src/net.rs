@@ -380,8 +380,9 @@ impl Actor {
         i: usize,
     ) -> bool {
         self.metrics.actor_tick_main.inc();
+        // Not biased: a publisher that always has a command ready would starve the
+        // branches after it, such as received messages, timers and closed connections.
         tokio::select! {
-            biased;
             conn = self.local_rx.recv() => {
                 match conn {
                     Some(LocalActorMessage::Shutdown { reply }) => {
@@ -573,6 +574,11 @@ impl Actor {
         conn: Connection,
         task_result: Result<(), ConnectionLoopError>,
     ) {
+        // The receive loop sends its messages before its task ends. Handle the ones
+        // still queued first, so that a message never comes after its own close.
+        while let Ok(event) = self.in_event_rx.try_recv() {
+            self.handle_in_event(event, Instant::now()).await;
+        }
         if conn.close_reason().is_none() {
             conn.close(0u32.into(), b"close from disconnect");
         }
@@ -1570,6 +1576,186 @@ pub(crate) mod tests {
     #[should_panic(expected = "original child panic")]
     async fn task_output_passes_a_panic_on() {
         task_output(task::spawn(async { panic!("original child panic") }).await);
+    }
+
+    /// Our endpoint, our side and the peer's side of a connection, and what keeps the peer alive.
+    async fn connected_pair() -> Result<(Endpoint, Connection, Connection, Box<dyn std::any::Any>)>
+    {
+        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
+        let (relay_map, relay_url, relay) = iroh::test_utils::run_relay_server()
+            .await
+            .std_context("relay")?;
+        let ours = create_endpoint(rng, relay_map.clone(), None).await?;
+        let theirs = create_endpoint(rng, relay_map, None).await?;
+        let addr = EndpointAddr::new(theirs.id()).with_relay_url(relay_url);
+        let connect = async { ours.connect(addr, GOSSIP_ALPN).await.std_context("connect") };
+        let accept = async {
+            let incoming = theirs.accept().await.std_context("endpoint closed")?;
+            incoming.await.std_context("accept")
+        };
+        let (conn, peer_conn) = (connect, accept).try_join().await?;
+        Ok((ours, conn, peer_conn, Box::new((theirs, relay))))
+    }
+
+    /// Returns the `Join` that a peer sends for `topic`.
+    fn peer_join(topic: TopicId) -> ProtoMessage {
+        let mut state = proto::State::new(
+            SecretKey::generate().public(),
+            PeerData::new(Vec::new()),
+            Default::default(),
+            StdRng::seed_from_u64(1),
+        );
+        let join = InEvent::Command(
+            topic,
+            proto::Command::Join(vec![SecretKey::generate().public()]),
+        );
+        let message = state
+            .handle(join, Instant::now(), None)
+            .find_map(|event| match event {
+                proto::OutEvent::SendMessage(_, message) => Some(message),
+                _ => None,
+            });
+        message.expect("a join sends a message")
+    }
+
+    /// A publisher that always has a command ready does not starve a finished connection.
+    #[tokio::test]
+    #[traced_test]
+    async fn busy_publisher_does_not_starve_finished_connections() -> Result {
+        let (ours, conn, _peer_conn, _peer) = connected_pair().await?;
+        let peer = conn.remote_id();
+        let (mut actor, _rpc_tx, _local_tx) = Actor::new(
+            ours,
+            Default::default(),
+            Default::default(),
+            None,
+            Default::default(),
+        );
+        let topic = [1; 32].into();
+        actor.topics.insert(topic, TopicState::default());
+        actor
+            .handle_in_event(
+                InEvent::Command(topic, ProtoCommand::Join(vec![])),
+                Instant::now(),
+            )
+            .await;
+        conn.close(0u32.into(), b"done");
+        actor.handle_connection(peer, ConnOrigin::Accept, conn);
+        // Keep commands ready throughout the test, as a continuous publisher does.
+        let commands = n0_future::stream::iter(std::iter::repeat_with(|| {
+            Ok(Command::Broadcast(Bytes::new()))
+        }));
+        let key = actor
+            .command_rx
+            .insert(TopicCommandStream::new(topic, Box::pin(commands)));
+        actor
+            .topics
+            .get_mut(&topic)
+            .expect("inserted above")
+            .command_rx_keys
+            .insert(key);
+        let mut addresses = n0_future::stream::pending();
+        for i in 0..256 {
+            actor.event_loop(&mut addresses, i).await;
+            tokio::task::yield_now().await;
+            if actor.connection_tasks.is_empty() {
+                return Ok(());
+            }
+        }
+        panic!("publishing starved the finished connection");
+    }
+
+    /// A message that a connection delivered before its close is handled before the close.
+    ///
+    /// The receive loop queues the message before its task ends, but the actor can
+    /// see the end first. A join from the peer then made it our neighbor after its
+    /// connection was gone.
+    #[tokio::test]
+    #[traced_test]
+    async fn message_before_a_close_is_handled_first() -> Result {
+        let (ours, conn, _peer_conn, _peer) = connected_pair().await?;
+        let peer = conn.remote_id();
+        let (mut actor, _rpc_tx, _local_tx) = Actor::new(
+            ours,
+            Default::default(),
+            Default::default(),
+            None,
+            Default::default(),
+        );
+        let topic = [1; 32].into();
+        let state = TopicState::default();
+        let mut events = state.event_sender.subscribe();
+        actor.topics.insert(topic, state);
+        actor
+            .handle_in_event(
+                InEvent::Command(topic, ProtoCommand::Join(vec![])),
+                Instant::now(),
+            )
+            .await;
+        actor
+            .in_event_tx
+            .send(InEvent::RecvMessage(peer, peer_join(topic)))
+            .await
+            .std_context("queue join")?;
+        conn.close(0u32.into(), b"done");
+        actor.handle_connection(peer, ConnOrigin::Accept, conn);
+        let (peer, conn, result) = actor
+            .connection_tasks
+            .join_next()
+            .await
+            .expect("one task")
+            .expect("no panic");
+        actor
+            .handle_connection_task_finished(peer, conn, result)
+            .await;
+
+        assert!(
+            !actor.state.has_active_peers(&topic),
+            "the join made a neighbor after its close"
+        );
+        let up = events.try_recv().std_context("no event")?;
+        let down = events.try_recv().std_context("no second event")?;
+        assert!(
+            matches!(up, ProtoEvent::NeighborUp(p) if p == peer),
+            "{up:?}"
+        );
+        assert!(
+            matches!(down, ProtoEvent::NeighborDown(p) if p == peer),
+            "{down:?}"
+        );
+        Ok(())
+    }
+
+    /// A stream with an incomplete header does not block the other streams.
+    #[tokio::test]
+    #[traced_test]
+    async fn partial_header_does_not_block_other_streams() -> Result {
+        let (_ours, conn, peer_conn, _peer) = connected_pair().await?;
+        let (in_event_tx, mut in_event_rx) = mpsc::channel(4);
+        let mut recv_loop = RecvLoop::new(peer_conn.remote_id(), conn, in_event_tx, 1024);
+        let _recv = AbortOnDropHandle::new(spawn(async move { recv_loop.run().await }));
+
+        let mut partial = peer_conn.open_uni().await.std_context("open stream")?;
+        partial
+            .write_all(&[0, 0, 0, 32, 0])
+            .await
+            .std_context("write partial header")?;
+        let topic: TopicId = [1; 32].into();
+        let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
+        let mut buffer = Vec::new();
+        util::StreamHeader { topic_id: topic }
+            .write(&mut stream, &mut buffer, 1024)
+            .await
+            .std_context("write header")?;
+        util::write_frame(&mut stream, &peer_join(topic).message, &mut buffer, 1024)
+            .await
+            .std_context("write frame")?;
+
+        let event = timeout(Duration::from_secs(2), in_event_rx.recv())
+            .await
+            .std_context("the partial header blocked the other stream")?;
+        assert!(matches!(event, Some(InEvent::RecvMessage(..))), "{event:?}");
+        Ok(())
     }
 
     /// Test that endpoints can reconnect to each other.
