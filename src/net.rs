@@ -254,14 +254,15 @@ impl Gossip {
     /// Shutdown the gossip instance.
     ///
     /// This leaves all topics, sending `Disconnect` messages to peers, and then
-    /// stops the gossip actor loop and drops all state and connections.
+    /// stops the gossip actor loop and drops all state and connections. A gossip
+    /// instance that is shut down already, or shutting down, returns `Ok` too.
     pub async fn shutdown(&self) -> Result<(), Error> {
         let (reply, reply_rx) = oneshot::channel();
-        self.inner
-            .local_tx
-            .send(LocalActorMessage::Shutdown { reply })
-            .await?;
-        reply_rx.await?;
+        let shutdown = LocalActorMessage::Shutdown { reply };
+        // The actor is gone or about to go, which is what the caller asks for.
+        if self.inner.local_tx.send(shutdown).await.is_ok() {
+            reply_rx.await.ok();
+        }
         Ok(())
     }
 
