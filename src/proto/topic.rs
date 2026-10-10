@@ -12,7 +12,7 @@ use super::{
     hyparview::{self, InEvent as SwarmIn},
     plumtree::{self, GossipEvent, InEvent as GossipIn, Scope},
     state::MessageKind,
-    PeerData, PeerIdentity, DEFAULT_MAX_MESSAGE_SIZE,
+    NeighborDownReason, PeerData, PeerIdentity, DEFAULT_MAX_MESSAGE_SIZE,
 };
 use crate::proto::MIN_MAX_MESSAGE_SIZE;
 
@@ -119,8 +119,13 @@ impl<PI> Message<PI> {
 pub enum Event<PI> {
     /// We have a new, direct neighbor in the swarm membership layer for this topic
     NeighborUp(PI),
-    /// We dropped direct neighbor in the swarm membership layer for this topic
-    NeighborDown(PI),
+    /// We dropped a direct neighbor in the swarm membership layer for this topic.
+    NeighborDown {
+        /// The removed neighbor.
+        neighbor: PI,
+        /// Why the neighbor was removed.
+        reason: NeighborDownReason,
+    },
     /// A gossip message was received for this topic
     Received(GossipEvent<PI>),
 }
@@ -129,7 +134,10 @@ impl<PI> From<hyparview::Event<PI>> for Event<PI> {
     fn from(value: hyparview::Event<PI>) -> Self {
         match value {
             hyparview::Event::NeighborUp(peer) => Self::NeighborUp(peer),
-            hyparview::Event::NeighborDown(peer) => Self::NeighborDown(peer),
+            hyparview::Event::NeighborDown { peer, reason } => Self::NeighborDown {
+                neighbor: peer,
+                reason,
+            },
         }
     }
 }
@@ -306,10 +314,9 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
                     self.gossip
                         .handle(GossipIn::NeighborUp(*peer), now, &mut io)
                 }
-                OutEvent::EmitEvent(Event::NeighborDown(peer)) => {
-                    self.gossip
-                        .handle(GossipIn::NeighborDown(*peer), now, &mut io)
-                }
+                OutEvent::EmitEvent(Event::NeighborDown { neighbor: peer, .. }) => self
+                    .gossip
+                    .handle(GossipIn::NeighborDown(*peer), now, &mut io),
                 _ => {}
             }
         }
