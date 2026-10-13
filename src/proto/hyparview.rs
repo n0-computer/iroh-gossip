@@ -326,8 +326,18 @@ where
 
         // Disconnect from passive nodes right after receiving a message.
         // TODO(frando): I'm not sure anymore that this is correct. Maybe remove?
-        if !is_disconnect && !self.active_view.contains(&from) {
-            io.push(OutEvent::DisconnectPeer(from));
+        if !is_disconnect {
+            self.release_if_unused(from, io);
+        }
+    }
+
+    /// Disconnects `peer` unless it is a neighbor or we wait for its `Neighbor` reply.
+    ///
+    /// The reply can come on the connection, and a closed connection would lose it.
+    fn release_if_unused(&self, peer: PI, io: &mut impl IO<PI>) {
+        if !self.active_view.contains(&peer) && !self.pending_neighbor_requests.contains_key(&peer)
+        {
+            io.push(OutEvent::DisconnectPeer(peer));
         }
     }
 
@@ -680,6 +690,8 @@ where
             self.pending_neighbor_requests.remove(&peer);
             self.passive_view.remove(&peer);
             self.forget_peer(&peer);
+            // A passive message may have kept the connection for the reply.
+            self.release_if_unused(peer, io);
             self.refill_active_from_passive(&[], io);
         }
     }
@@ -1125,7 +1137,6 @@ mod tests {
     /// An unrelated passive reply must not close the connection on which a
     /// Neighbor acceptance is still due. This is the race discussed in #178.
     #[test]
-    #[ignore = "fails: passive replies close a connection with a pending Neighbor"]
     fn passive_reply_keeps_a_pending_neighbor_connection() {
         let mut state = new_state();
         state.passive_view.insert(1);
@@ -1140,6 +1151,52 @@ mod tests {
             !io.iter()
                 .any(|event| matches!(event, TopicOut::DisconnectPeer(1))),
             "a passive reply closed the connection before the Neighbor reply"
+        );
+    }
+
+    /// Returns whether the state asked to close the connection to `peer`.
+    fn disconnected(io: &Io, peer: u32) -> bool {
+        io.iter()
+            .any(|event| matches!(event, TopicOut::DisconnectPeer(p) if *p == peer))
+    }
+
+    /// A request that ends without a neighbor releases the connection it kept.
+    ///
+    /// A passive message keeps the connection while the request is out. If the
+    /// reply never comes, the timeout must close it, or it stays open for good.
+    #[test]
+    fn timed_out_request_releases_its_connection() {
+        let mut state = new_state();
+        state.passive_view.insert(1);
+        state.send_neighbor(1, Priority::High, &mut Io::new());
+        let reply = Message::ShuffleReply(ShuffleReply { nodes: vec![] });
+        state.handle(InEvent::RecvMessage(1, reply), &mut Io::new());
+        let io = &mut Io::new();
+        state.handle(
+            InEvent::TimerExpired(Timer::PendingNeighborRequest(1, 0)),
+            io,
+        );
+        assert!(disconnected(io, 1), "the connection outlived its request");
+    }
+
+    /// An accepted request keeps its connection, also after a passive message came first.
+    #[test]
+    fn accepted_request_keeps_its_connection() {
+        let mut state = new_state();
+        state.passive_view.insert(1);
+        state.send_neighbor(1, Priority::High, &mut Io::new());
+        let io = &mut Io::new();
+        let reply = Message::ShuffleReply(ShuffleReply { nodes: vec![] });
+        state.handle(InEvent::RecvMessage(1, reply), io);
+        let accept = Message::Neighbor(Neighbor {
+            priority: Priority::High,
+            data: None,
+        });
+        state.handle(InEvent::RecvMessage(1, accept), io);
+        assert!(state.active_view.contains(&1));
+        assert!(
+            !disconnected(io, 1),
+            "closed the connection of a new neighbor"
         );
     }
 }
