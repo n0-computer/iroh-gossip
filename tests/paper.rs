@@ -1032,7 +1032,6 @@ fn plumtree_recovers_from_massive_failure() {
 /// and 400ms clears them. That figure holds for this implementation and this
 /// overlay, not in general.
 #[test]
-#[ignore = "fails: a late Prune or Graft from a departed neighbor makes it a broadcast peer again"]
 fn plumtree_graft_timeout_below_the_eager_path_costs_redundancy() {
     let mut costs = Vec::new();
     for seed in seeds() {
@@ -1162,7 +1161,6 @@ fn rmr_matches_the_payloads_of_the_round() {
 ///
 /// The other tests check them at settled moments only.
 #[test]
-#[ignore = "fails: a late Prune or Graft from a departed neighbor makes it a broadcast peer again"]
 fn local_invariants_hold_during_failure_and_repair() {
     let mut sim = static_swarm(100);
     sim.network.check_invariants().unwrap();
