@@ -535,6 +535,43 @@ fn hyparview_isolated_peer_rejoins_through_its_bootstrap_peer() {
     assert!(reconnected, "the isolated peer did not rejoin");
 }
 
+/// Extension: a peer whose bootstrap peer is gone for good comes back after a
+/// short outage of its own.
+///
+/// Peer 0 is the contact everyone joined through, as in an invite, and it
+/// leaves for good. Later another peer loses its network for 30s. While it is
+/// offline, its connections break and every neighbor request fails, so its own
+/// failure detection empties both of its views. Its neighbors and passive peers
+/// are alive and in the topic the whole time. Once it is back online, the only
+/// address it would rejoin through is peer 0.
+#[test]
+fn hyparview_peer_rejoins_after_an_outage_when_its_bootstrap_peer_is_gone() {
+    for seed in seeds() {
+        let mut sim = swarm(50, seed);
+        sim.network.remove(&0);
+        heal(&mut sim);
+        let peer = 1;
+        assert!(!neighbors(&sim, peer).is_empty());
+
+        sim.network.set_offline(&peer, true);
+        sim.network.run_duration(Duration::from_secs(30));
+        assert!(
+            neighbors(&sim, peer).is_empty(),
+            "seed {seed}: the peer should have lost its neighbors"
+        );
+        sim.network.set_offline(&peer, false);
+
+        sim.network.run_duration(Duration::from_secs(120));
+        let count = neighbors(&sim, peer).len();
+        report(
+            "hyparview: rejoin after outage",
+            seed,
+            format!("{count} neighbors two minutes after the outage"),
+        );
+        assert!(count > 0, "seed {seed}: the peer stayed alone");
+    }
+}
+
 /// Claim: the overlay heals quickly after a failure, without waiting for a
 /// shuffle.
 ///
