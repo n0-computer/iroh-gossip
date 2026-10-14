@@ -208,7 +208,7 @@ impl Builder {
             self.alpn,
             address_lookup,
         );
-        actor.send_queue_size = self.send_queue.size;
+        actor.send_queue = self.send_queue;
         let me = actor.endpoint.id().fmt_short();
         let max_message_size = actor.state.max_message_size();
 
@@ -359,8 +359,8 @@ struct Actor {
     metrics: Arc<Metrics>,
     topic_event_forwarders: JoinSet<TopicId>,
     address_lookup: GossipAddressLookup,
-    /// The size of the queue to each peer, see [`QueueOptions::size`].
-    send_queue_size: usize,
+    /// The options of the queue to each peer.
+    send_queue: QueueOptions,
 }
 
 impl Actor {
@@ -406,7 +406,7 @@ impl Actor {
             local_rx,
             topic_event_forwarders: Default::default(),
             address_lookup,
-            send_queue_size: queue::QUEUE_SIZE,
+            send_queue: Default::default(),
         };
 
         (actor, rpc_tx, local_tx)
@@ -607,7 +607,7 @@ impl Actor {
 
     fn handle_connection(&mut self, peer_id: EndpointId, origin: ConnOrigin, conn: Connection) {
         let max_message_size = self.state.max_message_size();
-        let size = queue::queue_size(self.send_queue_size, max_message_size);
+        let size = queue::queue_size(self.send_queue.size, max_message_size);
         let (send_tx, send_rx) = QueueSender::new(size);
 
         let dial = origin == ConnOrigin::Dial;
@@ -2290,7 +2290,11 @@ pub(crate) mod tests {
         let (conn, peer_conn) = pair.connect().await?;
         let topic: TopicId = blake3::hash(b"idle").into();
         let (queue, queues) = QueueSender::new(1 << 16);
-        assert!(matches!(queue.push(join_message(topic, 0)), Pushed::Queued));
+        let message = ProtoMessage {
+            topic,
+            message: TopicMessage::test_gossip(10),
+        };
+        assert!(matches!(queue.push(message), Pushed::Queued));
         let mut send_loop = SendLoop::new(conn, queues, TEST_FRAME_LIMIT);
         let _send = AbortOnDropHandle::new(spawn(async move { send_loop.run(vec![]).await }));
         // The queue stays, so only the idle time can end the stream.
@@ -2755,17 +2759,27 @@ pub(crate) mod tests {
         let mut send_loop = SendLoop::new(conn, send_rx, 1024);
         let _send = AbortOnDropHandle::new(spawn(async move { send_loop.run(queue).await }));
 
-        let (_, first) = timeout(Duration::from_secs(5), read_next_stream(&peer_conn))
-            .await
-            .std_context("the first stream did not end")??;
-        let (_, second) = timeout(Duration::from_secs(5), read_next_stream(&peer_conn))
-            .await
-            .std_context("the second stream did not end")??;
-
-        let first: Vec<bool> = first.iter().map(|m| m.is_disconnect()).collect();
-        let second: Vec<bool> = second.iter().map(|m| m.is_disconnect()).collect();
-        assert_eq!(first, vec![false, true], "first stream, by `is_disconnect`");
-        assert_eq!(second, vec![false], "second stream, by `is_disconnect`");
+        // The `Disconnect` ends the control stream of the topic, and goes on the
+        // data stream after the data of the topic. The next join opens a new
+        // control stream.
+        let mut streams = Vec::new();
+        for _ in 0..3 {
+            let (_, messages) = timeout(Duration::from_secs(5), read_next_stream(&peer_conn))
+                .await
+                .std_context("a stream did not end")??;
+            streams.push(
+                messages
+                    .iter()
+                    .map(|m| m.is_disconnect())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        streams.sort();
+        assert_eq!(
+            streams,
+            vec![vec![false], vec![false], vec![true]],
+            "streams, by `is_disconnect`"
+        );
         Ok(())
     }
 

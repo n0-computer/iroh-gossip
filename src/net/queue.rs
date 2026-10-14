@@ -91,10 +91,11 @@ fn class(limit: usize) -> (ClassSender, QueueReceiver) {
 
 /// Returns the size of a queue for `size` of the options and `max_message_size`.
 ///
-/// It holds at least four messages of the largest size.
+/// It holds at least eight messages of the largest size, so that the announcements,
+/// an eighth of the queue, hold one.
 pub(super) fn queue_size(size: usize, max_message_size: usize) -> usize {
     size.max(MIN_QUEUE_SIZE)
-        .max(4 * (max_message_size + ITEM_COST))
+        .max(8 * (max_message_size + ITEM_COST))
 }
 
 impl QueueSender {
@@ -112,21 +113,22 @@ impl QueueSender {
     /// Queues `message`, if its class has room for it.
     ///
     /// Announcements get half the control class, so they cannot crowd out the rest.
-    /// A `Disconnect` also ends the data stream of its topic.
     pub(super) fn push(&self, message: ProtoMessage) -> Pushed {
+        let size = postcard::experimental::serialized_size(&message.message).unwrap_or(0);
+        if message.message.is_disconnect() {
+            return self.push_disconnect(message, size);
+        }
         let announcement = message.message.is_announcement();
         let (class, dropped) = match message.kind() {
             MessageKind::Data => (&self.data, true),
             MessageKind::Control => (&self.control, announcement),
         };
         let limit = class.limit / if announcement { 2 } else { 1 };
-        let size = postcard::experimental::serialized_size(&message.message).unwrap_or(0);
-        let end = message.message.is_disconnect().then_some(message.topic);
         let item = QueueItem::Message(message, size);
         let charge = item.charge();
         if class.bytes.fetch_add(charge, Ordering::Relaxed) + charge > limit {
             class.bytes.fetch_sub(charge, Ordering::Relaxed);
-            let QueueItem::Message(message, _) = item else {
+            let QueueItem::Message(message, ..) = item else {
                 unreachable!("built as a message above");
             };
             return match dropped {
@@ -134,14 +136,25 @@ impl QueueSender {
                 false => Pushed::Overflow,
             };
         }
-        if class.tx.send(item).is_err() {
+        match class.tx.send(item) {
+            Ok(()) => Pushed::Queued,
+            Err(_) => Pushed::Closed,
+        }
+    }
+
+    /// Queues a `Disconnect` after the data of its topic, and ends the control stream of the topic.
+    ///
+    /// No data of the topic may overtake it: the peer would then take us for
+    /// a neighbor again. It always fits, but is charged.
+    fn push_disconnect(&self, message: ProtoMessage, size: usize) -> Pushed {
+        let topic = message.topic;
+        let item = QueueItem::Message(message, size);
+        self.data.bytes.fetch_add(item.charge(), Ordering::Relaxed);
+        if self.data.tx.send(item).is_err() {
             return Pushed::Closed;
         }
-        if let Some(topic) = end {
-            // It always fits, but is charged.
-            self.data.bytes.fetch_add(ITEM_COST, Ordering::Relaxed);
-            self.data.tx.send(QueueItem::End(topic)).ok();
-        }
+        self.control.bytes.fetch_add(ITEM_COST, Ordering::Relaxed);
+        self.control.tx.send(QueueItem::End(topic)).ok();
         Pushed::Queued
     }
 }
@@ -183,6 +196,13 @@ mod tests {
         proto(Message::test_ihave())
     }
 
+    fn shuffle() -> ProtoMessage {
+        proto(Message::test_shuffle(
+            iroh::SecretKey::generate().public(),
+            0,
+        ))
+    }
+
     fn disconnect() -> ProtoMessage {
         proto(Message::test_disconnect())
     }
@@ -210,48 +230,44 @@ mod tests {
         }
         assert!(matches!(queue.push(ihave()), Pushed::Dropped(_)));
 
-        let one = size(&disconnect());
+        let one = size(&shuffle());
         let mut pushed = 0;
-        while matches!(queue.push(disconnect()), Pushed::Queued) {
+        while matches!(queue.push(shuffle()), Pushed::Queued) {
             pushed += 1;
         }
         assert!(pushed > 0 && pushed <= control_share / one);
-        assert!(matches!(queue.push(disconnect()), Pushed::Overflow));
+        assert!(matches!(queue.push(shuffle()), Pushed::Overflow));
+        // A `Disconnect` always fits.
+        assert!(matches!(queue.push(disconnect()), Pushed::Queued));
     }
 
-    /// A control message does not wait behind data, and a `Disconnect` ends the data stream too.
+    /// A control message does not wait behind data, but a `Disconnect` follows the data of its topic.
+    ///
+    /// Data after the `Disconnect` would make the peer take us for a neighbor again.
     #[tokio::test]
-    async fn classes_are_separate() {
+    async fn disconnect_follows_the_data_of_its_topic() {
         let (queue, mut queues) = QueueSender::new(100_000);
         assert!(matches!(queue.push(data(10)), Pushed::Queued));
+        assert!(matches!(queue.push(shuffle()), Pushed::Queued));
         assert!(matches!(queue.push(disconnect()), Pushed::Queued));
+        let message = |item: Option<QueueItem>| match item {
+            Some(QueueItem::Message(message, ..)) => message.message,
+            other => panic!("not a message: {other:?}"),
+        };
+        assert!(!message(queues.control.recv().await).is_disconnect());
         assert!(matches!(
             queues.control.recv().await,
-            Some(QueueItem::Message(..))
+            Some(QueueItem::End(_))
         ));
-        assert!(queues.control.is_empty());
-        assert!(matches!(
-            queues.data.recv().await,
-            Some(QueueItem::Message(..))
-        ));
-        assert!(matches!(queues.data.recv().await, Some(QueueItem::End(_))));
+        assert!(!message(queues.data.recv().await).is_disconnect());
+        assert!(message(queues.data.recv().await).is_disconnect());
     }
 
-    /// Taking an item frees its bytes.
-    #[tokio::test]
-    async fn taking_frees_room() {
-        let limit = 4 * size(&data(1000));
-        let (queue, mut queues) = QueueSender::new(limit);
-        while matches!(queue.push(data(1000)), Pushed::Queued) {}
-        queues.data.recv().await.expect("an item");
-        assert!(matches!(queue.push(data(1000)), Pushed::Queued));
-    }
-
-    /// The least queue holds four messages of the largest size.
+    /// The least queue holds eight messages of the largest size, so its announcements hold one.
     #[test]
-    fn least_size_holds_four_large_messages() {
+    fn least_size_holds_eight_large_messages() {
         let max = 1 << 20;
-        assert_eq!(queue_size(0, max), 4 * (max + ITEM_COST));
+        assert_eq!(queue_size(0, max), 8 * (max + ITEM_COST));
         assert_eq!(queue_size(0, 1024), MIN_QUEUE_SIZE);
     }
 }

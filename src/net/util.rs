@@ -23,7 +23,7 @@ use n0_future::{
 };
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::AsyncReadExt,
     sync::{mpsc, watch},
 };
 use tracing::{debug, trace, warn, Instrument};
@@ -126,14 +126,20 @@ impl StreamHeader {
         })
     }
 
+    /// Returns the header as it goes over the wire: the topic, then the flags.
+    fn wire(&self) -> (TopicId, u8) {
+        let flags = if self.handles_close { HANDLES_CLOSE } else { 0 };
+        (self.topic_id, flags)
+    }
+
+    #[cfg(test)]
     pub(crate) async fn write(
         self,
         stream: &mut SendStream,
         buffer: &mut Vec<u8>,
         max_message_size: usize,
     ) -> Result<(), WriteError> {
-        let flags = if self.handles_close { HANDLES_CLOSE } else { 0 };
-        write_frame(stream, &(self.topic_id, flags), buffer, max_message_size).await?;
+        write_frame(stream, &self.wire(), buffer, max_message_size).await?;
         Ok(())
     }
 }
@@ -322,9 +328,19 @@ impl SendLoop {
     /// Sends `queue` first, then the queued messages, until the queue or the connection ends.
     pub(crate) async fn run(&mut self, queue: Vec<ProtoMessage>) -> Result<(), WriteError> {
         let QueueReceivers { control, data } = self.queues.take().expect("runs once");
-        let (first_control, first_data): (Vec<_>, Vec<_>) = queue
-            .into_iter()
-            .partition(|message| matches!(message.kind(), MessageKind::Control));
+        // Split as the queue does: a `Disconnect` goes after the data of its
+        // topic, and ends the control stream of the topic.
+        let (mut first_control, mut first_data) = (Vec::new(), Vec::new());
+        for message in queue {
+            if message.message.is_disconnect() {
+                first_control.push(QueueItem::End(message.topic));
+                first_data.push(QueueItem::Message(message, 0));
+            } else if matches!(message.kind(), MessageKind::Control) {
+                first_control.push(QueueItem::Message(message, 0));
+            } else {
+                first_data.push(QueueItem::Message(message, 0));
+            }
+        }
         let writer = |class: usize, rx: QueueReceiver| Writer {
             conn: self.conn.clone(),
             class,
@@ -349,6 +365,35 @@ impl SendLoop {
 const CONTROL: usize = 0;
 /// The index of the data writer in [`Sending`].
 const DATA: usize = 1;
+
+/// Encodes `message` as a length-prefixed frame into `buffer`.
+fn frame<T: Serialize>(
+    message: &T,
+    buffer: &mut Vec<u8>,
+    max_message_size: usize,
+) -> Result<(), WriteError> {
+    let len = postcard::experimental::serialized_size(message)?;
+    if len >= max_message_size {
+        return Err(e!(WriteError::TooLarge));
+    }
+    buffer.clear();
+    buffer.extend_from_slice(&(len as u32).to_be_bytes());
+    buffer.resize(4 + len, 0u8);
+    postcard::to_slice(message, &mut buffer[4..])?;
+    Ok(())
+}
+
+/// Writes `bytes`, and fails once the peer takes no byte for [`WRITE_TIMEOUT`].
+async fn write_timed(stream: &mut SendStream, bytes: &[u8]) -> Result<(), WriteError> {
+    let mut written = 0;
+    while written < bytes.len() {
+        written += n0_future::time::timeout(WRITE_TIMEOUT, stream.write(&bytes[written..]))
+            .await
+            .map_err(|_| e!(WriteError::Stalled))?
+            .map_err(io::Error::other)?;
+    }
+    Ok(())
+}
 
 /// The code of a close for a peer that took no byte for [`WRITE_TIMEOUT`].
 const CLOSE_STALLED: u32 = 3;
@@ -382,30 +427,34 @@ impl Writer {
         self.sending.set(self.class, sending);
     }
 
-    async fn run(&mut self, queue: Vec<ProtoMessage>) -> Result<(), WriteError> {
+    async fn run(&mut self, queue: Vec<QueueItem>) -> Result<(), WriteError> {
         self.set_sending(!queue.is_empty());
-        for msg in queue {
-            self.send(&msg).await?;
+        for item in queue {
+            self.take(item).await?;
         }
         let conn_clone = self.conn.clone();
         let closed = conn_clone.closed();
         tokio::pin!(closed);
         loop {
             self.set_sending(!self.rx.is_empty() || !self.finishing.is_empty());
-            let idle_at = self
-                .last_used
-                .values()
-                .min()
-                .map(|used| *used + STREAM_IDLE);
+            // Data streams only: a new control stream could overtake the bytes of
+            // the old one, and the order of control messages matters.
+            let idle_at = (self.class == DATA)
+                .then(|| {
+                    self.last_used
+                        .values()
+                        .min()
+                        .map(|used| *used + STREAM_IDLE)
+                })
+                .flatten();
             tokio::select! {
                 biased;
                 _ = &mut closed => break,
                 item = self.rx.recv() => match item {
-                    Some(QueueItem::Message(msg, _size)) => {
+                    Some(item) => {
                         self.set_sending(true);
-                        self.send(&msg).await?
+                        self.take(item).await?
                     }
-                    Some(QueueItem::End(topic)) => self.finish(topic),
                     // The actor dropped the sender.
                     None => break,
                 },
@@ -449,6 +498,17 @@ impl Writer {
         }
         self.set_sending(false);
         Ok(())
+    }
+
+    /// Sends a message, or ends the stream of a topic.
+    async fn take(&mut self, item: QueueItem) -> Result<(), WriteError> {
+        match item {
+            QueueItem::Message(message, ..) => self.send(&message).await,
+            QueueItem::End(topic) => {
+                self.finish(topic);
+                Ok(())
+            }
+        }
     }
 
     /// Finishes the stream of `topic_id`, if one is open.
@@ -509,36 +569,19 @@ impl Writer {
         let stream = match self.streams.entry(topic_id) {
             hash_map::Entry::Occupied(entry) => entry.into_mut(),
             hash_map::Entry::Vacant(entry) => {
-                // The peer grants streams as it reads them.
-                let mut stream = n0_future::time::timeout(WRITE_TIMEOUT, self.conn.open_uni())
-                    .await
-                    .map_err(|_| e!(WriteError::Stalled))??;
+                // The peer grants streams as it reads them. A peer that reads
+                // nothing grants none, but then a write of an open stream fails.
+                let mut stream = self.conn.open_uni().await?;
                 stream.set_priority(self.priority).ok();
                 let header = StreamHeader::new(topic_id);
-                header
-                    .write(&mut stream, &mut self.buffer, self.max_message_size)
-                    .await?;
+                frame(&header.wire(), &mut self.buffer, self.max_message_size)?;
+                write_timed(&mut stream, &self.buffer).await?;
                 debug!(topic=%topic_id.fmt_short(), "stream opened");
                 entry.insert(stream)
             }
         };
-        let len = postcard::experimental::serialized_size(&message)?;
-        if len >= self.max_message_size {
-            return Err(e!(WriteError::TooLarge));
-        }
-        self.buffer.clear();
-        self.buffer.extend_from_slice(&(len as u32).to_be_bytes());
-        self.buffer.resize(4 + len, 0u8);
-        postcard::to_slice(&message, &mut self.buffer[4..])?;
-        // Each write takes some bytes, or fails once the peer takes none for long.
-        let mut written = 0;
-        while written < self.buffer.len() {
-            written +=
-                n0_future::time::timeout(WRITE_TIMEOUT, stream.write(&self.buffer[written..]))
-                    .await
-                    .map_err(|_| e!(WriteError::Stalled))?
-                    .map_err(io::Error::other)?;
-        }
+        frame(message, &mut self.buffer, self.max_message_size)?;
+        write_timed(stream, &self.buffer).await?;
         self.last_used.insert(topic_id, Instant::now());
         if message.is_disconnect() {
             self.finish(topic_id);
@@ -611,12 +654,14 @@ pub async fn read_lp(
 }
 
 /// Writes a length-prefixed frame.
+#[cfg(test)]
 pub async fn write_frame<T: Serialize>(
     stream: &mut SendStream,
     message: &T,
     buffer: &mut Vec<u8>,
     max_message_size: usize,
 ) -> Result<(), WriteError> {
+    use tokio::io::AsyncWriteExt;
     let len = postcard::experimental::serialized_size(&message)?;
     if len >= max_message_size {
         return Err(e!(WriteError::TooLarge));
