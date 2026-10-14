@@ -10,7 +10,7 @@ use std::collections::{hash_map, HashMap, HashSet, VecDeque};
 
 use derive_more::{From, Sub};
 use n0_future::time::Duration;
-use rand::{rngs::ThreadRng, Rng, RngExt};
+use rand::{rngs::ThreadRng, seq::IteratorRandom, Rng, RngExt};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
@@ -41,6 +41,9 @@ const MAX_REJOIN_INTERVALS: u32 = 12;
 /// The topic keeps the contacts of the latest joins. An isolated node sends a
 /// join to each of them.
 const MAX_BOOTSTRAP_PEERS: usize = 8;
+
+/// Maximum number of recent neighbors a topic remembers for a rejoin.
+const MAX_RECENT_NEIGHBORS: usize = 8;
 
 /// Input event for HyParView
 #[derive(Debug)]
@@ -318,6 +321,12 @@ pub struct State<PI, RG = ThreadRng> {
     bootstrap_peers: VecDeque<PI>,
     /// Maintenance passes in a row with both views empty, see [`MAX_REJOIN_INTERVALS`].
     passes_alone: u32,
+    /// The latest peers that were our neighbors, least recently seen first.
+    ///
+    /// Peers only leave by age, never because they failed: a node that loses
+    /// its own network takes every peer as failed, and empties its views of
+    /// exactly the peers it needs once it is back. See [`MAX_RECENT_NEIGHBORS`].
+    recent_neighbors: VecDeque<PI>,
     /// Random number generator
     rng: RG,
     /// Statistics
@@ -353,6 +362,7 @@ where
             timers_scheduled: false,
             bootstrap_peers: VecDeque::new(),
             passes_alone: 0,
+            recent_neighbors: VecDeque::new(),
             rng,
             stats: Stats::default(),
             pending_neighbor_requests: Default::default(),
@@ -759,6 +769,13 @@ where
     /// peers can get it back into the swarm.
     fn handle_maintenance_timer(&mut self, io: &mut impl IO<PI>) {
         self.refused.clear();
+        for peer in self.active_view.iter() {
+            self.recent_neighbors.retain(|known| known != peer);
+            self.recent_neighbors.push_back(*peer);
+        }
+        while self.recent_neighbors.len() > MAX_RECENT_NEIGHBORS {
+            self.recent_neighbors.pop_front();
+        }
         if self.active_view.is_empty() && self.passive_view.is_empty() {
             self.passes_alone += 1;
             let n = self.passes_alone;
@@ -771,6 +788,13 @@ where
                 debug!("no neighbors and no passive peers, rejoin");
                 for peer in self.bootstrap_peers.iter() {
                     self.join(*peer, io);
+                }
+                // The bootstrap peers may be gone for good. Also try a random
+                // recent neighbor.
+                if let Some(peer) = self.recent_neighbors.iter().choose(&mut self.rng) {
+                    if !self.bootstrap_peers.contains(peer) {
+                        self.join(*peer, io);
+                    }
                 }
             }
         } else {
@@ -1580,6 +1604,18 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// An isolated node without bootstrap peers rejoins through a recent neighbor.
+    #[test]
+    fn rejoin_tries_a_recent_neighbor() {
+        let mut state = new_state();
+        state.active_view.insert(1);
+        state.handle(InEvent::TimerExpired(Timer::DoMaintenance), &mut Io::new());
+        state.active_view.remove(&1);
+        let io = &mut Io::new();
+        state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
+        assert_eq!(joined(io), vec![1]);
     }
 
     /// A node that loses its last neighbor, with an empty passive view,
