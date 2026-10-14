@@ -152,6 +152,11 @@ name = "e2e"
 path = "tests/e2e.rs"
 required-features = ["net"]
 
+[[test]]
+name = "paper"
+path = "tests/paper.rs"
+required-features = ["test-utils"]
+
 [[bin]]
 name = "sim"
 required-features = ["simulator"]

@@ -6,15 +6,41 @@
 //! [paper]: https://asc.di.fct.unl.pt/~jleitao/pdf/dsn07-leitao.pdf
 //! [impl]: https://gist.github.com/Horusiath/84fac596101b197da0546d1697580d99
 
-use std::collections::{hash_map, HashMap, HashSet};
+use std::collections::{hash_map, HashMap, HashSet, VecDeque};
 
 use derive_more::{From, Sub};
 use n0_future::time::Duration;
-use rand::{rngs::ThreadRng, Rng};
+use rand::{rngs::ThreadRng, Rng, RngExt};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use super::{util::IndexSet, PeerData, PeerIdentity, PeerInfo, IO};
+
+/// Delay before the first shuffle.
+///
+/// The interval doubles after each shuffle up to [`Config::shuffle_interval`].
+/// A join leaves the passive view small and lopsided: it holds only the peers
+/// that `ForwardJoin` walks passed by. The first shuffles fill it. The HyParView
+/// paper shuffles at a fixed period, without jitter.
+const INITIAL_SHUFFLE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Interval of the check that refills a short active view.
+///
+/// The HyParView paper has no such check. Partisan runs the same check, its
+/// "random promotion", every 5s.
+const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Maximum number of maintenance passes between two rejoins.
+///
+/// An isolated node rejoins in its 1st, 2nd, 4th, and 8th maintenance pass
+/// alone, and then in every 12th: at first after 5s, and later once a minute.
+const MAX_REJOIN_INTERVALS: u32 = 12;
+
+/// Maximum number of contacts a topic remembers for a rejoin.
+///
+/// The topic keeps the contacts of the latest joins. An isolated node sends a
+/// join to each of them.
+const MAX_BOOTSTRAP_PEERS: usize = 8;
 
 /// Input event for HyParView
 #[derive(Debug)]
@@ -61,6 +87,7 @@ pub enum Event<PI> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Timer<PI> {
     DoShuffle,
+    DoMaintenance,
     /// The timeout of the `Neighbor` to the peer with the given id.
     ///
     /// The id tells it from the timer of an earlier `Neighbor` to the same peer.
@@ -97,9 +124,11 @@ pub enum Message<PI> {
 #[derive(From, Sub, Eq, PartialEq, Clone, Debug, Copy, Serialize, Deserialize)]
 pub struct Ttl(pub u16);
 impl Ttl {
+    /// Returns `true` once the message may not be forwarded any further.
     pub fn expired(&self) -> bool {
         *self == Ttl(0)
     }
+    /// Returns the `Ttl` to forward a message with, one hop lower.
     pub fn next(&self) -> Ttl {
         Ttl(self.0.saturating_sub(1))
     }
@@ -222,7 +251,10 @@ pub struct Config {
     pub shuffle_active_view_count: usize,
     /// Number of passive peers to be included in a `Shuffle` request.
     pub shuffle_passive_view_count: usize,
-    /// Interval duration for shuffle requests
+    /// Interval between shuffle requests, once the first shuffles are done.
+    ///
+    /// Shuffles keep the passive view a live sample of the swarm. A node
+    /// falls back on its passive view when its neighbors fail.
     pub shuffle_interval: Duration,
     /// Timeout after which a neighbor request is considered failed.
     ///
@@ -275,8 +307,17 @@ pub struct State<PI, RG = ThreadRng> {
     pub(crate) passive_view: IndexSet<PI>,
     /// Protocol configuration (cannot change at runtime)
     config: Config,
-    /// Whether a shuffle timer is currently scheduled
-    shuffle_scheduled: bool,
+    /// Whether the shuffle and maintenance timers are scheduled
+    timers_scheduled: bool,
+    /// Delay before the next shuffle, see [`INITIAL_SHUFFLE_INTERVAL`].
+    next_shuffle_interval: Duration,
+    /// The latest peers the application asked us to join, oldest first.
+    ///
+    /// A node with empty views has nobody else left to dial. See
+    /// [`MAX_BOOTSTRAP_PEERS`].
+    bootstrap_peers: VecDeque<PI>,
+    /// Maintenance passes in a row with both views empty, see [`MAX_REJOIN_INTERVALS`].
+    passes_alone: u32,
     /// Random number generator
     rng: RG,
     /// Statistics
@@ -289,6 +330,11 @@ pub struct State<PI, RG = ThreadRng> {
     peer_data: HashMap<PI, PeerData>,
     /// List of peers that are disconnecting, but which we want to keep in the passive set once the connection closes
     alive_disconnect_peers: HashSet<PI>,
+    /// Passive peers that refused our neighbor request since the last maintenance pass.
+    ///
+    /// A refill skips them. Else a node short of neighbors, whose passive peers
+    /// are all full, asks them in turn without end.
+    refused: HashSet<PI>,
 }
 
 impl<PI, RG> State<PI, RG>
@@ -302,14 +348,18 @@ where
             me_data,
             active_view: IndexSet::new(),
             passive_view: IndexSet::new(),
+            next_shuffle_interval: INITIAL_SHUFFLE_INTERVAL.min(config.shuffle_interval),
             config,
-            shuffle_scheduled: false,
+            timers_scheduled: false,
+            bootstrap_peers: VecDeque::new(),
+            passes_alone: 0,
             rng,
             stats: Stats::default(),
             pending_neighbor_requests: Default::default(),
             next_neighbor_request: 0,
             peer_data: Default::default(),
             alive_disconnect_peers: Default::default(),
+            refused: Default::default(),
         }
     }
 
@@ -318,6 +368,7 @@ where
             InEvent::RecvMessage(from, message) => self.handle_message(from, message, io),
             InEvent::TimerExpired(timer) => match timer {
                 Timer::DoShuffle => self.handle_shuffle_timer(io),
+                Timer::DoMaintenance => self.handle_maintenance_timer(io),
                 Timer::PendingNeighborRequest(peer, id) => {
                     self.handle_pending_neighbor_timer(peer, id, io)
                 }
@@ -331,12 +382,13 @@ where
         }
 
         // this will only happen on the first call
-        if !self.shuffle_scheduled {
+        if !self.timers_scheduled {
+            self.timers_scheduled = true;
+            self.schedule_shuffle(io);
             io.push(OutEvent::ScheduleTimer(
-                self.config.shuffle_interval,
-                Timer::DoShuffle,
+                MAINTENANCE_INTERVAL,
+                Timer::DoMaintenance,
             ));
-            self.shuffle_scheduled = true;
         }
 
         #[cfg(test)]
@@ -392,7 +444,7 @@ where
             Message::Join(data) => self.on_join(from, data, io),
             Message::ForwardJoin(details) => self.on_forward_join(from, details, io),
             Message::Shuffle(details) => self.on_shuffle(from, details, io),
-            Message::ShuffleReply(details) => self.on_shuffle_reply(details, io),
+            Message::ShuffleReply(details) => self.on_shuffle_reply(from, details, io),
             Message::Neighbor(details) => self.on_neighbor(from, details, io),
             Message::Disconnect(details) => self.on_disconnect(from, details, io),
         }
@@ -402,14 +454,27 @@ where
         self.release_if_unused(from, io);
     }
 
-    /// Disconnects `peer` unless it is a neighbor.
+    /// Disconnects `peer` unless it is a neighbor or we wait for its `Neighbor` reply.
+    ///
+    /// The reply can come on the connection, and a closed connection would lose it.
     fn release_if_unused(&self, peer: PI, io: &mut impl IO<PI>) {
-        if !self.active_view.contains(&peer) {
+        if !self.active_view.contains(&peer) && !self.pending_neighbor_requests.contains_key(&peer)
+        {
             io.push(OutEvent::DisconnectPeer(peer));
         }
     }
 
     fn handle_join(&mut self, peer: PI, io: &mut impl IO<PI>) {
+        self.bootstrap_peers.retain(|known| *known != peer);
+        self.bootstrap_peers.push_back(peer);
+        if self.bootstrap_peers.len() > MAX_BOOTSTRAP_PEERS {
+            self.bootstrap_peers.pop_front();
+        }
+        self.join(peer, io);
+    }
+
+    /// Sends a join to `peer`.
+    fn join(&self, peer: PI, io: &mut impl IO<PI>) {
         io.push(OutEvent::SendMessage(
             peer,
             Message::Join(self.me_data.clone()),
@@ -418,7 +483,10 @@ where
 
     /// We received a disconnect message.
     fn on_disconnect(&mut self, peer: PI, details: Disconnect, io: &mut impl IO<PI>) {
-        self.pending_neighbor_requests.remove(&peer);
+        let requested = self.pending_neighbor_requests.remove(&peer).is_some();
+        if requested && !self.active_view.contains(&peer) {
+            self.refused.insert(peer);
+        }
         if self.active_view.contains(&peer) {
             self.remove_active(
                 &peer,
@@ -434,12 +502,18 @@ where
 
     /// A connection was closed by the peer.
     fn handle_connection_closed(&mut self, peer: PI, io: &mut impl IO<PI>) {
-        self.pending_neighbor_requests.remove(&peer);
+        let requested = self.pending_neighbor_requests.remove(&peer).is_some();
         if self.active_view.contains(&peer) {
             self.remove_active(&peer, RemovalReason::ConnectionClosed, io);
-        } else if !self.alive_disconnect_peers.remove(&peer) {
-            self.passive_view.remove(&peer);
-            self.peer_data.remove(&peer);
+        } else {
+            if !self.alive_disconnect_peers.remove(&peer) {
+                self.passive_view.remove(&peer);
+                self.peer_data.remove(&peer);
+            }
+            // The request failed with its dial, long before its timer fires.
+            if requested {
+                self.refill_active_from_passive(&[&peer], io);
+            }
         }
     }
 
@@ -452,6 +526,7 @@ where
         self.passive_view = IndexSet::new();
         self.peer_data.clear();
         self.alive_disconnect_peers.clear();
+        self.refused.clear();
     }
 
     fn send_disconnect(&mut self, peer: PI, alive: bool, io: &mut impl IO<PI>) {
@@ -632,11 +707,17 @@ where
         io.push(OutEvent::SendMessage(to, message));
     }
 
-    fn on_shuffle_reply(&mut self, message: ShuffleReply<PI>, io: &mut impl IO<PI>) {
+    fn on_shuffle_reply(&mut self, from: PI, message: ShuffleReply<PI>, io: &mut impl IO<PI>) {
         for node in message.nodes {
             self.add_passive(node.id, node.data, io);
         }
-        self.refill_active_from_passive(&[], io);
+        // A peer that refuses our request sends this reply first. Only a short
+        // node goes on to the next passive peer at once, and skips the peers in
+        // `refused`.
+        let refusal = self.pending_neighbor_requests.contains_key(&from);
+        if !refusal || self.is_short() {
+            self.refill_active_from_passive(&[], io);
+        }
     }
 
     fn handle_shuffle_timer(&mut self, io: &mut impl IO<PI>) {
@@ -667,10 +748,63 @@ where
             };
             io.push(OutEvent::SendMessage(*node, Message::Shuffle(message)));
         }
+        self.schedule_shuffle(io);
+    }
+
+    /// Refills the active view if it is short, and rejoins if both views are empty.
+    ///
+    /// A refill otherwise starts only when a neighbor leaves, and it stops once
+    /// the passive view has no peer left to try. A node with no neighbors cannot
+    /// shuffle either, so its passive view stays empty. Only the bootstrap
+    /// peers can get it back into the swarm.
+    fn handle_maintenance_timer(&mut self, io: &mut impl IO<PI>) {
+        self.refused.clear();
+        if self.active_view.is_empty() && self.passive_view.is_empty() {
+            self.passes_alone += 1;
+            let n = self.passes_alone;
+            let rejoin = if n < MAX_REJOIN_INTERVALS {
+                n.is_power_of_two()
+            } else {
+                n.is_multiple_of(MAX_REJOIN_INTERVALS)
+            };
+            if rejoin {
+                debug!("no neighbors and no passive peers, rejoin");
+                for peer in self.bootstrap_peers.iter() {
+                    self.join(*peer, io);
+                }
+            }
+        } else {
+            self.passes_alone = 0;
+            if self.is_short() {
+                self.refill_active_from_passive(&[], io);
+            }
+        }
         io.push(OutEvent::ScheduleTimer(
-            self.config.shuffle_interval,
+            MAINTENANCE_INTERVAL,
+            Timer::DoMaintenance,
+        ));
+    }
+
+    /// Schedules the next shuffle, with the interval doubled up to its maximum.
+    ///
+    /// The delay varies by 25 percent either way. Else the nodes of a swarm
+    /// that started together shuffle at the same moments for good.
+    fn schedule_shuffle(&mut self, io: &mut impl IO<PI>) {
+        let interval = self.next_shuffle_interval;
+        self.next_shuffle_interval = (interval * 2).min(self.config.shuffle_interval);
+        let jitter = self.rng.random_range(0.75..1.25);
+        io.push(OutEvent::ScheduleTimer(
+            interval.mul_f64(jitter),
             Timer::DoShuffle,
         ));
+    }
+
+    /// Returns whether the active view is below half its capacity.
+    ///
+    /// One slot short is the normal state: the peer that would fill it is
+    /// usually full itself. Partisan refills below half its capacity.
+    fn is_short(&self) -> bool {
+        self.active_view.len() < self.config.active_view_capacity.div_ceil(2)
     }
 
     fn passive_is_full(&self) -> bool {
@@ -741,6 +875,7 @@ where
         // with success." (p7)
         let mut skip_peers = skip_peers.to_vec();
         skip_peers.extend(self.pending_neighbor_requests.keys());
+        skip_peers.extend(self.refused.iter());
 
         if let Some(node) = self
             .passive_view
@@ -767,6 +902,7 @@ where
             self.pending_neighbor_requests.remove(&peer);
             self.passive_view.remove(&peer);
             self.forget_peer(&peer);
+            // A passive message may have kept the connection for the reply.
             self.release_if_unused(peer, io);
             self.refill_active_from_passive(&[], io);
         }
@@ -1211,6 +1347,27 @@ mod tests {
         assert!(state.passive_view.contains(&1), "the peer was dropped");
     }
 
+    /// A request whose dial failed is replaced by one to another passive peer.
+    ///
+    /// The request timer is long enough for a slow dial, so it must not be
+    /// what moves on from a peer we cannot reach.
+    #[test]
+    fn failed_dial_of_a_request_refills_at_once() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.passive_view.insert(1);
+        state.passive_view.insert(2);
+        state.send_neighbor(1, Priority::High, io);
+        io.clear();
+
+        state.handle(InEvent::PeerDisconnected(1), io);
+
+        assert!(sent_neighbor(io, 2), "no request to another passive peer");
+        assert!(!state.passive_view.contains(&1));
+        assert!(!state.pending_neighbor_requests.contains_key(&1));
+        assert!(state.pending_neighbor_requests.contains_key(&2));
+    }
+
     /// A passive peer whose neighbor request timed out loses its metadata.
     #[test]
     fn neighbor_request_timeout_forgets_peer() {
@@ -1353,5 +1510,325 @@ mod tests {
         });
         state.handle(InEvent::RecvMessage(1, disconnect), io);
         assert!(disconnected(io, 1));
+    }
+
+    /// An unrelated passive reply must not close the connection on which a
+    /// Neighbor acceptance is still due. This is the race discussed in #178.
+    #[test]
+    fn passive_reply_keeps_a_pending_neighbor_connection() {
+        let mut state = new_state();
+        state.passive_view.insert(1);
+        state.send_neighbor(1, Priority::High, &mut Io::new());
+        let io = &mut Io::new();
+        state.handle(
+            InEvent::RecvMessage(1, Message::ShuffleReply(ShuffleReply { nodes: vec![] })),
+            io,
+        );
+        assert!(state.pending_neighbor_requests.contains_key(&1));
+        assert!(
+            !io.iter()
+                .any(|event| matches!(event, TopicOut::DisconnectPeer(1))),
+            "a passive reply closed the connection before the Neighbor reply"
+        );
+    }
+
+    /// A request that ends without a neighbor releases the connection it kept.
+    ///
+    /// A passive message keeps the connection while the request is out. If the
+    /// reply never comes, the timeout must close it, or it stays open for good.
+    #[test]
+    fn timed_out_request_releases_its_connection() {
+        let mut state = new_state();
+        state.passive_view.insert(1);
+        state.send_neighbor(1, Priority::High, &mut Io::new());
+        let reply = Message::ShuffleReply(ShuffleReply { nodes: vec![] });
+        state.handle(InEvent::RecvMessage(1, reply), &mut Io::new());
+        let io = &mut Io::new();
+        state.handle(
+            InEvent::TimerExpired(Timer::PendingNeighborRequest(1, 0)),
+            io,
+        );
+        assert!(disconnected(io, 1), "the connection outlived its request");
+    }
+
+    /// An accepted request keeps its connection, also after a passive message came first.
+    #[test]
+    fn accepted_request_keeps_its_connection() {
+        let mut state = new_state();
+        state.passive_view.insert(1);
+        state.send_neighbor(1, Priority::High, &mut Io::new());
+        let io = &mut Io::new();
+        let reply = Message::ShuffleReply(ShuffleReply { nodes: vec![] });
+        state.handle(InEvent::RecvMessage(1, reply), io);
+        let accept = Message::Neighbor(Neighbor {
+            priority: Priority::High,
+            data: None,
+        });
+        state.handle(InEvent::RecvMessage(1, accept), io);
+        assert!(state.active_view.contains(&1));
+        assert!(
+            !disconnected(io, 1),
+            "closed the connection of a new neighbor"
+        );
+    }
+
+    /// Returns the peers that got a join.
+    fn joined(io: &Io) -> Vec<u32> {
+        io.iter()
+            .filter_map(|event| match event {
+                TopicOut::SendMessage(peer, topic::Message::Swarm(Message::Join(_))) => Some(*peer),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A node that loses its last neighbor, with an empty passive view,
+    /// rejoins through the peers the application joined.
+    #[test]
+    fn maintenance_rejoins_when_isolated() {
+        let mut state = new_state();
+        state.handle(InEvent::RequestJoin(1), &mut Io::new());
+        let accept = Message::Neighbor(Neighbor {
+            priority: Priority::High,
+            data: None,
+        });
+        state.handle(InEvent::RecvMessage(1, accept), &mut Io::new());
+        assert!(state.active_view.contains(&1));
+
+        state.handle(InEvent::PeerDisconnected(1), &mut Io::new());
+        assert!(state.active_view.is_empty() && state.passive_view.is_empty());
+
+        let io = &mut Io::new();
+        state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
+        assert_eq!(joined(io), vec![1], "no rejoin through the bootstrap peer");
+    }
+
+    /// An isolated node rejoins less often the longer it stays alone.
+    #[test]
+    fn rejoins_back_off() {
+        let mut state = new_state();
+        state.handle(InEvent::RequestJoin(1), &mut Io::new());
+        let mut rejoins = Vec::new();
+        for tick in 0..60 {
+            let io = &mut Io::new();
+            state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
+            assert!(io.iter().any(|event| matches!(
+                event,
+                TopicOut::ScheduleTimer(delay, topic::Timer::Swarm(Timer::DoMaintenance))
+                    if *delay == MAINTENANCE_INTERVAL
+            )));
+            if !joined(io).is_empty() {
+                rejoins.push(tick);
+            }
+        }
+        assert_eq!(rejoins, vec![0, 1, 3, 7, 11, 23, 35, 47, 59]);
+    }
+
+    /// Recovery must reset a long isolation backoff before a later failure.
+    #[test]
+    fn rejoin_backoff_resets_after_recovery() {
+        let mut state = new_state();
+        state.handle(InEvent::RequestJoin(1), &mut Io::new());
+        for _ in 0..60 {
+            state.handle(InEvent::TimerExpired(Timer::DoMaintenance), &mut Io::new());
+        }
+        assert_eq!(state.passes_alone, 60);
+        state.handle(
+            InEvent::RecvMessage(
+                1,
+                Message::Neighbor(Neighbor {
+                    priority: Priority::High,
+                    data: None,
+                }),
+            ),
+            &mut Io::new(),
+        );
+        state.handle(InEvent::TimerExpired(Timer::DoMaintenance), &mut Io::new());
+        assert_eq!(state.passes_alone, 0);
+        state.handle(InEvent::PeerDisconnected(1), &mut Io::new());
+        let io = &mut Io::new();
+        state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
+        assert_eq!(joined(io), vec![1]);
+    }
+
+    /// A node below half its active view capacity refills from its passive view.
+    #[test]
+    fn maintenance_refills_a_short_active_view() {
+        let mut state = new_state();
+        state.active_view.insert(1);
+        for peer in 10..20 {
+            state.passive_view.insert(peer);
+        }
+
+        let io = &mut Io::new();
+        state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
+        let requested: Vec<u32> = (10..20).filter(|peer| sent_neighbor(io, *peer)).collect();
+        assert_eq!(requested.len(), 1, "expected one neighbor request: {io:?}");
+    }
+
+    /// A node with half its active view or more sends nothing.
+    ///
+    /// One slot short is the normal state. Requests there would only be refused.
+    #[test]
+    fn maintenance_is_quiet_on_a_healthy_view() {
+        let mut state = new_state();
+        for peer in 1..=3 {
+            state.active_view.insert(peer);
+        }
+        for peer in 10..20 {
+            state.passive_view.insert(peer);
+        }
+
+        let io = &mut Io::new();
+        state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
+        assert!(
+            !io.iter()
+                .any(|event| matches!(event, TopicOut::SendMessage(..))),
+            "a healthy node sent messages: {io:?}"
+        );
+    }
+
+    /// The remembered bootstrap contacts stay within their bound, newest first.
+    ///
+    /// An application can pass every peer it discovers to a join. Before, the
+    /// topic kept all of them for good, and an isolated node sent a join to each.
+    #[test]
+    fn bootstrap_contacts_stay_bounded() {
+        let mut state = new_state();
+        let max = MAX_BOOTSTRAP_PEERS as u32;
+        for peer in 1..=max + 5 {
+            state.handle(InEvent::RequestJoin(peer), &mut Io::new());
+        }
+        assert_eq!(state.bootstrap_peers.len(), MAX_BOOTSTRAP_PEERS);
+        assert!(
+            !state.bootstrap_peers.contains(&5),
+            "the oldest contacts go first"
+        );
+        // A repeated contact moves to the newest place instead of growing the set.
+        state.handle(InEvent::RequestJoin(7), &mut Io::new());
+        assert_eq!(state.bootstrap_peers.len(), MAX_BOOTSTRAP_PEERS);
+        state.handle(InEvent::RequestJoin(max + 6), &mut Io::new());
+        assert!(
+            !state.bootstrap_peers.contains(&6),
+            "the oldest contact goes"
+        );
+        assert!(
+            state.bootstrap_peers.contains(&7),
+            "a repeated contact stays"
+        );
+
+        // An isolated node rejoins through every remembered contact.
+        let io = &mut Io::new();
+        state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
+        let mut rejoined = joined(io);
+        rejoined.sort();
+        let mut expected: Vec<u32> = state.bootstrap_peers.iter().copied().collect();
+        expected.sort();
+        assert_eq!(rejoined, expected);
+    }
+
+    /// A node asks each passive peer once between two maintenance passes.
+    ///
+    /// A peer with a full active view refuses with a `ShuffleReply` and a
+    /// `Disconnect`. The `ShuffleReply` starts a refill. If the refill could
+    /// pick peers that refused, a node short of neighbors whose passive peers
+    /// are all full would ask them in turn without end.
+    #[test]
+    fn refused_peers_are_asked_again_only_after_maintenance() {
+        let mut state = new_state();
+        state.active_view.insert(1);
+        for peer in 10..13 {
+            state.passive_view.insert(peer);
+        }
+        let mut asked = Vec::new();
+        state.handle(InEvent::TimerExpired(Timer::DoMaintenance), &mut Io::new());
+        for _ in 0..10 {
+            let Some(peer) = state.pending_neighbor_requests.keys().next().copied() else {
+                break;
+            };
+            asked.push(peer);
+            let reply = Message::ShuffleReply(ShuffleReply {
+                nodes: (10..13).map(|id| (id, None).into()).collect(),
+            });
+            let refusal = Message::Disconnect(Disconnect {
+                alive: true,
+                _respond: false,
+            });
+            state.handle(InEvent::RecvMessage(peer, reply), &mut Io::new());
+            state.handle(InEvent::RecvMessage(peer, refusal), &mut Io::new());
+            state.handle(InEvent::PeerDisconnected(peer), &mut Io::new());
+        }
+        asked.sort();
+        assert_eq!(asked, vec![10, 11, 12], "each passive peer once");
+        assert!(state.pending_neighbor_requests.is_empty());
+        assert!((10..13).all(|peer| state.passive_view.contains(&peer)));
+
+        let io = &mut Io::new();
+        state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
+        let requested: Vec<u32> = (10..13).filter(|peer| sent_neighbor(io, *peer)).collect();
+        assert_eq!(requested.len(), 1, "the next pass asks again");
+    }
+
+    /// A node with half its active view or more stops at a refusal.
+    ///
+    /// One slot short is the normal state, and the next passive peer is
+    /// usually full too.
+    #[test]
+    fn healthy_node_stops_at_a_refusal() {
+        let mut state = new_state();
+        for peer in 1..=3 {
+            state.active_view.insert(peer);
+        }
+        for peer in 10..13 {
+            state.passive_view.insert(peer);
+        }
+        state.pending_neighbor_requests.insert(10, 0);
+        let io = &mut Io::new();
+        let reply = Message::ShuffleReply(ShuffleReply {
+            nodes: (10..13).map(|id| (id, None).into()).collect(),
+        });
+        let refusal = Message::Disconnect(Disconnect {
+            alive: true,
+            _respond: false,
+        });
+        state.handle(InEvent::RecvMessage(10, reply), io);
+        state.handle(InEvent::RecvMessage(10, refusal), io);
+        let requested: Vec<u32> = (11..13).filter(|peer| sent_neighbor(io, *peer)).collect();
+        assert!(requested.is_empty(), "asked {requested:?} after a refusal");
+    }
+
+    /// The first shuffle comes soon after joining, and the interval backs
+    /// off to the configured one.
+    #[test]
+    fn shuffle_interval_backs_off_to_the_configured_one() {
+        let mut state = new_state();
+        let mut delays = Vec::new();
+        let mut handle = |event: InEvent<u32>| {
+            let mut io = Io::new();
+            state.handle(event, &mut io);
+            delays.extend(io.into_iter().filter_map(|event| match event {
+                TopicOut::ScheduleTimer(delay, topic::Timer::Swarm(Timer::DoShuffle)) => {
+                    Some(delay)
+                }
+                _ => None,
+            }));
+        };
+        handle(InEvent::RequestJoin(1));
+        for _ in 0..7 {
+            handle(InEvent::TimerExpired(Timer::DoShuffle));
+        }
+
+        let nominal = [1, 2, 4, 8, 16, 32, 60, 60].map(Duration::from_secs);
+        assert_eq!(delays.len(), nominal.len());
+        for (delay, nominal) in delays.iter().zip(nominal) {
+            assert!(
+                *delay >= nominal.mul_f64(0.75) && *delay <= nominal.mul_f64(1.25),
+                "delay {delay:?} is not within jitter of {nominal:?}, all delays {delays:?}"
+            );
+        }
+        assert!(
+            delays[6] != delays[7],
+            "the delays should vary, got {delays:?}"
+        );
     }
 }

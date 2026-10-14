@@ -87,6 +87,19 @@ pub struct Timer<PI> {
     timer: topic::Timer<PI>,
 }
 
+impl<PI> Timer<PI> {
+    /// Returns whether this timer runs a periodic membership task.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn is_membership_cycle(&self) -> bool {
+        matches!(
+            self.timer,
+            topic::Timer::Swarm(
+                super::hyparview::Timer::DoShuffle | super::hyparview::Timer::DoMaintenance
+            )
+        )
+    }
+}
+
 /// Input event to the protocol state.
 #[derive(Clone, Debug)]
 pub enum InEvent<PI> {
