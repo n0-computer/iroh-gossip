@@ -2279,6 +2279,36 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// A peer that takes no byte for the write timeout loses the connection.
+    ///
+    /// It never reads, so flow control holds every write once its window is
+    /// full. The writer waited for good.
+    #[tokio::test]
+    #[traced_test]
+    async fn stalled_write_closes_the_connection() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let topic: TopicId = blake3::hash(b"stalled").into();
+        let (queue, queues) = QueueSender::new(64 << 20);
+        // More than the stream window of the peer, which reads nothing.
+        for _ in 0..40 {
+            let message = ProtoMessage {
+                topic,
+                message: TopicMessage::test_gossip(60_000),
+            };
+            assert!(matches!(queue.push(message), Pushed::Queued));
+        }
+        let mut send_loop = SendLoop::new(conn, queues, TEST_FRAME_LIMIT);
+        let result = timeout(util::WRITE_TIMEOUT * 5, send_loop.run(vec![]))
+            .await
+            .std_context("the writer waited for good")?;
+        assert!(result.is_err(), "the stalled writer ended without an error");
+        timeout(Duration::from_secs(2), peer_conn.closed())
+            .await
+            .std_context("the connection to the stalled peer stayed open")?;
+        Ok(())
+    }
+
     /// A peer whose queue has no room for a control message goes down, and the actor does not wait (#47).
     ///
     /// The actor waited for room in the queue of a peer that did not read. While it

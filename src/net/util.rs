@@ -60,7 +60,20 @@ pub(crate) enum WriteError {
     /// Message was larger than the configured maximum message size
     #[error("message too large")]
     TooLarge {},
+    /// The peer took no byte for [`WRITE_TIMEOUT`]
+    #[error("the peer took no byte for {WRITE_TIMEOUT:?}")]
+    Stalled {},
 }
+
+/// How long a write may take no byte before it fails the connection.
+///
+/// A peer returns stream credit only after it read part of its window, so a
+/// slow reader takes no byte for a while now and then. A shorter time would
+/// fail such peers.
+#[cfg(not(test))]
+pub(crate) const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(test)]
+pub(crate) const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The first frame of a stream: the topic of its messages, and a byte of flags.
 ///
@@ -336,6 +349,9 @@ const CONTROL: usize = 0;
 /// The index of the data writer in [`Sending`].
 const DATA: usize = 1;
 
+/// The code of a close for a peer that took no byte for [`WRITE_TIMEOUT`].
+const CLOSE_STALLED: u32 = 3;
+
 /// Writes the messages of one class.
 struct Writer {
     conn: Connection,
@@ -433,6 +449,12 @@ impl Writer {
         let Err(err) = self.write_message(message).await else {
             return Ok(());
         };
+        if matches!(err, WriteError::Stalled { .. }) {
+            // A peer that takes nothing holds every stream of the connection.
+            warn!("the peer took no byte for {WRITE_TIMEOUT:?}, close the connection");
+            self.conn.close(CLOSE_STALLED.into(), b"write stalled");
+            return Err(err);
+        }
         if self.conn.close_reason().is_some() {
             return Err(err);
         }
@@ -456,7 +478,10 @@ impl Writer {
         let stream = match self.streams.entry(topic_id) {
             hash_map::Entry::Occupied(entry) => entry.into_mut(),
             hash_map::Entry::Vacant(entry) => {
-                let mut stream = self.conn.open_uni().await?;
+                // The peer grants streams as it reads them.
+                let mut stream = n0_future::time::timeout(WRITE_TIMEOUT, self.conn.open_uni())
+                    .await
+                    .map_err(|_| e!(WriteError::Stalled))??;
                 stream.set_priority(self.priority).ok();
                 let header = StreamHeader::new(topic_id);
                 header
@@ -466,7 +491,23 @@ impl Writer {
                 entry.insert(stream)
             }
         };
-        write_frame(stream, message, &mut self.buffer, self.max_message_size).await?;
+        let len = postcard::experimental::serialized_size(&message)?;
+        if len >= self.max_message_size {
+            return Err(e!(WriteError::TooLarge));
+        }
+        self.buffer.clear();
+        self.buffer.extend_from_slice(&(len as u32).to_be_bytes());
+        self.buffer.resize(4 + len, 0u8);
+        postcard::to_slice(&message, &mut self.buffer[4..])?;
+        // Each write takes some bytes, or fails once the peer takes none for long.
+        let mut written = 0;
+        while written < self.buffer.len() {
+            written +=
+                n0_future::time::timeout(WRITE_TIMEOUT, stream.write(&self.buffer[written..]))
+                    .await
+                    .map_err(|_| e!(WriteError::Stalled))?
+                    .map_err(io::Error::other)?;
+        }
         if message.is_disconnect() {
             self.finish(topic_id);
         }
