@@ -331,6 +331,7 @@ impl SendLoop {
             priority: if class == CONTROL { 1 } else { 0 },
             rx,
             streams: Default::default(),
+            last_used: Default::default(),
             buffer: Default::default(),
             max_message_size: self.max_message_size,
             finishing: Default::default(),
@@ -359,11 +360,22 @@ struct Writer {
     priority: i32,
     rx: QueueReceiver,
     streams: HashMap<TopicId, SendStream>,
+    /// When each stream last took a message.
+    last_used: HashMap<TopicId, Instant>,
     buffer: Vec<u8>,
     max_message_size: usize,
     finishing: JoinSet<()>,
     sending: Arc<Sending>,
 }
+
+/// How long a stream stays open without a message.
+///
+/// A peer grants a limited number of open streams, 100 by default. Each
+/// topic has a control and a data stream, so streams of quiet topics close.
+#[cfg(not(test))]
+const STREAM_IDLE: Duration = Duration::from_secs(10);
+#[cfg(test)]
+pub(crate) const STREAM_IDLE: Duration = Duration::from_secs(2);
 
 impl Writer {
     fn set_sending(&self, sending: bool) {
@@ -380,6 +392,11 @@ impl Writer {
         tokio::pin!(closed);
         loop {
             self.set_sending(!self.rx.is_empty() || !self.finishing.is_empty());
+            let idle_at = self
+                .last_used
+                .values()
+                .min()
+                .map(|used| *used + STREAM_IDLE);
             tokio::select! {
                 biased;
                 _ = &mut closed => break,
@@ -393,6 +410,18 @@ impl Writer {
                     None => break,
                 },
                 _ = self.finishing.join_next(), if !self.finishing.is_empty() => {}
+                _ = sleep_until(idle_at.unwrap_or_else(Instant::now)), if idle_at.is_some() => {
+                    let now = Instant::now();
+                    let idle: Vec<_> = self
+                        .last_used
+                        .iter()
+                        .filter(|(_, used)| **used + STREAM_IDLE <= now)
+                        .map(|(topic, _)| *topic)
+                        .collect();
+                    for topic in idle {
+                        self.finish(topic);
+                    }
+                }
             }
         }
         // Nothing reads the queue anymore, so the actor must not fill it.
@@ -424,6 +453,7 @@ impl Writer {
 
     /// Finishes the stream of `topic_id`, if one is open.
     fn finish(&mut self, topic_id: TopicId) {
+        self.last_used.remove(&topic_id);
         let Some(mut stream) = self.streams.remove(&topic_id) else {
             return;
         };
@@ -459,6 +489,7 @@ impl Writer {
             return Err(err);
         }
         warn!(topic = %message.topic.fmt_short(), "write failed, drop the stream: {err:#}");
+        self.last_used.remove(&message.topic);
         if let Some(mut stream) = self.streams.remove(&message.topic) {
             stream.reset(0u32.into()).ok();
         }
@@ -508,6 +539,7 @@ impl Writer {
                     .map_err(|_| e!(WriteError::Stalled))?
                     .map_err(io::Error::other)?;
         }
+        self.last_used.insert(topic_id, Instant::now());
         if message.is_disconnect() {
             self.finish(topic_id);
         }

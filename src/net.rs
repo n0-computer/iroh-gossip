@@ -2279,6 +2279,30 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// A stream without a message for a while ends, so that quiet topics hold no stream of the peer.
+    ///
+    /// The peer grants a limited number of open streams, and each topic has a
+    /// control and a data stream.
+    #[tokio::test]
+    #[traced_test]
+    async fn idle_stream_ends() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let topic: TopicId = blake3::hash(b"idle").into();
+        let (queue, queues) = QueueSender::new(1 << 16);
+        assert!(matches!(queue.push(join_message(topic, 0)), Pushed::Queued));
+        let mut send_loop = SendLoop::new(conn, queues, TEST_FRAME_LIMIT);
+        let _send = AbortOnDropHandle::new(spawn(async move { send_loop.run(vec![]).await }));
+        // The queue stays, so only the idle time can end the stream.
+        let (read_topic, messages) = timeout(util::STREAM_IDLE * 3, read_next_stream(&peer_conn))
+            .await
+            .std_context("the idle stream stayed open")??;
+        assert_eq!(read_topic, topic);
+        assert_eq!(messages.len(), 1);
+        drop(queue);
+        Ok(())
+    }
+
     /// A peer that takes no byte for the write timeout loses the connection.
     ///
     /// It never reads, so flow control holds every write once its window is
