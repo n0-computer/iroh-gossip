@@ -445,10 +445,9 @@ impl<PI: PeerIdentity> State<PI> {
                 "announcements queued for {peer:?}, which is no peer"
             );
         }
-        // Not yet holding:
-        // for (id, ihaves) in self.missing_messages.iter() {
-        //     assert!(!ihaves.is_empty(), "no announcer left for missing {id:?}");
-        // }
+        for (id, ihaves) in self.missing_messages.iter() {
+            assert!(!ihaves.is_empty(), "no announcer left for missing {id:?}");
+        }
     }
 
     /// Get access to the [`Stats`] of the plumtree.
@@ -654,6 +653,13 @@ impl<PI: PeerIdentity> State<PI> {
             .missing_messages
             .get_mut(&id)
             .and_then(|entries| entries.pop_front());
+        if self
+            .missing_messages
+            .get(&id)
+            .is_some_and(VecDeque::is_empty)
+        {
+            self.missing_messages.remove(&id);
+        }
         if let Some((peer, round)) = entry {
             self.add_eager(peer);
             let message = Message::Graft(Graft {
@@ -1037,7 +1043,6 @@ mod test {
 
     /// A missing message leaves no entry once we asked its last announcer.
     #[test]
-    #[ignore = "not yet passing"]
     fn last_graft_leaves_no_missing_entry() {
         let mut io = VecDeque::new();
         let mut state = State::new(1u32, Config::default(), 1024);
