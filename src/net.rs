@@ -2038,6 +2038,84 @@ pub(crate) mod tests {
         stream.finish().expect("finish");
     }
 
+    /// The stream header that nodes from 0.90 to 0.101 write and read.
+    ///
+    /// Their `StreamHeader` and `read_frame` are the same in every release from
+    /// 0.90 to 0.101, and their `read_lp` and `write_frame` are the same as ours
+    /// since 0.95. So `util::read_frame` and `util::write_frame` of this struct
+    /// read and write a header as those nodes do.
+    #[derive(Debug, serde::Serialize, serde::Deserialize)]
+    struct OldStreamHeader {
+        topic_id: TopicId,
+    }
+
+    /// Old and new nodes read the stream headers of each other on a stream, and the frames after them.
+    #[tokio::test]
+    #[traced_test]
+    async fn stream_headers_cross_versions_on_a_stream() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let topic: TopicId = blake3::hash(b"versions").into();
+        let join = join_message(topic, 0).message;
+        let encoded_join = postcard::to_stdvec(&join).std_context("encode")?;
+        let mut buffer = Vec::new();
+        let mut read_buffer = BytesMut::new();
+
+        // We write, an old node reads.
+        let mut stream = conn.open_uni().await.std_context("open stream")?;
+        util::StreamHeader::new(topic)
+            .write(&mut stream, &mut buffer, TEST_FRAME_LIMIT)
+            .await
+            .std_context("write header")?;
+        util::write_frame(&mut stream, &join, &mut buffer, TEST_FRAME_LIMIT)
+            .await
+            .std_context("write frame")?;
+        stream.finish().std_context("finish")?;
+        let mut recv = peer_conn.accept_uni().await.std_context("accept stream")?;
+        let header: OldStreamHeader =
+            util::read_frame(&mut recv, &mut read_buffer, TEST_FRAME_LIMIT)
+                .await
+                .std_context("old node reads header")?
+                .expect("a header");
+        assert_eq!(header.topic_id, topic);
+        let frame = util::read_lp(&mut recv, &mut read_buffer, TEST_FRAME_LIMIT)
+            .await
+            .std_context("old node reads frame")?
+            .expect("a frame");
+        assert_eq!(&frame[..], &encoded_join[..], "the frame after the header");
+
+        // An old node writes, we read.
+        let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
+        util::write_frame(
+            &mut stream,
+            &OldStreamHeader { topic_id: topic },
+            &mut buffer,
+            TEST_FRAME_LIMIT,
+        )
+        .await
+        .std_context("write old header")?;
+        util::write_frame(&mut stream, &join, &mut buffer, TEST_FRAME_LIMIT)
+            .await
+            .std_context("write frame")?;
+        stream.finish().std_context("finish")?;
+        let mut recv = conn.accept_uni().await.std_context("accept stream")?;
+        let header = util::StreamHeader::read(&mut recv, &mut read_buffer, TEST_FRAME_LIMIT)
+            .await
+            .std_context("read old header")?;
+        assert_eq!(header.topic_id, topic);
+        assert!(!header.handles_close);
+        let frame = util::read_lp(&mut recv, &mut read_buffer, TEST_FRAME_LIMIT)
+            .await
+            .std_context("read frame")?
+            .expect("a frame");
+        assert_eq!(
+            &frame[..],
+            &encoded_join[..],
+            "the frame after the old header"
+        );
+        Ok(())
+    }
+
     /// An unused connection to a peer whose header has no flags stays open.
     ///
     /// Nodes up to 0.101 send the topic alone. Such a node would lose its later
