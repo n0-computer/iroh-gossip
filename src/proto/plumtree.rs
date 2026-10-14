@@ -149,6 +149,27 @@ pub enum Message {
     IHave(Vec<IHave>),
 }
 
+#[cfg(all(test, feature = "net"))]
+impl Message {
+    /// Returns a payload of `len` bytes, as an eager push sends it, for the network tests.
+    pub(crate) fn test_gossip(len: usize) -> Self {
+        let content = Bytes::from(vec![7u8; len]);
+        Message::Gossip(Gossip {
+            id: MessageId::from_content(&content),
+            content,
+            scope: DeliveryScope::Swarm(Round(0)),
+        })
+    }
+
+    /// Returns an `IHave` of one message, for the network tests.
+    pub(crate) fn test_ihave() -> Self {
+        Message::IHave(vec![IHave {
+            id: MessageId::from_content(b"announced"),
+            round: Round(0),
+        }])
+    }
+}
+
 /// Payload messages transmitted by the protocol.
 #[derive(Serialize, Deserialize, Clone, derive_more::Debug, PartialEq, Eq)]
 pub struct Gossip {

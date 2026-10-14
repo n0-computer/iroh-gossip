@@ -3,6 +3,10 @@
 use std::{
     collections::{hash_map, HashMap},
     io,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -24,8 +28,11 @@ use tokio::{
 };
 use tracing::{debug, trace, warn, Instrument};
 
-use super::{InEvent, ProtoMessage};
-use crate::proto::{util::TimerMap, TopicId};
+use super::{
+    queue::{QueueItem, QueueReceiver, QueueReceivers},
+    InEvent, ProtoMessage,
+};
+use crate::proto::{state::MessageKind, util::TimerMap, TopicId};
 
 /// Errors related to message writing
 #[allow(missing_docs)]
@@ -254,45 +261,100 @@ impl RecvStreamState {
     }
 }
 
+/// Writes the queued messages of a connection, with one writer per class.
+///
+/// Each writer has its own streams, one per topic. Control streams have the
+/// higher priority, so control goes out first when data fills the connection.
 pub(crate) struct SendLoop {
     conn: Connection,
-    streams: HashMap<TopicId, SendStream>,
-    buffer: Vec<u8>,
     max_message_size: usize,
-    finishing: JoinSet<()>,
-    send_rx: mpsc::Receiver<ProtoMessage>,
-    /// Whether a message is queued or written, or a stream is not yet finished.
-    sending: watch::Sender<bool>,
+    queues: Option<QueueReceivers>,
+    sending: Arc<Sending>,
+}
+
+/// Whether a writer has a message queued or in writing, or a stream not yet finished.
+#[derive(Debug)]
+struct Sending {
+    busy: [AtomicBool; 2],
+    tx: watch::Sender<bool>,
+}
+
+impl Sending {
+    fn set(&self, class: usize, busy: bool) {
+        self.busy[class].store(busy, Ordering::Relaxed);
+        let any = self.busy.iter().any(|busy| busy.load(Ordering::Relaxed));
+        self.tx
+            .send_if_modified(|current| std::mem::replace(current, any) != any);
+    }
 }
 
 impl SendLoop {
-    pub(crate) fn new(
-        conn: Connection,
-        send_rx: mpsc::Receiver<ProtoMessage>,
-        max_message_size: usize,
-    ) -> Self {
+    pub(crate) fn new(conn: Connection, queues: QueueReceivers, max_message_size: usize) -> Self {
         Self {
             conn,
             max_message_size,
-            buffer: Default::default(),
-            streams: Default::default(),
-            finishing: Default::default(),
-            send_rx,
-            sending: watch::channel(false).0,
+            queues: Some(queues),
+            sending: Arc::new(Sending {
+                busy: Default::default(),
+                tx: watch::channel(false).0,
+            }),
         }
     }
 
     /// Returns whether the loop still has data to send, as it changes.
     pub(crate) fn sending(&self) -> watch::Receiver<bool> {
-        self.sending.subscribe()
+        self.sending.tx.subscribe()
     }
 
-    fn set_sending(&self, sending: bool) {
-        self.sending
-            .send_if_modified(|current| std::mem::replace(current, sending) != sending);
-    }
-
+    /// Sends `queue` first, then the queued messages, until the queue or the connection ends.
     pub(crate) async fn run(&mut self, queue: Vec<ProtoMessage>) -> Result<(), WriteError> {
+        let QueueReceivers { control, data } = self.queues.take().expect("runs once");
+        let (first_control, first_data): (Vec<_>, Vec<_>) = queue
+            .into_iter()
+            .partition(|message| matches!(message.kind(), MessageKind::Control));
+        let writer = |class: usize, rx: QueueReceiver| Writer {
+            conn: self.conn.clone(),
+            class,
+            priority: if class == CONTROL { 1 } else { 0 },
+            rx,
+            streams: Default::default(),
+            buffer: Default::default(),
+            max_message_size: self.max_message_size,
+            finishing: Default::default(),
+            sending: self.sending.clone(),
+        };
+        let mut control = writer(CONTROL, control);
+        let mut data = writer(DATA, data);
+        let result = n0_future::future::zip(control.run(first_control), data.run(first_data)).await;
+        debug!("send loop closed");
+        result.0.and(result.1)
+    }
+}
+
+/// The index of the control writer in [`Sending`].
+const CONTROL: usize = 0;
+/// The index of the data writer in [`Sending`].
+const DATA: usize = 1;
+
+/// Writes the messages of one class.
+struct Writer {
+    conn: Connection,
+    class: usize,
+    priority: i32,
+    rx: QueueReceiver,
+    streams: HashMap<TopicId, SendStream>,
+    buffer: Vec<u8>,
+    max_message_size: usize,
+    finishing: JoinSet<()>,
+    sending: Arc<Sending>,
+}
+
+impl Writer {
+    fn set_sending(&self, sending: bool) {
+        self.sending.set(self.class, sending);
+    }
+
+    async fn run(&mut self, queue: Vec<ProtoMessage>) -> Result<(), WriteError> {
         self.set_sending(!queue.is_empty());
         for msg in queue {
             self.send(&msg).await?;
@@ -301,15 +363,16 @@ impl SendLoop {
         let closed = conn_clone.closed();
         tokio::pin!(closed);
         loop {
-            self.set_sending(!self.send_rx.is_empty() || !self.finishing.is_empty());
+            self.set_sending(!self.rx.is_empty() || !self.finishing.is_empty());
             tokio::select! {
                 biased;
                 _ = &mut closed => break,
-                msg = self.send_rx.recv() => match msg {
-                    Some(msg) => {
+                item = self.rx.recv() => match item {
+                    Some(QueueItem::Message(msg, _size)) => {
                         self.set_sending(true);
                         self.send(&msg).await?
                     }
+                    Some(QueueItem::End(topic)) => self.finish(topic),
                     // The actor dropped the sender.
                     None => break,
                 },
@@ -317,19 +380,13 @@ impl SendLoop {
             }
         }
         // Nothing reads the queue anymore, so the actor must not fill it.
-        self.send_rx.close();
+        self.rx.close();
 
         // Close remaining streams.
         self.set_sending(!self.streams.is_empty() || !self.finishing.is_empty());
-        for (topic_id, mut stream) in self.streams.drain() {
-            stream.finish().ok();
-            self.finishing.spawn(
-                async move {
-                    stream.stopped().await.ok();
-                    debug!(topic=%topic_id.fmt_short(), "stream closed");
-                }
-                .instrument(tracing::Span::current()),
-            );
+        let topics: Vec<_> = self.streams.keys().copied().collect();
+        for topic_id in topics {
+            self.finish(topic_id);
         }
         if !self.finishing.is_empty() {
             trace!(
@@ -346,8 +403,24 @@ impl SendLoop {
             }
         }
         self.set_sending(false);
-        debug!("send loop closed");
         Ok(())
+    }
+
+    /// Finishes the stream of `topic_id`, if one is open.
+    fn finish(&mut self, topic_id: TopicId) {
+        let Some(mut stream) = self.streams.remove(&topic_id) else {
+            return;
+        };
+        trace!(topic=%topic_id.fmt_short(), "stream closing");
+        if stream.finish().is_ok() {
+            self.finishing.spawn(
+                async move {
+                    stream.stopped().await.ok();
+                    debug!(topic=%topic_id.fmt_short(), "stream closed");
+                }
+                .instrument(tracing::Span::current()),
+            );
+        }
     }
 
     /// Writes a message, and drops only its stream if the write fails while the connection runs.
@@ -373,43 +446,30 @@ impl SendLoop {
     /// Write a [`ProtoMessage`] as a length-prefixed, postcard-encoded message on its stream.
     ///
     /// If no stream is opened yet, this opens a new stream for the topic and writes the topic header.
+    /// A `Disconnect` is the last message of its stream.
     ///
     /// This function is not cancellation-safe.
-    pub async fn write_message(&mut self, message: &ProtoMessage) -> Result<(), WriteError> {
+    async fn write_message(&mut self, message: &ProtoMessage) -> Result<(), WriteError> {
         let ProtoMessage { topic, message } = message;
         let topic_id = *topic;
-        let is_last = message.is_disconnect();
 
-        let mut entry = match self.streams.entry(topic_id) {
-            hash_map::Entry::Occupied(entry) => entry,
+        let stream = match self.streams.entry(topic_id) {
+            hash_map::Entry::Occupied(entry) => entry.into_mut(),
             hash_map::Entry::Vacant(entry) => {
                 let mut stream = self.conn.open_uni().await?;
+                stream.set_priority(self.priority).ok();
                 let header = StreamHeader::new(topic_id);
                 header
                     .write(&mut stream, &mut self.buffer, self.max_message_size)
                     .await?;
                 debug!(topic=%topic_id.fmt_short(), "stream opened");
-                entry.insert_entry(stream)
+                entry.insert(stream)
             }
         };
-        let stream = entry.get_mut();
-
         write_frame(stream, message, &mut self.buffer, self.max_message_size).await?;
-
-        if is_last {
-            trace!(topic=%topic_id.fmt_short(), "stream closing");
-            let mut stream = entry.remove();
-            if stream.finish().is_ok() {
-                self.finishing.spawn(
-                    async move {
-                        stream.stopped().await.ok();
-                        debug!(topic=%topic_id.fmt_short(), "stream closed");
-                    }
-                    .instrument(tracing::Span::current()),
-                );
-            }
+        if message.is_disconnect() {
+            self.finish(topic_id);
         }
-
         Ok(())
     }
 }
