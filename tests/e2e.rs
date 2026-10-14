@@ -6,6 +6,7 @@
 //! a test can count the ones still open.
 
 use std::{
+    collections::BTreeSet,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -749,42 +750,43 @@ async fn open_connections_link_neighbors() -> Result {
     sleep(SETTLE).await;
 
     // A connection we are done with stays open for a grace of a few seconds,
-    // and the overlay can still open one, so we wait for a moment without an
-    // unlinked connection. A leaked connection stays unlinked.
-    let mut unlinked = None;
+    // and the overlay keeps opening short-lived ones, for example for a
+    // refused neighbor request. A leaked connection stays unlinked, so each
+    // pair unlinked now must be linked or closed at some point within `SETTLE`.
+    for sub in subs.iter_mut() {
+        sub.drain().await?;
+    }
+    let mut unlinked = unlinked_pairs(&nodes, &subs);
     let wait = async {
-        loop {
+        while !unlinked.is_empty() {
+            sleep(Duration::from_millis(200)).await;
             for sub in subs.iter_mut() {
                 sub.drain().await?;
             }
-            unlinked = unlinked_pair(&nodes, &subs);
-            if unlinked.is_none() {
-                return n0_error::Ok(());
-            }
-            sleep(Duration::from_millis(200)).await;
+            let now = unlinked_pairs(&nodes, &subs);
+            unlinked.retain(|pair| now.contains(pair));
         }
+        n0_error::Ok(())
     };
     match timeout(SETTLE, wait).await {
         Ok(drained) => drained,
-        Err(_) => {
-            let (i, j) = unlinked.expect("set before each sleep");
-            bail_any!("nodes {i} and {j} keep a connection without a neighbor")
-        }
+        Err(_) => bail_any!("these nodes keep a connection without a neighbor: {unlinked:?}"),
     }
 }
 
-/// Returns two nodes that keep a connection, where neither holds the other as a neighbor.
-fn unlinked_pair(nodes: &[Node], subs: &[Sub]) -> Option<(usize, usize)> {
+/// Returns the pairs of nodes that keep a connection, where neither holds the other as a neighbor.
+fn unlinked_pairs(nodes: &[Node], subs: &[Sub]) -> BTreeSet<(usize, usize)> {
+    let mut pairs = BTreeSet::new();
     for (i, a) in nodes.iter().enumerate() {
         for (j, b) in nodes.iter().enumerate().skip(i + 1) {
             let linked = subs[i].rx.neighbors().any(|p| p == b.id())
                 || subs[j].rx.neighbors().any(|p| p == a.id());
             if open_between(a, b) > 0 && !linked {
-                return Some((i, j));
+                pairs.insert((i, j));
             }
         }
     }
-    None
+    pairs
 }
 
 /// Many nodes that all join each other at once form an overlay that reaches all.
