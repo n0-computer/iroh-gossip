@@ -29,6 +29,8 @@ pub enum InEvent<PI> {
     PeerDisconnected(PI),
     /// Update the opaque peer data about yourself.
     UpdatePeerData(PeerData),
+    /// The network dropped a message to the peer, as the queue to it was full.
+    SendDropped(PI, Message<PI>),
 }
 
 /// An output event from the state handler.
@@ -103,6 +105,16 @@ impl<PI> Message<PI> {
         Message::Swarm(hyparview::Message::test_disconnect())
     }
 
+    /// Returns a payload of `len` bytes, as an eager push sends it, for the network tests.
+    pub(crate) fn test_gossip(len: usize) -> Self {
+        Message::Gossip(plumtree::Message::test_gossip(len))
+    }
+
+    /// Returns an `IHave` of one message, for the network tests.
+    pub(crate) fn test_ihave() -> Self {
+        Message::Gossip(plumtree::Message::test_ihave())
+    }
+
     /// Returns a shuffle from `origin` carrying no nodes, for the network tests.
     pub(crate) fn test_shuffle(origin: PI, ttl: u16) -> Self {
         Message::Swarm(hyparview::Message::test_shuffle(origin, ttl))
@@ -124,6 +136,13 @@ impl<PI> Message<PI> {
     /// Returns `true` if this is a disconnect message (which is the last message sent to a peer per topic).
     pub fn is_disconnect(&self) -> bool {
         matches!(self, Message::Swarm(hyparview::Message::Disconnect(_)))
+    }
+
+    /// Returns `true` if this announces messages, which the peer can still request.
+    ///
+    /// A full send queue drops an announcement, as it drops data.
+    pub fn is_announcement(&self) -> bool {
+        matches!(self, Message::Gossip(plumtree::Message::IHave(_)))
     }
 }
 
@@ -315,6 +334,13 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
                 self.gossip.handle(GossipIn::NeighborDown(peer), now, io);
             }
             InEvent::UpdatePeerData(data) => self.swarm.handle(SwarmIn::UpdatePeerData(data), io),
+            InEvent::SendDropped(peer, message) => {
+                // The network drops only data and announcements, both of Plumtree.
+                if let Message::Gossip(message) = message {
+                    self.gossip
+                        .handle(GossipIn::SendDropped(peer, message), now, io);
+                }
+            }
         }
 
         // Forward NeighborUp and NeighborDown events from hyparview to plumtree

@@ -1045,18 +1045,12 @@ async fn former_instance_leaving_preserves_replacement() -> Result {
     exchange(&mut sa, &mut sb, b"02").await
 }
 
-/// A peer that stops reading does not block our shutdown.
+/// A peer that stops reading does not block our shutdown (#47).
 ///
-/// KNOWN BUG (#47): the actor waits when a peer's send queue is full, and
-/// then handles nothing else. `Frando/fix-slow-peer` fixes it.
+/// The actor waited when a peer's send queue was full, and then handled
+/// nothing else.
 #[tokio::test(flavor = "multi_thread")]
 #[traced_test]
-#[should_panic(expected = "a flow-controlled peer blocked gossip shutdown")]
-async fn known_bug_slow_peer_does_not_block_shutdown() {
-    slow_peer_does_not_block_shutdown().await.unwrap();
-}
-
-/// Runs `known_bug_slow_peer_does_not_block_shutdown`.
 async fn slow_peer_does_not_block_shutdown() -> Result {
     let lookup = MemoryLookup::new();
     let (a, b) = (Node::spawn(&lookup).await?, Node::spawn(&lookup).await?);
