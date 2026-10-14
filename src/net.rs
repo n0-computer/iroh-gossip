@@ -37,7 +37,7 @@ use self::{
 use crate::{
     api::{self, Command, Event, GossipApi, RpcMessage},
     metrics::Metrics,
-    proto::{self, HyparviewConfig, PeerData, PlumtreeConfig, Scope, TopicId},
+    proto::{self, state::MessageKind, HyparviewConfig, PeerData, PlumtreeConfig, Scope, TopicId},
 };
 
 mod address_lookup;
@@ -796,6 +796,8 @@ impl Actor {
         let mut touched = Vec::new();
         // The peers whose queue had no room for a control message.
         let mut blocked = Vec::new();
+        // The data messages that a full queue dropped, for Plumtree to announce later.
+        let mut dropped = Vec::new();
         if let InEvent::RecvMessage(peer, _) | InEvent::PeerDisconnected(peer) = &event {
             touched.push(*peer);
         }
@@ -827,9 +829,12 @@ impl Actor {
                         PeerState::Active { active_send_tx, .. } => {
                             match active_send_tx.push(message) {
                                 Pushed::Queued => {}
-                                Pushed::Dropped(_message) => {
+                                Pushed::Dropped(message) => {
                                     debug!(peer = %peer_id.fmt_short(), "send queue full, drop the message");
                                     self.metrics.msgs_dropped.inc();
+                                    if matches!(message.kind(), MessageKind::Data) {
+                                        dropped.push((peer_id, message));
+                                    }
                                 }
                                 Pushed::Overflow => {
                                     if !blocked.contains(&peer_id) {
@@ -911,6 +916,10 @@ impl Actor {
                 let wanted = self.state.uses_peer(&peer);
                 tx.send_if_modified(|current| std::mem::replace(current, wanted) != wanted);
             }
+        }
+        for (peer_id, message) in dropped {
+            let event = InEvent::SendDropped(peer_id, message);
+            Box::pin(self.handle_in_event_inner(event, now)).await;
         }
         for peer_id in blocked {
             // The topics cannot work with a peer that takes no control message.

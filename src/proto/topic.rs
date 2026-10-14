@@ -29,6 +29,8 @@ pub enum InEvent<PI> {
     PeerDisconnected(PI),
     /// Update the opaque peer data about yourself.
     UpdatePeerData(PeerData),
+    /// The network dropped a message to the peer, as the queue to it was full.
+    SendDropped(PI, Message<PI>),
 }
 
 /// An output event from the state handler.
@@ -332,6 +334,13 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
                 self.gossip.handle(GossipIn::NeighborDown(peer), now, io);
             }
             InEvent::UpdatePeerData(data) => self.swarm.handle(SwarmIn::UpdatePeerData(data), io),
+            InEvent::SendDropped(peer, message) => {
+                // The network drops only data and announcements, both of Plumtree.
+                if let Message::Gossip(message) = message {
+                    self.gossip
+                        .handle(GossipIn::SendDropped(peer, message), now, io);
+                }
+            }
         }
 
         // Forward NeighborUp and NeighborDown events from hyparview to plumtree
