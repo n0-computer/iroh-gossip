@@ -18,8 +18,9 @@ use iroh::{
 use irpc::WithChannels;
 use n0_error::{e, stack_error};
 use n0_future::{
+    boxed::BoxStream,
     task::{self, AbortOnDropHandle, JoinSet},
-    time::Instant,
+    time::{Instant, Interval, MissedTickBehavior},
     Stream, StreamExt as _,
 };
 use rand::{rngs::StdRng, SeedableRng};
@@ -39,7 +40,11 @@ use crate::{
 };
 
 mod address_lookup;
+mod discovery;
 mod util;
+
+use self::discovery::DISCOVERY_INTERVAL;
+pub use self::discovery::{RecentPeers, TopicDiscovery};
 
 /// ALPN protocol name
 pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/1";
@@ -146,6 +151,7 @@ impl ProtocolHandler for Gossip {
 pub struct Builder {
     config: proto::Config,
     alpn: Option<Bytes>,
+    discovery: Option<Arc<dyn TopicDiscovery>>,
 }
 
 impl Builder {
@@ -180,6 +186,14 @@ impl Builder {
         self
     }
 
+    /// Set the [`TopicDiscovery`] that remembers good peers and finds peers for topics without neighbors.
+    ///
+    /// Without one, a topic only joins through the peers passed to it.
+    pub fn topic_discovery(mut self, discovery: impl TopicDiscovery) -> Self {
+        self.discovery = Some(Arc::new(discovery));
+        self
+    }
+
     /// Spawn a gossip actor and get a handle for it
     pub fn spawn(self, endpoint: Endpoint) -> Gossip {
         let metrics = Arc::new(Metrics::default());
@@ -199,6 +213,7 @@ impl Builder {
             metrics.clone(),
             self.alpn,
             address_lookup,
+            self.discovery,
         );
         let me = actor.endpoint.id().fmt_short();
         let max_message_size = actor.state.max_message_size();
@@ -226,6 +241,7 @@ impl Gossip {
         Builder {
             config: Default::default(),
             alpn: None,
+            discovery: None,
         }
     }
 
@@ -302,6 +318,12 @@ struct Actor {
     metrics: Arc<Metrics>,
     topic_event_forwarders: JoinSet<TopicId>,
     address_lookup: GossipAddressLookup,
+    /// Finds peers for topics without neighbors, see [`TopicDiscovery`].
+    discovery: Option<Arc<dyn TopicDiscovery>>,
+    /// Ticks every [`DISCOVERY_INTERVAL`] to check for topics without neighbors.
+    discovery_interval: Interval,
+    /// The running [`TopicDiscovery::discover`] streams, for topics without neighbors.
+    discovering: HashMap<TopicId, BoxStream<EndpointId>>,
 }
 
 impl Actor {
@@ -311,6 +333,7 @@ impl Actor {
         metrics: Arc<Metrics>,
         alpn: Option<Bytes>,
         address_lookup: GossipAddressLookup,
+        discovery: Option<Arc<dyn TopicDiscovery>>,
     ) -> (
         Self,
         mpsc::Sender<RpcMessage>,
@@ -327,6 +350,8 @@ impl Actor {
         let (rpc_tx, rpc_rx) = mpsc::channel(TO_ACTOR_CAP);
         let (local_tx, local_rx) = mpsc::channel(16);
         let (in_event_tx, in_event_rx) = mpsc::channel(IN_EVENT_CAP);
+        let mut discovery_interval = n0_future::time::interval(DISCOVERY_INTERVAL);
+        discovery_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         let actor = Actor {
             alpn: alpn.unwrap_or_else(|| GOSSIP_ALPN.to_vec().into()),
@@ -346,6 +371,9 @@ impl Actor {
             local_rx,
             topic_event_forwarders: Default::default(),
             address_lookup,
+            discovery,
+            discovery_interval,
+            discovering: Default::default(),
         };
 
         (actor, rpc_tx, local_tx)
@@ -482,9 +510,45 @@ impl Actor {
                     }
                 }
             }
+            _ = self.discovery_interval.tick(), if self.discovery.is_some() => {
+                self.start_discovery();
+            }
+            (topic, peer) = next_discovered(&mut self.discovering), if !self.discovering.is_empty() => {
+                let alone = self.topics.get(&topic).is_some_and(|state| state.neighbors.is_empty());
+                match peer {
+                    // Stop once the topic has a neighbor, or is gone.
+                    _ if !alone => {
+                        self.discovering.remove(&topic);
+                    }
+                    None => {
+                        self.discovering.remove(&topic);
+                    }
+                    Some(peer) if peer == self.endpoint.id() => {}
+                    Some(peer) => {
+                        debug!(topic = %topic.fmt_short(), peer = %peer.fmt_short(), "join through a discovered peer");
+                        let join = InEvent::Command(topic, ProtoCommand::Join(vec![peer]));
+                        self.handle_in_event(join, Instant::now()).await;
+                    }
+                }
+            }
         }
 
         true
+    }
+
+    /// Starts [`TopicDiscovery::discover`] for each topic without neighbors.
+    ///
+    /// A check on a timer rather than on `NeighborDown`, so that it also covers
+    /// a topic that never had a neighbor, and keeps trying until one comes.
+    fn start_discovery(&mut self) {
+        let Some(discovery) = &self.discovery else {
+            return;
+        };
+        for (topic, state) in self.topics.iter() {
+            if state.neighbors.is_empty() && !self.discovering.contains_key(topic) {
+                self.discovering.insert(*topic, discovery.discover(*topic));
+            }
+        }
     }
 
     async fn handle_addr_update(&mut self, endpoint_addr: EndpointAddr) {
@@ -613,6 +677,11 @@ impl Actor {
                     topic_id,
                     bootstrap,
                 } = inner;
+                if !self.topics.contains_key(&topic_id) {
+                    if let Some(discovery) = &self.discovery {
+                        discovery.topic_joined(topic_id);
+                    }
+                }
                 let TopicState {
                     neighbors,
                     event_sender,
@@ -667,6 +736,10 @@ impl Actor {
             .await;
             if self.topics.remove(&topic_id).is_some() {
                 tracing::debug!(%topic_id, "publishers and subscribers gone; unsubscribing");
+                self.discovering.remove(&topic_id);
+                if let Some(discovery) = &self.discovery {
+                    discovery.topic_left(topic_id);
+                }
             }
         }
     }
@@ -677,6 +750,12 @@ impl Actor {
         } else {
             debug!(?event, "handle in_event");
         };
+        if let (InEvent::RecvMessage(peer, message), Some(discovery)) = (&event, &self.discovery) {
+            // Only for topics we joined: a message for another topic says nothing.
+            if self.topics.contains_key(&message.topic) {
+                discovery.peer_seen(message.topic, *peer);
+            }
+        }
         let out = self.state.handle(event, now, Some(&self.metrics));
         for event in out {
             if matches!(event, OutEvent::ScheduleTimer(_, _)) {
@@ -721,6 +800,11 @@ impl Actor {
                     match &event {
                         ProtoEvent::NeighborUp(neighbor) => {
                             neighbors.insert(*neighbor);
+                            if let Some(discovery) = &self.discovery {
+                                discovery.neighbor_up(topic_id, *neighbor);
+                            }
+                            // The topic is in the swarm again, so stop looking.
+                            self.discovering.remove(&topic_id);
                         }
                         ProtoEvent::NeighborDown(neighbor) => {
                             neighbors.remove(neighbor);
@@ -887,6 +971,23 @@ impl<T> From<mpsc::error::SendError<T>> for ConnectionLoopError {
 ///
 /// A task cancelled at runtime shutdown is no bug, so it must not panic the actor (#140).
 /// A panic in the task panics the caller with the same payload.
+/// Returns the next item of any running discovery stream, with its topic.
+///
+/// `None` means that the topic's stream ended.
+async fn next_discovered(
+    streams: &mut HashMap<TopicId, BoxStream<EndpointId>>,
+) -> (TopicId, Option<EndpointId>) {
+    std::future::poll_fn(|cx| {
+        for (topic, stream) in streams.iter_mut() {
+            if let Poll::Ready(peer) = stream.poll_next(cx) {
+                return Poll::Ready((*topic, peer));
+            }
+        }
+        Poll::Pending
+    })
+    .await
+}
+
 fn task_output<T>(res: Result<T, task::JoinError>) -> Option<T> {
     match res {
         Ok(output) => Some(output),
@@ -1183,8 +1284,14 @@ pub(crate) mod tests {
                 .expect("endpoint is not closed")
                 .add(address_lookup.clone());
 
-            let (actor, to_actor_tx, conn_tx) =
-                Actor::new(endpoint, config, metrics.clone(), None, address_lookup);
+            let (actor, to_actor_tx, conn_tx) = Actor::new(
+                endpoint,
+                config,
+                metrics.clone(),
+                None,
+                address_lookup,
+                None,
+            );
             let max_message_size = actor.state.max_message_size();
 
             let _actor_handle = AbortOnDropHandle::new(task::spawn(n0_future::future::pending()));
@@ -1275,6 +1382,93 @@ pub(crate) mod tests {
                     }
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// A [`TopicDiscovery`] that returns fixed peers and records the neighbors it is told about.
+    #[derive(Debug, Default)]
+    struct StaticDiscovery {
+        peers: Vec<EndpointId>,
+        neighbors: std::sync::Mutex<Vec<(TopicId, EndpointId)>>,
+        seen: std::sync::Mutex<Vec<(TopicId, EndpointId)>>,
+        topics: std::sync::Mutex<Vec<(TopicId, bool)>>,
+    }
+
+    impl TopicDiscovery for Arc<StaticDiscovery> {
+        fn neighbor_up(&self, topic: TopicId, peer: EndpointId) {
+            self.neighbors.lock().unwrap().push((topic, peer));
+        }
+
+        fn peer_seen(&self, topic: TopicId, peer: EndpointId) {
+            self.seen.lock().unwrap().push((topic, peer));
+        }
+
+        fn topic_joined(&self, topic: TopicId) {
+            self.topics.lock().unwrap().push((topic, true));
+        }
+
+        fn topic_left(&self, topic: TopicId) {
+            self.topics.lock().unwrap().push((topic, false));
+        }
+
+        fn discover(&self, _topic: TopicId) -> BoxStream<EndpointId> {
+            Box::pin(n0_future::stream::iter(self.peers.clone()))
+        }
+    }
+
+    /// A topic joined without bootstrap peers finds a peer through discovery,
+    /// and the discovery learns about the new neighbor.
+    #[tokio::test]
+    #[traced_test]
+    async fn topic_discovery_joins_and_remembers() -> Result {
+        let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(1);
+        let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await?;
+        let memory_lookup = MemoryLookup::new();
+        let ep1 = create_endpoint(&mut rng, relay_map.clone(), Some(memory_lookup.clone())).await?;
+        let ep2 = create_endpoint(&mut rng, relay_map, Some(memory_lookup.clone())).await?;
+        memory_lookup.add_endpoint_info(EndpointAddr::new(ep1.id()).with_relay_url(relay_url));
+
+        let discovery = Arc::new(StaticDiscovery {
+            peers: vec![ep1.id()],
+            ..Default::default()
+        });
+        let go1 = Gossip::builder().spawn(ep1.clone());
+        let go2 = Gossip::builder()
+            .topic_discovery(discovery.clone())
+            .spawn(ep2.clone());
+        let cancel = CancellationToken::new();
+        let tasks = [
+            spawn(endpoint_loop(ep1.clone(), go1.clone(), cancel.clone())),
+            spawn(endpoint_loop(ep2.clone(), go2.clone(), cancel.clone())),
+        ];
+
+        let topic: TopicId = blake3::hash(b"topic_discovery").into();
+        let joins = (
+            go1.subscribe_and_join(topic, vec![]),
+            go2.subscribe_and_join(topic, vec![]),
+        )
+            .try_join();
+        let (_sub1, _sub2) = timeout(DISCOVERY_INTERVAL * 3, joins)
+            .await
+            .std_context("discovery did not join")??;
+
+        assert_eq!(
+            *discovery.neighbors.lock().unwrap(),
+            vec![(topic, ep1.id())]
+        );
+        assert!(discovery.seen.lock().unwrap().contains(&(topic, ep1.id())));
+        assert_eq!(*discovery.topics.lock().unwrap(), vec![(topic, true)]);
+
+        go2.shutdown().await?;
+        assert_eq!(
+            *discovery.topics.lock().unwrap(),
+            vec![(topic, true), (topic, false)]
+        );
+
+        cancel.cancel();
+        for task in tasks {
+            task.await.std_context("endpoint loop")??;
         }
         Ok(())
     }
