@@ -228,3 +228,137 @@ impl QueueSender {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use iroh::SecretKey;
+
+    use super::*;
+    use crate::proto::{topic::Message, TopicId};
+
+    fn proto(message: Message<iroh::PublicKey>) -> ProtoMessage {
+        let topic = TopicId::from_bytes([1; 32]);
+        ProtoMessage { topic, message }
+    }
+
+    fn data(len: usize) -> ProtoMessage {
+        proto(Message::test_gossip(len))
+    }
+
+    fn ihave() -> ProtoMessage {
+        proto(Message::test_ihave())
+    }
+
+    fn shuffle() -> ProtoMessage {
+        proto(Message::test_shuffle(SecretKey::generate().public(), 0))
+    }
+
+    fn disconnect() -> ProtoMessage {
+        proto(Message::test_disconnect())
+    }
+
+    fn size(message: &ProtoMessage) -> usize {
+        postcard::experimental::serialized_size(&message.message).unwrap() + MESSAGE_OVERHEAD
+    }
+
+    /// Returns the bytes in use of the whole queue and of its data part.
+    fn used(queue: &QueueSender) -> (usize, usize) {
+        let capacity = &queue.capacity;
+        let used = |limit: &Limit| limit.used.load(Ordering::Relaxed);
+        (used(&capacity.total), used(&capacity.data))
+    }
+
+    /// Pushes `message` until the queue no longer queues it, and returns how many it queued.
+    fn fill(queue: &QueueSender, message: impl Fn() -> ProtoMessage) -> (usize, Pushed) {
+        let mut queued = 0;
+        loop {
+            match queue.push(message()) {
+                Pushed::Queued => queued += 1,
+                other => return (queued, other),
+            }
+        }
+    }
+
+    /// The peer gets data, control and a `Disconnect` in the order of the pushes.
+    #[test]
+    fn messages_keep_their_order() {
+        let (queue, mut rx) = QueueSender::new(MIN_QUEUE_SIZE);
+        let pushed = [data(10), shuffle(), ihave(), disconnect(), data(20)];
+        for message in pushed.clone() {
+            assert!(matches!(queue.push(message), Pushed::Queued));
+        }
+        for message in pushed {
+            assert_eq!(rx.try_recv().unwrap().message.message, message.message);
+        }
+    }
+
+    /// Data and announcements fill only their part, and leave room for control.
+    #[test]
+    fn parts_leave_room_for_control() {
+        let queue_bytes = MIN_QUEUE_SIZE;
+        let (queue, _rx) = QueueSender::new(queue_bytes);
+        let (queued, last) = fill(&queue, || data(1000));
+        assert_eq!(queued, queue_bytes / 4 * 3 / size(&data(1000)));
+        assert!(matches!(last, Pushed::Dropped(_)));
+
+        let (queued, last) = fill(&queue, ihave);
+        assert_eq!(queued, queue_bytes / 8 / size(&ihave()));
+        assert!(matches!(last, Pushed::Dropped(_)));
+
+        let (queued, last) = fill(&queue, shuffle);
+        assert!(queued >= queue_bytes / 8 / size(&shuffle()));
+        assert!(matches!(last, Pushed::Overflow));
+        assert!(queue_bytes - used(&queue).0 < size(&shuffle()));
+    }
+
+    /// A `Disconnect` takes room as any control message, so many of them overflow the queue.
+    #[test]
+    fn disconnects_overflow_the_queue() {
+        let (queue, _rx) = QueueSender::new(MIN_QUEUE_SIZE);
+        let (queued, last) = fill(&queue, disconnect);
+        assert_eq!(queued, MIN_QUEUE_SIZE / size(&disconnect()));
+        assert!(matches!(last, Pushed::Overflow));
+    }
+
+    /// A message that fits its part but not the whole queue leaves its part as it was.
+    #[test]
+    fn failed_reservation_releases_its_part() {
+        let (queue, _rx) = QueueSender::new(MIN_QUEUE_SIZE);
+        let (_, last) = fill(&queue, shuffle);
+        assert!(matches!(last, Pushed::Overflow));
+        assert!(matches!(queue.push(data(10)), Pushed::Dropped(_)));
+        assert_eq!(used(&queue).1, 0);
+    }
+
+    /// A message keeps its reservation until the writer drops it, also once it left the channel.
+    #[test]
+    fn message_keeps_its_reservation_until_dropped() {
+        let (queue, mut rx) = QueueSender::new(MIN_QUEUE_SIZE);
+        let one = size(&data(1000));
+        assert!(matches!(queue.push(data(1000)), Pushed::Queued));
+        let in_writing = rx.try_recv().unwrap();
+        assert_eq!(used(&queue), (one, one));
+        drop(in_writing);
+        assert_eq!(used(&queue), (0, 0));
+    }
+
+    /// A closed queue takes nothing, and releases the reservations of its messages.
+    #[test]
+    fn closed_queue_frees_its_room() {
+        let (queue, mut rx) = QueueSender::new(MIN_QUEUE_SIZE);
+        assert!(matches!(queue.push(data(1000)), Pushed::Queued));
+        rx.close();
+        assert!(matches!(queue.push(shuffle()), Pushed::Closed));
+        drop(rx);
+        assert_eq!(used(&queue), (0, 0));
+    }
+
+    /// The least queue fits eight messages of the largest size, so its announcements fit one.
+    #[test]
+    fn least_size_fits_eight_large_messages() {
+        let max = 1 << 20;
+        assert_eq!(queue_size(0, max), 8 * (max + MESSAGE_OVERHEAD));
+        assert_eq!(queue_size(0, 1024), MIN_QUEUE_SIZE);
+        assert_eq!(queue_size(0, usize::MAX), usize::MAX);
+    }
+}

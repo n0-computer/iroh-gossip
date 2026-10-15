@@ -105,6 +105,16 @@ impl<PI> Message<PI> {
         Message::Swarm(hyparview::Message::test_disconnect())
     }
 
+    /// Returns a payload of `len` bytes, as an eager push sends it, for the network tests.
+    pub(crate) fn test_gossip(len: usize) -> Self {
+        Message::Gossip(plumtree::Message::test_gossip(len))
+    }
+
+    /// Returns an `IHave` of one message, for the network tests.
+    pub(crate) fn test_ihave() -> Self {
+        Message::Gossip(plumtree::Message::test_ihave())
+    }
+
     /// Returns a shuffle from `origin` carrying no nodes, for the network tests.
     pub(crate) fn test_shuffle(origin: PI, ttl: u16) -> Self {
         Message::Swarm(hyparview::Message::test_shuffle(origin, ttl))
