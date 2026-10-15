@@ -63,6 +63,9 @@ struct Args {
     /// QUIC receive window per stream of every node, in bytes. The default of noq is 1.25 MB.
     #[arg(long)]
     stream_window: Option<u32>,
+    /// QUIC receive window per connection of every node, in bytes. Unlimited by default.
+    #[arg(long)]
+    receive_window: Option<u32>,
 }
 
 /// Returns the nanoseconds since the process started, on a clock that does not jump.
@@ -152,6 +155,9 @@ async fn run(args: Args) -> Result<()> {
                 let mut transport = QuicTransportConfig::builder();
                 if let Some(window) = args2.send_window {
                     transport = transport.send_window(window);
+                }
+                if let Some(window) = args2.receive_window {
+                    transport = transport.receive_window(VarInt::from_u32(window));
                 }
                 if let Some(window) = args2.stream_window {
                     transport = transport.stream_receive_window(VarInt::from_u32(window));
@@ -274,6 +280,7 @@ async fn run(args: Args) -> Result<()> {
         "rate": args.rate, "size": args.size, "publishers": args.publishers,
         "topics": args.topics, "publish_secs": args.publish_secs, "drain_secs": args.drain_secs,
         "send_window": args.send_window, "stream_window": args.stream_window,
+        "receive_window": args.receive_window, "rtt_ms": args.rtt_ms,
         "env": std::env::vars().filter(|(k, _)| k.starts_with("GOSSIP_EXP")).collect::<BTreeMap<_, _>>(),
         "sent": total_sent,
         "achieved_rate": total_sent as f64 / published.as_secs_f64(),
