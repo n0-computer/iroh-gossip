@@ -299,6 +299,11 @@ struct Actor {
     ///
     /// It outlives the peer's state, so that a peer we want again keeps them.
     wanted: HashMap<EndpointId, watch::Sender<bool>>,
+    /// Whether each peer with a connection sent [`util::StreamHeader::handles_close`].
+    ///
+    /// It belongs to the peer, not to one connection. So a connection on which
+    /// neither side sends closes too, as after two dials cross.
+    handles_close: HashMap<EndpointId, watch::Sender<bool>>,
     /// Stream of commands from topic handles.
     command_rx: stream_group::Keyed<TopicCommandStream>,
     /// Internal queue of topic to close because all handles were dropped.
@@ -346,6 +351,7 @@ impl Actor {
             command_rx: StreamGroup::new().keyed(),
             peers: Default::default(),
             wanted: Default::default(),
+            handles_close: Default::default(),
             topics: Default::default(),
             quit_queue: Default::default(),
             connection_tasks: Default::default(),
@@ -571,6 +577,11 @@ impl Actor {
             .or_insert_with(|| watch::channel(wanted).0);
         tx.send_if_modified(|current| std::mem::replace(current, wanted) != wanted);
         let wanted = tx.subscribe();
+        let handles_close = self
+            .handles_close
+            .entry(peer_id)
+            .or_insert_with(|| watch::channel(false).0)
+            .clone();
 
         let max_message_size = self.state.max_message_size();
         let in_event_tx = self.in_event_tx.clone();
@@ -587,6 +598,7 @@ impl Actor {
                     max_message_size,
                     queue,
                     wanted,
+                    handles_close,
                 )
                 .await;
                 // Closed here, so that a busy actor does not delay the close.
@@ -612,6 +624,14 @@ impl Actor {
             .is_some_and(|tx| tx.receiver_count() == 0)
         {
             self.wanted.remove(&peer_id);
+        }
+        if self
+            .handles_close
+            .get(&peer_id)
+            // A task subscribes only once it runs, but holds a clone from its spawn.
+            .is_some_and(|tx| tx.sender_count() == 1)
+        {
+            self.handles_close.remove(&peer_id);
         }
         let reason = conn.close_reason().expect("closed by its task");
         let error = task_result.err();
@@ -1037,13 +1057,14 @@ async fn connection_loop(
     max_message_size: usize,
     queue: Vec<ProtoMessage>,
     wanted: watch::Receiver<bool>,
+    handles_close: watch::Sender<bool>,
 ) -> Result<(), ConnectionLoopError> {
     debug!(?origin, "connection established");
 
     let mut send_loop = SendLoop::new(conn.clone(), send_rx, max_message_size);
     let sending = send_loop.sending();
-    let mut recv_loop = RecvLoop::new(from, conn, in_event_tx, max_message_size);
-    let mut handles_close = recv_loop.handles_close();
+    let mut handles_close_rx = handles_close.subscribe();
+    let mut recv_loop = RecvLoop::new(from, conn, in_event_tx, max_message_size, handles_close);
 
     let send_fut = send_loop.run(queue).instrument(error_span!("send"));
     let recv_fut = recv_loop.run().instrument(error_span!("recv"));
@@ -1063,7 +1084,7 @@ async fn connection_loop(
         // An old node would lose its later messages to us after a close, see
         // `StreamHeader::handles_close`.
         _ = async {
-            if handles_close.wait_for(|known| *known).await.is_err() {
+            if handles_close_rx.wait_for(|known| *known).await.is_err() {
                 std::future::pending::<()>().await;
             }
             retire(wanted, sending).await
@@ -2362,6 +2383,59 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// A late dial on which the peer never sends closes.
+    ///
+    /// Two peers that dial each other at once can each end up with a
+    /// connection on which neither side sends. The peer showed on its other
+    /// connection that it handles a close, and that connection ends before
+    /// the dial runs.
+    #[tokio::test]
+    #[traced_test]
+    async fn silent_late_dial_closes() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (accepted, peer_accepted) = pair.connect().await?;
+        let (dialed, peer_dialed) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
+        let topic: TopicId = blake3::hash(b"silent_late_dial").into();
+        let mut actor = t_actor().await?;
+
+        actor.handle_connection(peer_id, ConnOrigin::Accept, accepted);
+        show_that_it_handles_a_close(&peer_accepted, topic).await;
+        disconnect_peer(&mut actor.peers, peer_id);
+        let ended = timeout(
+            IDLE_GRACE + Duration::from_secs(3),
+            actor.connection_tasks.join_next(),
+        )
+        .await
+        .std_context("the accepted connection stayed open")?;
+        let (peer, conn, res) = ended.expect("one task").expect("no panic");
+
+        // The test runtime runs the dial task only at the next await.
+        actor.handle_connection(peer_id, ConnOrigin::Dial, dialed);
+        actor.handle_connection_task_finished(peer, conn, res).await;
+        assert!(
+            actor.handles_close.contains_key(&peer_id),
+            "the flag went while the dial holds it"
+        );
+
+        let ended = timeout(
+            IDLE_GRACE + Duration::from_secs(3),
+            actor.connection_tasks.join_next(),
+        )
+        .await
+        .std_context("the dial stayed open")?;
+        let (peer, conn, res) = ended.expect("one task").expect("no panic");
+        actor.handle_connection_task_finished(peer, conn, res).await;
+        timeout(Duration::from_secs(1), peer_dialed.closed())
+            .await
+            .std_context("the peer did not see the close")?;
+        assert!(
+            !actor.handles_close.contains_key(&peer_id),
+            "the flag outlived the connections"
+        );
+        Ok(())
+    }
+
     /// A late dial stays open if we want the peer again within the grace.
     ///
     /// The peer may take the dial as its active connection. Closing it would
@@ -2603,6 +2677,7 @@ pub(crate) mod tests {
             TEST_FRAME_LIMIT,
             vec![],
             watch::channel(true).1,
+            watch::channel(false).0,
         )));
 
         let (read_topic, read_message, peer_conn) = timeout(Duration::from_secs(5), peer)
@@ -2655,6 +2730,7 @@ pub(crate) mod tests {
                 1024,
                 vec![],
                 watch::channel(true).1,
+                watch::channel(false).0,
             ),
         )
         .await
