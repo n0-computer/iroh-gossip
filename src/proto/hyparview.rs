@@ -30,11 +30,29 @@ const INITIAL_SHUFFLE_INTERVAL: Duration = Duration::from_secs(1);
 /// "random promotion", every 5s.
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Maximum number of maintenance passes between two rejoins.
+/// Maximum number of maintenance passes between two rejoins or two refills.
 ///
 /// An isolated node rejoins in its 1st, 2nd, 4th, and 8th maintenance pass
 /// alone, and then in every 12th: at first after 5s, and later once a minute.
-const MAX_REJOIN_INTERVALS: u32 = 12;
+/// A short node refills from its passive view on the same schedule.
+const MAX_BACKOFF_PASSES: u32 = 12;
+
+/// Maximum number of neighbor requests a short node sends in a row in a maintenance refill.
+///
+/// A peer with a full active view refuses a request, and the node then asks
+/// the next passive peer. If all of them are full, each request costs a dial
+/// for nothing. A refill after a neighbor left has no limit, as in the paper:
+/// the failure may have made room in the views of other peers.
+const MAX_REQUESTS_PER_REFILL: usize = 3;
+
+/// Returns whether the `n`th maintenance pass in a row acts, see [`MAX_BACKOFF_PASSES`].
+fn backoff_due(n: u32) -> bool {
+    if n < MAX_BACKOFF_PASSES {
+        n.is_power_of_two()
+    } else {
+        n.is_multiple_of(MAX_BACKOFF_PASSES)
+    }
+}
 
 /// Maximum number of contacts a topic remembers for a rejoin.
 ///
@@ -316,8 +334,10 @@ pub struct State<PI, RG = ThreadRng> {
     /// A node with empty views has nobody else left to dial. See
     /// [`MAX_BOOTSTRAP_PEERS`].
     bootstrap_peers: VecDeque<PI>,
-    /// Maintenance passes in a row with both views empty, see [`MAX_REJOIN_INTERVALS`].
+    /// Maintenance passes in a row with both views empty, see [`MAX_BACKOFF_PASSES`].
     passes_alone: u32,
+    /// Maintenance passes in a row with a short active view, see [`MAX_BACKOFF_PASSES`].
+    passes_short: u32,
     /// Random number generator
     rng: RG,
     /// Statistics
@@ -330,11 +350,13 @@ pub struct State<PI, RG = ThreadRng> {
     peer_data: HashMap<PI, PeerData>,
     /// List of peers that are disconnecting, but which we want to keep in the passive set once the connection closes
     alive_disconnect_peers: HashSet<PI>,
-    /// Passive peers that refused our neighbor request since the last maintenance pass.
+    /// Passive peers that refused our neighbor request since the last refill pass or neighbor loss.
     ///
     /// A refill skips them. Else a node short of neighbors, whose passive peers
     /// are all full, asks them in turn without end.
     refused: HashSet<PI>,
+    /// Whether the refill in progress started from a maintenance pass, see [`MAX_REQUESTS_PER_REFILL`].
+    refill_limited: bool,
 }
 
 impl<PI, RG> State<PI, RG>
@@ -353,6 +375,7 @@ where
             timers_scheduled: false,
             bootstrap_peers: VecDeque::new(),
             passes_alone: 0,
+            passes_short: 0,
             rng,
             stats: Stats::default(),
             pending_neighbor_requests: Default::default(),
@@ -360,6 +383,7 @@ where
             peer_data: Default::default(),
             alive_disconnect_peers: Default::default(),
             refused: Default::default(),
+            refill_limited: false,
         }
     }
 
@@ -713,9 +737,11 @@ where
         }
         // A peer that refuses our request sends this reply first. Only a short
         // node goes on to the next passive peer at once, and skips the peers in
-        // `refused`.
+        // `refused`. The refusing peer joins `refused` with its `Disconnect`,
+        // after this reply.
         let refusal = self.pending_neighbor_requests.contains_key(&from);
-        if !refusal || self.is_short() {
+        let may_ask_next = !self.refill_limited || self.refused.len() + 1 < MAX_REQUESTS_PER_REFILL;
+        if !refusal || (self.is_short() && may_ask_next) {
             self.refill_active_from_passive(&[], io);
         }
     }
@@ -757,17 +783,16 @@ where
     /// the passive view has no peer left to try. A node with no neighbors cannot
     /// shuffle either, so its passive view stays empty. Only the bootstrap
     /// peers can get it back into the swarm.
+    ///
+    /// Both back off while the node stays alone or short, see [`MAX_BACKOFF_PASSES`].
+    /// A node with no neighbors but passive peers does not back off: it asks
+    /// with high priority, which no peer refuses.
     fn handle_maintenance_timer(&mut self, io: &mut impl IO<PI>) {
-        self.refused.clear();
         if self.active_view.is_empty() && self.passive_view.is_empty() {
+            self.passes_short = 0;
+            self.refused.clear();
             self.passes_alone += 1;
-            let n = self.passes_alone;
-            let rejoin = if n < MAX_REJOIN_INTERVALS {
-                n.is_power_of_two()
-            } else {
-                n.is_multiple_of(MAX_REJOIN_INTERVALS)
-            };
-            if rejoin {
+            if backoff_due(self.passes_alone) {
                 debug!("no neighbors and no passive peers, rejoin");
                 for peer in self.bootstrap_peers.iter() {
                     self.join(*peer, io);
@@ -776,7 +801,15 @@ where
         } else {
             self.passes_alone = 0;
             if self.is_short() {
-                self.refill_active_from_passive(&[], io);
+                self.passes_short += 1;
+                if self.active_view.is_empty() || backoff_due(self.passes_short) {
+                    self.refused.clear();
+                    self.refill_limited = true;
+                    self.refill_active_from_passive(&[], io);
+                }
+            } else {
+                self.passes_short = 0;
+                self.refused.clear();
             }
         }
         io.push(OutEvent::ScheduleTimer(
@@ -853,6 +886,9 @@ where
     fn remove_active(&mut self, peer: &PI, reason: RemovalReason, io: &mut impl IO<PI>) {
         if let Some(idx) = self.active_view.get_index_of(peer) {
             let removed_peer = self.remove_active_by_index(idx, reason, io).unwrap();
+            // Peers that refused may have room now.
+            self.refused.clear();
+            self.refill_limited = false;
             self.refill_active_from_passive(&[&removed_peer], io);
         }
     }
@@ -1727,28 +1763,19 @@ mod tests {
         assert_eq!(rejoined, expected);
     }
 
-    /// A node asks each passive peer once between two maintenance passes.
+    /// Refuses each neighbor request as a full peer does, also those the refusals start.
     ///
-    /// A peer with a full active view refuses with a `ShuffleReply` and a
-    /// `Disconnect`. The `ShuffleReply` starts a refill. If the refill could
-    /// pick peers that refused, a node short of neighbors whose passive peers
-    /// are all full would ask them in turn without end.
-    #[test]
-    fn refused_peers_are_asked_again_only_after_maintenance() {
-        let mut state = new_state();
-        state.active_view.insert(1);
-        for peer in 10..13 {
-            state.passive_view.insert(peer);
-        }
+    /// Returns the peers that were asked, in order.
+    fn refuse_pending(state: &mut State<u32, StdRng>) -> Vec<u32> {
         let mut asked = Vec::new();
-        state.handle(InEvent::TimerExpired(Timer::DoMaintenance), &mut Io::new());
-        for _ in 0..10 {
-            let Some(peer) = state.pending_neighbor_requests.keys().next().copied() else {
-                break;
-            };
+        while let Some(peer) = state.pending_neighbor_requests.keys().next().copied() {
             asked.push(peer);
             let reply = Message::ShuffleReply(ShuffleReply {
-                nodes: (10..13).map(|id| (id, None).into()).collect(),
+                nodes: state
+                    .passive_view
+                    .iter()
+                    .map(|id| (*id, None).into())
+                    .collect(),
             });
             let refusal = Message::Disconnect(Disconnect {
                 alive: true,
@@ -1758,15 +1785,133 @@ mod tests {
             state.handle(InEvent::RecvMessage(peer, refusal), &mut Io::new());
             state.handle(InEvent::PeerDisconnected(peer), &mut Io::new());
         }
+        asked
+    }
+
+    /// A node asks each passive peer at most once between two refill passes.
+    ///
+    /// A peer with a full active view refuses with a `ShuffleReply` and a
+    /// `Disconnect`. The `ShuffleReply` starts a refill. If the refill could
+    /// pick peers that refused, a node short of neighbors whose passive peers
+    /// are all full would ask them in turn without end.
+    #[test]
+    fn refused_peers_are_asked_again_only_after_maintenance() {
+        let mut state = new_state();
+        state.active_view.insert(1);
+        for peer in 10..12 {
+            state.passive_view.insert(peer);
+        }
+        state.handle(InEvent::TimerExpired(Timer::DoMaintenance), &mut Io::new());
+        let mut asked = refuse_pending(&mut state);
         asked.sort();
-        assert_eq!(asked, vec![10, 11, 12], "each passive peer once");
-        assert!(state.pending_neighbor_requests.is_empty());
-        assert!((10..13).all(|peer| state.passive_view.contains(&peer)));
+        assert_eq!(asked, vec![10, 11], "each passive peer once");
+        assert!((10..12).all(|peer| state.passive_view.contains(&peer)));
 
         let io = &mut Io::new();
         state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
-        let requested: Vec<u32> = (10..13).filter(|peer| sent_neighbor(io, *peer)).collect();
+        let requested: Vec<u32> = (10..12).filter(|peer| sent_neighbor(io, *peer)).collect();
         assert_eq!(requested.len(), 1, "the next pass asks again");
+    }
+
+    /// A short node sends only a few requests in a row when its passive peers refuse.
+    ///
+    /// Each request costs a dial. A node whose passive peers are all full would
+    /// else dial each of them.
+    #[test]
+    fn refill_stops_after_a_few_refusals() {
+        let mut state = new_state();
+        state.active_view.insert(1);
+        for peer in 10..20 {
+            state.passive_view.insert(peer);
+        }
+        state.handle(InEvent::TimerExpired(Timer::DoMaintenance), &mut Io::new());
+        let asked = refuse_pending(&mut state);
+        assert_eq!(asked.len(), MAX_REQUESTS_PER_REFILL, "asked {asked:?}");
+    }
+
+    /// A node that loses a neighbor asks passive peers until one accepts, as in the paper.
+    ///
+    /// The failure may have made room in their views, also in those of peers
+    /// that refused before.
+    #[test]
+    fn refill_after_a_neighbor_left_has_no_limit() {
+        let mut state = new_state();
+        state.active_view.insert(1);
+        state.active_view.insert(2);
+        for peer in 10..20 {
+            state.passive_view.insert(peer);
+        }
+        state.handle(InEvent::TimerExpired(Timer::DoMaintenance), &mut Io::new());
+        refuse_pending(&mut state);
+
+        state.handle(InEvent::PeerDisconnected(2), &mut Io::new());
+        let asked = refuse_pending(&mut state);
+        assert_eq!(asked.len(), 10, "asked {asked:?}");
+    }
+
+    /// A node that stays short refills less often, on the schedule of the rejoins.
+    #[test]
+    fn refills_back_off() {
+        let mut state = new_state();
+        state.active_view.insert(1);
+        for peer in 10..40 {
+            state.passive_view.insert(peer);
+        }
+        let mut refills = Vec::new();
+        for tick in 0..60 {
+            state.handle(InEvent::TimerExpired(Timer::DoMaintenance), &mut Io::new());
+            if !refuse_pending(&mut state).is_empty() {
+                refills.push(tick);
+            }
+        }
+        assert_eq!(refills, vec![0, 1, 3, 7, 11, 23, 35, 47, 59]);
+    }
+
+    /// A node that is no longer short starts over with the backoff.
+    #[test]
+    fn refill_backoff_resets_once_not_short() {
+        let mut state = new_state();
+        state.active_view.insert(1);
+        for peer in 10..40 {
+            state.passive_view.insert(peer);
+        }
+        for _ in 0..60 {
+            state.handle(InEvent::TimerExpired(Timer::DoMaintenance), &mut Io::new());
+            refuse_pending(&mut state);
+        }
+        state.active_view.insert(2);
+        state.active_view.insert(3);
+        state.handle(InEvent::TimerExpired(Timer::DoMaintenance), &mut Io::new());
+        assert_eq!(state.passes_short, 0);
+
+        state.active_view.remove(&3);
+        let io = &mut Io::new();
+        state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
+        assert!(
+            (10..40).any(|peer| sent_neighbor(io, peer)),
+            "the first short pass did not refill"
+        );
+    }
+
+    /// A node with no neighbors asks a passive peer in each pass.
+    ///
+    /// It asks with high priority, which no peer refuses, so there is nothing to back off from.
+    #[test]
+    fn node_without_neighbors_refills_in_each_pass() {
+        let mut state = new_state();
+        for peer in 10..40 {
+            state.passive_view.insert(peer);
+        }
+        for tick in 0..20 {
+            let io = &mut Io::new();
+            state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
+            assert!(
+                (10..40).any(|peer| sent_neighbor(io, peer)),
+                "pass {tick} did not refill"
+            );
+            // The requests got lost. Pending ones would hold the slots.
+            state.pending_neighbor_requests.clear();
+        }
     }
 
     /// A node with half its active view or more stops at a refusal.
