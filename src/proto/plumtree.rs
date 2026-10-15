@@ -13,6 +13,7 @@ use std::{
 
 use bytes::Bytes;
 use derive_more::{Add, From, Sub};
+use indexmap::IndexMap;
 use n0_future::time::{Duration, Instant};
 use postcard::experimental::max_size::MaxSize;
 use serde::{Deserialize, Serialize};
@@ -50,6 +51,8 @@ pub enum InEvent<PI> {
     NeighborUp(PI),
     /// Peer `PI` has disconnected from the topic.
     NeighborDown(PI),
+    /// The network dropped a [`Message`] to peer `PI`, as the queue to it was full.
+    SendDropped(PI, Message),
 }
 
 /// Events Plumtree emits.
@@ -76,6 +79,8 @@ pub enum Timer {
     DispatchLazyPush,
     /// Evict the message cache
     EvictCache,
+    /// Announce again the messages that a full send queue dropped.
+    AnnounceDropped,
 }
 
 /// Event emitted by the [`State`] to the application.
@@ -348,6 +353,15 @@ pub struct Stats {
     pub max_last_delivery_hop: u16,
 }
 
+/// The most dropped messages per peer that we keep to announce again.
+const MAX_DROPPED_PER_PEER: usize = 256;
+/// The most dropped messages per topic that we keep to announce again.
+const MAX_DROPPED: usize = 4096;
+/// The most dropped messages that we announce to a peer again per [`Timer::AnnounceDropped`].
+const DROPPED_PER_TICK: usize = 64;
+/// The time between two [`Timer::AnnounceDropped`].
+const ANNOUNCE_DROPPED_INTERVAL: Duration = Duration::from_secs(1);
+
 /// State of the plumtree.
 #[derive(Debug)]
 pub struct State<PI> {
@@ -362,6 +376,11 @@ pub struct State<PI> {
     pub(crate) lazy_push_peers: BTreeSet<PI>,
 
     lazy_push_queue: BTreeMap<PI, Vec<IHave>>,
+    /// Messages that a full queue to the peer dropped, to announce to the peer again.
+    ///
+    /// They go out with [`Timer::AnnounceDropped`], not at once. A graft reply that
+    /// the full queue drops again would otherwise loop at the speed of a round trip.
+    dropped: BTreeMap<PI, IndexMap<MessageId, Round>>,
 
     /// Messages for which a [`MessageId`] has been seen via a [`Message::IHave`] but we have not
     /// yet received the full payload. For each, we store the peers that have claimed to have this
@@ -376,6 +395,8 @@ pub struct State<PI> {
     graft_timer_scheduled: HashSet<MessageId>,
     /// Whether a [`Timer::DispatchLazyPush`] has been scheduled.
     dispatch_timer_scheduled: bool,
+    /// Whether a [`Timer::AnnounceDropped`] has been scheduled.
+    announce_dropped_scheduled: bool,
 
     /// Set to false after the first message is received. Used for initial timer scheduling.
     init: bool,
@@ -394,11 +415,13 @@ impl<PI: PeerIdentity> State<PI> {
             eager_push_peers: Default::default(),
             lazy_push_peers: Default::default(),
             lazy_push_queue: Default::default(),
+            dropped: Default::default(),
             config,
             missing_messages: Default::default(),
             received_messages: Default::default(),
             graft_timer_scheduled: Default::default(),
             dispatch_timer_scheduled: false,
+            announce_dropped_scheduled: false,
             cache: Default::default(),
             init: false,
             stats: Default::default(),
@@ -417,12 +440,14 @@ impl<PI: PeerIdentity> State<PI> {
             InEvent::Broadcast(data, scope) => self.broadcast(data, scope, now, io),
             InEvent::NeighborUp(peer) => self.on_neighbor_up(peer),
             InEvent::NeighborDown(peer) => self.on_neighbor_down(peer),
+            InEvent::SendDropped(peer, message) => self.on_send_dropped(peer, message, io),
             InEvent::TimerExpired(timer) => match timer {
                 Timer::DispatchLazyPush => self.on_dispatch_timer(io),
                 Timer::SendGraft(id) => {
                     self.on_send_graft_timer(id, io);
                 }
                 Timer::EvictCache => self.on_evict_cache_timer(now, io),
+                Timer::AnnounceDropped => self.on_announce_dropped_timer(io),
             },
         }
 
@@ -443,7 +468,7 @@ impl<PI: PeerIdentity> State<PI> {
                 "{peer:?} is both eager and lazy"
             );
         }
-        for peer in self.lazy_push_queue.keys() {
+        for peer in self.lazy_push_queue.keys().chain(self.dropped.keys()) {
             assert!(
                 self.lazy_push_peers.contains(peer) || self.eager_push_peers.contains(peer),
                 "announcements queued for {peer:?}, which is no peer"
@@ -735,6 +760,79 @@ impl<PI: PeerIdentity> State<PI> {
         // The dispatch timer would otherwise send these, and the network layer
         // would dial the peer to deliver them.
         self.lazy_push_queue.remove(&peer);
+        self.dropped.remove(&peer);
+    }
+
+    /// Notes a dropped push or announcement, to announce it to the peer later.
+    ///
+    /// A dropped neighbor message is lost, as we do not cache it.
+    fn on_send_dropped(&mut self, peer: PI, message: Message, io: &mut impl IO<PI>) {
+        if !self.eager_push_peers.contains(&peer) && !self.lazy_push_peers.contains(&peer) {
+            return;
+        }
+        let ihaves = match message {
+            Message::Gossip(gossip) => match gossip.round() {
+                Some(round) => vec![IHave {
+                    id: gossip.id,
+                    round,
+                }],
+                None => return,
+            },
+            Message::IHave(ihaves) => ihaves,
+            Message::Prune | Message::Graft(_) => return,
+        };
+        let mut total: usize = self.dropped.values().map(IndexMap::len).sum();
+        let ids = self.dropped.entry(peer).or_default();
+        for IHave { id, round } in ihaves {
+            if !self.cache.contains_key(&id) || ids.contains_key(&id) {
+                continue;
+            }
+            // Past the caps, the peer misses the message unless another peer has it.
+            if ids.len() >= MAX_DROPPED_PER_PEER || total >= MAX_DROPPED {
+                debug!("too many dropped messages to announce again, drop {id}");
+                continue;
+            }
+            ids.insert(id, round);
+            total += 1;
+        }
+        self.dropped.retain(|_, ids| !ids.is_empty());
+        self.schedule_announce_dropped(io);
+    }
+
+    fn schedule_announce_dropped(&mut self, io: &mut impl IO<PI>) {
+        if !self.dropped.is_empty() && !self.announce_dropped_scheduled {
+            io.push(OutEvent::ScheduleTimer(
+                ANNOUNCE_DROPPED_INTERVAL,
+                Timer::AnnounceDropped,
+            ));
+            self.announce_dropped_scheduled = true;
+        }
+    }
+
+    /// Announces the oldest dropped messages per peer, so that one tick sends a bounded amount.
+    fn on_announce_dropped_timer(&mut self, io: &mut impl IO<PI>) {
+        self.announce_dropped_scheduled = false;
+        for (peer, ids) in self.dropped.iter_mut() {
+            // A peer cannot graft what we no longer cache.
+            ids.retain(|id, _round| self.cache.contains_key(id));
+            let ihaves = ids
+                .drain(..ids.len().min(DROPPED_PER_TICK))
+                .map(|(id, round)| IHave { id, round });
+            self.lazy_push_queue
+                .entry(*peer)
+                .or_default()
+                .extend(ihaves);
+        }
+        self.dropped.retain(|_, ids| !ids.is_empty());
+        self.lazy_push_queue.retain(|_, ihaves| !ihaves.is_empty());
+        if !self.lazy_push_queue.is_empty() && !self.dispatch_timer_scheduled {
+            io.push(OutEvent::ScheduleTimer(
+                self.config.dispatch_timeout,
+                Timer::DispatchLazyPush,
+            ));
+            self.dispatch_timer_scheduled = true;
+        }
+        self.schedule_announce_dropped(io);
     }
 
     fn on_evict_cache_timer(&mut self, now: Instant, io: &mut impl IO<PI>) {

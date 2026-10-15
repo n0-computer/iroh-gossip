@@ -7,13 +7,21 @@ use iroh_metrics::{Counter, MetricsGroup};
 #[metrics(name = "gossip")]
 pub struct Metrics {
     /// Number of control messages sent
+    ///
+    /// It counts a message to each peer, also one that a full send queue then dropped.
     pub msgs_ctrl_sent: Counter,
     /// Number of control messages received
     pub msgs_ctrl_recv: Counter,
     /// Number of data messages sent
+    ///
+    /// It counts a message to each peer, also one that a full send queue then dropped.
     pub msgs_data_sent: Counter,
     /// Number of data messages received
     pub msgs_data_recv: Counter,
+    /// Number of data messages and announcements dropped because the send queue to their peer was full
+    pub msgs_dropped: Counter,
+    /// Number of times a peer failed because its send queue had no room for a control message
+    pub peers_send_queue_full: Counter,
     /// Total size of all data messages sent
     pub msgs_data_sent_size: Counter,
     /// Total size of all data messages received
