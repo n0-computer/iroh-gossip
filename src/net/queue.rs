@@ -164,11 +164,52 @@ pub(super) type QueueReceiver = mpsc::UnboundedReceiver<QueuedMessage>;
 /// current message, so we write the messages in the order of the queue. The
 /// peer may still read the last messages on the old connection after the
 /// first ones on the new connection.
-pub(super) type SharedReceiver = Arc<tokio::sync::Mutex<QueueReceiver>>;
+pub(super) type SharedReceiver = Arc<tokio::sync::Mutex<QueueReader>>;
 
 /// Returns `rx` as a receiver that connections take in turn.
 pub(super) fn share(rx: QueueReceiver) -> SharedReceiver {
-    Arc::new(tokio::sync::Mutex::new(rx))
+    Arc::new(tokio::sync::Mutex::new(QueueReader {
+        rx,
+        unfinished: None,
+    }))
+}
+
+/// Reads a queue, and keeps the message that a writer has not finished.
+///
+/// A writer that stops in the middle of a message leaves it here, so the next
+/// connection writes it first.
+#[derive(Debug)]
+pub(super) struct QueueReader {
+    rx: QueueReceiver,
+    unfinished: Option<QueuedMessage>,
+}
+
+impl QueueReader {
+    /// Waits for the next message to write, and returns `false` once the sender is gone.
+    ///
+    /// The message stays the current one until [`Self::written`]. This is
+    /// cancellation-safe.
+    pub(super) async fn next(&mut self) -> bool {
+        if self.unfinished.is_none() {
+            self.unfinished = self.rx.recv().await;
+        }
+        self.unfinished.is_some()
+    }
+
+    /// Returns the message that [`Self::next`] waited for.
+    pub(super) fn current(&self) -> Option<&QueuedMessage> {
+        self.unfinished.as_ref()
+    }
+
+    /// Ends the current message, which releases its reservation.
+    pub(super) fn written(&mut self) {
+        self.unfinished = None;
+    }
+
+    /// Returns whether no message waits to be written.
+    pub(super) fn is_empty(&self) -> bool {
+        self.unfinished.is_none() && self.rx.is_empty()
+    }
 }
 
 /// The sending half of a queue.
@@ -352,6 +393,32 @@ mod tests {
         let in_writing = rx.try_recv().unwrap();
         assert_eq!(used(&queue), (one, one));
         drop(in_writing);
+        assert_eq!(used(&queue), (0, 0));
+    }
+
+    /// A message that a writer did not finish stays first, for the next writer.
+    #[tokio::test]
+    async fn unfinished_message_stays_first() {
+        let (queue, rx) = QueueSender::new(MIN_QUEUE_SIZE);
+        let reader = share(rx);
+        assert!(matches!(queue.push(data(10)), Pushed::Queued));
+        assert!(matches!(queue.push(data(20)), Pushed::Queued));
+        let first = |len| {
+            let reader = reader.clone();
+            async move {
+                let mut reader = reader.lock_owned().await;
+                assert!(reader.next().await);
+                let current = &reader.current().unwrap().message.message;
+                assert_eq!(current, &data(len).message);
+                reader
+            }
+        };
+        // The first writer stops without `written`.
+        drop(first(10).await);
+        let mut reader = first(10).await;
+        reader.written();
+        drop(reader);
+        first(20).await.written();
         assert_eq!(used(&queue), (0, 0));
     }
 

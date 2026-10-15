@@ -84,6 +84,14 @@ pub(crate) const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(test)]
 pub(crate) const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long a replaced connection may write its current message before it closes.
+///
+/// The new connection of the peer waits for it, as the messages keep their order.
+#[cfg(not(test))]
+pub(crate) const HANDOVER_LIMIT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+pub(crate) const HANDOVER_LIMIT: Duration = Duration::from_secs(1);
+
 /// The code of a close for a write or a stream open that made no progress in time.
 const CLOSE_STALLED: u32 = 3;
 
@@ -346,22 +354,36 @@ impl SendLoop {
         if let Some(mut queue) = queue {
             loop {
                 self.set_sending(!queue.is_empty() || !self.finishing.is_empty());
-                tokio::select! {
+                let more = tokio::select! {
                     biased;
                     _ = &mut closed => break,
                     // The next connection takes the rest of the queue.
                     _ = stop.cancelled() => break,
-                    item = queue.recv() => match item {
-                        // The item keeps its reservation in the queue until the write ends.
-                        Some(item) => {
-                            self.set_sending(true);
-                            self.send(&item).await?
-                        }
-                        // The actor dropped the sender.
-                        None => break,
-                    },
-                    _ = self.finishing.join_next(), if !self.finishing.is_empty() => {}
+                    more = queue.next() => more,
+                    _ = self.finishing.join_next(), if !self.finishing.is_empty() => continue,
+                };
+                // The actor dropped the sender.
+                if !more {
+                    break;
                 }
+                self.set_sending(true);
+                let item = queue.current().expect("next returned a message");
+                // A stuck write would keep the queue from the connection that replaced
+                // this one. A message that we stop in the middle stays in the queue,
+                // and the next connection writes it first.
+                let handover = async {
+                    stop.cancelled().await;
+                    n0_future::time::sleep(HANDOVER_LIMIT).await;
+                };
+                tokio::select! {
+                    res = self.send(item) => res?,
+                    _ = handover => {
+                        warn!("the replaced connection did not finish its message in time, close it");
+                        self.conn.close(CLOSE_STALLED.into(), b"write stalled");
+                        break;
+                    }
+                }
+                queue.written();
             }
         }
 

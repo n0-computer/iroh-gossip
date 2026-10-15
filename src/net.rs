@@ -852,8 +852,8 @@ impl Actor {
                                 full.push((peer_id, queue));
                             }
                         }
-                        // Removing the peer is handled by the in_event PeerDisconnected sent
-                        // in [`Self::handle_connection_task_finished`].
+                        // The state of the peer holds the queue, so it stays open. Only a
+                        // queue of a removed state closes, which no message reaches.
                         Pushed::Closed => debug!(
                             peer = %peer_id.fmt_short(),
                             "failed to send: connection task send loop terminated",
@@ -2553,8 +2553,8 @@ pub(crate) mod tests {
             .std_context("the send loop did not end")??;
         let message = join_message(TopicId::from_bytes([0; 32]), 0);
         assert!(matches!(tx.push(message), Pushed::Queued));
-        let mut rx = rx.try_lock().std_context("the queue is still locked")?;
-        assert!(rx.try_recv().is_ok(), "the message did not stay queued");
+        let rx = rx.try_lock().std_context("the queue is still locked")?;
+        assert!(!rx.is_empty(), "the message did not stay queued");
         Ok(())
     }
 
@@ -2646,8 +2646,8 @@ pub(crate) mod tests {
 
     /// A replaced connection hands the rest of the queue to the new one, which keeps its order.
     ///
-    /// The old writer never ran, so all messages go out on the new connection,
-    /// in one stream and in the order of the queue.
+    /// The old writer never took the queue, so all messages go out on the new
+    /// connection, in one stream and in the order of the queue.
     #[tokio::test]
     #[traced_test]
     async fn replaced_connection_hands_over_its_queue() -> Result {
@@ -2657,11 +2657,17 @@ pub(crate) mod tests {
         let peer_id = pair.ep2.id();
         let topic: TopicId = blake3::hash(b"handed over").into();
         let mut actor = t_actor().await?;
-        // The test runtime runs the writer of the old connection only at the next await.
         actor.handle_connection(peer_id, ConnOrigin::Accept, old);
+        // The old writer cannot take the queue before the new connection replaces it.
+        let held = match actor.peers.get(&peer_id) {
+            Some(PeerState::Active { queue, .. }) => queue.send_rx.clone().try_lock_owned(),
+            other => panic!("not active: {other:?}"),
+        }
+        .std_context("the queue is locked")?;
         push_active(&actor, peer_id, join_message(topic, 1));
         actor.handle_connection(peer_id, ConnOrigin::Accept, new);
         push_active(&actor, peer_id, join_message(topic, 2));
+        drop(held);
 
         let read = async {
             let mut stream = peer_new.accept_uni().await.std_context("accept")?;
@@ -2687,6 +2693,44 @@ pub(crate) mod tests {
                 .is_err(),
             "the old connection sent a message"
         );
+        Ok(())
+    }
+
+    /// A replaced connection that cannot finish its message closes, and the new one takes the queue.
+    ///
+    /// The old connection does not read, so flow control blocks its writer in
+    /// the middle of a message. The new connection writes that message first.
+    #[tokio::test]
+    #[traced_test]
+    async fn stuck_replaced_connection_hands_over_its_queue() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (old, peer_old) = pair.connect().await?;
+        let (new, peer_new) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
+        let topic: TopicId = blake3::hash(b"stuck").into();
+        let mut actor = t_actor().await?;
+        actor.send_queue_size = 64 << 20;
+        actor.handle_connection(peer_id, ConnOrigin::Accept, old);
+        // More than the windows of the old connection.
+        for _ in 0..3000 {
+            let message = ProtoMessage {
+                topic,
+                message: TopicMessage::test_gossip(3000),
+            };
+            push_active(&actor, peer_id, message);
+        }
+        // Wait until flow control blocks the old writer.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        actor.handle_connection(peer_id, ConnOrigin::Accept, new);
+
+        timeout(util::HANDOVER_LIMIT * 3, peer_old.closed())
+            .await
+            .std_context("the stuck connection stayed open")?;
+        let (read_topic, message) = timeout(util::HANDOVER_LIMIT * 3, read_next_message(&peer_new))
+            .await
+            .std_context("the new connection sent nothing")??;
+        assert_eq!(read_topic, topic);
+        assert_eq!(message, TopicMessage::test_gossip(3000));
         Ok(())
     }
 
