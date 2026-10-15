@@ -793,8 +793,8 @@ impl Actor {
         } else {
             debug!(?event, "handle in_event");
         };
-        // The peers whose queue had no room for a control message.
-        let mut full = Vec::new();
+        // The queues that had no room for a control message.
+        let mut full: Vec<(EndpointId, FullQueue)> = Vec::new();
         let out = self.state.handle(event, now, Some(&self.metrics));
         for event in out {
             if matches!(event, OutEvent::ScheduleTimer(_, _)) {
@@ -837,8 +837,17 @@ impl Actor {
                                 .push_back(InEvent::SendDropped(peer_id, message));
                         }
                         Pushed::Overflow => {
-                            if !full.contains(&peer_id) {
-                                full.push(peer_id);
+                            let queue = match self.peers.get(&peer_id) {
+                                Some(PeerState::Active { active_conn, .. }) => {
+                                    FullQueue::Conn(active_conn.clone())
+                                }
+                                _ => FullQueue::Dial,
+                            };
+                            if !full
+                                .iter()
+                                .any(|(peer, known)| *peer == peer_id && *known == queue)
+                            {
+                                full.push((peer_id, queue));
                             }
                         }
                         // Removing the peer is handled by the in_event PeerDisconnected sent
@@ -906,36 +915,62 @@ impl Actor {
                 tx.send_if_modified(|current| std::mem::replace(current, wanted) != wanted);
             }
         }
-        for peer_id in full {
-            self.fail_full_peer(peer_id);
+        for (peer_id, queue) in full {
+            self.fail_full_queue(peer_id, queue);
         }
     }
 
-    /// Fails a peer whose queue had no room for a control message.
+    /// Fails the transport whose queue had no room for a control message.
     ///
-    /// The topics cannot work with a peer that takes no control message. We do
-    /// not tell the protocol at once: the close of the connection does that,
-    /// after the messages that the peer sent before.
-    fn fail_full_peer(&mut self, peer_id: EndpointId) {
-        match self.peers.get(&peer_id) {
-            Some(PeerState::Active { active_conn, .. }) => {
+    /// The topics cannot work with a peer that takes no control message. The
+    /// state of the peer may have changed later in the batch, so this fails the
+    /// queue that overflowed, not the current state of the peer.
+    fn fail_full_queue(&mut self, peer_id: EndpointId, queue: FullQueue) {
+        match queue {
+            FullQueue::Conn(conn) => {
                 // A second overflow before the close completes fails nothing new.
-                if active_conn.close_reason().is_some() {
+                if conn.close_reason().is_some() {
                     return;
                 }
+                // The close tells the protocol, after the messages that the peer sent before.
                 warn!(peer = %peer_id.fmt_short(), "send queue full with a control message, close the connection");
-                active_conn.close(CLOSE_QUEUE_FULL.into(), b"send queue full");
+                conn.close(CLOSE_QUEUE_FULL.into(), b"send queue full");
             }
-            Some(PeerState::Pending { .. } | PeerState::Dropped { .. }) => {
+            FullQueue::Dial => {
+                // Within a batch, a pending queue moves only between `Pending` and `Dropped`.
+                if !matches!(
+                    self.peers.get(&peer_id),
+                    Some(PeerState::Pending { .. } | PeerState::Dropped { .. })
+                ) {
+                    return;
+                }
                 // A dial that completes later finds no state, and closes.
                 warn!(peer = %peer_id.fmt_short(), "send queue full during the dial, drop the peer");
                 self.peers.remove(&peer_id);
                 self.follow_ups
                     .push_back(InEvent::PeerDisconnected(peer_id));
             }
-            None => return,
         }
         self.metrics.peers_send_queue_full.inc();
+    }
+}
+
+/// A queue that had no room for a control message.
+#[derive(Debug)]
+enum FullQueue {
+    /// The queue of this connection.
+    Conn(Connection),
+    /// The queue of a dial in progress.
+    Dial,
+}
+
+impl PartialEq for FullQueue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (FullQueue::Conn(a), FullQueue::Conn(b)) => a.stable_id() == b.stable_id(),
+            (FullQueue::Dial, FullQueue::Dial) => true,
+            _ => false,
+        }
     }
 }
 
@@ -2509,6 +2544,115 @@ pub(crate) mod tests {
             ),
             "the retained receiver accepts unconsumed sends"
         );
+        Ok(())
+    }
+
+    /// An overflow closes the connection whose queue overflowed, whatever the state of the peer is later.
+    ///
+    /// Later in the same batch, the protocol may drop the peer and want it
+    /// again. The new dial of the peer must stay.
+    #[tokio::test]
+    #[traced_test]
+    async fn overflow_fails_the_queue_that_overflowed() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
+        let mut actor = t_actor().await?;
+        actor.handle_connection(peer_id, ConnOrigin::Accept, conn.clone());
+        // The protocol dropped the peer, and then wanted it again.
+        disconnect_peer(&mut actor.peers, peer_id);
+        actor.peers.insert(peer_id, pending_with(vec![]));
+
+        actor.fail_full_queue(peer_id, FullQueue::Conn(conn));
+        assert!(
+            matches!(actor.peers.get(&peer_id), Some(PeerState::Pending { .. })),
+            "the new dial went"
+        );
+        timeout(Duration::from_secs(2), peer_conn.closed())
+            .await
+            .std_context("the connection that overflowed stayed open")?;
+
+        // An overflow of a dial does not fail the connection that replaced it.
+        let (conn, _peer_conn) = pair.connect().await?;
+        actor.handle_connection(peer_id, ConnOrigin::Accept, conn);
+        actor.fail_full_queue(peer_id, FullQueue::Dial);
+        assert!(
+            matches!(actor.peers.get(&peer_id), Some(PeerState::Active { .. })),
+            "the active peer went"
+        );
+        assert_eq!(actor.metrics.peers_send_queue_full.get(), 1);
+        Ok(())
+    }
+
+    /// A dropped peer that the protocol wants again keeps its queue, and the dial delivers all of it.
+    #[tokio::test]
+    #[traced_test]
+    async fn peer_wanted_again_during_the_dial_keeps_its_queue() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
+        let (before, after): (TopicId, TopicId) = (
+            blake3::hash(b"before").into(),
+            blake3::hash(b"after").into(),
+        );
+        let mut actor = t_actor().await?;
+        actor
+            .peers
+            .insert(peer_id, pending_with(vec![join_message(before, 0)]));
+        disconnect_peer(&mut actor.peers, peer_id);
+        let join = InEvent::Command(after, ProtoCommand::Join(vec![peer_id]));
+        actor.handle_in_event(join, Instant::now());
+        assert!(
+            matches!(actor.peers.get(&peer_id), Some(PeerState::Pending { .. })),
+            "the peer is not pending again"
+        );
+
+        actor.handle_connection(peer_id, ConnOrigin::Dial, conn);
+        assert!(
+            matches!(actor.peers.get(&peer_id), Some(PeerState::Active { .. })),
+            "the dial was not kept"
+        );
+        let mut topics = BTreeSet::new();
+        for _ in 0..2 {
+            let (topic, _) = timeout(Duration::from_secs(5), read_next_message(&peer_conn))
+                .await
+                .std_context("a queued message did not go out")??;
+            topics.insert(topic);
+        }
+        assert_eq!(topics, BTreeSet::from([before, after]));
+        Ok(())
+    }
+
+    /// A replaced connection sends the rest of its queue, and new messages go on the new connection.
+    #[tokio::test]
+    #[traced_test]
+    async fn replaced_connection_sends_its_queue() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (old, peer_old) = pair.connect().await?;
+        let (new, peer_new) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
+        let (t_old, t_new): (TopicId, TopicId) =
+            (blake3::hash(b"old").into(), blake3::hash(b"new").into());
+        let mut actor = t_actor().await?;
+        let push = |actor: &Actor, message| match actor.peers.get(&peer_id) {
+            Some(PeerState::Active { active_send_tx, .. }) => {
+                assert!(matches!(active_send_tx.push(message), Pushed::Queued));
+            }
+            other => panic!("not active: {other:?}"),
+        };
+        actor.handle_connection(peer_id, ConnOrigin::Accept, old);
+        push(&actor, join_message(t_old, 0));
+        actor.handle_connection(peer_id, ConnOrigin::Accept, new);
+        push(&actor, join_message(t_new, 0));
+
+        let (topic, _) = timeout(Duration::from_secs(5), read_next_message(&peer_old))
+            .await
+            .std_context("the old queue did not go out")??;
+        assert_eq!(topic, t_old);
+        let (topic, _) = timeout(Duration::from_secs(5), read_next_message(&peer_new))
+            .await
+            .std_context("the new message did not go out")??;
+        assert_eq!(topic, t_new);
         Ok(())
     }
 
