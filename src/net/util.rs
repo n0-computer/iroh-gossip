@@ -22,10 +22,11 @@ use tokio::{
     io::AsyncReadExt,
     sync::{mpsc, watch},
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn, Instrument};
 
 use super::{
-    queue::{QueueReceiver, QueuedMessage},
+    queue::{QueuedMessage, SharedReceiver},
     InEvent, ProtoMessage,
 };
 use crate::proto::{util::TimerMap, TopicId};
@@ -293,21 +294,30 @@ pub(crate) struct SendLoop {
     buffer: Vec<u8>,
     max_message_size: usize,
     finishing: JoinSet<()>,
-    send_rx: QueueReceiver,
+    queue: SharedReceiver,
+    /// Stops the loop after its current message, once another connection takes the queue.
+    stop: CancellationToken,
     /// Whether a message is queued or written, or a stream is not yet finished.
     sending: watch::Sender<bool>,
 }
 
 impl SendLoop {
-    pub(crate) fn new(conn: Connection, send_rx: QueueReceiver, max_message_size: usize) -> Self {
+    pub(crate) fn new(
+        conn: Connection,
+        queue: SharedReceiver,
+        stop: CancellationToken,
+        max_message_size: usize,
+    ) -> Self {
         Self {
             conn,
             max_message_size,
             buffer: Default::default(),
             streams: Default::default(),
             finishing: Default::default(),
-            send_rx,
-            sending: watch::channel(false).0,
+            queue,
+            stop,
+            // The queue may hold messages before the loop takes it.
+            sending: watch::channel(true).0,
         }
     }
 
@@ -325,25 +335,35 @@ impl SendLoop {
         let conn_clone = self.conn.clone();
         let closed = conn_clone.closed();
         tokio::pin!(closed);
-        loop {
-            self.set_sending(!self.send_rx.is_empty() || !self.finishing.is_empty());
-            tokio::select! {
-                biased;
-                _ = &mut closed => break,
-                item = self.send_rx.recv() => match item {
-                    // The item keeps its reservation in the queue until the write ends.
-                    Some(item) => {
-                        self.set_sending(true);
-                        self.send(&item).await?
-                    }
-                    // The actor dropped the sender.
-                    None => break,
-                },
-                _ = self.finishing.join_next(), if !self.finishing.is_empty() => {}
+        let stop = self.stop.clone();
+        // A replaced connection of the peer may still write its current message.
+        let queue = tokio::select! {
+            biased;
+            _ = &mut closed => None,
+            _ = stop.cancelled() => None,
+            queue = self.queue.clone().lock_owned() => Some(queue),
+        };
+        if let Some(mut queue) = queue {
+            loop {
+                self.set_sending(!queue.is_empty() || !self.finishing.is_empty());
+                tokio::select! {
+                    biased;
+                    _ = &mut closed => break,
+                    // The next connection takes the rest of the queue.
+                    _ = stop.cancelled() => break,
+                    item = queue.recv() => match item {
+                        // The item keeps its reservation in the queue until the write ends.
+                        Some(item) => {
+                            self.set_sending(true);
+                            self.send(&item).await?
+                        }
+                        // The actor dropped the sender.
+                        None => break,
+                    },
+                    _ = self.finishing.join_next(), if !self.finishing.is_empty() => {}
+                }
             }
         }
-        // Nothing reads the queue anymore, so the actor must not fill it.
-        self.send_rx.close();
 
         // Close remaining streams.
         self.set_sending(!self.streams.is_empty() || !self.finishing.is_empty());

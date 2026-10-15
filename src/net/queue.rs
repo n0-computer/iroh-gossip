@@ -53,7 +53,7 @@ pub(super) enum Pushed {
     Dropped(ProtoMessage),
     /// The queue had no room for a control message.
     Overflow,
-    /// The writer is gone.
+    /// No connection can take the queue anymore.
     Closed,
 }
 
@@ -157,6 +157,19 @@ impl Drop for Reservation {
 
 /// The receiving half of a queue.
 pub(super) type QueueReceiver = mpsc::UnboundedReceiver<QueuedMessage>;
+
+/// The receiving half of the queue to a peer, which its connections take in turn.
+///
+/// One writer at a time locks it. A replaced connection unlocks it after its
+/// current message, so we write the messages in the order of the queue. The
+/// peer may still read the last messages on the old connection after the
+/// first ones on the new connection.
+pub(super) type SharedReceiver = Arc<tokio::sync::Mutex<QueueReceiver>>;
+
+/// Returns `rx` as a receiver that connections take in turn.
+pub(super) fn share(rx: QueueReceiver) -> SharedReceiver {
+    Arc::new(tokio::sync::Mutex::new(rx))
+}
 
 /// The sending half of a queue.
 ///
