@@ -15,7 +15,10 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use clap::Parser;
 use iroh::{
-    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint,
+    address_lookup::memory::MemoryLookup,
+    endpoint::{presets, QuicTransportConfig, VarInt},
+    protocol::Router,
+    Endpoint,
     EndpointAddr, EndpointId, RelayMode,
 };
 use iroh_gossip::{
@@ -54,6 +57,12 @@ struct Args {
     publish_secs: u64,
     #[arg(long, default_value_t = 30)]
     drain_secs: u64,
+    /// QUIC send window of every node, in bytes. The default of noq is 10 MB.
+    #[arg(long)]
+    send_window: Option<u64>,
+    /// QUIC receive window per stream of every node, in bytes. The default of noq is 1.25 MB.
+    #[arg(long)]
+    stream_window: Option<u32>,
 }
 
 /// Returns the nanoseconds since the process started, on a clock that does not jump.
@@ -140,9 +149,17 @@ async fn run(args: Args) -> Result<()> {
         };
         let (id, node) = dev
             .spawn(async move |_dev| -> Result<(EndpointId, Node)> {
+                let mut transport = QuicTransportConfig::builder();
+                if let Some(window) = args2.send_window {
+                    transport = transport.send_window(window);
+                }
+                if let Some(window) = args2.stream_window {
+                    transport = transport.stream_receive_window(VarInt::from_u32(window));
+                }
                 let endpoint = Endpoint::builder(presets::Minimal)
                     .relay_mode(RelayMode::Disabled)
                     .alpns(vec![GOSSIP_ALPN.to_vec()])
+                    .transport_config(transport.build())
                     .bind()
                     .await?;
                 endpoint.address_lookup()?.add(lookup.clone());
@@ -256,6 +273,8 @@ async fn run(args: Args) -> Result<()> {
         "nodes": args.nodes, "slow": args.slow, "slow_kbit": args.slow_kbit,
         "rate": args.rate, "size": args.size, "publishers": args.publishers,
         "topics": args.topics, "publish_secs": args.publish_secs, "drain_secs": args.drain_secs,
+        "send_window": args.send_window, "stream_window": args.stream_window,
+        "env": std::env::vars().filter(|(k, _)| k.starts_with("GOSSIP_EXP")).collect::<BTreeMap<_, _>>(),
         "sent": total_sent,
         "achieved_rate": total_sent as f64 / published.as_secs_f64(),
         "max_publish_lateness_ms": max_lateness.as_secs_f64() * 1000.0,
