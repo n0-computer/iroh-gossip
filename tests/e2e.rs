@@ -141,16 +141,25 @@ impl Node {
 
     /// Counts the connections from `peer` this node accepted that are still open.
     fn open_from(&self, peer: EndpointId) -> usize {
+        self.open_ids_from(peer).len()
+    }
+
+    /// Returns the positions in `accepted` of the open connections from `peer`.
+    ///
+    /// A position names one connection for the life of the node.
+    fn open_ids_from(&self, peer: EndpointId) -> Vec<usize> {
         let accepted = self.accepted.lock().expect("poisoned");
         accepted
             .iter()
-            .filter(|(id, handle)| {
+            .enumerate()
+            .filter(|(_, (id, handle))| {
                 *id == peer
                     && handle
                         .upgrade()
                         .is_some_and(|conn| conn.close_reason().is_none())
             })
-            .count()
+            .map(|(pos, _)| pos)
+            .collect()
     }
 
     /// Leaves all topics, telling the neighbors, then closes the endpoint.
@@ -751,42 +760,56 @@ async fn open_connections_link_neighbors() -> Result {
 
     // A connection we are done with stays open for a grace of a few seconds,
     // and the overlay keeps opening short-lived ones, for example for a
-    // refused neighbor request. A leaked connection stays unlinked, so each
-    // pair unlinked now must be linked or closed at some point within `SETTLE`.
+    // refused neighbor request. A node short of neighbors asks its full
+    // passive peers again every few seconds, so such a pair may always have
+    // one. A leaked connection stays unlinked, so each connection unlinked now
+    // must be linked or closed at some point within `SETTLE`.
     for sub in subs.iter_mut() {
         sub.drain().await?;
     }
-    let mut unlinked = unlinked_pairs(&nodes, &subs);
+    let mut unlinked = unlinked_connections(&nodes, &subs);
     let wait = async {
         while !unlinked.is_empty() {
             sleep(Duration::from_millis(200)).await;
             for sub in subs.iter_mut() {
                 sub.drain().await?;
             }
-            let now = unlinked_pairs(&nodes, &subs);
-            unlinked.retain(|pair| now.contains(pair));
+            let now = unlinked_connections(&nodes, &subs);
+            unlinked.retain(|conn| now.contains(conn));
         }
         n0_error::Ok(())
     };
     match timeout(SETTLE, wait).await {
         Ok(drained) => drained,
-        Err(_) => bail_any!("these nodes keep a connection without a neighbor: {unlinked:?}"),
+        Err(_) => {
+            let pairs: BTreeSet<_> = unlinked.iter().map(|c| (c.0, c.1)).collect();
+            bail_any!("these nodes keep a connection without a neighbor: {pairs:?}")
+        }
     }
 }
 
-/// Returns the pairs of nodes that keep a connection, where neither holds the other as a neighbor.
-fn unlinked_pairs(nodes: &[Node], subs: &[Sub]) -> BTreeSet<(usize, usize)> {
-    let mut pairs = BTreeSet::new();
+/// Returns the open connections between nodes where neither holds the other as a neighbor.
+///
+/// An entry holds the indices of the two nodes, the index of the node that
+/// accepted the connection, and its position in `Node::accepted`.
+fn unlinked_connections(nodes: &[Node], subs: &[Sub]) -> BTreeSet<(usize, usize, usize, usize)> {
+    let mut conns = BTreeSet::new();
     for (i, a) in nodes.iter().enumerate() {
         for (j, b) in nodes.iter().enumerate().skip(i + 1) {
             let linked = subs[i].rx.neighbors().any(|p| p == b.id())
                 || subs[j].rx.neighbors().any(|p| p == a.id());
-            if open_between(a, b) > 0 && !linked {
-                pairs.insert((i, j));
+            if linked {
+                continue;
+            }
+            for pos in a.open_ids_from(b.id()) {
+                conns.insert((i, j, i, pos));
+            }
+            for pos in b.open_ids_from(a.id()) {
+                conns.insert((i, j, j, pos));
             }
         }
     }
-    pairs
+    conns
 }
 
 /// Many nodes that all join each other at once form an overlay that reaches all.
