@@ -2678,10 +2678,11 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// A replaced connection that cannot finish its message closes, and the new one takes the queue.
+    /// A replaced connection that cannot finish its message resets its stream, and the new one takes the queue.
     ///
     /// The old connection does not read, so flow control blocks its writer in
     /// the middle of a message. The new connection writes that message first.
+    /// The old connection stays open, as the peer may still send on it.
     #[tokio::test]
     #[traced_test]
     async fn stuck_replaced_connection_hands_over_its_queue() -> Result {
@@ -2705,14 +2706,30 @@ pub(crate) mod tests {
         tokio::time::sleep(Duration::from_secs(1)).await;
         actor.handle_connection(peer_id, ConnOrigin::Accept, new);
 
-        timeout(util::HANDOVER_LIMIT * 3, peer_old.closed())
-            .await
-            .std_context("the stuck connection stayed open")?;
         let (read_topic, message) = timeout(util::HANDOVER_LIMIT * 3, read_next_message(&peer_new))
             .await
             .std_context("the new connection sent nothing")??;
         assert_eq!(read_topic, topic);
         assert_eq!(message, TopicMessage::test_gossip(3000));
+
+        // The stuck stream ends with a reset, and the connection stays.
+        let mut stream = peer_old.accept_uni().await.std_context("accept")?;
+        let read = timeout(Duration::from_secs(5), async {
+            let mut chunk = vec![0u8; 64 * 1024];
+            loop {
+                match stream.read(&mut chunk).await {
+                    Ok(Some(_)) => continue,
+                    other => return other,
+                }
+            }
+        })
+        .await
+        .std_context("the stuck stream did not end")?;
+        assert!(read.is_err(), "the stuck stream was not reset: {read:?}");
+        assert!(
+            peer_old.close_reason().is_none(),
+            "the old connection closed"
+        );
         Ok(())
     }
 

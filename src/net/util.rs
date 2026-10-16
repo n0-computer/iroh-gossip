@@ -361,7 +361,8 @@ impl SendLoop {
                 let item = queue.current().expect("next returned a message");
                 // A stuck write would keep the queue from the connection that replaced
                 // this one. A message that we stop in the middle stays in the queue,
-                // and the next connection writes it first.
+                // and the next connection writes it first. We reset only its stream:
+                // the peer may still send to us on this connection.
                 let handover = async {
                     revoked.cancelled().await;
                     n0_future::time::sleep(HANDOVER_LIMIT).await;
@@ -369,8 +370,10 @@ impl SendLoop {
                 tokio::select! {
                     res = self.send(item) => res?,
                     _ = handover => {
-                        warn!("the replaced connection did not finish its message in time, close it");
-                        self.conn.close(CLOSE_STALLED.into(), b"write stalled");
+                        warn!("the replaced connection did not finish its message in time, reset its stream");
+                        if let Some(mut stream) = self.streams.remove(&item.message.topic) {
+                            stream.reset(0u32.into()).ok();
+                        }
                         break;
                     }
                 }
