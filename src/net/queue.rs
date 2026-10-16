@@ -2,7 +2,7 @@
 //!
 //! All messages to the peer share one FIFO, so the peer gets them in the order
 //! that the protocol sent them. Data and announcements may each fill only a
-//! part of the queue, so other control messages always find some room.
+//! section of the queue, so other control messages always find some room.
 //!
 //! The size bounds the bytes that wait to be sent, and so how long a message
 //! waits behind them. It overstates memory: the queues to all peers and the
@@ -16,7 +16,8 @@ use std::{
     },
 };
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, OwnedMutexGuard};
+use tokio_util::sync::CancellationToken;
 
 use super::ProtoMessage;
 use crate::proto::state::MessageKind;
@@ -49,7 +50,7 @@ pub(super) fn queue_size(size: usize, max_message_size: usize) -> usize {
 pub(super) enum Pushed {
     /// The message was queued.
     Queued,
-    /// The data or announcement part was full, so the peer loses the message.
+    /// The data or announcement section was full, so the peer loses the message.
     Dropped(ProtoMessage),
     /// The queue had no room for a control message.
     Overflow,
@@ -74,15 +75,25 @@ impl QueuedMessage {
     }
 }
 
-/// The part of a queue that a message counts against, besides the whole queue.
+/// The section of a queue that a message counts against, besides the whole queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Part {
+enum Section {
     Control,
     Data,
     Announcements,
 }
 
-/// The bytes in use of a queue and of its parts.
+impl Section {
+    fn of(message: &ProtoMessage) -> Self {
+        match message.kind() {
+            MessageKind::Data => Section::Data,
+            MessageKind::Control if message.message.is_announcement() => Section::Announcements,
+            MessageKind::Control => Section::Control,
+        }
+    }
+}
+
+/// The bytes in use of a queue and of its sections.
 #[derive(Debug)]
 struct Capacity {
     total: Limit,
@@ -91,11 +102,12 @@ struct Capacity {
 }
 
 impl Capacity {
-    fn part(&self, part: Part) -> Option<&Limit> {
-        match part {
-            Part::Control => None,
-            Part::Data => Some(&self.data),
-            Part::Announcements => Some(&self.announcements),
+    /// Returns the limit of `section`; control has none of its own.
+    fn section(&self, section: Section) -> Option<&Limit> {
+        match section {
+            Section::Control => None,
+            Section::Data => Some(&self.data),
+            Section::Announcements => Some(&self.announcements),
         }
     }
 }
@@ -137,26 +149,45 @@ impl Limit {
 struct Reservation {
     capacity: Arc<Capacity>,
     encoded_len: u32,
-    part: Part,
+    section: Section,
 }
 
-/// Returns the room that a message of `encoded_len` bytes takes.
-fn reserved_size(encoded_len: u32) -> usize {
-    encoded_len as usize + MESSAGE_OVERHEAD
+impl Reservation {
+    /// Reserves the room of `message` in the queue and in its section, if both have it.
+    fn new(capacity: &Arc<Capacity>, message: &ProtoMessage, section: Section) -> Option<Self> {
+        let encoded_len = postcard::experimental::serialized_size(&message.message).ok()?;
+        let encoded_len = u32::try_from(encoded_len).ok()?;
+        let size = Self::size_of(encoded_len);
+        let limit = capacity.section(section);
+        if !limit.is_none_or(|limit| limit.reserve(size)) {
+            return None;
+        }
+        if !capacity.total.reserve(size) {
+            limit.inspect(|limit| limit.release(size));
+            return None;
+        }
+        Some(Self {
+            capacity: capacity.clone(),
+            encoded_len,
+            section,
+        })
+    }
+
+    /// Returns the room that a message of `encoded_len` bytes takes.
+    fn size_of(encoded_len: u32) -> usize {
+        encoded_len as usize + MESSAGE_OVERHEAD
+    }
 }
 
 impl Drop for Reservation {
     fn drop(&mut self) {
-        let size = reserved_size(self.encoded_len);
+        let size = Self::size_of(self.encoded_len);
         self.capacity.total.release(size);
-        if let Some(limit) = self.capacity.part(self.part) {
+        if let Some(limit) = self.capacity.section(self.section) {
             limit.release(size);
         }
     }
 }
-
-/// The receiving half of a queue.
-pub(super) type QueueReceiver = mpsc::UnboundedReceiver<QueuedMessage>;
 
 /// The receiving half of the queue to a peer, which its connections take in turn.
 ///
@@ -164,14 +195,28 @@ pub(super) type QueueReceiver = mpsc::UnboundedReceiver<QueuedMessage>;
 /// current message, so we write the messages in the order of the queue. The
 /// peer may still read the last messages on the old connection after the
 /// first ones on the new connection.
-pub(super) type SharedReceiver = Arc<tokio::sync::Mutex<QueueReader>>;
+#[derive(Debug, Clone)]
+pub(super) struct SharedReceiver(Arc<tokio::sync::Mutex<QueueReader>>);
 
-/// Returns `rx` as a receiver that connections take in turn.
-pub(super) fn share(rx: QueueReceiver) -> SharedReceiver {
-    Arc::new(tokio::sync::Mutex::new(QueueReader {
-        rx,
-        unfinished: None,
-    }))
+impl SharedReceiver {
+    /// Waits until no other writer reads the queue, and returns its reader.
+    pub(super) async fn lock(&self) -> OwnedMutexGuard<QueueReader> {
+        self.0.clone().lock_owned().await
+    }
+
+    /// Returns the reader of the queue, if no writer reads it.
+    #[cfg(test)]
+    pub(super) fn try_lock(&self) -> Option<OwnedMutexGuard<QueueReader>> {
+        self.0.clone().try_lock_owned().ok()
+    }
+}
+
+/// The turn of a connection at the queue of its peer.
+#[derive(Debug)]
+pub(super) struct QueueTurn {
+    pub(super) queue: SharedReceiver,
+    /// Ends the turn after the current message, once another connection takes the queue.
+    pub(super) stop: CancellationToken,
 }
 
 /// Reads a queue, and keeps the message that a writer has not finished.
@@ -180,7 +225,7 @@ pub(super) fn share(rx: QueueReceiver) -> SharedReceiver {
 /// connection writes it first.
 #[derive(Debug)]
 pub(super) struct QueueReader {
-    rx: QueueReceiver,
+    rx: mpsc::UnboundedReceiver<QueuedMessage>,
     unfinished: Option<QueuedMessage>,
 }
 
@@ -224,13 +269,18 @@ pub(super) struct QueueSender {
 
 impl QueueSender {
     /// Creates a queue of `size` bytes, of which data may fill 3/4 and announcements 1/8.
-    pub(super) fn new(size: usize) -> (Self, QueueReceiver) {
+    pub(super) fn new(size: usize) -> (Self, SharedReceiver) {
         let (tx, rx) = mpsc::unbounded_channel();
         let capacity = Arc::new(Capacity {
             total: Limit::new(size),
             data: Limit::new(size / 4 * 3),
             announcements: Limit::new(size / 8),
         });
+        let reader = QueueReader {
+            rx,
+            unfinished: None,
+        };
+        let rx = SharedReceiver(Arc::new(tokio::sync::Mutex::new(reader)));
         (Self { tx, capacity }, rx)
     }
 
@@ -239,15 +289,11 @@ impl QueueSender {
         if self.tx.is_closed() {
             return Pushed::Closed;
         }
-        let part = match message.kind() {
-            MessageKind::Data => Part::Data,
-            MessageKind::Control if message.message.is_announcement() => Part::Announcements,
-            MessageKind::Control => Part::Control,
-        };
-        let Some(reservation) = self.reserve(&message, part) else {
-            return match part {
-                Part::Control => Pushed::Overflow,
-                Part::Data | Part::Announcements => Pushed::Dropped(message),
+        let section = Section::of(&message);
+        let Some(reservation) = Reservation::new(&self.capacity, &message, section) else {
+            return match section {
+                Section::Control => Pushed::Overflow,
+                Section::Data | Section::Announcements => Pushed::Dropped(message),
             };
         };
         let item = QueuedMessage {
@@ -258,28 +304,6 @@ impl QueueSender {
             Ok(()) => Pushed::Queued,
             Err(_) => Pushed::Closed,
         }
-    }
-
-    /// Reserves the room of `message` in the queue and in `part`, if both have it.
-    fn reserve(&self, message: &ProtoMessage, part: Part) -> Option<Reservation> {
-        let encoded_len = postcard::experimental::serialized_size(&message.message).ok()?;
-        let encoded_len = u32::try_from(encoded_len).ok()?;
-        let size = reserved_size(encoded_len);
-        let limit = self.capacity.part(part);
-        if !limit.is_none_or(|limit| limit.reserve(size)) {
-            return None;
-        }
-        if !self.capacity.total.reserve(size) {
-            if let Some(limit) = limit {
-                limit.release(size);
-            }
-            return None;
-        }
-        Some(Reservation {
-            capacity: self.capacity.clone(),
-            encoded_len,
-            part,
-        })
     }
 }
 
@@ -315,7 +339,7 @@ mod tests {
         postcard::experimental::serialized_size(&message.message).unwrap() + MESSAGE_OVERHEAD
     }
 
-    /// Returns the bytes in use of the whole queue and of its data part.
+    /// Returns the bytes in use of the whole queue and of its data section.
     fn used(queue: &QueueSender) -> (usize, usize) {
         let capacity = &queue.capacity;
         let used = |limit: &Limit| limit.used.load(Ordering::Relaxed);
@@ -336,19 +360,21 @@ mod tests {
     /// The peer gets data, control and a `Disconnect` in the order of the pushes.
     #[test]
     fn messages_keep_their_order() {
-        let (queue, mut rx) = QueueSender::new(MIN_QUEUE_SIZE);
+        let (queue, rx) = QueueSender::new(MIN_QUEUE_SIZE);
         let pushed = [data(10), shuffle(), ihave(), disconnect(), data(20)];
         for message in pushed.clone() {
             assert!(matches!(queue.push(message), Pushed::Queued));
         }
+        let mut reader = rx.try_lock().unwrap();
         for message in pushed {
-            assert_eq!(rx.try_recv().unwrap().message.message, message.message);
+            let item = reader.rx.try_recv().unwrap();
+            assert_eq!(item.message.message, message.message);
         }
     }
 
-    /// Data and announcements fill only their part, and leave room for control.
+    /// Data and announcements fill only their section, and leave room for control.
     #[test]
-    fn parts_leave_room_for_control() {
+    fn sections_leave_room_for_control() {
         let queue_bytes = MIN_QUEUE_SIZE;
         let (queue, _rx) = QueueSender::new(queue_bytes);
         let (queued, last) = fill(&queue, || data(1000));
@@ -374,9 +400,9 @@ mod tests {
         assert!(matches!(last, Pushed::Overflow));
     }
 
-    /// A message that fits its part but not the whole queue leaves its part as it was.
+    /// A message that fits its section but not the whole queue leaves its section as it was.
     #[test]
-    fn failed_reservation_releases_its_part() {
+    fn failed_reservation_releases_its_section() {
         let (queue, _rx) = QueueSender::new(MIN_QUEUE_SIZE);
         let (_, last) = fill(&queue, shuffle);
         assert!(matches!(last, Pushed::Overflow));
@@ -387,10 +413,10 @@ mod tests {
     /// A message keeps its reservation until the writer drops it, also once it left the channel.
     #[test]
     fn message_keeps_its_reservation_until_dropped() {
-        let (queue, mut rx) = QueueSender::new(MIN_QUEUE_SIZE);
+        let (queue, rx) = QueueSender::new(MIN_QUEUE_SIZE);
         let one = size(&data(1000));
         assert!(matches!(queue.push(data(1000)), Pushed::Queued));
-        let in_writing = rx.try_recv().unwrap();
+        let in_writing = rx.try_lock().unwrap().rx.try_recv().unwrap();
         assert_eq!(used(&queue), (one, one));
         drop(in_writing);
         assert_eq!(used(&queue), (0, 0));
@@ -399,14 +425,13 @@ mod tests {
     /// A message that a writer did not finish stays first, for the next writer.
     #[tokio::test]
     async fn unfinished_message_stays_first() {
-        let (queue, rx) = QueueSender::new(MIN_QUEUE_SIZE);
-        let reader = share(rx);
+        let (queue, reader) = QueueSender::new(MIN_QUEUE_SIZE);
         assert!(matches!(queue.push(data(10)), Pushed::Queued));
         assert!(matches!(queue.push(data(20)), Pushed::Queued));
         let first = |len| {
             let reader = reader.clone();
             async move {
-                let mut reader = reader.lock_owned().await;
+                let mut reader = reader.lock().await;
                 assert!(reader.next().await);
                 let current = &reader.current().unwrap().message.message;
                 assert_eq!(current, &data(len).message);
@@ -422,14 +447,13 @@ mod tests {
         assert_eq!(used(&queue), (0, 0));
     }
 
-    /// A closed queue takes nothing, and releases the reservations of its messages.
+    /// A queue without reader takes nothing, and releases the reservations of its messages.
     #[test]
     fn closed_queue_frees_its_room() {
-        let (queue, mut rx) = QueueSender::new(MIN_QUEUE_SIZE);
+        let (queue, rx) = QueueSender::new(MIN_QUEUE_SIZE);
         assert!(matches!(queue.push(data(1000)), Pushed::Queued));
-        rx.close();
-        assert!(matches!(queue.push(shuffle()), Pushed::Closed));
         drop(rx);
+        assert!(matches!(queue.push(shuffle()), Pushed::Closed));
         assert_eq!(used(&queue), (0, 0));
     }
 

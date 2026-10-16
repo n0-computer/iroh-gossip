@@ -31,7 +31,7 @@ use tracing::{debug, error, error_span, trace, warn, Instrument};
 
 use self::{
     address_lookup::GossipAddressLookup,
-    queue::{Pushed, QueueSender, SharedReceiver},
+    queue::{Pushed, QueueSender, QueueTurn, SharedReceiver},
     util::{RecvLoop, SendLoop, Timers},
 };
 use crate::{
@@ -601,24 +601,22 @@ impl Actor {
                 Some(PeerState::Active { stale_dial, .. }) => std::mem::take(stale_dial),
                 Some(_) => false,
             };
-        let (send_rx, stop) = if stale_dial {
+        let turn = if stale_dial {
             debug!(peer = %peer_id.fmt_short(), "dial completed after the peer was dropped, close it");
             // The sender drops at once, so the send loop ends.
-            let closed = queue::share(QueueSender::new(0).1);
-            (closed, CancellationToken::new())
+            QueueTurn {
+                queue: QueueSender::new(0).1,
+                stop: Default::default(),
+            }
         } else {
-            let size = self.send_queue_size;
-            let state = self
-                .peers
-                .entry(peer_id)
-                .or_insert_with(|| PeerState::pending(size));
-            let queue = state.accept_conn(conn.clone(), dropped);
+            let turn = PeerState::get(&mut self.peers, peer_id, self.send_queue_size)
+                .accept_conn(conn.clone(), dropped);
             // The queue goes out, then the connection closes. A connection the peer
             // opened stays, as the peer is about to use it.
             if dropped && dial {
                 self.peers.remove(&peer_id);
             }
-            queue
+            turn
         };
         // A stale dial follows the flag too. The peer may take it as its active
         // connection, and we may want the peer again.
@@ -640,8 +638,7 @@ impl Actor {
                     peer_id,
                     conn.clone(),
                     origin,
-                    send_rx,
-                    stop,
+                    turn,
                     in_event_tx,
                     max_message_size,
                     wanted,
@@ -807,11 +804,7 @@ impl Actor {
             match event {
                 OutEvent::SendMessage(peer_id, message) => {
                     touched.push(peer_id);
-                    let size = self.send_queue_size;
-                    let state = self
-                        .peers
-                        .entry(peer_id)
-                        .or_insert_with(|| PeerState::pending(size));
+                    let state = PeerState::get(&mut self.peers, peer_id, self.send_queue_size);
                     // The protocol wants the peer again. The running dial delivers the queue.
                     if let PeerState::Dropped { queue } = state {
                         *state = PeerState::Pending {
@@ -845,10 +838,8 @@ impl Actor {
                                 }
                                 _ => FullQueue::Dial,
                             };
-                            if !full
-                                .iter()
-                                .any(|(peer, known)| *peer == peer_id && *known == queue)
-                            {
+                            // The active connection does not change within a batch.
+                            if !full.iter().any(|(peer, _)| *peer == peer_id) {
                                 full.push((peer_id, queue));
                             }
                         }
@@ -966,16 +957,6 @@ enum FullQueue {
     Dial,
 }
 
-impl PartialEq for FullQueue {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (FullQueue::Conn(a), FullQueue::Conn(b)) => a.stable_id() == b.stable_id(),
-            (FullQueue::Dial, FullQueue::Dial) => true,
-            _ => false,
-        }
-    }
-}
-
 /// The code of a close for a peer whose send queue had no room for a control message.
 const CLOSE_QUEUE_FULL: u32 = 2;
 
@@ -1010,14 +991,17 @@ struct PeerQueue {
     send_rx: SharedReceiver,
 }
 
+impl PeerQueue {
+    fn new(size: usize) -> Self {
+        let (send_tx, send_rx) = QueueSender::new(size);
+        Self { send_tx, send_rx }
+    }
+}
+
 impl Default for PeerQueue {
     /// Returns a queue without room, which only takes the place of a queue moved out.
     fn default() -> Self {
-        let (send_tx, send_rx) = QueueSender::new(0);
-        Self {
-            send_tx,
-            send_rx: queue::share(send_rx),
-        }
+        Self::new(0)
     }
 }
 
@@ -1033,29 +1017,33 @@ fn disconnect_peer(peers: &mut HashMap<EndpointId, PeerState>, peer_id: Endpoint
 }
 
 impl PeerState {
+    /// Returns the state of `peer_id`, and a pending one with a queue of `size` bytes if it has none.
+    fn get(
+        peers: &mut HashMap<EndpointId, PeerState>,
+        peer_id: EndpointId,
+        size: usize,
+    ) -> &mut Self {
+        peers.entry(peer_id).or_insert_with(|| Self::pending(size))
+    }
+
     /// Returns the state of a peer that we start to dial, with a queue of `size` bytes.
     fn pending(size: usize) -> Self {
-        let (send_tx, send_rx) = QueueSender::new(size);
         PeerState::Pending {
-            queue: PeerQueue {
-                send_tx,
-                send_rx: queue::share(send_rx),
-            },
+            queue: PeerQueue::new(size),
         }
     }
 
-    /// Sends on the new connection from now on, and returns the queue and the stop of its writer.
-    fn accept_conn(
-        &mut self,
-        conn: Connection,
-        stale_dial: bool,
-    ) -> (SharedReceiver, CancellationToken) {
+    /// Sends on the new connection from now on, and returns its turn at the queue.
+    fn accept_conn(&mut self, conn: Connection, stale_dial: bool) -> QueueTurn {
         let conn_id = conn.stable_id();
         let stop = CancellationToken::new();
         match self {
             PeerState::Pending { queue } | PeerState::Dropped { queue } => {
                 let queue = std::mem::take(queue);
-                let send_rx = queue.send_rx.clone();
+                let turn = QueueTurn {
+                    queue: queue.send_rx.clone(),
+                    stop: stop.clone(),
+                };
                 *self = PeerState::Active {
                     queue,
                     active_conn: conn,
@@ -1064,7 +1052,7 @@ impl PeerState {
                     other_conns: Vec::new(),
                     stale_dial,
                 };
-                (send_rx, stop)
+                turn
             }
             PeerState::Active {
                 queue,
@@ -1084,7 +1072,10 @@ impl PeerState {
                 *active_stop = stop.clone();
                 *active_conn = conn;
                 *active_conn_id = conn_id;
-                (queue.send_rx.clone(), stop)
+                QueueTurn {
+                    queue: queue.send_rx.clone(),
+                    stop,
+                }
             }
         }
     }
@@ -1222,15 +1213,14 @@ async fn connection_loop(
     from: PublicKey,
     conn: Connection,
     origin: ConnOrigin,
-    send_rx: SharedReceiver,
-    stop: CancellationToken,
+    turn: QueueTurn,
     in_event_tx: mpsc::Sender<InEvent>,
     max_message_size: usize,
     wanted: watch::Receiver<bool>,
 ) -> Result<(), ConnectionLoopError> {
     debug!(?origin, "connection established");
 
-    let mut send_loop = SendLoop::new(conn.clone(), send_rx, stop, max_message_size);
+    let mut send_loop = SendLoop::new(conn.clone(), turn, max_message_size);
     let sending = send_loop.sending();
     let mut recv_loop = RecvLoop::new(from, conn, in_event_tx, max_message_size);
     let mut handles_close = recv_loop.handles_close();
@@ -2350,7 +2340,7 @@ pub(crate) mod tests {
             };
             assert!(matches!(queue.push(message), Pushed::Queued));
         }
-        queue::share(send_rx)
+        send_rx
     }
 
     /// A write that makes no progress for the write timeout closes the connection.
@@ -2365,8 +2355,7 @@ pub(crate) mod tests {
         let topic: TopicId = blake3::hash(b"stalled").into();
         // More than the windows of the peer, which reads nothing.
         let send_rx = queue_payloads(topic, 200, 60_000);
-        let mut send_loop =
-            SendLoop::new(conn, send_rx, CancellationToken::new(), TEST_FRAME_LIMIT);
+        let mut send_loop = SendLoop::new(conn, turn(send_rx), TEST_FRAME_LIMIT);
         let result = timeout(util::WRITE_TIMEOUT * 5, send_loop.run())
             .await
             .std_context("the writer waited for good")?;
@@ -2389,8 +2378,7 @@ pub(crate) mod tests {
         let topic: TopicId = blake3::hash(b"slow").into();
         let (count, len) = (100, 60_000);
         let send_rx = queue_payloads(topic, count, len);
-        let mut send_loop =
-            SendLoop::new(conn, send_rx, CancellationToken::new(), TEST_FRAME_LIMIT);
+        let mut send_loop = SendLoop::new(conn, turn(send_rx), TEST_FRAME_LIMIT);
         let send = AbortOnDropHandle::new(spawn(async move { send_loop.run().await }));
 
         let start = Instant::now();
@@ -2431,12 +2419,7 @@ pub(crate) mod tests {
             let topic: TopicId = blake3::hash(&i.to_be_bytes()).into();
             assert!(matches!(queue.push(join_message(topic, 0)), Pushed::Queued));
         }
-        let mut send_loop = SendLoop::new(
-            conn,
-            queue::share(send_rx),
-            CancellationToken::new(),
-            TEST_FRAME_LIMIT,
-        );
+        let mut send_loop = SendLoop::new(conn, turn(send_rx), TEST_FRAME_LIMIT);
         let result = timeout(util::OPEN_TIMEOUT * 5, send_loop.run())
             .await
             .std_context("the writer waited for good")?;
@@ -2545,8 +2528,7 @@ pub(crate) mod tests {
         let pair = TestPair::new(1).await?;
         let (conn, peer_conn) = pair.connect().await?;
         let (tx, rx) = QueueSender::new(queue::MIN_QUEUE_SIZE);
-        let rx = queue::share(rx);
-        let mut send = SendLoop::new(conn, rx.clone(), CancellationToken::new(), TEST_FRAME_LIMIT);
+        let mut send = SendLoop::new(conn, turn(rx.clone()), TEST_FRAME_LIMIT);
         peer_conn.close(0u32.into(), b"done");
         timeout(Duration::from_secs(3), send.run())
             .await
@@ -2660,7 +2642,7 @@ pub(crate) mod tests {
         actor.handle_connection(peer_id, ConnOrigin::Accept, old);
         // The old writer cannot take the queue before the new connection replaces it.
         let held = match actor.peers.get(&peer_id) {
-            Some(PeerState::Active { queue, .. }) => queue.send_rx.clone().try_lock_owned(),
+            Some(PeerState::Active { queue, .. }) => queue.send_rx.try_lock(),
             other => panic!("not active: {other:?}"),
         }
         .std_context("the queue is locked")?;
@@ -3079,8 +3061,7 @@ pub(crate) mod tests {
             assert!(matches!(send_tx.push(message), Pushed::Queued));
         }
         drop(send_tx);
-        let mut send_loop =
-            SendLoop::new(conn, queue::share(send_rx), CancellationToken::new(), 1024);
+        let mut send_loop = SendLoop::new(conn, turn(send_rx), 1024);
         let _send = AbortOnDropHandle::new(spawn(async move { send_loop.run().await }));
 
         let (_, first) = timeout(Duration::from_secs(5), read_next_stream(&peer_conn))
@@ -3095,6 +3076,14 @@ pub(crate) mod tests {
         assert_eq!(first, vec![false, true], "first stream, by `is_disconnect`");
         assert_eq!(second, vec![false], "second stream, by `is_disconnect`");
         Ok(())
+    }
+
+    /// Returns a turn at `queue` that nothing stops.
+    fn turn(queue: SharedReceiver) -> QueueTurn {
+        QueueTurn {
+            queue,
+            stop: Default::default(),
+        }
     }
 
     /// Returns the state of a peer that we dial, with `messages` in its queue.
@@ -3169,8 +3158,7 @@ pub(crate) mod tests {
             peer_id,
             conn,
             ConnOrigin::Dial,
-            queue::share(send_rx),
-            CancellationToken::new(),
+            turn(send_rx),
             in_event_tx,
             TEST_FRAME_LIMIT,
             watch::channel(true).1,
@@ -3209,8 +3197,7 @@ pub(crate) mod tests {
                 pair.ep2.id(),
                 conn,
                 ConnOrigin::Dial,
-                queue::share(send_rx),
-                CancellationToken::new(),
+                turn(send_rx),
                 in_event_tx,
                 TEST_FRAME_LIMIT,
                 watch::channel(true).1,

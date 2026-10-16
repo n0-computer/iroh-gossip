@@ -22,11 +22,10 @@ use tokio::{
     io::AsyncReadExt,
     sync::{mpsc, watch},
 };
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn, Instrument};
 
 use super::{
-    queue::{QueuedMessage, SharedReceiver},
+    queue::{QueueTurn, QueuedMessage},
     InEvent, ProtoMessage,
 };
 use crate::proto::{util::TimerMap, TopicId};
@@ -302,28 +301,20 @@ pub(crate) struct SendLoop {
     buffer: Vec<u8>,
     max_message_size: usize,
     finishing: JoinSet<()>,
-    queue: SharedReceiver,
-    /// Stops the loop after its current message, once another connection takes the queue.
-    stop: CancellationToken,
+    turn: QueueTurn,
     /// Whether a message is queued or written, or a stream is not yet finished.
     sending: watch::Sender<bool>,
 }
 
 impl SendLoop {
-    pub(crate) fn new(
-        conn: Connection,
-        queue: SharedReceiver,
-        stop: CancellationToken,
-        max_message_size: usize,
-    ) -> Self {
+    pub(crate) fn new(conn: Connection, turn: QueueTurn, max_message_size: usize) -> Self {
         Self {
             conn,
             max_message_size,
             buffer: Default::default(),
             streams: Default::default(),
             finishing: Default::default(),
-            queue,
-            stop,
+            turn,
             // The queue may hold messages before the loop takes it.
             sending: watch::channel(true).0,
         }
@@ -343,13 +334,13 @@ impl SendLoop {
         let conn_clone = self.conn.clone();
         let closed = conn_clone.closed();
         tokio::pin!(closed);
-        let stop = self.stop.clone();
+        let stop = self.turn.stop.clone();
         // A replaced connection of the peer may still write its current message.
         let queue = tokio::select! {
             biased;
             _ = &mut closed => None,
             _ = stop.cancelled() => None,
-            queue = self.queue.clone().lock_owned() => Some(queue),
+            queue = self.turn.queue.lock() => Some(queue),
         };
         if let Some(mut queue) = queue {
             loop {
