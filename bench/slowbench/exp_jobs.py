@@ -1,16 +1,12 @@
 import itertools, random, shlex
 variants = {
-  "fifo": ("exp", "", ""),
-  "headdrop-sw": ("exp", "GOSSIP_EXP_HEADDROP=1", "--send-window 131072"),
-  "hp-sw": ("exp", "GOSSIP_EXP_HEADDROP=1 GOSSIP_EXP_PRIO=1", "--send-window 131072"),
-  "hp-rw": ("exp", "GOSSIP_EXP_HEADDROP=1 GOSSIP_EXP_PRIO=1", "--receive-window 131072"),
-  "hp-sw64k": ("exp", "GOSSIP_EXP_HEADDROP=1 GOSSIP_EXP_PRIO=1", "--send-window 65536"),
-  "hp-sw256k": ("exp", "GOSSIP_EXP_HEADDROP=1 GOSSIP_EXP_PRIO=1", "--send-window 262144"),
+  "opt-complete": ("opt", "", ""),
+  "opt-newest": ("opt", "SLOWBENCH_NEWEST=1", ""),
 }
 scenarios = {
   "s1": "--slow 1 --rate 250 --publish-secs 60 --drain-secs 30",
   "s8": "--slow 8 --rate 250 --publish-secs 60 --drain-secs 30",
-  "burst": "--slow 1 --rate 1000 --publish-secs 5 --drain-secs 60",
+  "multi": "--slow 1 --rate 250 --publishers 3 --topics 2 --publish-secs 60 --drain-secs 30",
   "fast": "--slow 0 --rate 2000 --publish-secs 30 --drain-secs 15 --rtt-ms 200",
 }
 import sys

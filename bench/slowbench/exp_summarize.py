@@ -6,7 +6,7 @@ for f in sorted(glob.glob(f"{d}/*.json")):
         rows.append(json.load(open(f)))
     except Exception as e:
         rows.append({"label": f.split("/")[-1], "failed": True})
-order = ["fifo","headdrop-sw","hp-sw","hp-rw","hp-sw64k","hp-sw256k","q64k","q256k","dcap64k","dcap64k-prio","dcap64k-head","q64k-prio","prio","headdrop","q4m","norepair","fifo-sw","prio-sw","split","split-sw"]
+order = ["fifo","hp","moq-reset","moq-reset-250ms","moq-wait","moq-wait-500ms","fifo-2s","fifo-lanes","hp","hp-2s","h-lanes","hp-rw256k","hp-sw256k","h-rw256k","headdrop-sw","hp-sw","hp-rw","hp-sw64k","hp-sw256k","q64k","q256k","dcap64k","dcap64k-prio","dcap64k-head","q64k-prio","prio","headdrop","q4m","norepair","fifo-sw","prio-sw","split","split-sw"]
 by = collections.defaultdict(list)
 for r in rows:
     v, s = r["label"].split(":") if ":" in r["label"] else (r["label"], "?")
@@ -16,7 +16,7 @@ def wait(m, c):
     n = sum(b)
     if n == 0: return "-", "-"
     return f"{m.get(f'qwait_{c}_ms_sum',0)/n:.0f}", f"{(b[3]+b[4])/n*100:.1f}%"
-for s in ["s1","s8","s9","burst","fast"]:
+for s in ["s1","s8","s9","burst","fast","multi"]:
     print(f"== {s}")
     print(f"{'variant':>12} | {'pub/s':>5} | {'H p99':>6} {'H dlv':>5} {'Hpub':>4} | {'S msgs':>6} {'S min':>5} {'S p50s':>6} {'S p99s':>6} {'late':>5} | {'drops':>7} {'qfull':>5} {'nDown':>5} | {'cW ms':>6} {'c>1s':>6} {'dW ms':>6} | {'rss':>4}")
     for v, r in sorted(by[s], key=lambda x: order.index(x[0]) if x[0] in order else 99):
