@@ -191,15 +191,30 @@ impl Drop for Reservation {
 
 /// The receiving half of the queue to a peer, which its connections take in turn.
 ///
-/// One writer at a time locks it. A replaced connection unlocks it after its
-/// current message, so we write the messages in the order of the queue. The
-/// peer may still read the last messages on the old connection after the
-/// first ones on the new connection.
+/// The writer of a connection locks it once, and keeps the lock for as long as
+/// it writes: across all its messages, not per message. So the lock is free of
+/// contention while a peer has one connection. Only the actor pushes, and it
+/// never locks.
+///
+/// Two writers contend only at a handover, when a new connection replaces the
+/// active one. The new writer waits in [`Self::lock`], and the old writer
+/// unlocks after its current message. Waiters get the lock in order, and a
+/// writer that stops while it waits leaves the line. The messages thus go out
+/// in the order of the queue. The peer may still read the last messages on the
+/// old connection after the first ones on the new connection.
+///
+/// A writer must not keep the lock without bound, or the next connection waits
+/// for good. Every way out of the loop of a writer unlocks: the end of the
+/// queue, a stop, a closed connection, an error, and a drop of its future. A
+/// stopped writer gets [`HANDOVER_LIMIT`](super::util::HANDOVER_LIMIT) for its
+/// current message, and then closes its connection, which ends the write.
 #[derive(Debug, Clone)]
 pub(super) struct SharedReceiver(Arc<tokio::sync::Mutex<QueueReader>>);
 
 impl SharedReceiver {
     /// Waits until no other writer reads the queue, and returns its reader.
+    ///
+    /// Waits only at a handover, see [`SharedReceiver`].
     pub(super) async fn lock(&self) -> OwnedMutexGuard<QueueReader> {
         self.0.clone().lock_owned().await
     }
