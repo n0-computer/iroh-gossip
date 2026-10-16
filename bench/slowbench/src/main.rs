@@ -63,6 +63,9 @@ struct Args {
     /// QUIC receive window per stream of every node, in bytes. The default of noq is 1.25 MB.
     #[arg(long)]
     stream_window: Option<u32>,
+    /// The maximum message size of every node, in bytes. The default of iroh-gossip is 4096.
+    #[arg(long)]
+    max_message_size: Option<usize>,
     /// QUIC receive window per connection of every node, in bytes. Unlimited by default.
     #[arg(long)]
     receive_window: Option<u32>,
@@ -174,7 +177,14 @@ async fn run(args: Args) -> Result<()> {
                     EndpointAddr::new(endpoint.id())
                         .with_ip_addr(SocketAddr::new(IpAddr::V4(ip), port)),
                 );
-                let gossip = Gossip::builder().spawn(endpoint.clone());
+                let mut builder = Gossip::builder();
+                if let Some(size) = args2.max_message_size {
+                    builder = builder.max_message_size(size);
+                }
+                if std::env::var("SLOWBENCH_NEWEST").is_ok_and(|v| v == "1") {
+                    builder = newest(builder);
+                }
+                let gossip = builder.spawn(endpoint.clone());
                 let router = Router::builder(endpoint.clone())
                     .accept(GOSSIP_ALPN, gossip.clone())
                     .spawn();
@@ -281,6 +291,7 @@ async fn run(args: Args) -> Result<()> {
         "topics": args.topics, "publish_secs": args.publish_secs, "drain_secs": args.drain_secs,
         "send_window": args.send_window, "stream_window": args.stream_window,
         "receive_window": args.receive_window, "rtt_ms": args.rtt_ms,
+        "max_message_size": args.max_message_size,
         "env": std::env::vars().filter(|(k, _)| k.starts_with("GOSSIP_EXP")).collect::<BTreeMap<_, _>>(),
         "sent": total_sent,
         "achieved_rate": total_sent as f64 / published.as_secs_f64(),
@@ -341,6 +352,21 @@ async fn receive(
             Event::Lagged => s.lagged += 1,
         }
     }
+}
+
+/// Sets `Delivery::Newest` on `builder`, on revisions that have it.
+///
+/// Build with `--features newest` for such a revision.
+#[cfg(feature = "newest")]
+fn newest(builder: iroh_gossip::net::Builder) -> iroh_gossip::net::Builder {
+    builder.send_queue(
+        iroh_gossip::net::QueueOptions::default().delivery(iroh_gossip::net::Delivery::Newest),
+    )
+}
+
+#[cfg(not(feature = "newest"))]
+fn newest(_builder: iroh_gossip::net::Builder) -> iroh_gossip::net::Builder {
+    panic!("SLOWBENCH_NEWEST needs a build with the feature newest")
 }
 
 fn max_rss_mb() -> f64 {

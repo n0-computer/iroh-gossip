@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[features]
+# Revisions with `Delivery::Newest`.
+newest = []
+
 [dependencies]
 iroh-gossip = { path = "../.." }
 iroh = { version = "1", default-features = false, features = ["tls-ring", "metrics"] }

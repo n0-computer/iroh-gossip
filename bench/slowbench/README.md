@@ -13,6 +13,8 @@ Linux only, rootless (user namespaces).
 ```sh
 ./build-rev.sh main origin/main /tmp/slowbench
 ./build-rev.sh mine HEAD /tmp/slowbench
+# For a revision with `Delivery::Newest`, and SLOWBENCH_NEWEST=1 at run time:
+FEATURES=newest ./build-rev.sh newest HEAD /tmp/slowbench
 ./run.sh /tmp/slowbench/out.jsonl 2 "/tmp/slowbench/bins/main /tmp/slowbench/bins/mine" \
   -- --nodes 10 --slow 1 --rate 250 --publish-secs 60 --drain-secs 30
 python3 summarize.py /tmp/slowbench/out.jsonl

@@ -15,6 +15,6 @@ rm -rf "$work/h-$label"; mkdir -p "$work/h-$label"
 cp -r "$here/src" "$here/Cargo.lock" "$work/h-$label/"
 sed "s|^iroh-gossip = { path = \"../..\" }|iroh-gossip = { path = \"$work/revs/$label\" }|" \
   "$here/Cargo.toml" > "$work/h-$label/Cargo.toml"
-(cd "$work/h-$label" && CARGO_TARGET_DIR="$work/t-$label" cargo build -q --release)
+(cd "$work/h-$label" && CARGO_TARGET_DIR="$work/t-$label" cargo build -q --release ${FEATURES:+--features "$FEATURES"})
 cp "$work/t-$label/release/slowbench" "$work/bins/$label"
 echo "$work/bins/$label"
