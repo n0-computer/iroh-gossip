@@ -402,15 +402,16 @@ impl Actor {
 
     /// One event loop processing step.
     ///
-    /// None is returned when no further processing should be performed.
+    /// Returns `false` when the actor should stop.
     async fn event_loop(
         &mut self,
         addr_updates: &mut (impl Stream<Item = EndpointAddr> + Send + Unpin),
         i: usize,
     ) -> bool {
         self.metrics.actor_tick_main.inc();
-        // A shutdown waits at most for one tick. Each tick still runs the select
-        // below, so other local messages starve no other branch.
+        // A shutdown skips the other branches. It waits only for the local messages
+        // queued before it. Each tick still runs the select below, so local messages
+        // starve no other branch.
         if let Ok(msg) = self.local_rx.try_recv() {
             if !self.handle_local_message(Some(msg)).await {
                 return false;
@@ -972,10 +973,6 @@ enum ConnectionLoopError {
         source: self::util::WriteError,
     },
     #[error(transparent)]
-    Read {
-        source: self::util::ReadError,
-    },
-    #[error(transparent)]
     Connection {
         #[error(std_err)]
         source: iroh::endpoint::ConnectionError,
@@ -1076,11 +1073,11 @@ async fn connection_loop(
         tokio::pin!(send_fut, recv_fut);
         tokio::select! {
             res = &mut send_fut => res?,
-            res = &mut recv_fut => return Ok(res?),
+            _ = &mut recv_fut => return Ok(()),
         }
         // We are done sending. A peer we want may still send on this connection,
         // as two peers that dialed each other can each use a different one.
-        recv_fut.await?;
+        recv_fut.await;
         Ok(())
     };
     tokio::select! {
@@ -2640,13 +2637,13 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// A receive loop that ended closes the connection despite a live send loop.
+    /// A receive loop that ended ends the connection loop despite a live send loop.
     ///
     /// The receive loop ends once the actor takes no more messages. A bad
     /// stream header does not end it: it drops only its stream.
     #[tokio::test]
     #[traced_test]
-    async fn ended_receive_loop_closes_connection() -> Result {
+    async fn ended_receive_loop_ends_connection_loop() -> Result {
         let pair = TestPair::new(1).await?;
         let (conn, peer_conn) = pair.connect().await?;
         let topic: TopicId = blake3::hash(b"ended_receive_loop").into();
@@ -2766,7 +2763,8 @@ pub(crate) mod tests {
     #[tokio::test]
     #[traced_test]
     async fn bad_header_drops_only_its_stream() -> Result {
-        let (_ours, conn, peer_conn, _peer) = connected_pair().await?;
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
         let (in_event_tx, mut in_event_rx) = mpsc::channel(4);
         let mut recv_loop = RecvLoop::new(peer_conn.remote_id(), conn, in_event_tx, 1024);
         let _recv = AbortOnDropHandle::new(spawn(async move { recv_loop.run().await }));
@@ -2778,15 +2776,7 @@ pub(crate) mod tests {
             .std_context("write bad header")?;
         bad.finish().std_context("finish")?;
         let topic: TopicId = [1; 32].into();
-        let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
-        let mut buffer = Vec::new();
-        util::StreamHeader::new(topic)
-            .write(&mut stream, &mut buffer, 1024)
-            .await
-            .std_context("write header")?;
-        util::write_frame(&mut stream, &peer_join(topic).message, &mut buffer, 1024)
-            .await
-            .std_context("write frame")?;
+        let _stream = open_stream(&peer_conn, topic, &[join_message(topic, 0).message]).await?;
 
         let event = timeout(Duration::from_secs(2), in_event_rx.recv())
             .await
@@ -2802,7 +2792,8 @@ pub(crate) mod tests {
     #[traced_test]
     async fn pending_header_is_read_after_a_close() -> Result {
         for round in 0..4 {
-            let (_ours, conn, peer_conn, _peer) = connected_pair().await?;
+            let pair = TestPair::new(1).await?;
+            let (conn, peer_conn) = pair.connect().await?;
             let (in_event_tx, mut in_event_rx) = mpsc::channel(2);
             let mut recv_loop =
                 RecvLoop::new(peer_conn.remote_id(), conn.clone(), in_event_tx, 1024);
@@ -2817,15 +2808,8 @@ pub(crate) mod tests {
                 .await
                 .std_context("write partial header")?;
             // The loop accepts streams in order, so this message means it has the partial one.
-            let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
-            let mut buffer = Vec::new();
-            util::StreamHeader::new(topic)
-                .write(&mut stream, &mut buffer, 1024)
-                .await
-                .std_context("write header")?;
-            util::write_frame(&mut stream, &peer_join(topic).message, &mut buffer, 1024)
-                .await
-                .std_context("write frame")?;
+            let mut stream =
+                open_stream(&peer_conn, topic, &[join_message(topic, 0).message]).await?;
             stream.finish().std_context("finish")?;
             tokio::select! {
                 res = &mut run => panic!("the recv loop ended: {res:?}"),
@@ -2846,9 +2830,15 @@ pub(crate) mod tests {
                 .write_all(&[1; 32])
                 .await
                 .std_context("write topic")?;
-            util::write_frame(&mut partial, &peer_join(topic).message, &mut buffer, 1024)
-                .await
-                .std_context("write frame")?;
+            let mut buffer = Vec::new();
+            util::write_frame(
+                &mut partial,
+                &join_message(topic, 0).message,
+                &mut buffer,
+                1024,
+            )
+            .await
+            .std_context("write frame")?;
             partial.finish().std_context("finish")?;
             partial.stopped().await.std_context("stopped")?;
             peer_conn.close(0u32.into(), b"done");
@@ -2856,7 +2846,7 @@ pub(crate) mod tests {
 
             timeout(Duration::from_secs(2), &mut run)
                 .await
-                .std_context("the recv loop did not end")??;
+                .std_context("the recv loop did not end")?;
             let event = in_event_rx.try_recv();
             assert!(
                 matches!(event, Ok(InEvent::RecvMessage(..))),
@@ -2870,7 +2860,8 @@ pub(crate) mod tests {
     #[tokio::test]
     #[traced_test]
     async fn partial_headers_are_limited() -> Result {
-        let (_ours, conn, peer_conn, _peer) = connected_pair().await?;
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
         let (in_event_tx, mut in_event_rx) = mpsc::channel(4);
         let mut recv_loop = RecvLoop::new(peer_conn.remote_id(), conn, in_event_tx, 1024);
         let _recv = AbortOnDropHandle::new(spawn(async move { recv_loop.run().await }));
@@ -2885,15 +2876,7 @@ pub(crate) mod tests {
             partials.push(stream);
         }
         let topic: TopicId = [1; 32].into();
-        let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
-        let mut buffer = Vec::new();
-        util::StreamHeader::new(topic)
-            .write(&mut stream, &mut buffer, 1024)
-            .await
-            .std_context("write header")?;
-        util::write_frame(&mut stream, &peer_join(topic).message, &mut buffer, 1024)
-            .await
-            .std_context("write frame")?;
+        let _stream = open_stream(&peer_conn, topic, &[join_message(topic, 0).message]).await?;
         let event = timeout(Duration::from_millis(500), in_event_rx.recv()).await;
         assert!(event.is_err(), "the loop read more headers than its limit");
 
@@ -2919,10 +2902,11 @@ pub(crate) mod tests {
     #[tokio::test(flavor = "multi_thread")]
     #[traced_test]
     async fn close_does_not_wait_for_an_empty_queue() -> Result {
-        let (ours, conn, _peer_conn, _peer) = connected_pair().await?;
+        let pair = TestPair::new(1).await?;
+        let (conn, _peer_conn) = pair.connect().await?;
         let peer = conn.remote_id();
         let (mut actor, _rpc_tx, _local_tx) = Actor::new(
-            ours,
+            pair.ep1.clone(),
             Default::default(),
             Default::default(),
             None,
@@ -3402,46 +3386,6 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// Our endpoint, our side and the peer's side of a connection, and what keeps the peer alive.
-    async fn connected_pair() -> Result<(Endpoint, Connection, Connection, Box<dyn std::any::Any>)>
-    {
-        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
-        let (relay_map, relay_url, relay) = iroh::test_utils::run_relay_server()
-            .await
-            .std_context("relay")?;
-        let ours = create_endpoint(rng, relay_map.clone(), None).await?;
-        let theirs = create_endpoint(rng, relay_map, None).await?;
-        let addr = EndpointAddr::new(theirs.id()).with_relay_url(relay_url);
-        let connect = async { ours.connect(addr, GOSSIP_ALPN).await.std_context("connect") };
-        let accept = async {
-            let incoming = theirs.accept().await.std_context("endpoint closed")?;
-            incoming.await.std_context("accept")
-        };
-        let (conn, peer_conn) = (connect, accept).try_join().await?;
-        Ok((ours, conn, peer_conn, Box::new((theirs, relay))))
-    }
-
-    /// Returns the `Join` that a peer sends for `topic`.
-    fn peer_join(topic: TopicId) -> ProtoMessage {
-        let mut state = proto::State::new(
-            SecretKey::generate().public(),
-            PeerData::new(Vec::new()),
-            Default::default(),
-            StdRng::seed_from_u64(1),
-        );
-        let join = InEvent::Command(
-            topic,
-            proto::Command::Join(vec![SecretKey::generate().public()]),
-        );
-        let message = state
-            .handle(join, Instant::now(), None)
-            .find_map(|event| match event {
-                proto::OutEvent::SendMessage(_, message) => Some(message),
-                _ => None,
-            });
-        message.expect("a join sends a message")
-    }
-
     /// A message that a connection delivered before its close is handled before the close.
     ///
     /// The receive loop queues the message before its task ends, but the actor can
@@ -3450,10 +3394,11 @@ pub(crate) mod tests {
     #[tokio::test]
     #[traced_test]
     async fn message_before_a_close_is_handled_first() -> Result {
-        let (ours, conn, _peer_conn, _peer) = connected_pair().await?;
+        let pair = TestPair::new(1).await?;
+        let (conn, _peer_conn) = pair.connect().await?;
         let peer = conn.remote_id();
         let (mut actor, _rpc_tx, _local_tx) = Actor::new(
-            ours,
+            pair.ep1.clone(),
             Default::default(),
             Default::default(),
             None,
@@ -3471,7 +3416,7 @@ pub(crate) mod tests {
             .await;
         actor
             .in_event_tx
-            .send(InEvent::RecvMessage(peer, peer_join(topic)))
+            .send(InEvent::RecvMessage(peer, join_message(topic, 0)))
             .await
             .std_context("queue join")?;
         conn.close(0u32.into(), b"done");
@@ -3507,7 +3452,8 @@ pub(crate) mod tests {
     #[tokio::test]
     #[traced_test]
     async fn partial_header_does_not_block_other_streams() -> Result {
-        let (_ours, conn, peer_conn, _peer) = connected_pair().await?;
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
         let (in_event_tx, mut in_event_rx) = mpsc::channel(4);
         let mut recv_loop = RecvLoop::new(peer_conn.remote_id(), conn, in_event_tx, 1024);
         let _recv = AbortOnDropHandle::new(spawn(async move { recv_loop.run().await }));
@@ -3518,15 +3464,7 @@ pub(crate) mod tests {
             .await
             .std_context("write partial header")?;
         let topic: TopicId = [1; 32].into();
-        let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
-        let mut buffer = Vec::new();
-        util::StreamHeader::new(topic)
-            .write(&mut stream, &mut buffer, 1024)
-            .await
-            .std_context("write header")?;
-        util::write_frame(&mut stream, &peer_join(topic).message, &mut buffer, 1024)
-            .await
-            .std_context("write frame")?;
+        let _stream = open_stream(&peer_conn, topic, &[join_message(topic, 0).message]).await?;
 
         let event = timeout(Duration::from_secs(2), in_event_rx.recv())
             .await
@@ -3563,10 +3501,11 @@ pub(crate) mod tests {
     #[tokio::test]
     #[traced_test]
     async fn busy_publisher_does_not_starve_finished_connections() -> Result {
-        let (ours, conn, _peer_conn, _peer) = connected_pair().await?;
+        let pair = TestPair::new(1).await?;
+        let (conn, _peer_conn) = pair.connect().await?;
         let peer = conn.remote_id();
         let (mut actor, _rpc_tx, _local_tx) = Actor::new(
-            ours,
+            pair.ep1.clone(),
             Default::default(),
             Default::default(),
             None,
@@ -3593,10 +3532,10 @@ pub(crate) mod tests {
     #[tokio::test]
     #[traced_test]
     async fn shutdown_comes_before_a_busy_publisher() -> Result {
-        let (ours, _conn, _peer_conn, _peer) = connected_pair().await?;
+        let pair = TestPair::new(1).await?;
         for round in 0..8 {
             let (mut actor, _rpc_tx, local_tx) = Actor::new(
-                ours.clone(),
+                pair.ep1.clone(),
                 Default::default(),
                 Default::default(),
                 None,

@@ -154,8 +154,11 @@ impl RecvLoop {
         self.handles_close.subscribe()
     }
 
-    pub(crate) async fn run(&mut self) -> Result<(), ReadError> {
-        // Headers are read apart, so that a partial one blocks no other stream.
+    /// Reads the streams of the connection until it closes or the actor stops.
+    ///
+    /// A bad stream loses only itself, so this never fails.
+    pub(crate) async fn run(&mut self) {
+        // Each header is read in its own future, so a partial one blocks no other stream.
         let mut header_futures = FuturesUnordered::new();
         let mut read_futures = FuturesUnordered::new();
         let mut conn_is_closed = false;
@@ -213,7 +216,6 @@ impl RecvLoop {
             }
         }
         debug!("recv loop closed");
-        Ok(())
     }
 }
 
