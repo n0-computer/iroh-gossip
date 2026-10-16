@@ -25,7 +25,7 @@ use tokio::{
 use tracing::{debug, trace, warn, Instrument};
 
 use super::{
-    queue::{QueueTurn, QueuedMessage},
+    queue::{QueueLease, QueuedMessage},
     InEvent, ProtoMessage,
 };
 use crate::proto::{util::TimerMap, TopicId};
@@ -301,20 +301,20 @@ pub(crate) struct SendLoop {
     buffer: Vec<u8>,
     max_message_size: usize,
     finishing: JoinSet<()>,
-    turn: QueueTurn,
+    lease: QueueLease,
     /// Whether a message is queued or written, or a stream is not yet finished.
     sending: watch::Sender<bool>,
 }
 
 impl SendLoop {
-    pub(crate) fn new(conn: Connection, turn: QueueTurn, max_message_size: usize) -> Self {
+    pub(crate) fn new(conn: Connection, lease: QueueLease, max_message_size: usize) -> Self {
         Self {
             conn,
             max_message_size,
             buffer: Default::default(),
             streams: Default::default(),
             finishing: Default::default(),
-            turn,
+            lease,
             // The queue may hold messages before the loop takes it.
             sending: watch::channel(true).0,
         }
@@ -334,13 +334,13 @@ impl SendLoop {
         let conn_clone = self.conn.clone();
         let closed = conn_clone.closed();
         tokio::pin!(closed);
-        let stop = self.turn.stop.clone();
+        let revoked = self.lease.revoked.clone();
         // A replaced connection of the peer may still write its current message.
         let queue = tokio::select! {
             biased;
             _ = &mut closed => None,
-            _ = stop.cancelled() => None,
-            queue = self.turn.queue.lock() => Some(queue),
+            _ = revoked.cancelled() => None,
+            queue = self.lease.queue.lock() => Some(queue),
         };
         if let Some(mut queue) = queue {
             loop {
@@ -349,7 +349,7 @@ impl SendLoop {
                     biased;
                     _ = &mut closed => break,
                     // The next connection takes the rest of the queue.
-                    _ = stop.cancelled() => break,
+                    _ = revoked.cancelled() => break,
                     more = queue.next() => more,
                     _ = self.finishing.join_next(), if !self.finishing.is_empty() => continue,
                 };
@@ -363,7 +363,7 @@ impl SendLoop {
                 // this one. A message that we stop in the middle stays in the queue,
                 // and the next connection writes it first.
                 let handover = async {
-                    stop.cancelled().await;
+                    revoked.cancelled().await;
                     n0_future::time::sleep(HANDOVER_LIMIT).await;
                 };
                 tokio::select! {

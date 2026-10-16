@@ -226,12 +226,15 @@ impl SharedReceiver {
     }
 }
 
-/// The turn of a connection at the queue of its peer.
+/// The lease of a connection on the queue to its peer.
+///
+/// The actor revokes it when a new connection replaces this one. The writer
+/// then lets go of the queue after its current message, and the writer of the
+/// new connection takes it.
 #[derive(Debug)]
-pub(super) struct QueueTurn {
+pub(super) struct QueueLease {
     pub(super) queue: SharedReceiver,
-    /// Ends the turn after the current message, once another connection takes the queue.
-    pub(super) stop: CancellationToken,
+    pub(super) revoked: CancellationToken,
 }
 
 /// Reads a queue, and keeps the message that a writer has not finished.
