@@ -50,12 +50,10 @@ pub(super) fn queue_size(size: usize, max_message_size: usize) -> usize {
 pub(super) enum Pushed {
     /// The message was queued.
     Queued,
-    /// The data or announcement section was full, so the peer loses the message.
+    /// The data or announcement message did not fit, so the peer loses it.
     Dropped(ProtoMessage),
     /// The queue had no room for a control message.
     Overflow,
-    /// No connection can take the queue anymore.
-    Closed,
 }
 
 /// A queued message, which keeps its reservation until it is dropped.
@@ -207,7 +205,8 @@ impl Drop for Reservation {
 /// for good. Every way out of the loop of a writer unlocks: the end of the
 /// queue, a stop, a closed connection, an error, and a drop of its future. A
 /// stopped writer gets [`HANDOVER_LIMIT`](super::util::HANDOVER_LIMIT) for its
-/// current message, and then closes its connection, which ends the write.
+/// current message. Then it stops the write, and the next connection writes
+/// the message again.
 #[derive(Debug, Clone)]
 pub(super) struct SharedReceiver(Arc<tokio::sync::Mutex<QueueReader>>);
 
@@ -224,6 +223,13 @@ impl SharedReceiver {
     pub(super) fn try_lock(&self) -> Option<OwnedMutexGuard<QueueReader>> {
         self.0.clone().try_lock_owned().ok()
     }
+
+    /// Returns whether the sender is gone and no message is left, so no writer needs the queue.
+    pub(super) fn is_finished(&self) -> bool {
+        self.0
+            .try_lock()
+            .is_ok_and(|reader| reader.is_empty() && reader.rx.is_closed())
+    }
 }
 
 /// The lease of a connection on the queue to its peer.
@@ -234,6 +240,8 @@ impl SharedReceiver {
 #[derive(Debug)]
 pub(super) struct QueueLease {
     pub(super) queue: SharedReceiver,
+    /// The queues of the peer from before we dropped it, which go out first.
+    pub(super) earlier: Vec<SharedReceiver>,
     pub(super) revoked: CancellationToken,
 }
 
@@ -303,10 +311,10 @@ impl QueueSender {
     }
 
     /// Queues `message` if it fits, and never waits.
+    ///
+    /// The queue to a peer lives as long as the state of the peer, so its
+    /// receiver is never gone while the actor pushes.
     pub(super) fn push(&self, message: ProtoMessage) -> Pushed {
-        if self.tx.is_closed() {
-            return Pushed::Closed;
-        }
         let section = Section::of(&message);
         let Some(reservation) = Reservation::new(&self.capacity, &message, section) else {
             return match section {
@@ -318,10 +326,9 @@ impl QueueSender {
             message,
             reservation,
         };
-        match self.tx.send(item) {
-            Ok(()) => Pushed::Queued,
-            Err(_) => Pushed::Closed,
-        }
+        // A closed queue drops the message, as the connection would.
+        self.tx.send(item).ok();
+        Pushed::Queued
     }
 }
 
@@ -465,13 +472,13 @@ mod tests {
         assert_eq!(used(&queue), (0, 0));
     }
 
-    /// A queue without reader takes nothing, and releases the reservations of its messages.
+    /// A queue without reader keeps nothing, and releases the reservations of its messages.
     #[test]
     fn closed_queue_frees_its_room() {
         let (queue, rx) = QueueSender::new(MIN_QUEUE_SIZE);
         assert!(matches!(queue.push(data(1000)), Pushed::Queued));
         drop(rx);
-        assert!(matches!(queue.push(shuffle()), Pushed::Closed));
+        assert!(matches!(queue.push(shuffle()), Pushed::Queued));
         assert_eq!(used(&queue), (0, 0));
     }
 

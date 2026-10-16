@@ -1153,7 +1153,7 @@ mod test {
         assert_eq!(tick(&mut state, now, 2), vec![id]);
     }
 
-    /// A dropped announcement goes out again with the next cache eviction.
+    /// A dropped announcement goes out again with the next `Timer::AnnounceDropped`.
     #[test]
     fn dropped_announcement_is_announced_again() {
         let (mut state, push) = broadcast_to_2(b"dropped", Scope::Swarm);

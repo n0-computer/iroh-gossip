@@ -22,10 +22,11 @@ use tokio::{
     io::AsyncReadExt,
     sync::{mpsc, watch},
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn, Instrument};
 
 use super::{
-    queue::{QueueLease, QueuedMessage},
+    queue::{QueueLease, QueueReader, QueuedMessage},
     InEvent, ProtoMessage,
 };
 use crate::proto::{util::TimerMap, TopicId};
@@ -83,7 +84,7 @@ pub(crate) const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(test)]
 pub(crate) const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How long a replaced connection may write its current message before it closes.
+/// How long a replaced connection may write its current message before it hands it over.
 ///
 /// The new connection of the peer waits for it, as the messages keep their order.
 #[cfg(not(test))]
@@ -331,53 +332,28 @@ impl SendLoop {
     }
 
     pub(crate) async fn run(&mut self) -> Result<(), WriteError> {
-        let conn_clone = self.conn.clone();
-        let closed = conn_clone.closed();
+        let conn = self.conn.clone();
+        let closed = conn.closed();
         tokio::pin!(closed);
         let revoked = self.lease.revoked.clone();
-        // A replaced connection of the peer may still write its current message.
-        let queue = tokio::select! {
-            biased;
-            _ = &mut closed => None,
-            _ = revoked.cancelled() => None,
-            queue = self.lease.queue.lock() => Some(queue),
-        };
-        if let Some(mut queue) = queue {
-            loop {
-                self.set_sending(!queue.is_empty() || !self.finishing.is_empty());
-                let more = tokio::select! {
-                    biased;
-                    _ = &mut closed => break,
-                    // The next connection takes the rest of the queue.
-                    _ = revoked.cancelled() => break,
-                    more = queue.next() => more,
-                    _ = self.finishing.join_next(), if !self.finishing.is_empty() => continue,
-                };
-                // The actor dropped the sender.
-                if !more {
-                    break;
-                }
-                self.set_sending(true);
-                let item = queue.current().expect("next returned a message");
-                // A stuck write would keep the queue from the connection that replaced
-                // this one. A message that we stop in the middle stays in the queue,
-                // and the next connection writes it first. We reset only its stream:
-                // the peer may still send to us on this connection.
-                let handover = async {
-                    revoked.cancelled().await;
-                    n0_future::time::sleep(HANDOVER_LIMIT).await;
-                };
-                tokio::select! {
-                    res = self.send(item) => res?,
-                    _ = handover => {
-                        warn!("the replaced connection did not finish its message in time, reset its stream");
-                        if let Some(mut stream) = self.streams.remove(&item.message.topic) {
-                            stream.reset(0u32.into()).ok();
-                        }
-                        break;
-                    }
-                }
-                queue.written();
+        // The rest of the queues from before a drop of the peer goes first.
+        let queues: Vec<_> = self
+            .lease
+            .earlier
+            .iter()
+            .chain([&self.lease.queue])
+            .cloned()
+            .collect();
+        for queue in queues {
+            // A replaced connection of the peer may still write its current message.
+            let mut queue = tokio::select! {
+                biased;
+                _ = &mut closed => break,
+                _ = revoked.cancelled() => break,
+                queue = queue.lock() => queue,
+            };
+            if !self.write_queue(&mut queue, &revoked).await? {
+                break;
             }
         }
 
@@ -410,6 +386,53 @@ impl SendLoop {
         self.set_sending(false);
         debug!("send loop closed");
         Ok(())
+    }
+
+    /// Writes the messages of `queue`, and returns whether its sender is gone.
+    ///
+    /// Returns `false` once the connection closes or the lease is revoked.
+    async fn write_queue(
+        &mut self,
+        queue: &mut QueueReader,
+        revoked: &CancellationToken,
+    ) -> Result<bool, WriteError> {
+        let conn = self.conn.clone();
+        let closed = conn.closed();
+        tokio::pin!(closed);
+        loop {
+            self.set_sending(!queue.is_empty() || !self.finishing.is_empty());
+            let more = tokio::select! {
+                biased;
+                _ = &mut closed => return Ok(false),
+                // The next connection takes the rest of the queue.
+                _ = revoked.cancelled() => return Ok(false),
+                more = queue.next() => more,
+                _ = self.finishing.join_next(), if !self.finishing.is_empty() => continue,
+            };
+            if !more {
+                return Ok(true);
+            }
+            self.set_sending(true);
+            let item = queue.current().expect("next returned a message");
+            // A stuck write would keep the queue from the connection that replaced
+            // this one. A message that we stop in the middle stays in the queue,
+            // and the next connection writes it first. Its stream stays, and ends
+            // with the others: the peer reads the messages before it, and drops
+            // the part of this one.
+            let handover = async {
+                revoked.cancelled().await;
+                n0_future::time::sleep(HANDOVER_LIMIT).await;
+            };
+            tokio::select! {
+                biased;
+                res = self.send(item) => res?,
+                _ = handover => {
+                    warn!("the replaced connection did not finish its message in time, hand it over");
+                    return Ok(false);
+                }
+            }
+            queue.written();
+        }
     }
 
     /// Writes a message, and drops only its stream if the write fails while the connection runs.
