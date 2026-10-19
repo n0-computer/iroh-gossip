@@ -4955,25 +4955,30 @@ pub(crate) mod tests {
 
     /// A slow peer gets the payloads that its full queue dropped, once it catches up.
     ///
-    /// The queue to it is small and its windows are small, so a burst drops
-    /// payloads. A fast neighbor keeps the publisher from waiting, and forwards
-    /// nothing. We announce the dropped payloads to the slow peer again, and it
-    /// requests them.
+    /// A relays the broadcasts of C to B. The queue to B is small and B's
+    /// windows are small, so a burst drops payloads. A relays and publishes
+    /// nothing, so it never waits. A announces the dropped payloads to B again,
+    /// and B requests them.
     #[tokio::test(flavor = "multi_thread")]
     #[traced_test]
     async fn slow_peer_gets_the_dropped_messages() -> Result {
         let lookup = MemoryLookup::new();
         let small_queue = Gossip::builder().send_queue(QueueOptions::default().size(0));
-        let a = DirectNode::spawn(&lookup, small_queue, small_windows(16 * 1024)).await?;
+        let default = || QuicTransportConfig::builder().build();
+        let a = DirectNode::spawn(&lookup, small_queue, default()).await?;
         let b = DirectNode::spawn(&lookup, Gossip::builder(), small_windows(8 * 1024)).await?;
         let topic: TopicId = blake3::hash(b"slow peer").into();
-        let (a_tx, mut a_rx) = a.gossip.subscribe(topic, vec![]).await?.split();
-        let mut b_topic = b.gossip.subscribe_and_join(topic, vec![a.id()]).await?;
+        let (_a_tx, mut a_rx) = a.gossip.subscribe(topic, vec![]).await?.split();
+        let (_b_tx, mut b_rx) = b
+            .gossip
+            .subscribe_and_join(topic, vec![a.id()])
+            .await?
+            .split();
 
-        // C joins on its own connection, and reads every stream at once.
-        let c = direct_endpoint(&lookup, QuicTransportConfig::builder().build()).await?;
+        // C publishes on its own connection, and reads every stream of A at once.
+        let c = direct_endpoint(&lookup, default()).await?;
         let c_conn = c.connect(a.id(), GOSSIP_ALPN).await?;
-        let _join = open_stream(&c_conn, topic, &[join_message(topic, 0).message]).await?;
+        let mut publish = open_stream(&c_conn, topic, &[join_message(topic, 0).message]).await?;
         let reader = c_conn.clone();
         let _read = AbortOnDropHandle::new(spawn(async move {
             while let Ok(mut stream) = reader.accept_uni().await {
@@ -4991,17 +4996,32 @@ pub(crate) mod tests {
         .await
         .std_context("C did not become a neighbor")??;
 
-        // A burst of 150 drops at most 150 payloads, which the caps keep.
+        // B reads all along, so that its subscription does not lag. The channel
+        // holds more than all bursts.
+        let (got_tx, mut got_rx) = mpsc::channel(8192);
+        let _receive = AbortOnDropHandle::new(spawn(async move {
+            while let Ok(Some(event)) = b_rx.try_next().await {
+                if let api::Event::Received(message) = event {
+                    got_tx.send(message.content).await.ok();
+                }
+            }
+        }));
+
+        // A burst of 60 overflows the queue to B, which holds about 16 payloads.
         let metrics = a.gossip.metrics().clone();
         let mut sent = BTreeSet::new();
-        for burst in 0..20u32 {
-            for i in 0..150u32 {
-                let mut message = vec![7u8; 3000];
-                message.extend_from_slice(&burst.to_be_bytes());
-                message.extend_from_slice(&i.to_be_bytes());
-                let message = Bytes::from(message);
-                sent.insert(message.clone());
-                a_tx.broadcast(message).await?;
+        let mut buffer = Vec::new();
+        for burst in 0..40u32 {
+            for i in 0..60u32 {
+                let mut content = vec![7u8; 3000];
+                content.extend_from_slice(&burst.to_be_bytes());
+                content.extend_from_slice(&i.to_be_bytes());
+                let content = Bytes::from(content);
+                sent.insert(content.clone());
+                let message = TopicMessage::test_payload(content);
+                util::write_frame(&mut publish, &message, &mut buffer, TEST_FRAME_LIMIT)
+                    .await
+                    .std_context("publish")?;
             }
             if metrics.msgs_dropped.get() > 0 {
                 break;
@@ -5014,15 +5034,13 @@ pub(crate) mod tests {
         let mut received = BTreeSet::new();
         timeout(Duration::from_secs(25), async {
             while received.len() < sent.len() {
-                match b_topic.try_next().await? {
-                    Some(api::Event::Received(message)) => {
-                        received.insert(message.content);
+                match got_rx.recv().await {
+                    Some(content) => {
+                        received.insert(content);
                     }
-                    Some(_) => {}
-                    None => return Err(n0_error::anyerr!("the subscription ended")),
+                    None => break,
                 }
             }
-            Ok(())
         })
         .await
         .with_std_context(|_| {
@@ -5032,7 +5050,7 @@ pub(crate) mod tests {
                 sent.len(),
                 metrics.msgs_dropped.get()
             )
-        })??;
+        })?;
         assert_eq!(received, sent);
         Ok(())
     }

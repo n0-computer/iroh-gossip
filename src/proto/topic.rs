@@ -139,6 +139,11 @@ impl<PI> Message<PI> {
         Message::Gossip(plumtree::Message::test_gossip(len))
     }
 
+    /// Returns a payload with `content`, as its publisher sends it, for the network tests.
+    pub(crate) fn test_payload(content: Bytes) -> Self {
+        Message::Gossip(plumtree::Message::test_payload(content))
+    }
+
     /// Returns an `IHave` of one message, for the network tests.
     pub(crate) fn test_ihave() -> Self {
         Message::Gossip(plumtree::Message::test_ihave())
@@ -168,6 +173,7 @@ impl<PI> Message<PI> {
     }
 
     /// Returns `true` if this announces messages, which the peer can still request.
+    #[cfg(feature = "net")]
     pub(crate) fn is_announcement(&self) -> bool {
         matches!(self, Message::Gossip(plumtree::Message::IHave(_)))
     }

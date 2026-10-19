@@ -163,7 +163,11 @@ pub enum Message {
 impl Message {
     /// Returns a payload of `len` bytes, as an eager push sends it, for the network tests.
     pub(crate) fn test_gossip(len: usize) -> Self {
-        let content = Bytes::from(vec![7u8; len]);
+        Self::test_payload(Bytes::from(vec![7u8; len]))
+    }
+
+    /// Returns a payload with `content`, as its publisher sends it, for the network tests.
+    pub(crate) fn test_payload(content: Bytes) -> Self {
         Message::Gossip(Gossip {
             id: MessageId::from_content(&content),
             content,
