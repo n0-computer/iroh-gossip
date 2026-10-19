@@ -31,6 +31,7 @@ use tracing::{debug, error, error_span, trace, warn, Instrument};
 
 use self::{
     address_lookup::GossipAddressLookup,
+    queue::{Pushed, QueueLease, QueueSender, SharedReceiver},
     util::{RecvLoop, SendLoop, Timers},
 };
 use crate::{
@@ -40,13 +41,12 @@ use crate::{
 };
 
 mod address_lookup;
+mod queue;
 mod util;
 
 /// ALPN protocol name
 pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/1";
 
-/// Channel capacity for the send queue (one per connection)
-const SEND_QUEUE_CAP: usize = 64;
 /// Channel capacity for the ToActor message queue (single)
 const TO_ACTOR_CAP: usize = 64;
 /// Channel capacity for the InEvent message queue (single)
@@ -147,6 +147,7 @@ impl ProtocolHandler for Gossip {
 pub struct Builder {
     config: proto::Config,
     alpn: Option<Bytes>,
+    send_queue: QueueOptions,
 }
 
 impl Builder {
@@ -189,6 +190,12 @@ impl Builder {
         self
     }
 
+    /// Sets the options of the queue of messages to each peer.
+    pub fn send_queue(mut self, options: QueueOptions) -> Self {
+        self.send_queue = options;
+        self
+    }
+
     /// Spawn a gossip actor and get a handle for it
     pub fn spawn(self, endpoint: Endpoint) -> Gossip {
         let metrics = Arc::new(Metrics::default());
@@ -202,13 +209,15 @@ impl Builder {
         if let Ok(endpoint_addr_lookup) = endpoint.address_lookup().as_ref() {
             endpoint_addr_lookup.add(address_lookup.clone());
         }
-        let (actor, rpc_tx, local_tx) = Actor::new(
+        let (mut actor, rpc_tx, local_tx) = Actor::new(
             endpoint,
             self.config,
             metrics.clone(),
             self.alpn,
             address_lookup,
         );
+        actor.send_queue_size =
+            queue::queue_size(self.send_queue.size, actor.state.max_message_size());
         let me = actor.endpoint.id().fmt_short();
         let max_message_size = actor.state.max_message_size();
 
@@ -229,12 +238,73 @@ impl Builder {
     }
 }
 
+/// Options of the queue of messages to each peer, for [`Builder::send_queue`].
+///
+/// The queue bounds the bytes that wait to be sent to one peer. When it is
+/// full, a data message or announcement is lost, and we announce a lost
+/// broadcast again later. Any other control message closes the connection.
+/// [`Metrics::msgs_dropped`] and [`Metrics::peers_send_queue_full`] count both.
+///
+/// Known limits:
+///
+/// - **No backpressure.** A broadcast never waits for a peer. A burst larger
+///   than the queue and the QUIC windows loses messages, also on a fast link,
+///   and the repair recovers only part of them.
+/// - **Repair.** A lost broadcast is announced again only while it is cached,
+///   30 s by default. At most 256 per peer and 4096 per topic wait for it, and
+///   64 per peer go out per second. A message with neighbor scope is never
+///   repaired.
+/// - **One queue per peer.** All topics share it, so a busy topic can crowd
+///   out the data of another. Control waits behind the data queued before it.
+/// - **Age.** The queue bounds bytes, not time. QUIC buffers more on top: at
+///   1 Mbit/s, data can arrive 30-40 s after it was sent.
+/// - **Order across streams.** We write the messages to a peer in order, but
+///   the peer reads each stream on its own. It may handle a `Join` before a
+///   `Disconnect` that we sent earlier, and then drop a neighbor that just
+///   joined. A restarted peer may get the last messages for its former run.
+/// - **Stream limit.** Each topic on which we sent a peer anything keeps a
+///   stream open. Over the limit of concurrent streams of the peer, 100 by
+///   default, the connection closes after 15 s, and again after each rejoin.
+/// - **Closes.** A control message that does not fit, a write without
+///   progress for 60 s, and a stream open that waits for 15 s close the
+///   connection. A node up to version 0.101 may then lose its later messages
+///   to us, if the connection was no neighbor link on its side.
+/// - **Handover.** A control message that does not fit while a replaced
+///   connection still writes its last message closes the new connection, not
+///   the old one.
+///
+/// Ignored tests show the order, the stream limit and the handover.
+#[derive(Debug, Clone, Copy)]
+pub struct QueueOptions {
+    size: usize,
+}
+
+impl Default for QueueOptions {
+    fn default() -> Self {
+        Self {
+            size: queue::QUEUE_SIZE,
+        }
+    }
+}
+
+impl QueueOptions {
+    /// Sets the size of the queue in bytes, 1 MiB by default.
+    ///
+    /// A message takes its encoded size and about a hundred bytes more. The queue is
+    /// at least 64 KiB, and fits eight messages of [`Builder::max_message_size`].
+    pub fn size(mut self, size: usize) -> Self {
+        self.size = size;
+        self
+    }
+}
+
 impl Gossip {
     /// Creates a default `Builder`, with the endpoint set.
     pub fn builder() -> Builder {
         Builder {
             config: Default::default(),
             alpn: None,
+            send_queue: Default::default(),
         }
     }
 
@@ -323,6 +393,10 @@ struct Actor {
     metrics: Arc<Metrics>,
     topic_event_forwarders: JoinSet<TopicId>,
     address_lookup: GossipAddressLookup,
+    /// The size of the queue to each peer, see [`QueueOptions::size`].
+    send_queue_size: usize,
+    /// Events that the handling of an event caused, handled after it.
+    follow_ups: VecDeque<InEvent>,
 }
 
 impl Actor {
@@ -345,6 +419,7 @@ impl Actor {
             config,
             rand::rngs::StdRng::from_rng(&mut rand::rng()),
         );
+        let send_queue_size = queue::queue_size(queue::QUEUE_SIZE, state.max_message_size());
         let (rpc_tx, rpc_rx) = mpsc::channel(TO_ACTOR_CAP);
         let (local_tx, local_rx) = mpsc::channel(16);
         let (in_event_tx, in_event_rx) = mpsc::channel(IN_EVENT_CAP);
@@ -369,13 +444,15 @@ impl Actor {
             local_rx,
             topic_event_forwarders: Default::default(),
             address_lookup,
+            send_queue_size,
+            follow_ups: Default::default(),
         };
 
         (actor, rpc_tx, local_tx)
     }
 
     pub async fn run(mut self) {
-        let mut addr_update_stream = self.setup().await;
+        let mut addr_update_stream = self.setup();
 
         let mut i = 0;
         while self.event_loop(&mut addr_update_stream, i).await {
@@ -384,12 +461,12 @@ impl Actor {
     }
 
     /// Handles a message from the [`Gossip`] handle, and returns `false` to stop the actor.
-    async fn handle_local_message(&mut self, msg: Option<LocalActorMessage>) -> bool {
+    fn handle_local_message(&mut self, msg: Option<LocalActorMessage>) -> bool {
         match msg {
             Some(LocalActorMessage::Shutdown { reply }) => {
                 debug!("received shutdown message, quit all topics");
                 self.quit_queue.extend(self.topics.keys().copied());
-                self.process_quit_queue().await;
+                self.process_quit_queue();
                 debug!("all topics quit, stop gossip actor");
                 reply.send(()).ok();
                 false
@@ -409,10 +486,10 @@ impl Actor {
     ///
     /// This updates our current address and return it. It also returns the home relay stream and
     /// direct addr stream.
-    async fn setup(&mut self) -> impl Stream<Item = EndpointAddr> + Send + Unpin + use<> {
+    fn setup(&mut self) -> impl Stream<Item = EndpointAddr> + Send + Unpin + use<> {
         let addr_update_stream = self.endpoint.watch_addr().stream();
         let initial_addr = self.endpoint.addr();
-        self.handle_addr_update(initial_addr).await;
+        self.handle_addr_update(initial_addr);
         addr_update_stream
     }
 
@@ -429,7 +506,7 @@ impl Actor {
         // queued before it. Each tick still runs the select below, so local messages
         // starve no other branch.
         if let Ok(msg) = self.local_rx.try_recv() {
-            if !self.handle_local_message(Some(msg)).await {
+            if !self.handle_local_message(Some(msg)) {
                 return false;
             }
         }
@@ -437,7 +514,7 @@ impl Actor {
         // branches after it, such as received messages, timers and closed connections.
         tokio::select! {
             msg = self.local_rx.recv() => {
-                if !self.handle_local_message(msg).await {
+                if !self.handle_local_message(msg) {
                     return false;
                 }
             }
@@ -456,12 +533,12 @@ impl Actor {
             },
             Some((key, (topic, command))) = self.command_rx.next(), if !self.command_rx.is_empty() => {
                 trace!(?i, "tick: command_rx");
-                self.handle_command(topic, key, command).await;
+                self.handle_command(topic, key, command);
             },
             Some(new_address) = addr_updates.next() => {
                 trace!(?i, "tick: new_address");
                 self.metrics.actor_tick_endpoint.inc();
-                self.handle_addr_update(new_address).await;
+                self.handle_addr_update(new_address);
             }
             (peer_id, res) = self.dialer.next_conn() => {
                 trace!(?i, "tick: dialer");
@@ -478,8 +555,7 @@ impl Actor {
                         let peer_state = self.peers.get(&peer_id);
                         let is_active = matches!(peer_state, Some(PeerState::Active { .. }));
                         if !is_active {
-                            self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
-                                .await;
+                            self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now());
                         }
                     }
                     None => {
@@ -492,14 +568,14 @@ impl Actor {
                 trace!(?i, "tick: in_event_rx");
                 self.metrics.actor_tick_in_event_rx.inc();
                 let event = event.expect("unreachable: in_event_tx is never dropped before receiver");
-                self.handle_in_event(event, Instant::now()).await;
+                self.handle_in_event(event, Instant::now());
             }
             _ = self.timers.wait_next() => {
                 trace!(?i, "tick: timers");
                 self.metrics.actor_tick_timers.inc();
                 let now = Instant::now();
                 while let Some((_instant, timer)) = self.timers.pop_before(now) {
-                    self.handle_in_event(InEvent::TimerExpired(timer), now).await;
+                    self.handle_in_event(InEvent::TimerExpired(timer), now);
                 }
             }
             Some(res) = self.connection_tasks.join_next(), if !self.connection_tasks.is_empty() => {
@@ -508,7 +584,7 @@ impl Actor {
                     debug!("connection task cancelled, the runtime shuts down");
                     return false;
                 };
-                self.handle_connection_task_finished(peer_id, conn, result).await;
+                self.handle_connection_task_finished(peer_id, conn, result);
             }
             Some(res) = self.topic_event_forwarders.join_next(), if !self.topic_event_forwarders.is_empty() => {
                 let Some(topic_id) = task_output(res) else {
@@ -518,7 +594,7 @@ impl Actor {
                 if let Some(state) = self.topics.get_mut(&topic_id) {
                     if !state.still_needed() {
                         self.quit_queue.push_back(topic_id);
-                        self.process_quit_queue().await;
+                        self.process_quit_queue();
                     }
                 }
             }
@@ -527,19 +603,13 @@ impl Actor {
         true
     }
 
-    async fn handle_addr_update(&mut self, endpoint_addr: EndpointAddr) {
+    fn handle_addr_update(&mut self, endpoint_addr: EndpointAddr) {
         // let peer_data = our_peer_data(&self.endpoint, current_addresses);
         let peer_data = encode_peer_data(&endpoint_addr.into());
-        self.handle_in_event(InEvent::UpdatePeerData(peer_data), Instant::now())
-            .await
+        self.handle_in_event(InEvent::UpdatePeerData(peer_data), Instant::now());
     }
 
-    async fn handle_command(
-        &mut self,
-        topic: TopicId,
-        key: stream_group::Key,
-        command: Option<Command>,
-    ) {
+    fn handle_command(&mut self, topic: TopicId, key: stream_group::Key, command: Option<Command>) {
         debug!(?topic, ?key, ?command, "handle command");
         let Some(state) = self.topics.get_mut(&topic) else {
             // TODO: unreachable?
@@ -555,45 +625,45 @@ impl Actor {
                     }
                     Command::JoinPeers(peers) => ProtoCommand::Join(peers),
                 };
-                self.handle_in_event(proto::InEvent::Command(topic, command), Instant::now())
-                    .await;
+                self.handle_in_event(proto::InEvent::Command(topic, command), Instant::now());
             }
             None => {
                 state.command_rx_keys.remove(&key);
                 if !state.still_needed() {
                     self.quit_queue.push_back(topic);
-                    self.process_quit_queue().await;
+                    self.process_quit_queue();
                 }
             }
         }
     }
 
     fn handle_connection(&mut self, peer_id: EndpointId, origin: ConnOrigin, conn: Connection) {
-        let (send_tx, send_rx) = mpsc::channel(SEND_QUEUE_CAP);
-        let conn_id = conn.stable_id();
-
         let dial = origin == ConnOrigin::Dial;
-        let dropped = matches!(self.peers.get(&peer_id), Some(PeerState::Dropped { .. }));
+        // Our dial for a peer that we dropped while we dialed it.
+        let dropped_dial = matches!(
+            self.peers.get(&peer_id),
+            Some(PeerState::Dropped { conn: None, .. })
+        );
         // We dropped the peer, or the peer's connection took over after a drop.
         let stale_dial = dial
             && match self.peers.get_mut(&peer_id) {
-                None => true,
+                None | Some(PeerState::Dropped { conn: Some(_), .. }) => true,
                 Some(PeerState::Active { stale_dial, .. }) => std::mem::take(stale_dial),
                 Some(_) => false,
             };
-        let queue = if stale_dial {
+        let lease = if stale_dial {
             debug!(peer = %peer_id.fmt_short(), "dial completed after the peer was dropped, close it");
-            drop(send_tx);
-            Vec::new()
+            // The sender drops at once, so the send loop ends.
+            SendQueue::new(0).lease()
         } else {
-            let state = self.peers.entry(peer_id).or_default();
-            let queue = state.accept_conn(send_tx, conn_id, dropped);
+            let lease = PeerState::get_or_pending(&mut self.peers, peer_id, self.send_queue_size)
+                .accept_conn(conn.clone(), dropped_dial);
             // The queue goes out, then the connection closes. A connection the peer
             // opened stays, as the peer is about to use it.
-            if dropped && dial {
-                self.peers.remove(&peer_id);
+            if dropped_dial && dial {
+                disconnect_peer(&mut self.peers, peer_id);
             }
-            queue
+            lease
         };
         // A stale dial follows the flag too. The peer may take it as its active
         // connection, and we may want the peer again.
@@ -619,10 +689,9 @@ impl Actor {
                     peer_id,
                     conn.clone(),
                     origin,
-                    send_rx,
+                    lease,
                     in_event_tx,
                     max_message_size,
-                    queue,
                     wanted,
                     handles_close,
                 )
@@ -644,7 +713,7 @@ impl Actor {
     }
 
     #[tracing::instrument(name = "conn", skip_all, fields(peer = %peer_id.fmt_short()))]
-    async fn handle_connection_task_finished(
+    fn handle_connection_task_finished(
         &mut self,
         peer_id: EndpointId,
         conn: Connection,
@@ -657,7 +726,7 @@ impl Actor {
             let Ok(event) = self.in_event_rx.try_recv() else {
                 break;
             };
-            self.handle_in_event(event, Instant::now()).await;
+            self.handle_in_event(event, Instant::now());
         }
         if self
             .wanted
@@ -679,22 +748,25 @@ impl Actor {
         let reason = conn.close_reason().expect("closed by its task");
         let error = task_result.err();
         debug!(%reason, ?error, "connection closed");
-        if let Some(PeerState::Active {
-            active_conn_id,
-            other_conns,
-            ..
-        }) = self.peers.get_mut(&peer_id)
-        {
-            if conn.stable_id() == *active_conn_id {
-                debug!("active send connection closed, mark peer as disconnected");
-                self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
-                    .await;
-            } else {
-                other_conns.retain(|x| *x != conn.stable_id());
-                debug!("remaining {} other connections", other_conns.len() + 1);
+        match self.peers.get_mut(&peer_id) {
+            Some(PeerState::Active {
+                active_conn,
+                other_conns,
+                ..
+            }) => {
+                if conn.stable_id() == active_conn.stable_id() {
+                    debug!("active send connection closed, mark peer as disconnected");
+                    self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now());
+                } else {
+                    other_conns.retain(|x| *x != conn.stable_id());
+                    debug!("remaining {} other connections", other_conns.len() + 1);
+                }
             }
-        } else {
-            debug!("peer already marked as disconnected");
+            // The connection that wrote the queue of a dropped peer is gone, and the queue with it.
+            Some(PeerState::Dropped { conn: Some(id), .. }) if *id == conn.stable_id() => {
+                self.peers.remove(&peer_id);
+            }
+            _ => debug!("peer already marked as disconnected"),
         }
     }
 
@@ -747,8 +819,7 @@ impl Actor {
                         ProtoCommand::Join(bootstrap.into_iter().collect()),
                     ),
                     now,
-                )
-                .await;
+                );
             }
             RpcMessage::MaxContentSize(msg) => {
                 let max_message_size = self.state.max_message_size();
@@ -758,25 +829,32 @@ impl Actor {
         }
     }
 
-    async fn handle_in_event(&mut self, event: InEvent, now: Instant) {
-        self.handle_in_event_inner(event, now).await;
-        self.process_quit_queue().await;
+    fn handle_in_event(&mut self, event: InEvent, now: Instant) {
+        self.handle_in_event_inner(event, now);
+        self.process_quit_queue();
     }
 
-    async fn process_quit_queue(&mut self) {
+    fn process_quit_queue(&mut self) {
         while let Some(topic_id) = self.quit_queue.pop_front() {
             self.handle_in_event_inner(
                 InEvent::Command(topic_id, ProtoCommand::Quit),
                 Instant::now(),
-            )
-            .await;
+            );
             if self.topics.remove(&topic_id).is_some() {
                 tracing::debug!(%topic_id, "publishers and subscribers gone; unsubscribing");
             }
         }
     }
 
-    async fn handle_in_event_inner(&mut self, event: InEvent, now: Instant) {
+    fn handle_in_event_inner(&mut self, event: InEvent, now: Instant) {
+        self.handle_proto_event(event, now);
+        while let Some(event) = self.follow_ups.pop_front() {
+            self.handle_proto_event(event, now);
+        }
+    }
+
+    /// Handles one event of the protocol, and queues the events it causes in [`Self::follow_ups`].
+    fn handle_proto_event(&mut self, event: InEvent, now: Instant) {
         // Drop the state first, so that a message the event causes dials anew.
         if let InEvent::PeerDisconnected(peer) = &event {
             self.peers.remove(peer);
@@ -801,30 +879,33 @@ impl Actor {
             match event {
                 OutEvent::SendMessage(peer_id, message) => {
                     touched.push(peer_id);
-                    let state = self.peers.entry(peer_id).or_default();
-                    // The protocol wants the peer again. The running dial delivers the queue.
-                    if let PeerState::Dropped { queue } = state {
-                        *state = PeerState::Pending {
-                            queue: std::mem::take(queue),
-                        };
-                    }
-                    match state {
-                        PeerState::Active { active_send_tx, .. } => {
-                            if let Err(_err) = active_send_tx.send(message).await {
-                                // Removing the peer is handled by the in_event PeerDisconnected sent
-                                // in [`Self::handle_connection_task_finished`].
-                                warn!(
-                                    peer = %peer_id.fmt_short(),
-                                    "failed to send: connection task send loop terminated",
-                                );
-                            }
-                        }
-                        PeerState::Pending { queue } | PeerState::Dropped { queue } => {
-                            if queue.is_empty() {
+                    let state =
+                        PeerState::get_or_pending(&mut self.peers, peer_id, self.send_queue_size);
+                    state.revive();
+                    // Waiting for room would stop the actor, and with it every
+                    // topic, for as long as this one peer does not read.
+                    let pushed = match state {
+                        PeerState::Active { queue, .. } => queue.send_tx.push(message),
+                        PeerState::Pending { queue } | PeerState::Dropped { queue, .. } => {
+                            // `revive` made a dropped peer pending.
+                            if !self.dialer.is_pending(peer_id) {
                                 debug!(peer = %peer_id.fmt_short(), "start to dial");
                                 self.dialer.queue_dial(peer_id, self.alpn.clone());
                             }
-                            queue.push(message);
+                            queue.send_tx.push(message)
+                        }
+                    };
+                    match pushed {
+                        Pushed::Queued => {}
+                        Pushed::Dropped(message) => {
+                            trace!(peer = %peer_id.fmt_short(), "send queue full, drop the message");
+                            self.metrics.msgs_dropped.inc();
+                            self.follow_ups
+                                .push_back(InEvent::SendDropped(peer_id, message));
+                        }
+                        Pushed::Overflow => {
+                            fail_peer(&mut self.peers, &mut self.follow_ups, peer_id);
+                            self.metrics.peers_send_queue_full.inc();
                         }
                     }
                 }
@@ -888,35 +969,66 @@ impl Actor {
     }
 }
 
+/// Drops a peer whose queue had no room for a control message.
+///
+/// The topics cannot work with a peer that misses a control message. The
+/// protocol learns it at once, and no writer sends the queue with the gap.
+/// A later message to the peer starts a new queue and a new dial.
+fn fail_peer(
+    peers: &mut HashMap<EndpointId, PeerState>,
+    follow_ups: &mut VecDeque<InEvent>,
+    peer_id: EndpointId,
+) {
+    let Some(mut state) = peers.remove(&peer_id) else {
+        return;
+    };
+    warn!(peer = %peer_id.fmt_short(), "send queue full with a control message, drop the peer");
+    state.queue_mut().revoke.cancel();
+    if let PeerState::Active { active_conn, .. } = state {
+        // An old node may lose its later messages to us, see
+        // `StreamHeader::handles_close`, but it cannot work with us anyway.
+        active_conn.close(CLOSE_QUEUE_FULL.into(), b"send queue full");
+    }
+    follow_ups.push_back(InEvent::PeerDisconnected(peer_id));
+}
+
+/// The code of a close for a peer whose send queue had no room for a control message.
+const CLOSE_QUEUE_FULL: u32 = 2;
+
 type ConnId = usize;
 
 #[derive(Debug)]
 enum PeerState {
     Pending {
-        queue: Vec<ProtoMessage>,
+        queue: SendQueue,
     },
-    /// The protocol dropped the peer while we dialed it. The queue still goes out.
+    /// The protocol dropped the peer. The queue still goes out, and then closes.
     Dropped {
-        queue: Vec<ProtoMessage>,
+        queue: SendQueue,
+        /// The connection that writes the queue, or `None` for our dial.
+        conn: Option<ConnId>,
     },
     Active {
-        active_send_tx: mpsc::Sender<ProtoMessage>,
-        active_conn_id: ConnId,
+        queue: SendQueue,
+        /// The connection that we send on.
+        active_conn: Connection,
         other_conns: Vec<ConnId>,
         /// Whether our running dial is for a peer we dropped, so it must not replace this one.
         stale_dial: bool,
     },
 }
 
-/// Drops the peer's state, which ends the send loops of its connections.
+/// The queue of messages to a peer, which its connections take in turn.
 ///
-/// A dial in progress keeps the queue, which goes out once it connects.
-fn disconnect_peer(peers: &mut HashMap<EndpointId, PeerState>, peer_id: EndpointId) {
-    if let Some(PeerState::Pending { queue } | PeerState::Dropped { queue }) =
-        peers.remove(&peer_id)
-    {
-        peers.insert(peer_id, PeerState::Dropped { queue });
-    }
+/// It lives as long as we know the peer, also while we drop it. A writer may
+/// still drain an older queue for a short time after a failure, so the bytes
+/// to a peer can briefly reach two queues.
+#[derive(Debug)]
+struct SendQueue {
+    send_tx: QueueSender,
+    send_rx: SharedReceiver,
+    /// Revokes the lease of the connection that writes the queue now.
+    revoke: CancellationToken,
 }
 
 /// Whether a peer sent [`util::StreamHeader::handles_close`], shared by its connections.
@@ -936,48 +1048,123 @@ impl Default for CloseFlag {
     }
 }
 
-impl PeerState {
-    /// Sends on the new connection from now on, and returns its queue.
-    fn accept_conn(
-        &mut self,
-        send_tx: mpsc::Sender<ProtoMessage>,
-        conn_id: ConnId,
-        stale_dial: bool,
-    ) -> Vec<ProtoMessage> {
-        match self {
-            PeerState::Pending { queue } | PeerState::Dropped { queue } => {
-                let queue = std::mem::take(queue);
-                *self = PeerState::Active {
-                    active_send_tx: send_tx,
-                    active_conn_id: conn_id,
-                    other_conns: Vec::new(),
-                    stale_dial,
-                };
-                queue
-            }
-            PeerState::Active {
-                active_send_tx,
-                active_conn_id,
-                other_conns,
-                ..
-            } => {
-                // We already have an active connection. We keep the old connection intact,
-                // but only use the new connection for sending from now on.
-                // By dropping the `send_tx` of the old connection, the send loop part of
-                // the `connection_loop` of the old connection will terminate, which will also
-                // notify the peer that the old connection may be dropped.
-                other_conns.push(*active_conn_id);
-                *active_send_tx = send_tx;
-                *active_conn_id = conn_id;
-                Vec::new()
-            }
+impl SendQueue {
+    fn new(size: usize) -> Self {
+        let (send_tx, send_rx) = QueueSender::new(size);
+        Self {
+            send_tx,
+            send_rx,
+            revoke: Default::default(),
+        }
+    }
+
+    /// Revokes the lease of the connection that writes the queue, and returns one for the next.
+    fn lease(&mut self) -> QueueLease {
+        self.revoke.cancel();
+        self.revoke = CancellationToken::new();
+        QueueLease {
+            queue: self.send_rx.clone(),
+            revoked: self.revoke.clone(),
         }
     }
 }
 
-impl Default for PeerState {
+impl Default for SendQueue {
+    /// Returns a queue without room, which only takes the place of a queue moved out.
     fn default() -> Self {
-        PeerState::Pending { queue: Vec::new() }
+        Self::new(0)
+    }
+}
+
+/// Drops the peer's state, but not its queue.
+///
+/// The queue goes out on our dial or on the active connection, and then
+/// closes. If we want the peer again, its new messages follow in the same
+/// queue.
+fn disconnect_peer(peers: &mut HashMap<EndpointId, PeerState>, peer_id: EndpointId) {
+    let dropped = match peers.remove(&peer_id) {
+        None => return,
+        Some(PeerState::Pending { queue }) => PeerState::Dropped { queue, conn: None },
+        Some(dropped @ PeerState::Dropped { .. }) => dropped,
+        Some(PeerState::Active {
+            queue, active_conn, ..
+        }) => PeerState::Dropped {
+            queue,
+            conn: Some(active_conn.stable_id()),
+        },
+    };
+    let state = peers.entry(peer_id).insert_entry(dropped).into_mut();
+    state.queue_mut().send_tx.set_closing(true);
+}
+
+impl PeerState {
+    /// Returns the state of `peer_id`, and a pending one with a queue of `size` bytes if it has none.
+    fn get_or_pending(
+        peers: &mut HashMap<EndpointId, PeerState>,
+        peer_id: EndpointId,
+        size: usize,
+    ) -> &mut Self {
+        peers.entry(peer_id).or_insert_with(|| Self::pending(size))
+    }
+
+    /// Returns the state of a peer that we start to dial, with a queue of `size` bytes.
+    fn pending(size: usize) -> Self {
+        PeerState::Pending {
+            queue: SendQueue::new(size),
+        }
+    }
+
+    /// Wants a dropped peer again, whose new messages follow the old ones in its queue.
+    ///
+    /// A running dial or connection delivers the queue.
+    fn revive(&mut self) {
+        if let PeerState::Dropped { queue, .. } = self {
+            queue.send_tx.set_closing(false);
+            *self = PeerState::Pending {
+                queue: std::mem::take(queue),
+            };
+        }
+    }
+
+    /// Returns the queue of the peer.
+    fn queue_mut(&mut self) -> &mut SendQueue {
+        match self {
+            PeerState::Pending { queue }
+            | PeerState::Dropped { queue, .. }
+            | PeerState::Active { queue, .. } => queue,
+        }
+    }
+
+    /// Sends on the new connection from now on, and returns its lease on the queue.
+    ///
+    /// The writer of the old connection stops after its current message, and
+    /// finishes its streams. The new connection then takes the rest of the queue.
+    fn accept_conn(&mut self, conn: Connection, stale_dial: bool) -> QueueLease {
+        match self {
+            PeerState::Pending { queue } | PeerState::Dropped { queue, .. } => {
+                let mut queue = std::mem::take(queue);
+                queue.send_tx.set_closing(false);
+                let lease = queue.lease();
+                *self = PeerState::Active {
+                    queue,
+                    active_conn: conn,
+                    other_conns: Vec::new(),
+                    stale_dial,
+                };
+                lease
+            }
+            PeerState::Active {
+                queue,
+                active_conn,
+                other_conns,
+                ..
+            } => {
+                // We keep the old connection intact, as the peer may still send on it.
+                other_conns.push(active_conn.stable_id());
+                *active_conn = conn;
+                queue.lease()
+            }
+        }
     }
 }
 
@@ -1113,20 +1300,19 @@ async fn connection_loop(
     from: PublicKey,
     conn: Connection,
     origin: ConnOrigin,
-    send_rx: mpsc::Receiver<ProtoMessage>,
+    lease: QueueLease,
     in_event_tx: mpsc::Sender<InEvent>,
     max_message_size: usize,
-    queue: Vec<ProtoMessage>,
     wanted: watch::Receiver<bool>,
     (handles_close, mut handles_close_rx): (watch::Sender<bool>, watch::Receiver<bool>),
 ) -> Result<(), ConnectionLoopError> {
     debug!(?origin, "connection established");
 
-    let mut send_loop = SendLoop::new(conn.clone(), send_rx, max_message_size);
+    let send_loop = SendLoop::new(conn.clone(), lease, max_message_size);
     let sending = send_loop.sending();
     let mut recv_loop = RecvLoop::new(from, conn, in_event_tx, max_message_size, handles_close);
 
-    let send_fut = send_loop.run(queue).instrument(error_span!("send"));
+    let send_fut = send_loop.run().instrument(error_span!("send"));
     let recv_fut = recv_loop.run().instrument(error_span!("recv"));
     let loops = async {
         tokio::pin!(send_fut, recv_fut);
@@ -1332,7 +1518,7 @@ pub(crate) mod tests {
     use futures_concurrency::future::TryJoin;
     use iroh::{
         address_lookup::memory::MemoryLookup,
-        endpoint::{presets, BindError},
+        endpoint::{presets, BindError, QuicTransportConfig, VarInt},
         protocol::Router,
         tls::CaTlsConfig,
         RelayMap, RelayMode, SecretKey,
@@ -1371,7 +1557,7 @@ pub(crate) mod tests {
     impl ManualActorLoop {
         #[instrument(skip_all, fields(me = %actor.endpoint.id().fmt_short()))]
         async fn new(mut actor: Actor) -> Self {
-            let _ = actor.setup().await;
+            let _ = actor.setup();
             Self { actor, step: 0 }
         }
 
@@ -2073,17 +2259,12 @@ pub(crate) mod tests {
     async fn failed_retired_dial_releases_its_queue() -> Result {
         let mut actor = t_actor().await?;
         let peer = SecretKey::generate().public();
-        actor.peers.insert(
-            peer,
-            PeerState::Pending {
-                queue: vec![join_message([1; 32].into(), 0)],
-            },
-        );
+        actor
+            .peers
+            .insert(peer, pending_with(vec![join_message([1; 32].into(), 0)]));
         disconnect_peer(&mut actor.peers, peer);
         // A failed dial of a peer that is not active reports it gone.
-        actor
-            .handle_in_event(InEvent::PeerDisconnected(peer), Instant::now())
-            .await;
+        actor.handle_in_event(InEvent::PeerDisconnected(peer), Instant::now());
         assert!(!actor.peers.contains_key(&peer));
         Ok(())
     }
@@ -2259,6 +2440,201 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// Pushes `count` payloads of `len` bytes for `topic` into a large queue.
+    fn queue_payloads(topic: TopicId, count: usize, len: usize) -> SharedReceiver {
+        let (queue, send_rx) = QueueSender::new(64 << 20);
+        for _ in 0..count {
+            let message = ProtoMessage {
+                topic,
+                message: TopicMessage::test_gossip(len),
+            };
+            assert!(matches!(queue.push(message), Pushed::Queued));
+        }
+        send_rx
+    }
+
+    /// A write that makes no progress for the write timeout closes the connection.
+    ///
+    /// The peer never reads, so flow control blocks every write once the
+    /// receive window is full. The writer waited for good.
+    #[tokio::test]
+    #[traced_test]
+    async fn stalled_write_closes_the_connection() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let topic: TopicId = blake3::hash(b"stalled").into();
+        // More than the windows of the peer, which reads nothing.
+        let send_rx = queue_payloads(topic, 200, 60_000);
+        let send_loop = SendLoop::new(conn, lease(send_rx), TEST_FRAME_LIMIT);
+        let result = timeout(util::WRITE_TIMEOUT * 5, send_loop.run())
+            .await
+            .std_context("the writer waited for good")?;
+        assert!(
+            matches!(result, Err(util::WriteError::Stalled { .. })),
+            "{result:?}"
+        );
+        timeout(Duration::from_secs(2), peer_conn.closed())
+            .await
+            .std_context("the connection to the stalled peer stayed open")?;
+        Ok(())
+    }
+
+    /// A peer that reads one frame slower than the write timeout keeps the connection.
+    ///
+    /// The timeout counts the time without progress, not the time of a frame.
+    #[tokio::test]
+    #[traced_test]
+    async fn slow_reader_keeps_the_connection() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let topic: TopicId = blake3::hash(b"slow").into();
+        // At 64 KiB per 300 ms, the frame takes about 9 s.
+        let (count, len) = (1, 2_000_000);
+        let send_rx = queue_payloads(topic, count, len);
+        let send_loop = SendLoop::new(conn, lease(send_rx), 4 << 20);
+        let send = AbortOnDropHandle::new(spawn(async move { send_loop.run().await }));
+
+        let start = Instant::now();
+        let mut stream = peer_conn.accept_uni().await.std_context("accept")?;
+        let mut chunk = vec![0u8; 64 * 1024];
+        let mut read = 0;
+        while read < count * len {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            read += stream
+                .read(&mut chunk)
+                .await
+                .std_context("read")?
+                .std_context("the stream ended early")?;
+        }
+        assert!(
+            start.elapsed() > util::WRITE_TIMEOUT,
+            "the reader was not slow"
+        );
+        let result = timeout(Duration::from_secs(5), send)
+            .await
+            .std_context("the writer did not end")?
+            .std_context("send task")?;
+        assert!(result.is_ok(), "{result:?}");
+        Ok(())
+    }
+
+    /// A peer at its stream limit loses the connection after the open timeout.
+    ///
+    /// It accepts no stream, so no stream of ours ends, and the peer never
+    /// raises its stream limit.
+    #[tokio::test]
+    #[traced_test]
+    async fn stream_limit_closes_the_connection() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let (queue, send_rx) = QueueSender::new(64 << 20);
+        for i in 0..1000u32 {
+            let topic: TopicId = blake3::hash(&i.to_be_bytes()).into();
+            assert!(matches!(queue.push(join_message(topic, 0)), Pushed::Queued));
+        }
+        let send_loop = SendLoop::new(conn, lease(send_rx), TEST_FRAME_LIMIT);
+        let result = timeout(util::OPEN_TIMEOUT * 5, send_loop.run())
+            .await
+            .std_context("the writer waited for good")?;
+        assert!(
+            matches!(result, Err(util::WriteError::OpenStalled { .. })),
+            "{result:?}"
+        );
+        timeout(Duration::from_secs(2), peer_conn.closed())
+            .await
+            .std_context("the connection stayed open")?;
+        Ok(())
+    }
+
+    /// A peer whose queue has no room for a control message loses its connection (#47).
+    ///
+    /// The actor waited for room in the queue of a peer that did not read. While it
+    /// waited, no topic made progress, no timer fired, and the peer stayed.
+    #[tokio::test]
+    #[traced_test]
+    async fn full_control_queue_fails_the_peer_without_waiting() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let peer = pair.ep2.id();
+        let mut actor = t_actor().await?;
+        // Nothing takes from this queue, as from that of a peer that does not read.
+        let mut state = PeerState::pending(queue::MIN_QUEUE_SIZE);
+        let _queue = state.accept_conn(conn, false);
+        actor.peers.insert(peer, state);
+
+        join_until_full(&mut actor, peer);
+        assert_eq!(actor.metrics.peers_send_queue_full.get(), 1);
+        // More control messages to the closing connection fail nothing new.
+        let topic: TopicId = blake3::hash(b"one more").into();
+        let join = InEvent::Command(topic, ProtoCommand::Join(vec![peer]));
+        actor.handle_in_event(join, Instant::now());
+        assert_eq!(actor.metrics.peers_send_queue_full.get(), 1);
+        timeout(Duration::from_secs(2), peer_conn.closed())
+            .await
+            .std_context("the connection to the full peer stayed open")?;
+        Ok(())
+    }
+
+    /// A control overflow during a handover closes the stuck old connection, not the new one (known limit).
+    ///
+    /// The old connection does not read, so its writer keeps the queue for up
+    /// to the handover limit, and control fills the queue meanwhile. Today the
+    /// overflow closes the active connection, which is the new and healthy one.
+    #[tokio::test(flavor = "current_thread")]
+    #[traced_test]
+    #[ignore = "known limit: see the known limits of QueueOptions"]
+    async fn overflow_during_a_handover_keeps_the_new_connection() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (old, peer_old) = pair.connect().await?;
+        let (new, peer_new) = pair.connect().await?;
+        let peer = pair.ep2.id();
+        let topic: TopicId = blake3::hash(b"overflow during a handover").into();
+        let mut actor = t_actor().await?;
+        actor.send_queue_size = 8 << 20;
+        actor.handle_connection(peer, ConnOrigin::Accept, old);
+        for _ in 0..1000 {
+            let message = ProtoMessage {
+                topic,
+                message: TopicMessage::test_gossip(3000),
+            };
+            push_active(&actor, peer, message);
+        }
+        // Wait until flow control blocks the old writer.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        actor.handle_connection(peer, ConnOrigin::Accept, new);
+
+        // Large joins fill the queue before a writer runs again: nothing awaits.
+        let data = PeerData::new(vec![0u8; 2000]);
+        actor.handle_in_event(InEvent::UpdatePeerData(data), Instant::now());
+        join_until_full(&mut actor, peer);
+        assert_eq!(actor.metrics.peers_send_queue_full.get(), 1, "no overflow");
+        timeout(Duration::from_secs(2), peer_old.closed())
+            .await
+            .std_context("the stuck old connection stayed open")?;
+        assert!(
+            peer_new.close_reason().is_none(),
+            "the new connection closed"
+        );
+        Ok(())
+    }
+
+    /// A peer whose queue fills during the dial goes down, and its queue with it.
+    #[tokio::test]
+    #[traced_test]
+    async fn full_queue_during_the_dial_drops_the_peer() -> Result {
+        let mut actor = t_actor().await?;
+        actor.send_queue_size = queue::MIN_QUEUE_SIZE;
+        // The endpoint has no address for the peer, so the dial does not connect soon.
+        let peer = SecretKey::generate().public();
+        join_until_full(&mut actor, peer);
+        assert_eq!(actor.metrics.peers_send_queue_full.get(), 1);
+        assert!(
+            !actor.state.uses_peer(&peer),
+            "the protocol still uses the dropped peer"
+        );
+        Ok(())
+    }
+
     /// An inbound connection that no topic uses closes, even with a partial header.
     #[tokio::test]
     #[traced_test]
@@ -2286,22 +2662,366 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// A send loop that ended closes its receiver, so that sends to it fail.
+    /// A send loop whose connection closed lets go of the queue, for another connection of the peer.
     #[tokio::test]
     #[traced_test]
-    async fn completed_send_loop_closes_its_retained_receiver() -> Result {
+    async fn closed_send_loop_lets_go_of_the_queue() -> Result {
         let pair = TestPair::new(1).await?;
         let (conn, peer_conn) = pair.connect().await?;
-        let (tx, rx) = mpsc::channel(1);
-        let mut send = SendLoop::new(conn, rx, TEST_FRAME_LIMIT);
+        let (tx, rx) = QueueSender::new(queue::MIN_QUEUE_SIZE);
+        let send = SendLoop::new(conn, lease(rx.clone()), TEST_FRAME_LIMIT);
         peer_conn.close(0u32.into(), b"done");
-        timeout(Duration::from_secs(3), send.run(vec![]))
+        timeout(Duration::from_secs(3), send.run())
             .await
             .std_context("the send loop did not end")??;
+        let message = join_message(TopicId::from_bytes([0; 32]), 0);
+        assert!(matches!(tx.push(message), Pushed::Queued));
+        let rx = rx.try_lock().std_context("the queue is still locked")?;
+        assert!(!rx.is_empty(), "the message did not stay queued");
+        Ok(())
+    }
+
+    /// An overflow of a revived queue drops the peer, and stops the writer of the queue with the gap.
+    ///
+    /// The protocol dropped the peer while its connection still wrote the
+    /// queue, and wanted it again. The queue lives on, so an overflow must not
+    /// leave it to the old writer.
+    #[tokio::test]
+    #[traced_test]
+    async fn overflow_of_a_revived_queue_drops_the_peer() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, _peer_conn) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
+        let mut peers = HashMap::new();
+        let mut state = PeerState::pending(queue::MIN_QUEUE_SIZE);
+        let lease = state.accept_conn(conn, false);
+        peers.insert(peer_id, state);
+        disconnect_peer(&mut peers, peer_id);
+        peers.get_mut(&peer_id).expect("dropped").revive();
+
+        let mut follow_ups = VecDeque::new();
+        fail_peer(&mut peers, &mut follow_ups, peer_id);
+        assert!(peers.is_empty(), "the peer stayed");
         assert!(
-            tx.is_closed(),
-            "the retained receiver accepts unconsumed sends"
+            matches!(follow_ups.pop_front(), Some(InEvent::PeerDisconnected(p)) if p == peer_id),
+            "the protocol was not told"
         );
+        assert!(lease.revoked.is_cancelled(), "the old writer goes on");
+        Ok(())
+    }
+
+    /// A dropped peer that the protocol wants again keeps its queue, and the dial delivers all of it.
+    #[tokio::test]
+    #[traced_test]
+    async fn peer_wanted_again_during_the_dial_keeps_its_queue() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
+        let (before, after): (TopicId, TopicId) = (
+            blake3::hash(b"before").into(),
+            blake3::hash(b"after").into(),
+        );
+        let mut actor = t_actor().await?;
+        actor
+            .peers
+            .insert(peer_id, pending_with(vec![join_message(before, 0)]));
+        disconnect_peer(&mut actor.peers, peer_id);
+        let join = InEvent::Command(after, ProtoCommand::Join(vec![peer_id]));
+        actor.handle_in_event(join, Instant::now());
+        assert!(
+            matches!(actor.peers.get(&peer_id), Some(PeerState::Pending { .. })),
+            "the peer is not pending again"
+        );
+
+        actor.handle_connection(peer_id, ConnOrigin::Dial, conn);
+        assert!(
+            matches!(actor.peers.get(&peer_id), Some(PeerState::Active { .. })),
+            "the dial was not kept"
+        );
+        let mut topics = BTreeSet::new();
+        for _ in 0..2 {
+            let (topic, _) = timeout(Duration::from_secs(5), read_next_message(&peer_conn))
+                .await
+                .std_context("a queued message did not go out")??;
+            topics.insert(topic);
+        }
+        assert_eq!(topics, BTreeSet::from([before, after]));
+        Ok(())
+    }
+
+    /// Joins new topics with `peer` until its queue had no room for a control message.
+    fn join_until_full(actor: &mut Actor, peer: EndpointId) {
+        for i in 0..10_000u32 {
+            let topic: TopicId = blake3::hash(&i.to_be_bytes()).into();
+            let join = InEvent::Command(topic, ProtoCommand::Join(vec![peer]));
+            actor.handle_in_event(join, Instant::now());
+            if actor.metrics.peers_send_queue_full.get() > 0 {
+                return;
+            }
+        }
+    }
+
+    /// Pushes `message` to the queue of the active peer `peer_id`.
+    fn push_active(actor: &Actor, peer_id: EndpointId, message: ProtoMessage) {
+        match actor.peers.get(&peer_id) {
+            Some(PeerState::Active { queue, .. }) => {
+                assert!(matches!(queue.send_tx.push(message), Pushed::Queued));
+            }
+            other => panic!("not active: {other:?}"),
+        }
+    }
+
+    /// A replaced connection hands the rest of the queue to the new one, which keeps its order.
+    ///
+    /// The old writer never took the queue, so all messages go out on the new
+    /// connection, in one stream and in the order of the queue.
+    ///
+    /// The runtime has one thread, so the old writer cannot take the queue before the test does.
+    #[tokio::test(flavor = "current_thread")]
+    #[traced_test]
+    async fn replaced_connection_hands_over_its_queue() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (old, peer_old) = pair.connect().await?;
+        let (new, peer_new) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
+        let topic: TopicId = blake3::hash(b"handed over").into();
+        let mut actor = t_actor().await?;
+        actor.handle_connection(peer_id, ConnOrigin::Accept, old);
+        // The old writer cannot take the queue before the new connection replaces it.
+        let held = match actor.peers.get(&peer_id) {
+            Some(PeerState::Active { queue, .. }) => queue.send_rx.try_lock(),
+            other => panic!("not active: {other:?}"),
+        }
+        .std_context("the queue is locked")?;
+        push_active(&actor, peer_id, join_message(topic, 1));
+        actor.handle_connection(peer_id, ConnOrigin::Accept, new);
+        push_active(&actor, peer_id, join_message(topic, 2));
+        drop(held);
+
+        let read = async {
+            let mut stream = peer_new.accept_uni().await.std_context("accept")?;
+            let mut buffer = BytesMut::new();
+            util::StreamHeader::read(&mut stream, &mut buffer, TEST_FRAME_LIMIT).await?;
+            let mut sizes = Vec::new();
+            for _ in 0..2 {
+                let message: TopicMessage =
+                    util::read_frame(&mut stream, &mut buffer, TEST_FRAME_LIMIT)
+                        .await?
+                        .std_context("the stream ended")?;
+                sizes.push(postcard::experimental::serialized_size(&message).anyerr()?);
+            }
+            Ok::<_, AnyError>(sizes)
+        };
+        let sizes = timeout(Duration::from_secs(5), read)
+            .await
+            .std_context("the queue did not go out on the new connection")??;
+        assert!(sizes[0] < sizes[1], "the messages lost their order");
+        assert!(
+            timeout(Duration::from_millis(500), peer_old.accept_uni())
+                .await
+                .is_err(),
+            "the old connection sent a message"
+        );
+        Ok(())
+    }
+
+    /// Pushes `count` payloads of distinct sizes, which may fill the windows of a connection.
+    fn push_many(actor: &Actor, peer_id: EndpointId, topic: TopicId, count: usize) {
+        for i in 0..count {
+            push_active(actor, peer_id, numbered(topic, i));
+        }
+    }
+
+    /// Returns the payload number `i`, which differs from the others in its size.
+    ///
+    /// Up to 3000 of them fit the frame limit of the actor.
+    fn numbered(topic: TopicId, i: usize) -> ProtoMessage {
+        ProtoMessage {
+            topic,
+            message: TopicMessage::test_gossip(1000 + i),
+        }
+    }
+
+    /// A replaced connection that cannot finish its message hands it to the new one, and loses nothing.
+    ///
+    /// The old connection does not read, so flow control blocks its writer in
+    /// the middle of a message. The new connection writes that message first.
+    /// The old stream ends after the part of it: the peer gets each message
+    /// before it on the old connection, and that message once. The old
+    /// connection stays open, as the peer may still send on it.
+    #[tokio::test]
+    #[traced_test]
+    async fn stuck_replaced_connection_hands_over_its_queue() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (old, peer_old) = pair.connect().await?;
+        let (new, peer_new) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
+        let topic: TopicId = blake3::hash(b"stuck").into();
+        let mut actor = t_actor().await?;
+        actor.send_queue_size = 64 << 20;
+        actor.handle_connection(peer_id, ConnOrigin::Accept, old);
+        push_many(&actor, peer_id, topic, 3000);
+        // Wait until flow control blocks the old writer.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        actor.handle_connection(peer_id, ConnOrigin::Accept, new);
+
+        let mut new_stream = timeout(util::HANDOVER_LIMIT * 3, peer_new.accept_uni())
+            .await
+            .std_context("the new connection sent nothing")?
+            .std_context("accept")?;
+        let mut new_buffer = BytesMut::new();
+        let header =
+            util::StreamHeader::read(&mut new_stream, &mut new_buffer, TEST_FRAME_LIMIT).await?;
+        assert_eq!(header.topic_id, topic);
+        let last = numbered(topic, 2999).message;
+        let read_new = async {
+            let mut messages = Vec::new();
+            while messages.last() != Some(&last) {
+                match util::read_frame(&mut new_stream, &mut new_buffer, TEST_FRAME_LIMIT).await {
+                    Ok(Some(message)) => messages.push(message),
+                    _ => break,
+                }
+            }
+            messages
+        };
+        let new_messages = timeout(Duration::from_secs(10), read_new)
+            .await
+            .std_context("the new connection did not send the rest")?;
+        let handed_over = (0..3000)
+            .find(|&i| Some(&numbered(topic, i).message) == new_messages.first())
+            .std_context("an unknown message")?;
+        let rest: Vec<_> = (handed_over..3000)
+            .map(|i| numbered(topic, i).message)
+            .collect();
+        assert!(
+            new_messages == rest,
+            "the new connection sent {} messages, not those from {handed_over}",
+            new_messages.len()
+        );
+
+        let mut stream = peer_old.accept_uni().await.std_context("accept")?;
+        let mut buffer = BytesMut::new();
+        util::StreamHeader::read(&mut stream, &mut buffer, TEST_FRAME_LIMIT).await?;
+        let read = async {
+            let mut messages = Vec::new();
+            // The part of the handed over message ends the stream with an error.
+            while let Ok(Some(message)) =
+                util::read_frame::<TopicMessage>(&mut stream, &mut buffer, TEST_FRAME_LIMIT).await
+            {
+                messages.push(message);
+            }
+            messages
+        };
+        let messages = timeout(Duration::from_secs(5), read)
+            .await
+            .std_context("the stuck stream did not end")?;
+        let expected: Vec<_> = (0..handed_over)
+            .map(|i| numbered(topic, i).message)
+            .collect();
+        assert!(
+            messages == expected,
+            "the old connection sent {} messages, not those before {handed_over}",
+            messages.len()
+        );
+        assert!(
+            peer_old.close_reason().is_none(),
+            "the old connection closed"
+        );
+        Ok(())
+    }
+
+    /// A peer that we drop and want again keeps its queue, and the next connection writes the old messages first.
+    ///
+    /// The old connection does not read, so its writer still has the queue,
+    /// which ends with a `Disconnect`. This checks the order of our writes
+    /// only: the peer reads each stream on its own.
+    #[tokio::test]
+    #[traced_test]
+    async fn dropped_peer_wanted_again_gets_the_old_queue_first() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (old, _peer_old) = pair.connect().await?;
+        let (new, peer_new) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
+        let (left, joined): (TopicId, TopicId) =
+            (blake3::hash(b"left").into(), blake3::hash(b"joined").into());
+        let mut actor = t_actor().await?;
+        actor.send_queue_size = 64 << 20;
+        actor.handle_connection(peer_id, ConnOrigin::Accept, old);
+        push_many(&actor, peer_id, left, 3000);
+        push_active(&actor, peer_id, disconnect_message(left));
+        // Wait until flow control blocks the old writer.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        disconnect_peer(&mut actor.peers, peer_id);
+        let state = actor.peers.get_mut(&peer_id).expect("dropped");
+        state.revive();
+        let pushed = state.queue_mut().send_tx.push(join_message(joined, 0));
+        assert!(matches!(pushed, Pushed::Queued));
+        actor.handle_connection(peer_id, ConnOrigin::Accept, new);
+
+        let (topic, messages) = timeout(Duration::from_secs(10), read_next_stream(&peer_new))
+            .await
+            .std_context("the old queue did not go out")??;
+        assert_eq!(topic, left, "the new queue went first");
+        assert_eq!(messages.last(), Some(&TopicMessage::test_disconnect()));
+        let (topic, _) = timeout(Duration::from_secs(5), read_next_message(&peer_new))
+            .await
+            .std_context("the new queue did not go out")??;
+        assert_eq!(topic, joined);
+        Ok(())
+    }
+
+    /// A peer that we drop and want again keeps one byte limit for its old and new messages.
+    #[tokio::test]
+    #[traced_test]
+    async fn dropped_peer_keeps_its_byte_limit() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, _peer_conn) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
+        let topic: TopicId = blake3::hash(b"one limit").into();
+        let mut peers = HashMap::new();
+        let mut state = PeerState::pending(queue::MIN_QUEUE_SIZE);
+        // Nothing takes from the queue, as from that of a peer that does not read.
+        let _lease = state.accept_conn(conn, false);
+        peers.insert(peer_id, state);
+        let push = |peers: &mut HashMap<EndpointId, PeerState>| {
+            let queue = peers.get_mut(&peer_id).expect("known").queue_mut();
+            queue.send_tx.push(numbered(topic, 0))
+        };
+        while matches!(push(&mut peers), Pushed::Queued) {}
+
+        disconnect_peer(&mut peers, peer_id);
+        peers.get_mut(&peer_id).expect("dropped").revive();
+        assert!(
+            matches!(push(&mut peers), Pushed::Dropped(_)),
+            "the peer got a second limit"
+        );
+        Ok(())
+    }
+
+    /// A replaced connection keeps the message that it wrote, and new messages go on the new connection.
+    #[tokio::test]
+    #[traced_test]
+    async fn replaced_connection_keeps_what_it_wrote() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (old, peer_old) = pair.connect().await?;
+        let (new, peer_new) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
+        let (t_old, t_new): (TopicId, TopicId) =
+            (blake3::hash(b"old").into(), blake3::hash(b"new").into());
+        let mut actor = t_actor().await?;
+        actor.handle_connection(peer_id, ConnOrigin::Accept, old);
+        push_active(&actor, peer_id, join_message(t_old, 0));
+        let (topic, _) = timeout(Duration::from_secs(5), read_next_message(&peer_old))
+            .await
+            .std_context("the old connection sent nothing")??;
+        assert_eq!(topic, t_old);
+
+        actor.handle_connection(peer_id, ConnOrigin::Accept, new);
+        push_active(&actor, peer_id, join_message(t_new, 0));
+        let (topic, _) = timeout(Duration::from_secs(5), read_next_message(&peer_new))
+            .await
+            .std_context("the new message did not go out")??;
+        assert_eq!(topic, t_new);
         Ok(())
     }
 
@@ -2317,12 +3037,9 @@ pub(crate) mod tests {
         let peer_id = pair.ep2.id();
         let topic: TopicId = blake3::hash(b"inbound_during_disconnected_dial").into();
         let mut actor = t_actor().await?;
-        actor.peers.insert(
-            peer_id,
-            PeerState::Pending {
-                queue: vec![join_message(topic, 0)],
-            },
-        );
+        actor
+            .peers
+            .insert(peer_id, pending_with(vec![join_message(topic, 0)]));
         disconnect_peer(&mut actor.peers, peer_id);
 
         actor.handle_connection(peer_id, ConnOrigin::Accept, conn);
@@ -2399,7 +3116,7 @@ pub(crate) mod tests {
             .await
             .std_context("a connection stayed open")?;
             let (peer, conn, res) = ended.expect("two tasks").expect("no panic");
-            actor.handle_connection_task_finished(peer, conn, res).await;
+            actor.handle_connection_task_finished(peer, conn, res);
         }
         timeout(Duration::from_secs(1), peer_first.closed())
             .await
@@ -2422,7 +3139,10 @@ pub(crate) mod tests {
         set_wanted(&actor, peer_id, false);
         // The grace is running when we want the peer again.
         tokio::time::sleep(Duration::from_secs(2)).await;
-        actor.peers.entry(peer_id).or_default();
+        actor
+            .peers
+            .entry(peer_id)
+            .or_insert_with(|| pending_with(vec![]));
         set_wanted(&actor, peer_id, true);
 
         tokio::time::sleep(IDLE_GRACE + Duration::from_secs(1)).await;
@@ -2459,7 +3179,7 @@ pub(crate) mod tests {
         .await
         .std_context("the connection stayed open")?;
         let (peer, conn, res) = ended.expect("one task").expect("no panic");
-        actor.handle_connection_task_finished(peer, conn, res).await;
+        actor.handle_connection_task_finished(peer, conn, res);
         timeout(Duration::from_secs(1), peer_conn.closed())
             .await
             .std_context("the peer did not see the close")?;
@@ -2495,7 +3215,7 @@ pub(crate) mod tests {
 
         // The test runtime runs the dial task only at the next await.
         actor.handle_connection(peer_id, ConnOrigin::Dial, dialed);
-        actor.handle_connection_task_finished(peer, conn, res).await;
+        actor.handle_connection_task_finished(peer, conn, res);
         assert!(
             actor.handles_close.contains_key(&peer_id),
             "the flag went while the dial holds it"
@@ -2508,7 +3228,7 @@ pub(crate) mod tests {
         .await
         .std_context("the dial stayed open")?;
         let (peer, conn, res) = ended.expect("one task").expect("no panic");
-        actor.handle_connection_task_finished(peer, conn, res).await;
+        actor.handle_connection_task_finished(peer, conn, res);
         timeout(Duration::from_secs(1), peer_dialed.closed())
             .await
             .std_context("the peer did not see the close")?;
@@ -2543,7 +3263,7 @@ pub(crate) mod tests {
         .await
         .std_context("the accepted connection stayed open")?;
         let (peer, conn, res) = ended.expect("one task").expect("no panic");
-        actor.handle_connection_task_finished(peer, conn, res).await;
+        actor.handle_connection_task_finished(peer, conn, res);
         assert!(
             actor.handles_close.contains_key(&peer_id),
             "the flag went with the last connection"
@@ -2557,7 +3277,7 @@ pub(crate) mod tests {
         .await
         .std_context("the dial stayed open")?;
         let (peer, conn, res) = ended.expect("one task").expect("no panic");
-        actor.handle_connection_task_finished(peer, conn, res).await;
+        actor.handle_connection_task_finished(peer, conn, res);
         timeout(Duration::from_secs(1), peer_dialed.closed())
             .await
             .std_context("the peer did not see the close")?;
@@ -2579,7 +3299,7 @@ pub(crate) mod tests {
             .await
             .std_context("the connection stayed open")?;
         let (peer, conn, res) = ended.expect("one task").expect("no panic");
-        actor.handle_connection_task_finished(peer, conn, res).await;
+        actor.handle_connection_task_finished(peer, conn, res);
         assert!(
             !actor.handles_close.contains_key(&peer_id),
             "an unset flag outlived the connection"
@@ -2626,9 +3346,7 @@ pub(crate) mod tests {
         let peer_id = pair.ep2.id();
         let topic: TopicId = blake3::hash(b"overtaken_dial").into();
         let mut actor = t_actor().await?;
-        actor
-            .peers
-            .insert(peer_id, PeerState::Pending { queue: Vec::new() });
+        actor.peers.insert(peer_id, pending_with(vec![]));
         disconnect_peer(&mut actor.peers, peer_id);
 
         let inbound_id = inbound.stable_id();
@@ -2640,7 +3358,7 @@ pub(crate) mod tests {
         assert!(
             matches!(
                 actor.peers.get(&peer_id),
-                Some(PeerState::Active { active_conn_id, .. }) if *active_conn_id == inbound_id
+                Some(PeerState::Active { active_conn, .. }) if active_conn.stable_id() == inbound_id
             ),
             "the dial replaced the peer's connection"
         );
@@ -2698,16 +3416,16 @@ pub(crate) mod tests {
             .connect(ep2_addr, GOSSIP_ALPN)
             .await
             .std_context("connect")?;
-        actor.peers.insert(
-            ep2_id,
-            PeerState::Pending {
-                queue: vec![join_message(topic, 0)],
-            },
-        );
+        actor
+            .peers
+            .insert(ep2_id, pending_with(vec![join_message(topic, 0)]));
         disconnect_peer(&mut actor.peers, ep2_id);
         actor.handle_connection(ep2_id, ConnOrigin::Dial, conn);
         assert!(
-            !actor.peers.contains_key(&ep2_id),
+            matches!(
+                actor.peers.get(&ep2_id),
+                Some(PeerState::Dropped { conn: Some(_), .. })
+            ),
             "the connection became the peer's active one"
         );
 
@@ -2739,15 +3457,18 @@ pub(crate) mod tests {
         let pair = TestPair::new(1).await?;
         let (conn, peer_conn) = pair.connect().await?;
         let topic: TopicId = blake3::hash(b"disconnect_ends_its_stream").into();
-        let queue = vec![
+        let messages = vec![
             join_message(topic, 0),
             disconnect_message(topic),
             join_message(topic, 0),
         ];
-        let (send_tx, send_rx) = mpsc::channel(1);
+        let (send_tx, send_rx) = QueueSender::new(queue::MIN_QUEUE_SIZE);
+        for message in messages {
+            assert!(matches!(send_tx.push(message), Pushed::Queued));
+        }
         drop(send_tx);
-        let mut send_loop = SendLoop::new(conn, send_rx, 1024);
-        let _send = AbortOnDropHandle::new(spawn(async move { send_loop.run(queue).await }));
+        let send_loop = SendLoop::new(conn, lease(send_rx), 1024);
+        let _send = AbortOnDropHandle::new(spawn(async move { send_loop.run().await }));
 
         let (_, first) = timeout(Duration::from_secs(5), read_next_stream(&peer_conn))
             .await
@@ -2761,6 +3482,26 @@ pub(crate) mod tests {
         assert_eq!(first, vec![false, true], "first stream, by `is_disconnect`");
         assert_eq!(second, vec![false], "second stream, by `is_disconnect`");
         Ok(())
+    }
+
+    /// Returns a lease on `queue` that nothing revokes.
+    fn lease(queue: SharedReceiver) -> QueueLease {
+        QueueLease {
+            queue,
+            revoked: Default::default(),
+        }
+    }
+
+    /// Returns the state of a peer that we dial, with `messages` in its queue.
+    fn pending_with(messages: Vec<ProtoMessage>) -> PeerState {
+        let state = PeerState::pending(queue::QUEUE_SIZE);
+        let PeerState::Pending { queue } = &state else {
+            unreachable!("a pending state");
+        };
+        for message in messages {
+            assert!(matches!(queue.send_tx.push(message), Pushed::Queued));
+        }
+        state
     }
 
     /// Returns a join for `topic` carrying `data_len` bytes of peer data.
@@ -2812,9 +3553,10 @@ pub(crate) mod tests {
                     .expect("read frame");
             (header.topic_id, message.is_some(), peer_conn)
         }));
-        let (send_tx, send_rx) = mpsc::channel(1);
+        let (send_tx, send_rx) = QueueSender::new(queue::MIN_QUEUE_SIZE);
         let _feed = AbortOnDropHandle::new(spawn(async move {
-            while send_tx.send(join_message(topic, 0)).await.is_ok() {
+            loop {
+                send_tx.push(join_message(topic, 0));
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         }));
@@ -2823,10 +3565,9 @@ pub(crate) mod tests {
             peer_id,
             conn,
             ConnOrigin::Dial,
-            send_rx,
+            lease(send_rx),
             in_event_tx,
             TEST_FRAME_LIMIT,
-            vec![],
             watch::channel(true).1,
             close_flag(),
         )));
@@ -2855,7 +3596,7 @@ pub(crate) mod tests {
         let _stream = open_stream(&peer_conn, topic, &[join]).await?;
 
         // The sender stays alive, so only the receive loop can end the connection.
-        let (_send_tx, send_rx) = mpsc::channel(1);
+        let (_send_tx, send_rx) = QueueSender::new(queue::MIN_QUEUE_SIZE);
         let (in_event_tx, in_event_rx) = mpsc::channel(16);
         drop(in_event_rx);
         timeout(
@@ -2864,10 +3605,9 @@ pub(crate) mod tests {
                 pair.ep2.id(),
                 conn,
                 ConnOrigin::Dial,
-                send_rx,
+                lease(send_rx),
                 in_event_tx,
                 TEST_FRAME_LIMIT,
-                vec![],
                 watch::channel(true).1,
                 close_flag(),
             ),
@@ -2901,12 +3641,10 @@ pub(crate) mod tests {
             .add(memory_lookup.clone());
         let ep1_addr = EndpointAddr::new(actor.endpoint.id()).with_relay_url(relay_url.clone());
         let topic: TopicId = blake3::hash(b"shuffle_reply_closes").into();
-        actor
-            .handle_in_event(
-                InEvent::Command(topic, proto::Command::Join(vec![])),
-                Instant::now(),
-            )
-            .await;
+        actor.handle_in_event(
+            InEvent::Command(topic, proto::Command::Join(vec![])),
+            Instant::now(),
+        );
 
         // The origin of the shuffle reads the reply, then waits for the close.
         let origin = create_endpoint(rng, relay_map.clone(), None).await?;
@@ -3157,9 +3895,7 @@ pub(crate) mod tests {
         while actor.in_event_rx.len() < IN_EVENT_CAP {
             tokio::task::yield_now().await;
         }
-        actor
-            .handle_connection_task_finished(peer, conn, result)
-            .await;
+        actor.handle_connection_task_finished(peer, conn, result);
         assert!(
             !producer.is_finished(),
             "the close waited for an empty queue"
@@ -3664,12 +4400,10 @@ pub(crate) mod tests {
         let state = TopicState::default();
         let mut events = state.event_sender.subscribe();
         actor.topics.insert(topic, state);
-        actor
-            .handle_in_event(
-                InEvent::Command(topic, ProtoCommand::Join(vec![])),
-                Instant::now(),
-            )
-            .await;
+        actor.handle_in_event(
+            InEvent::Command(topic, ProtoCommand::Join(vec![])),
+            Instant::now(),
+        );
         actor
             .in_event_tx
             .send(InEvent::RecvMessage(peer, join_message(topic, 0)))
@@ -3683,9 +4417,7 @@ pub(crate) mod tests {
             .await
             .expect("one task")
             .expect("no panic");
-        actor
-            .handle_connection_task_finished(peer, conn, result)
-            .await;
+        actor.handle_connection_task_finished(peer, conn, result);
 
         assert!(
             !actor.state.has_active_peers(&topic),
@@ -3736,15 +4468,13 @@ pub(crate) mod tests {
     }
 
     /// Joins a topic with a publisher that always has a command ready.
-    async fn publish_forever(actor: &mut Actor) {
+    fn publish_forever(actor: &mut Actor) {
         let topic = [1; 32].into();
         actor.topics.insert(topic, TopicState::default());
-        actor
-            .handle_in_event(
-                InEvent::Command(topic, ProtoCommand::Join(vec![])),
-                Instant::now(),
-            )
-            .await;
+        actor.handle_in_event(
+            InEvent::Command(topic, ProtoCommand::Join(vec![])),
+            Instant::now(),
+        );
         let commands = n0_future::stream::iter(std::iter::repeat_with(|| {
             Ok(Command::Broadcast(Bytes::new()))
         }));
@@ -3773,7 +4503,7 @@ pub(crate) mod tests {
             None,
             Default::default(),
         );
-        publish_forever(&mut actor).await;
+        publish_forever(&mut actor);
         conn.close(0u32.into(), b"done");
         actor.handle_connection(peer, ConnOrigin::Accept, conn);
         let mut addresses = n0_future::stream::pending();
@@ -3803,7 +4533,7 @@ pub(crate) mod tests {
                 None,
                 Default::default(),
             );
-            publish_forever(&mut actor).await;
+            publish_forever(&mut actor);
             let (reply, mut reply_rx) = oneshot::channel();
             local_tx
                 .send(LocalActorMessage::Shutdown { reply })
@@ -3886,28 +4616,27 @@ pub(crate) mod tests {
         let (conn, peer_conn) = pair.connect().await?;
         let peer_id = pair.ep2.id();
         let topic: TopicId = blake3::hash(b"oversized_message").into();
-        let (send_tx, send_rx) = mpsc::channel(2);
+        let (send_tx, send_rx) = QueueSender::new(queue::MIN_QUEUE_SIZE);
         let (in_event_tx, _in_event_rx) = mpsc::channel(16);
         let task = AbortOnDropHandle::new(spawn(connection_loop(
             peer_id,
             conn,
             ConnOrigin::Dial,
-            send_rx,
+            lease(send_rx),
             in_event_tx,
             1024,
-            vec![],
             watch::channel(true).1,
             close_flag(),
         )));
 
-        send_tx
-            .send(join_message(topic, 4096))
-            .await
-            .std_context("send")?;
-        send_tx
-            .send(join_message(topic, 16))
-            .await
-            .std_context("send")?;
+        assert!(matches!(
+            send_tx.push(join_message(topic, 4096)),
+            Pushed::Queued
+        ));
+        assert!(matches!(
+            send_tx.push(join_message(topic, 16)),
+            Pushed::Queued
+        ));
 
         let (_, message) = timeout(Duration::from_secs(5), read_next_message(&peer_conn))
             .await
@@ -3915,6 +4644,250 @@ pub(crate) mod tests {
         let size = postcard::experimental::serialized_size(&message).std_context("size")?;
         assert!(size < 1024, "the oversized message went out");
         assert!(!task.is_finished(), "the connection ended");
+        Ok(())
+    }
+
+    /// How long a slow peer test waits for something that should happen promptly.
+    const PROMPT: Duration = Duration::from_secs(10);
+
+    /// A gossip node that connects only directly, with its router.
+    struct DirectNode {
+        router: Router,
+        gossip: Gossip,
+    }
+
+    impl DirectNode {
+        /// Spawns gossip from `builder` on an endpoint with `transport`, and adds its address to `lookup`.
+        async fn spawn(
+            lookup: &MemoryLookup,
+            builder: Builder,
+            transport: QuicTransportConfig,
+        ) -> Result<Self> {
+            let endpoint = direct_endpoint(lookup, transport).await?;
+            let gossip = builder.spawn(endpoint.clone());
+            let router = Router::builder(endpoint)
+                .accept(GOSSIP_ALPN, gossip.clone())
+                .spawn();
+            Ok(Self { router, gossip })
+        }
+
+        fn id(&self) -> EndpointId {
+            self.router.endpoint().id()
+        }
+    }
+
+    /// Binds an endpoint without a relay, and adds its address to `lookup`.
+    async fn direct_endpoint(
+        lookup: &MemoryLookup,
+        transport: QuicTransportConfig,
+    ) -> Result<Endpoint> {
+        let endpoint = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .alpns(vec![GOSSIP_ALPN.to_vec()])
+            .transport_config(transport)
+            .bind()
+            .await?;
+        endpoint.address_lookup()?.add(lookup.clone());
+        lookup.set_endpoint_info(endpoint.addr());
+        Ok(endpoint)
+    }
+
+    /// Returns a transport with a receive window of `window` bytes per stream, and twice that per connection.
+    fn small_windows(window: u32) -> QuicTransportConfig {
+        QuicTransportConfig::builder()
+            .stream_receive_window(VarInt::from_u32(window))
+            .receive_window(VarInt::from_u32(window * 2))
+            .build()
+    }
+
+    /// Waits until `receiver` got a message with `content`, and returns the contents it got.
+    async fn receive_until(receiver: &mut GossipReceiver, content: &[u8]) -> Result<Vec<Bytes>> {
+        let mut received = Vec::new();
+        while let Some(event) = receiver.try_next().await? {
+            if let api::Event::Received(message) = event {
+                let done = message.content == content;
+                received.push(message.content);
+                if done {
+                    return Ok(received);
+                }
+            }
+        }
+        Err(n0_error::anyerr!("the subscription ended"))
+    }
+
+    /// A healthy peer that shares more topics with us than its stream limit keeps its neighbors (known limit).
+    ///
+    /// v1 keeps a stream per topic open while the topic uses the peer. Over the
+    /// peer's limit of concurrent streams, the open of the next stream waits for
+    /// good, and the open timeout closes the connection. The topics rejoin, and
+    /// it closes again. The limit of iroh is 100 streams by default.
+    #[tokio::test(flavor = "multi_thread")]
+    #[traced_test]
+    #[ignore = "known limit: one stream per topic, see the known limits of QueueOptions"]
+    async fn topics_over_the_stream_limit_keep_their_neighbors() -> Result {
+        let lookup = MemoryLookup::new();
+        let limited = || {
+            QuicTransportConfig::builder()
+                .max_concurrent_uni_streams(VarInt::from_u32(4))
+                .build()
+        };
+        let a = DirectNode::spawn(&lookup, Gossip::builder(), limited()).await?;
+        let b = DirectNode::spawn(&lookup, Gossip::builder(), limited()).await?;
+        let mut topics = Vec::new();
+        for i in 0..8u32 {
+            let topic: TopicId = blake3::hash(&i.to_be_bytes()).into();
+            topics.push(a.gossip.subscribe(topic, vec![]).await?);
+            topics.push(b.gossip.subscribe(topic, vec![a.id()]).await?);
+        }
+        let joined = async {
+            for topic in topics.iter_mut() {
+                topic.joined().await?;
+            }
+            Ok::<_, AnyError>(())
+        };
+        timeout(PROMPT, joined)
+            .await
+            .std_context("the topics did not join")??;
+        // Long enough for the open timeout of a stream over the limit.
+        tokio::time::sleep(util::OPEN_TIMEOUT + Duration::from_secs(2)).await;
+        let down = a.gossip.metrics().neighbor_down.get() + b.gossip.metrics().neighbor_down.get();
+        assert_eq!(down, 0, "neighbors went down");
+        Ok(())
+    }
+
+    /// A peer that reads nothing fills its queue, and the other peers still get each message (#47).
+    ///
+    /// A neighbor of the publisher keeps its connection open but never reads,
+    /// so the queue to it fills and drops payloads. A healthy neighbor gets the
+    /// later messages on the same topic and on a second one, and the publisher
+    /// shuts down in time.
+    #[tokio::test(flavor = "multi_thread")]
+    #[traced_test]
+    async fn blocked_peer_does_not_stall_the_others() -> Result {
+        let lookup = MemoryLookup::new();
+        let default = || QuicTransportConfig::builder().build();
+        let a = DirectNode::spawn(&lookup, Gossip::builder(), default()).await?;
+        let c = DirectNode::spawn(&lookup, Gossip::builder(), default()).await?;
+        let (t1, t2): (TopicId, TopicId) = (
+            blake3::hash(b"blocked 1").into(),
+            blake3::hash(b"blocked 2").into(),
+        );
+        let (a1, mut a1_rx) = a.gossip.subscribe(t1, vec![]).await?.split();
+        let (a2, _a2_rx) = a.gossip.subscribe(t2, vec![]).await?.split();
+        let (_c1_tx, mut c1) = c.gossip.subscribe_and_join(t1, vec![a.id()]).await?.split();
+        let (_c2_tx, mut c2) = c.gossip.subscribe_and_join(t2, vec![a.id()]).await?.split();
+
+        // B joins on its own connection, and then reads nothing.
+        let b = direct_endpoint(&lookup, small_windows(16 * 1024)).await?;
+        let conn = b.connect(a.id(), GOSSIP_ALPN).await?;
+        let _join = open_stream(&conn, t1, &[join_message(t1, 0).message]).await?;
+        timeout(PROMPT, async {
+            while let Some(event) = a1_rx.try_next().await? {
+                if matches!(event, api::Event::NeighborUp(peer) if peer == b.id()) {
+                    return Ok(());
+                }
+            }
+            Err(n0_error::anyerr!("the subscription ended"))
+        })
+        .await
+        .std_context("B did not become a neighbor")??;
+
+        let metrics = a.gossip.metrics().clone();
+        let payload = Bytes::from(vec![7u8; 3000]);
+        timeout(PROMPT, async {
+            let mut i = 0u32;
+            while metrics.msgs_dropped.get() == 0 {
+                let mut message = payload.to_vec();
+                message.extend_from_slice(&i.to_be_bytes());
+                a1.broadcast(message.into()).await?;
+                i += 1;
+            }
+            Ok::<_, AnyError>(())
+        })
+        .await
+        .std_context("the queue to B did not fill")??;
+        // Checked now: B reads nothing, so the write timeout closes it later.
+        assert!(conn.close_reason().is_none(), "B lost its connection");
+
+        a1.broadcast(Bytes::from_static(b"after")).await?;
+        a2.broadcast(Bytes::from_static(b"other topic")).await?;
+        timeout(PROMPT, receive_until(&mut c1, b"after"))
+            .await
+            .std_context("C missed a message on the topic of B")??;
+        timeout(PROMPT, receive_until(&mut c2, b"other topic"))
+            .await
+            .std_context("C missed a message on the other topic")??;
+        assert_eq!(
+            metrics.peers_send_queue_full.get(),
+            0,
+            "B lost its connection"
+        );
+
+        timeout(Duration::from_secs(5), a.gossip.shutdown())
+            .await
+            .std_context("B blocked the shutdown")??;
+        conn.close(0u32.into(), b"done");
+        Ok(())
+    }
+
+    /// A slow peer gets the payloads that its full queue dropped, once it catches up.
+    ///
+    /// The queue to it is small and its windows are small, so a burst drops
+    /// payloads. We announce them to the peer again, and it requests them.
+    #[tokio::test(flavor = "multi_thread")]
+    #[traced_test]
+    async fn slow_peer_gets_the_dropped_messages() -> Result {
+        let lookup = MemoryLookup::new();
+        let small_queue = Gossip::builder().send_queue(QueueOptions::default().size(0));
+        let a = DirectNode::spawn(&lookup, small_queue, small_windows(16 * 1024)).await?;
+        let b = DirectNode::spawn(&lookup, Gossip::builder(), small_windows(8 * 1024)).await?;
+        let topic: TopicId = blake3::hash(b"slow peer").into();
+        let (a_tx, _a_rx) = a.gossip.subscribe(topic, vec![]).await?.split();
+        let mut b_topic = b.gossip.subscribe_and_join(topic, vec![a.id()]).await?;
+
+        // A burst of 150 drops at most 150 payloads, which the caps keep.
+        let metrics = a.gossip.metrics().clone();
+        let mut sent = BTreeSet::new();
+        for burst in 0..20u32 {
+            for i in 0..150u32 {
+                let mut message = vec![7u8; 3000];
+                message.extend_from_slice(&burst.to_be_bytes());
+                message.extend_from_slice(&i.to_be_bytes());
+                let message = Bytes::from(message);
+                sent.insert(message.clone());
+                a_tx.broadcast(message).await?;
+            }
+            if metrics.msgs_dropped.get() > 0 {
+                break;
+            }
+            // Let the queue drain, so that each burst starts empty.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        assert!(metrics.msgs_dropped.get() > 0, "no burst filled the queue");
+
+        let mut received = BTreeSet::new();
+        timeout(Duration::from_secs(25), async {
+            while received.len() < sent.len() {
+                match b_topic.try_next().await? {
+                    Some(api::Event::Received(message)) => {
+                        received.insert(message.content);
+                    }
+                    Some(_) => {}
+                    None => return Err(n0_error::anyerr!("the subscription ended")),
+                }
+            }
+            Ok(())
+        })
+        .await
+        .with_std_context(|_| {
+            format!(
+                "B got {} of {} payloads, {} dropped",
+                received.len(),
+                sent.len(),
+                metrics.msgs_dropped.get()
+            )
+        })??;
+        assert_eq!(received, sent);
         Ok(())
     }
 }
