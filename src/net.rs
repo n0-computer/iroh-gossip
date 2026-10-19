@@ -250,9 +250,11 @@ impl Builder {
 ///
 /// - **Backpressure.** A broadcast waits only while every neighbor of its
 ///   topic has its data section half full: then our own link is the limit.
-///   Otherwise it never waits, and a burst larger than the queue and the QUIC
-///   windows of a neighbor loses messages for it. The repair recovers only
-///   part of them.
+///   The other commands of the topic wait with it, in order: a join of more
+///   peers, and a leave, which takes effect once the broadcasts before it went
+///   out. Otherwise a broadcast never waits, and a burst larger than the queue
+///   and the QUIC windows of a neighbor loses messages for it. The repair
+///   recovers only part of them.
 /// - **Repair.** A lost broadcast is announced again only while it is cached,
 ///   30 s by default. At most 256 per peer and 4096 per topic wait for it, and
 ///   64 per peer go out per second. A message with neighbor scope is never
@@ -1216,6 +1218,8 @@ const GATE_CHECK: Duration = Duration::from_millis(10);
 /// Lets the publishers of a topic wait, see [`Actor::update_gate`].
 ///
 /// A broadcast that waits keeps its publisher waiting, as on a full channel.
+/// The gate holds the whole command stream, so a join of more peers, and the
+/// end of the stream, which leaves the topic, wait behind it.
 #[derive(Debug, Default)]
 struct PublishGate(Mutex<GateState>);
 
