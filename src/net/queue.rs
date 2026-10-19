@@ -317,6 +317,12 @@ impl QueueSender {
         (sender, rx)
     }
 
+    /// Returns whether data fills at least half of its section.
+    pub(super) fn is_busy(&self) -> bool {
+        let data = &self.capacity.data;
+        data.used.load(Ordering::Relaxed) >= data.max / 2
+    }
+
     /// Sets whether the writer ends once the queue is empty, as it does for a dropped peer.
     pub(super) fn set_closing(&self, closing: bool) {
         self.closing.send_replace(closing);

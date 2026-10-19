@@ -4,8 +4,8 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
     net::SocketAddr,
     pin::Pin,
-    sync::Arc,
-    task::{Context, Poll},
+    sync::{Arc, Mutex},
+    task::{Context, Poll, Waker},
     time::Duration,
 };
 
@@ -20,7 +20,7 @@ use irpc::WithChannels;
 use n0_error::{e, stack_error};
 use n0_future::{
     task::{self, AbortOnDropHandle, JoinSet},
-    time::Instant,
+    time::{Instant, Interval},
     Stream, StreamExt as _,
 };
 use rand::{rngs::StdRng, SeedableRng};
@@ -243,13 +243,16 @@ impl Builder {
 /// The queue bounds the bytes that wait to be sent to one peer. When it is
 /// full, a data message or announcement is lost, and we announce a lost
 /// broadcast again later. Any other control message closes the connection.
+/// A publisher waits while the queues to all neighbors of its topic fill.
 /// [`Metrics::msgs_dropped`] and [`Metrics::peers_send_queue_full`] count both.
 ///
 /// Known limits:
 ///
-/// - **No backpressure.** A broadcast never waits for a peer. A burst larger
-///   than the queue and the QUIC windows loses messages, also on a fast link,
-///   and the repair recovers only part of them.
+/// - **Backpressure.** A broadcast waits only while every neighbor of its
+///   topic has its data section half full: then our own link is the limit.
+///   Otherwise it never waits, and a burst larger than the queue and the QUIC
+///   windows of a neighbor loses messages for it. The repair recovers only
+///   part of them.
 /// - **Repair.** A lost broadcast is announced again only while it is cached,
 ///   30 s by default. At most 256 per peer and 4096 per topic wait for it, and
 ///   64 per peer go out per second. A message with neighbor scope is never
@@ -397,6 +400,10 @@ struct Actor {
     send_queue_size: usize,
     /// Events that the handling of an event caused, handled after it.
     follow_ups: VecDeque<InEvent>,
+    /// The topics whose publishers wait, see [`PublishGate`].
+    paused_topics: BTreeSet<TopicId>,
+    /// When to check the paused topics again.
+    gate_check: Interval,
 }
 
 impl Actor {
@@ -446,6 +453,8 @@ impl Actor {
             address_lookup,
             send_queue_size,
             follow_ups: Default::default(),
+            paused_topics: Default::default(),
+            gate_check: n0_future::time::interval(GATE_CHECK),
         };
 
         (actor, rpc_tx, local_tx)
@@ -534,6 +543,12 @@ impl Actor {
             Some((key, (topic, command))) = self.command_rx.next(), if !self.command_rx.is_empty() => {
                 trace!(?i, "tick: command_rx");
                 self.handle_command(topic, key, command);
+                self.update_gate(topic);
+            },
+            _ = self.gate_check.tick(), if !self.paused_topics.is_empty() => {
+                for topic in self.paused_topics.clone() {
+                    self.update_gate(topic);
+                }
             },
             Some(new_address) = addr_updates.next() => {
                 trace!(?i, "tick: new_address");
@@ -609,6 +624,29 @@ impl Actor {
         // let peer_data = our_peer_data(&self.endpoint, current_addresses);
         let peer_data = encode_peer_data(&endpoint_addr.into());
         self.handle_in_event(InEvent::UpdatePeerData(peer_data), Instant::now());
+    }
+
+    /// Pauses the publishers of `topic` while every neighbor has its data queue half full.
+    ///
+    /// Then our own link is the limit, and a broadcast would be lost for every
+    /// neighbor. One slow neighbor among others pauses nothing.
+    fn update_gate(&mut self, topic: TopicId) {
+        let busy = self.topics.get(&topic).is_some_and(|state| {
+            !state.neighbors.is_empty()
+                && state.neighbors.iter().all(|peer| {
+                    self.peers
+                        .get(peer)
+                        .is_some_and(|peer| peer.queue.send_tx.is_busy())
+                })
+        });
+        if let Some(state) = self.topics.get(&topic) {
+            state.gate.set_paused(busy);
+        }
+        if busy {
+            self.paused_topics.insert(topic);
+        } else {
+            self.paused_topics.remove(&topic);
+        }
     }
 
     fn handle_command(&mut self, topic: TopicId, key: stream_group::Key, command: Option<Command>) {
@@ -791,6 +829,7 @@ impl Actor {
                     neighbors,
                     event_sender,
                     command_rx_keys,
+                    gate,
                 } = self.topics.entry(topic_id).or_default();
                 let mut sender_dead = false;
                 if !neighbors.is_empty() {
@@ -811,7 +850,8 @@ impl Actor {
                     self.topic_event_forwarders
                         .spawn(fut.instrument(tracing::Span::current()));
                 }
-                let command_rx = TopicCommandStream::new(topic_id, Box::pin(rx.into_stream()));
+                let command_rx =
+                    TopicCommandStream::new(topic_id, Box::pin(rx.into_stream()), gate.clone());
                 let key = self.command_rx.insert(command_rx);
                 command_rx_keys.insert(key);
 
@@ -1153,6 +1193,7 @@ struct TopicState {
     ///
     /// This represents the receiver side of gossip's publish public API.
     command_rx_keys: HashSet<stream_group::Key>,
+    gate: Arc<PublishGate>,
 }
 
 impl Default for TopicState {
@@ -1162,6 +1203,49 @@ impl Default for TopicState {
             neighbors: Default::default(),
             command_rx_keys: Default::default(),
             event_sender,
+            gate: Default::default(),
+        }
+    }
+}
+
+/// How often the actor checks whether the neighbors of a paused topic took data again.
+const GATE_CHECK: Duration = Duration::from_millis(10);
+
+/// Lets the publishers of a topic wait, see [`Actor::update_gate`].
+///
+/// A broadcast that waits keeps its publisher waiting, as on a full channel.
+#[derive(Debug, Default)]
+struct PublishGate(Mutex<GateState>);
+
+#[derive(Debug, Default)]
+struct GateState {
+    paused: bool,
+    /// The command streams that wait for the gate to open.
+    waiting: Vec<Waker>,
+}
+
+impl PublishGate {
+    /// Returns ready while the gate is open, and wakes the caller once it opens.
+    fn poll_open(&self, cx: &mut Context<'_>) -> Poll<()> {
+        let mut state = self.0.lock().expect("poisoned");
+        if !state.paused {
+            return Poll::Ready(());
+        }
+        if !state
+            .waiting
+            .iter()
+            .any(|waker| waker.will_wake(cx.waker()))
+        {
+            state.waiting.push(cx.waker().clone());
+        }
+        Poll::Pending
+    }
+
+    fn set_paused(&self, paused: bool) {
+        let mut state = self.0.lock().expect("poisoned");
+        state.paused = paused;
+        if !paused {
+            state.waiting.drain(..).for_each(Waker::wake);
         }
     }
 }
@@ -1379,14 +1463,16 @@ struct TopicCommandStream {
     #[debug("CommandStream")]
     stream: BoxedCommandReceiver,
     closed: bool,
+    gate: Arc<PublishGate>,
 }
 
 impl TopicCommandStream {
-    fn new(topic_id: TopicId, stream: BoxedCommandReceiver) -> Self {
+    fn new(topic_id: TopicId, stream: BoxedCommandReceiver, gate: Arc<PublishGate>) -> Self {
         Self {
             topic_id,
             stream,
             closed: false,
+            gate,
         }
     }
 }
@@ -1396,6 +1482,9 @@ impl Stream for TopicCommandStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if self.closed {
             return Poll::Ready(None);
+        }
+        if self.gate.poll_open(cx).is_pending() {
+            return Poll::Pending;
         }
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Ready(Some(Ok(item))) => Poll::Ready(Some((self.topic_id, Some(item)))),
@@ -4459,9 +4548,11 @@ pub(crate) mod tests {
         let commands = n0_future::stream::iter(std::iter::repeat_with(|| {
             Ok(Command::Broadcast(Bytes::new()))
         }));
-        let key = actor
-            .command_rx
-            .insert(TopicCommandStream::new(topic, Box::pin(commands)));
+        let key = actor.command_rx.insert(TopicCommandStream::new(
+            topic,
+            Box::pin(commands),
+            Default::default(),
+        ));
         actor
             .topics
             .get_mut(&topic)
@@ -4736,6 +4827,51 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// A publisher whose every neighbor has a full queue waits, and loses nothing.
+    ///
+    /// The only neighbor reads nothing, as when our own uplink is the limit for
+    /// all neighbors. Without the wait, the queue drops the broadcasts.
+    #[tokio::test(flavor = "multi_thread")]
+    #[traced_test]
+    async fn publisher_waits_while_all_neighbors_are_full() -> Result {
+        let lookup = MemoryLookup::new();
+        let a = DirectNode::spawn(&lookup, Gossip::builder(), small_windows(16 * 1024)).await?;
+        let topic: TopicId = blake3::hash(b"all full").into();
+        let (a_tx, mut a_rx) = a.gossip.subscribe(topic, vec![]).await?.split();
+
+        // B joins on its own connection, and then reads nothing.
+        let b = direct_endpoint(&lookup, small_windows(16 * 1024)).await?;
+        let conn = b.connect(a.id(), GOSSIP_ALPN).await?;
+        let _join = open_stream(&conn, topic, &[join_message(topic, 0).message]).await?;
+        timeout(PROMPT, async {
+            while let Some(event) = a_rx.try_next().await? {
+                if matches!(event, api::Event::NeighborUp(peer) if peer == b.id()) {
+                    return Ok(());
+                }
+            }
+            Err(n0_error::anyerr!("the subscription ended"))
+        })
+        .await
+        .std_context("B did not become a neighbor")??;
+
+        let mut waited = false;
+        for i in 0..2000u32 {
+            let mut message = vec![7u8; 3000];
+            message[..4].copy_from_slice(&i.to_be_bytes());
+            if timeout(Duration::from_secs(1), a_tx.broadcast(message.into()))
+                .await
+                .is_err()
+            {
+                waited = true;
+                break;
+            }
+        }
+        assert!(waited, "the publisher never waited");
+        assert_eq!(a.gossip.metrics().msgs_dropped.get(), 0, "messages dropped");
+        conn.close(0u32.into(), b"done");
+        Ok(())
+    }
+
     /// A peer that reads nothing fills its queue, and the other peers still get each message (#47).
     ///
     /// A neighbor of the publisher keeps its connection open but never reads,
@@ -4814,7 +4950,9 @@ pub(crate) mod tests {
     /// A slow peer gets the payloads that its full queue dropped, once it catches up.
     ///
     /// The queue to it is small and its windows are small, so a burst drops
-    /// payloads. We announce them to the peer again, and it requests them.
+    /// payloads. A fast neighbor keeps the publisher from waiting, and forwards
+    /// nothing. We announce the dropped payloads to the slow peer again, and it
+    /// requests them.
     #[tokio::test(flavor = "multi_thread")]
     #[traced_test]
     async fn slow_peer_gets_the_dropped_messages() -> Result {
@@ -4823,8 +4961,29 @@ pub(crate) mod tests {
         let a = DirectNode::spawn(&lookup, small_queue, small_windows(16 * 1024)).await?;
         let b = DirectNode::spawn(&lookup, Gossip::builder(), small_windows(8 * 1024)).await?;
         let topic: TopicId = blake3::hash(b"slow peer").into();
-        let (a_tx, _a_rx) = a.gossip.subscribe(topic, vec![]).await?.split();
+        let (a_tx, mut a_rx) = a.gossip.subscribe(topic, vec![]).await?.split();
         let mut b_topic = b.gossip.subscribe_and_join(topic, vec![a.id()]).await?;
+
+        // C joins on its own connection, and reads every stream at once.
+        let c = direct_endpoint(&lookup, QuicTransportConfig::builder().build()).await?;
+        let c_conn = c.connect(a.id(), GOSSIP_ALPN).await?;
+        let _join = open_stream(&c_conn, topic, &[join_message(topic, 0).message]).await?;
+        let reader = c_conn.clone();
+        let _read = AbortOnDropHandle::new(spawn(async move {
+            while let Ok(mut stream) = reader.accept_uni().await {
+                spawn(async move { stream.read_to_end(usize::MAX).await.ok() });
+            }
+        }));
+        timeout(PROMPT, async {
+            while let Some(event) = a_rx.try_next().await? {
+                if matches!(event, api::Event::NeighborUp(peer) if peer == c.id()) {
+                    return Ok(());
+                }
+            }
+            Err(n0_error::anyerr!("the subscription ended"))
+        })
+        .await
+        .std_context("C did not become a neighbor")??;
 
         // A burst of 150 drops at most 150 payloads, which the caps keep.
         let metrics = a.gossip.metrics().clone();
