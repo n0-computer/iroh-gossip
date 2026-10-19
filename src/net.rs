@@ -552,8 +552,10 @@ impl Actor {
                     Some(Err(err)) => {
                         warn!(peer = %peer_id.fmt_short(), "dial failed: {err}");
                         self.metrics.actor_tick_dialer_failure.inc();
-                        let peer_state = self.peers.get(&peer_id);
-                        let is_active = matches!(peer_state, Some(PeerState::Active { .. }));
+                        let is_active = self
+                            .peers
+                            .get(&peer_id)
+                            .is_some_and(|state| matches!(state.conn, ConnState::Active { .. }));
                         if !is_active {
                             self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now());
                         }
@@ -640,15 +642,15 @@ impl Actor {
     fn handle_connection(&mut self, peer_id: EndpointId, origin: ConnOrigin, conn: Connection) {
         let dial = origin == ConnOrigin::Dial;
         // Our dial for a peer that we dropped while we dialed it.
-        let dropped_dial = matches!(
-            self.peers.get(&peer_id),
-            Some(PeerState::Dropped { conn: None, .. })
-        );
+        let dropped_dial = self
+            .peers
+            .get(&peer_id)
+            .is_some_and(|state| matches!(state.conn, ConnState::Dropped { conn: None }));
         // We dropped the peer, or the peer's connection took over after a drop.
         let stale_dial = dial
-            && match self.peers.get_mut(&peer_id) {
-                None | Some(PeerState::Dropped { conn: Some(_), .. }) => true,
-                Some(PeerState::Active { stale_dial, .. }) => std::mem::take(stale_dial),
+            && match self.peers.get_mut(&peer_id).map(|state| &mut state.conn) {
+                None | Some(ConnState::Dropped { conn: Some(_) }) => true,
+                Some(ConnState::Active { stale_dial, .. }) => std::mem::take(stale_dial),
                 Some(_) => false,
             };
         let lease = if stale_dial {
@@ -748,8 +750,8 @@ impl Actor {
         let reason = conn.close_reason().expect("closed by its task");
         let error = task_result.err();
         debug!(%reason, ?error, "connection closed");
-        match self.peers.get_mut(&peer_id) {
-            Some(PeerState::Active {
+        match self.peers.get_mut(&peer_id).map(|state| &mut state.conn) {
+            Some(ConnState::Active {
                 active_conn,
                 other_conns,
                 ..
@@ -763,7 +765,7 @@ impl Actor {
                 }
             }
             // The connection that wrote the queue of a dropped peer is gone, and the queue with it.
-            Some(PeerState::Dropped { conn: Some(id), .. }) if *id == conn.stable_id() => {
+            Some(ConnState::Dropped { conn: Some(id) }) if *id == conn.stable_id() => {
                 self.peers.remove(&peer_id);
             }
             _ => debug!("peer already marked as disconnected"),
@@ -884,17 +886,13 @@ impl Actor {
                     state.revive();
                     // Waiting for room would stop the actor, and with it every
                     // topic, for as long as this one peer does not read.
-                    let pushed = match state {
-                        PeerState::Active { queue, .. } => queue.send_tx.push(message),
-                        PeerState::Pending { queue } | PeerState::Dropped { queue, .. } => {
-                            // `revive` made a dropped peer pending.
-                            if !self.dialer.is_pending(peer_id) {
-                                debug!(peer = %peer_id.fmt_short(), "start to dial");
-                                self.dialer.queue_dial(peer_id, self.alpn.clone());
-                            }
-                            queue.send_tx.push(message)
-                        }
-                    };
+                    if !matches!(state.conn, ConnState::Active { .. })
+                        && !self.dialer.is_pending(peer_id)
+                    {
+                        debug!(peer = %peer_id.fmt_short(), "start to dial");
+                        self.dialer.queue_dial(peer_id, self.alpn.clone());
+                    }
+                    let pushed = state.queue.send_tx.push(message);
                     match pushed {
                         Pushed::Queued => {}
                         Pushed::Dropped(message) => {
@@ -979,12 +977,12 @@ fn fail_peer(
     follow_ups: &mut VecDeque<InEvent>,
     peer_id: EndpointId,
 ) {
-    let Some(mut state) = peers.remove(&peer_id) else {
+    let Some(state) = peers.remove(&peer_id) else {
         return;
     };
     warn!(peer = %peer_id.fmt_short(), "send queue full with a control message, drop the peer");
-    state.queue_mut().revoke.cancel();
-    if let PeerState::Active { active_conn, .. } = state {
+    state.queue.revoke.cancel();
+    if let ConnState::Active { active_conn, .. } = state.conn {
         // An old node may lose its later messages to us, see
         // `StreamHeader::handles_close`, but it cannot work with us anyway.
         active_conn.close(CLOSE_QUEUE_FULL.into(), b"send queue full");
@@ -997,19 +995,23 @@ const CLOSE_QUEUE_FULL: u32 = 2;
 
 type ConnId = usize;
 
+/// What we know of a peer: its queue, and the state of its connections.
 #[derive(Debug)]
-enum PeerState {
-    Pending {
-        queue: SendQueue,
-    },
+struct PeerState {
+    queue: SendQueue,
+    conn: ConnState,
+}
+
+#[derive(Debug)]
+enum ConnState {
+    /// We dial the peer.
+    Pending,
     /// The protocol dropped the peer. The queue still goes out, and then closes.
     Dropped {
-        queue: SendQueue,
         /// The connection that writes the queue, or `None` for our dial.
         conn: Option<ConnId>,
     },
     Active {
-        queue: SendQueue,
         /// The connection that we send on.
         active_conn: Connection,
         other_conns: Vec<ConnId>,
@@ -1069,32 +1071,22 @@ impl SendQueue {
     }
 }
 
-impl Default for SendQueue {
-    /// Returns a queue without room, which only takes the place of a queue moved out.
-    fn default() -> Self {
-        Self::new(0)
-    }
-}
-
 /// Drops the peer's state, but not its queue.
 ///
 /// The queue goes out on our dial or on the active connection, and then
 /// closes. If we want the peer again, its new messages follow in the same
 /// queue.
 fn disconnect_peer(peers: &mut HashMap<EndpointId, PeerState>, peer_id: EndpointId) {
-    let dropped = match peers.remove(&peer_id) {
-        None => return,
-        Some(PeerState::Pending { queue }) => PeerState::Dropped { queue, conn: None },
-        Some(dropped @ PeerState::Dropped { .. }) => dropped,
-        Some(PeerState::Active {
-            queue, active_conn, ..
-        }) => PeerState::Dropped {
-            queue,
-            conn: Some(active_conn.stable_id()),
-        },
+    let Some(state) = peers.get_mut(&peer_id) else {
+        return;
     };
-    let state = peers.entry(peer_id).insert_entry(dropped).into_mut();
-    state.queue_mut().send_tx.set_closing(true);
+    let conn = match &state.conn {
+        ConnState::Pending => None,
+        ConnState::Dropped { conn } => *conn,
+        ConnState::Active { active_conn, .. } => Some(active_conn.stable_id()),
+    };
+    state.conn = ConnState::Dropped { conn };
+    state.queue.send_tx.set_closing(true);
 }
 
 impl PeerState {
@@ -1109,8 +1101,9 @@ impl PeerState {
 
     /// Returns the state of a peer that we start to dial, with a queue of `size` bytes.
     fn pending(size: usize) -> Self {
-        PeerState::Pending {
+        PeerState {
             queue: SendQueue::new(size),
+            conn: ConnState::Pending,
         }
     }
 
@@ -1118,20 +1111,9 @@ impl PeerState {
     ///
     /// A running dial or connection delivers the queue.
     fn revive(&mut self) {
-        if let PeerState::Dropped { queue, .. } = self {
-            queue.send_tx.set_closing(false);
-            *self = PeerState::Pending {
-                queue: std::mem::take(queue),
-            };
-        }
-    }
-
-    /// Returns the queue of the peer.
-    fn queue_mut(&mut self) -> &mut SendQueue {
-        match self {
-            PeerState::Pending { queue }
-            | PeerState::Dropped { queue, .. }
-            | PeerState::Active { queue, .. } => queue,
+        if let ConnState::Dropped { .. } = self.conn {
+            self.queue.send_tx.set_closing(false);
+            self.conn = ConnState::Pending;
         }
     }
 
@@ -1140,21 +1122,8 @@ impl PeerState {
     /// The writer of the old connection stops after its current message, and
     /// finishes its streams. The new connection then takes the rest of the queue.
     fn accept_conn(&mut self, conn: Connection, stale_dial: bool) -> QueueLease {
-        match self {
-            PeerState::Pending { queue } | PeerState::Dropped { queue, .. } => {
-                let mut queue = std::mem::take(queue);
-                queue.send_tx.set_closing(false);
-                let lease = queue.lease();
-                *self = PeerState::Active {
-                    queue,
-                    active_conn: conn,
-                    other_conns: Vec::new(),
-                    stale_dial,
-                };
-                lease
-            }
-            PeerState::Active {
-                queue,
+        match &mut self.conn {
+            ConnState::Active {
                 active_conn,
                 other_conns,
                 ..
@@ -1162,9 +1131,17 @@ impl PeerState {
                 // We keep the old connection intact, as the peer may still send on it.
                 other_conns.push(active_conn.stable_id());
                 *active_conn = conn;
-                queue.lease()
+            }
+            ConnState::Pending | ConnState::Dropped { .. } => {
+                self.queue.send_tx.set_closing(false);
+                self.conn = ConnState::Active {
+                    active_conn: conn,
+                    other_conns: Vec::new(),
+                    stale_dial,
+                };
             }
         }
+        self.queue.lease()
     }
 }
 
@@ -2304,8 +2281,8 @@ pub(crate) mod tests {
         .await
         .std_context("the dial did not fail")?;
         assert!(matches!(
-            actor.peers.get(&peer_id),
-            Some(PeerState::Active { .. })
+            conn_state(&actor, peer_id),
+            Some(ConnState::Active { .. })
         ));
         assert!(peer_conn.close_reason().is_none(), "the connection closed");
         Ok(())
@@ -2729,13 +2706,13 @@ pub(crate) mod tests {
         let join = InEvent::Command(after, ProtoCommand::Join(vec![peer_id]));
         actor.handle_in_event(join, Instant::now());
         assert!(
-            matches!(actor.peers.get(&peer_id), Some(PeerState::Pending { .. })),
+            matches!(conn_state(&actor, peer_id), Some(ConnState::Pending)),
             "the peer is not pending again"
         );
 
         actor.handle_connection(peer_id, ConnOrigin::Dial, conn);
         assert!(
-            matches!(actor.peers.get(&peer_id), Some(PeerState::Active { .. })),
+            matches!(conn_state(&actor, peer_id), Some(ConnState::Active { .. })),
             "the dial was not kept"
         );
         let mut topics = BTreeSet::new();
@@ -2764,8 +2741,8 @@ pub(crate) mod tests {
     /// Pushes `message` to the queue of the active peer `peer_id`.
     fn push_active(actor: &Actor, peer_id: EndpointId, message: ProtoMessage) {
         match actor.peers.get(&peer_id) {
-            Some(PeerState::Active { queue, .. }) => {
-                assert!(matches!(queue.send_tx.push(message), Pushed::Queued));
+            Some(state) if matches!(state.conn, ConnState::Active { .. }) => {
+                assert!(matches!(state.queue.send_tx.push(message), Pushed::Queued));
             }
             other => panic!("not active: {other:?}"),
         }
@@ -2789,7 +2766,9 @@ pub(crate) mod tests {
         actor.handle_connection(peer_id, ConnOrigin::Accept, old);
         // The old writer cannot take the queue before the new connection replaces it.
         let held = match actor.peers.get(&peer_id) {
-            Some(PeerState::Active { queue, .. }) => queue.send_rx.try_lock(),
+            Some(state) if matches!(state.conn, ConnState::Active { .. }) => {
+                state.queue.send_rx.try_lock()
+            }
             other => panic!("not active: {other:?}"),
         }
         .std_context("the queue is locked")?;
@@ -2954,7 +2933,7 @@ pub(crate) mod tests {
         disconnect_peer(&mut actor.peers, peer_id);
         let state = actor.peers.get_mut(&peer_id).expect("dropped");
         state.revive();
-        let pushed = state.queue_mut().send_tx.push(join_message(joined, 0));
+        let pushed = state.queue.send_tx.push(join_message(joined, 0));
         assert!(matches!(pushed, Pushed::Queued));
         actor.handle_connection(peer_id, ConnOrigin::Accept, new);
 
@@ -2984,8 +2963,8 @@ pub(crate) mod tests {
         let _lease = state.accept_conn(conn, false);
         peers.insert(peer_id, state);
         let push = |peers: &mut HashMap<EndpointId, PeerState>| {
-            let queue = peers.get_mut(&peer_id).expect("known").queue_mut();
-            queue.send_tx.push(numbered(topic, 0))
+            let state = peers.get_mut(&peer_id).expect("known");
+            state.queue.send_tx.push(numbered(topic, 0))
         };
         while matches!(push(&mut peers), Pushed::Queued) {}
 
@@ -3045,7 +3024,7 @@ pub(crate) mod tests {
         actor.handle_connection(peer_id, ConnOrigin::Accept, conn);
 
         assert!(
-            matches!(actor.peers.get(&peer_id), Some(PeerState::Active { .. })),
+            matches!(conn_state(&actor, peer_id), Some(ConnState::Active { .. })),
             "the peer's connection was not kept"
         );
         let (_, message) = timeout(Duration::from_secs(5), read_next_message(&peer_conn))
@@ -3357,8 +3336,8 @@ pub(crate) mod tests {
 
         assert!(
             matches!(
-                actor.peers.get(&peer_id),
-                Some(PeerState::Active { active_conn, .. }) if active_conn.stable_id() == inbound_id
+                conn_state(&actor, peer_id),
+                Some(ConnState::Active { active_conn, .. }) if active_conn.stable_id() == inbound_id
             ),
             "the dial replaced the peer's connection"
         );
@@ -3423,8 +3402,8 @@ pub(crate) mod tests {
         actor.handle_connection(ep2_id, ConnOrigin::Dial, conn);
         assert!(
             matches!(
-                actor.peers.get(&ep2_id),
-                Some(PeerState::Dropped { conn: Some(_), .. })
+                conn_state(&actor, ep2_id),
+                Some(ConnState::Dropped { conn: Some(_) })
             ),
             "the connection became the peer's active one"
         );
@@ -3492,14 +3471,16 @@ pub(crate) mod tests {
         }
     }
 
+    /// Returns the state of the connections of `peer_id`.
+    fn conn_state(actor: &Actor, peer_id: EndpointId) -> Option<&ConnState> {
+        actor.peers.get(&peer_id).map(|state| &state.conn)
+    }
+
     /// Returns the state of a peer that we dial, with `messages` in its queue.
     fn pending_with(messages: Vec<ProtoMessage>) -> PeerState {
         let state = PeerState::pending(queue::QUEUE_SIZE);
-        let PeerState::Pending { queue } = &state else {
-            unreachable!("a pending state");
-        };
         for message in messages {
-            assert!(matches!(queue.send_tx.push(message), Pushed::Queued));
+            assert!(matches!(state.queue.send_tx.push(message), Pushed::Queued));
         }
         state
     }
