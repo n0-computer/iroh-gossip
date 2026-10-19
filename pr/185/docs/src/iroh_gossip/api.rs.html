@@ -169,9 +169,9 @@
 <a href=#169 id=169 data-nosnippet>169</a>
 <a href=#170 id=170 data-nosnippet>170</a><span class="doccomment">/// Sender for a gossip topic.
 <a href=#171 id=171 data-nosnippet>171</a>///
-<a href=#172 id=172 data-nosnippet>172</a>/// The commands of a topic keep their order. While the queues to all
-<a href=#173 id=173 data-nosnippet>173</a>/// neighbors of the topic are half full with data, they wait: a broadcast, a
-<a href=#174 id=174 data-nosnippet>174</a>/// join of more peers, and the leave when the last handle drops. See the known
+<a href=#172 id=172 data-nosnippet>172</a>/// The commands of a topic keep their order. While the queues to all peers
+<a href=#173 id=173 data-nosnippet>173</a>/// that the topic pushes data to are half full with data, they wait: a
+<a href=#174 id=174 data-nosnippet>174</a>/// broadcast, a join of more peers, and the leave when the last handle drops. See the known
 <a href=#175 id=175 data-nosnippet>175</a>/// limits of `QueueOptions` in the `net` module.
 <a href=#176 id=176 data-nosnippet>176</a></span><span class="attr">#[derive(Debug, Clone)]
 <a href=#177 id=177 data-nosnippet>177</a></span><span class="kw">pub struct </span>GossipSender(mpsc::Sender&lt;Command&gt;);
