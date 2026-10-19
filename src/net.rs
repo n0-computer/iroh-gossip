@@ -20,7 +20,7 @@ use irpc::WithChannels;
 use n0_error::{e, stack_error};
 use n0_future::{
     task::{self, AbortOnDropHandle, JoinSet},
-    time::{Instant, Interval},
+    time::{Instant, Interval, MissedTickBehavior},
     Stream, StreamExt as _,
 };
 use rand::{rngs::StdRng, SeedableRng};
@@ -430,6 +430,8 @@ impl Actor {
         let (rpc_tx, rpc_rx) = mpsc::channel(TO_ACTOR_CAP);
         let (local_tx, local_rx) = mpsc::channel(16);
         let (in_event_tx, in_event_rx) = mpsc::channel(IN_EVENT_CAP);
+        let mut gate_check = n0_future::time::interval(GATE_CHECK);
+        gate_check.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         let actor = Actor {
             alpn: alpn.unwrap_or_else(|| GOSSIP_ALPN.to_vec().into()),
@@ -454,7 +456,7 @@ impl Actor {
             send_queue_size,
             follow_ups: Default::default(),
             paused_topics: Default::default(),
-            gate_check: n0_future::time::interval(GATE_CHECK),
+            gate_check,
         };
 
         (actor, rpc_tx, local_tx)
