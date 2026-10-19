@@ -130,12 +130,22 @@ impl Limit {
 
     /// Takes `size` bytes, and returns `false` if they do not fit.
     fn reserve(&self, size: usize) -> bool {
-        // The counter guards no other data, so relaxed ordering suffices.
-        self.used
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
-                used.checked_add(size).filter(|&used| used <= self.max)
-            })
-            .is_ok()
+        // The counter guards no other data, so relaxed ordering suffices. A loop of
+        // its own, as `fetch_update` is deprecated on new and `try_update` missing on
+        // old toolchains.
+        let mut used = self.used.load(Ordering::Relaxed);
+        loop {
+            let Some(next) = used.checked_add(size).filter(|&next| next <= self.max) else {
+                return false;
+            };
+            match self
+                .used
+                .compare_exchange_weak(used, next, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => return true,
+                Err(actual) => used = actual,
+            }
+        }
     }
 
     fn release(&self, size: usize) {
