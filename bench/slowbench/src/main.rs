@@ -258,6 +258,7 @@ async fn run(args: Args) -> Result<()> {
             "p99_ms": ages.get((ages.len() as f64 * 0.99) as usize).copied(),
             "neighbor_down": s.neighbor_down,
             "publisher_neighbor": s.neighbors.contains(&nodes[0].0),
+            "dropped": metric(&nodes[i].1, "msgs_dropped"),
         }));
         churn.0 += s.neighbor_up;
         churn.1 += s.neighbor_down;
@@ -378,4 +379,17 @@ fn max_rss_mb() -> f64 {
         .and_then(|kb| kb.parse::<f64>().ok())
         .map(|kb| kb / 1024.0)
         .unwrap_or(f64::NAN)
+}
+
+/// Returns the counter `name` of one node, or 0 if its version has none.
+fn metric(node: &Node, name: &str) -> i128 {
+    node.gossip
+        .metrics()
+        .iter()
+        .find(|item| item.name() == name)
+        .and_then(|item| match item.value() {
+            MetricValue::Counter(v) => Some(v as i128),
+            _ => None,
+        })
+        .unwrap_or(0)
 }
