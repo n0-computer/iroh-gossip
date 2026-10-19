@@ -695,6 +695,11 @@ impl Actor {
                 )
                 .await;
             }
+            RpcMessage::MaxContentSize(msg) => {
+                let max_message_size = self.state.max_message_size();
+                let max_content = proto::topic::max_content_size(max_message_size);
+                msg.tx.send(max_content).await.ok();
+            }
         }
     }
 
@@ -2775,7 +2780,7 @@ pub(crate) mod tests {
             .rev()
             .find(|len| proto::topic::broadcast_fits(*len, Scope::Swarm, MAX))
             .expect("some content fits");
-        assert_eq!(sender.max_content_size(), Some(fits));
+        assert_eq!(sender.max_content_size(), fits);
 
         sender.broadcast(vec![0; fits].into()).await?;
         let refused = sender.broadcast(vec![0; fits + 1].into()).await;

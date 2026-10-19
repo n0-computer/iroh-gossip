@@ -5,12 +5,16 @@
 use std::{
     collections::{BTreeSet, HashSet},
     pin::Pin,
+    sync::{Arc, OnceLock},
     task::{Context, Poll},
 };
 
 use bytes::Bytes;
 use iroh_base::EndpointId;
-use irpc::{channel::mpsc, rpc_requests, Client};
+use irpc::{
+    channel::{mpsc, oneshot},
+    rpc_requests, Client,
+};
 use n0_error::{e, stack_error};
 use n0_future::{Stream, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
@@ -28,7 +32,14 @@ const TOPIC_COMMANDS_CAP: usize = 64;
 pub(crate) enum Request {
     #[rpc(tx=mpsc::Sender<Event>, rx=mpsc::Receiver<Command>)]
     Join(JoinRequest),
+    /// Asks for the largest message content that a broadcast takes.
+    #[rpc(tx=oneshot::Sender<usize>)]
+    MaxContentSize(MaxContentSizeRequest),
 }
+
+/// The request for the size limit of the server, see [`GossipSender::max_content_size`].
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct MaxContentSizeRequest;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct JoinRequest {
@@ -89,8 +100,10 @@ impl From<irpc::channel::oneshot::RecvError> for ApiError {
 #[derive(Debug, Clone)]
 pub struct GossipApi {
     client: Client<Request>,
-    /// The largest content that a broadcast takes, unknown to an RPC client.
-    max_content: Option<usize>,
+    /// The largest content that a broadcast takes, once known.
+    ///
+    /// An RPC client asks its server on its first subscribe.
+    max_content: Arc<OnceLock<usize>>,
 }
 
 impl GossipApi {
@@ -100,9 +113,10 @@ impl GossipApi {
         max_message_size: usize,
     ) -> Self {
         let local = irpc::LocalSender::<Request>::from(tx);
+        let max_content = crate::proto::topic::max_content_size(max_message_size);
         Self {
             client: local.into(),
-            max_content: Some(crate::proto::topic::max_content_size(max_message_size)),
+            max_content: Arc::new(OnceLock::from(max_content)),
         }
     }
 
@@ -112,7 +126,7 @@ impl GossipApi {
         let inner = irpc::Client::noq(endpoint, addr);
         Self {
             client: inner,
-            max_content: None,
+            max_content: Default::default(),
         }
     }
 
@@ -130,6 +144,23 @@ impl GossipApi {
         listen::<Request>(endpoint, handler).await
     }
 
+    /// Returns the largest content that a broadcast takes, and asks the server once.
+    ///
+    /// A server older than 0.102.0 does not know the request, see
+    /// [`GossipSender::max_content_size`].
+    async fn max_content_size(&self) -> usize {
+        if let Some(max_content) = self.max_content.get() {
+            return *max_content;
+        }
+        match self.client.rpc(MaxContentSizeRequest).await {
+            Ok(max_content) => *self.max_content.get_or_init(|| max_content),
+            Err(err) => {
+                tracing::debug!("the server reported no size limit: {err:#}");
+                usize::MAX
+            }
+        }
+    }
+
     /// Join a gossip topic with options.
     ///
     /// Returns a [`GossipTopic`] instantly. To wait for at least one connection to be established,
@@ -142,6 +173,7 @@ impl GossipApi {
         topic_id: TopicId,
         opts: JoinOptions,
     ) -> Result<GossipTopic, ApiError> {
+        let max_content = self.max_content_size().await;
         let req = JoinRequest {
             topic_id,
             bootstrap: opts.bootstrap,
@@ -150,7 +182,7 @@ impl GossipApi {
             .client
             .bidi_streaming(req, TOPIC_COMMANDS_CAP, opts.subscription_capacity)
             .await?;
-        Ok(GossipTopic::new(tx, rx, self.max_content))
+        Ok(GossipTopic::new(tx, rx, max_content))
     }
 
     /// Join a gossip topic with the default options and wait for at least one active connection.
@@ -188,11 +220,11 @@ impl GossipApi {
 #[derive(Debug, Clone)]
 pub struct GossipSender {
     sender: mpsc::Sender<Command>,
-    max_content: Option<usize>,
+    max_content: usize,
 }
 
 impl GossipSender {
-    pub(crate) fn new(sender: mpsc::Sender<Command>, max_content: Option<usize>) -> Self {
+    pub(crate) fn new(sender: mpsc::Sender<Command>, max_content: usize) -> Self {
         Self {
             sender,
             max_content,
@@ -202,23 +234,24 @@ impl GossipSender {
     /// Returns the largest message content that [`Self::broadcast`] takes.
     ///
     /// It is [`Builder::max_message_size`] less the encoding, about 40 bytes,
-    /// and holds for [`Self::broadcast_neighbors`] too. An RPC client does not
-    /// know the limit of its server, and gets `None`.
+    /// and holds for [`Self::broadcast_neighbors`] too. Over a remote RPC
+    /// connection, it is the limit of the server. If that server is older than
+    /// iroh-gossip 0.102.0, it is `usize::MAX`.
     ///
     /// [`Builder::max_message_size`]: crate::net::Builder::max_message_size
-    pub fn max_content_size(&self) -> Option<usize> {
+    pub fn max_content_size(&self) -> usize {
         self.max_content
     }
 
     /// Returns an error if the message content is over the limit.
     fn check_size(&self, message: &Bytes) -> Result<(), ApiError> {
-        match self.max_content {
-            Some(max_content) if message.len() > max_content => Err(e!(ApiError::TooLarge {
+        if message.len() > self.max_content {
+            return Err(e!(ApiError::TooLarge {
                 size: message.len(),
-                max_content
-            })),
-            _ => Ok(()),
+                max_content: self.max_content
+            }));
         }
+        Ok(())
     }
 
     /// Broadcasts a message to all endpoints.
@@ -226,9 +259,7 @@ impl GossipSender {
     /// # Errors
     ///
     /// Returns [`ApiError::TooLarge`] if the content is over
-    /// [`Self::max_content_size`]. An RPC client does not know the limit of its
-    /// server: there the server drops such a message with a warning, and this
-    /// returns `Ok`.
+    /// [`Self::max_content_size`].
     pub async fn broadcast(&self, message: Bytes) -> Result<(), ApiError> {
         self.check_size(&message)?;
         self.send(Command::Broadcast(message)).await?;
@@ -276,7 +307,7 @@ impl GossipTopic {
     pub(crate) fn new(
         sender: mpsc::Sender<Command>,
         receiver: mpsc::Receiver<Event>,
-        max_content: Option<usize>,
+        max_content: usize,
     ) -> Self {
         let sender = GossipSender::new(sender, max_content);
         Self {
@@ -288,7 +319,7 @@ impl GossipTopic {
     /// Returns the largest message content that [`Self::broadcast`] takes.
     ///
     /// See [`GossipSender::max_content_size`].
-    pub fn max_content_size(&self) -> Option<usize> {
+    pub fn max_content_size(&self) -> usize {
         self.sender.max_content_size()
     }
 
@@ -544,6 +575,9 @@ mod tests {
 
         router.endpoint().address_lookup()?.add(memory_lookup);
 
+        // The size limit of the server, which an RPC client asks for.
+        let max_content = crate::proto::topic::max_content_size(gossip.max_message_size());
+
         // expose the gossip endpoint over RPC
         let (rpc_server_endpoint, rpc_server_cert) =
             irpc::util::make_server_endpoint("127.0.0.1:0".parse().unwrap())
@@ -566,6 +600,13 @@ mod tests {
             let mut topic = rpc_client
                 .subscribe_and_join(topic_id, vec![endpoint2_id])
                 .await?;
+            // The client refuses an oversized message itself, as a local one does.
+            assert_eq!(topic.max_content_size(), max_content);
+            let refused = topic.broadcast(vec![0; max_content + 1].into()).await;
+            assert!(
+                matches!(refused, Err(super::ApiError::TooLarge { .. })),
+                "{refused:?}"
+            );
             // wait for a message
             while let Some(event) = topic.try_next().await? {
                 match event {
