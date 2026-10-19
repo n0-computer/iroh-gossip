@@ -221,9 +221,9 @@ impl GossipApi {
 
 /// Sender for a gossip topic.
 ///
-/// The commands of a topic keep their order. While the queues to all
-/// neighbors of the topic are half full with data, they wait: a broadcast, a
-/// join of more peers, and the leave when the last handle drops. See the known
+/// The commands of a topic keep their order. While the queues to all peers
+/// that the topic pushes data to are half full with data, they wait: a
+/// broadcast, a join of more peers, and the leave when the last handle drops. See the known
 /// limits of `QueueOptions` in the `net` module.
 #[derive(Debug, Clone)]
 pub struct GossipSender {

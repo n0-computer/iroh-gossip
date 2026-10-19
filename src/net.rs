@@ -243,18 +243,19 @@ impl Builder {
 /// The queue bounds the bytes that wait to be sent to one peer. When it is
 /// full, a data message or announcement is lost, and we announce a lost
 /// broadcast again later. Any other control message closes the connection.
-/// A publisher waits while the queues to all neighbors of its topic fill.
+/// A publisher waits while the queues to all peers that its topic pushes data to fill.
 /// [`Metrics::msgs_dropped`] and [`Metrics::peers_send_queue_full`] count both.
 ///
 /// Known limits:
 ///
-/// - **Backpressure.** A broadcast waits only while every neighbor of its
-///   topic has its data section half full: then our own link is the limit.
-///   The other commands of the topic wait with it, in order: a join of more
-///   peers, and a leave, which takes effect once the broadcasts before it went
-///   out. Otherwise a broadcast never waits, and a burst larger than the queue
-///   and the QUIC windows of a neighbor loses messages for it. The repair
-///   recovers only part of them.
+/// - **Backpressure.** A broadcast waits only while every eager peer of its
+///   topic, each peer that we push data to, has its data section half full:
+///   then our own link is the limit. The other commands of the topic wait
+///   with it, in order: a join of more peers, and a leave, which takes effect
+///   once the broadcasts before it went out. Otherwise a broadcast never
+///   waits, and a node that relays it never waits either. A burst larger than
+///   the queue and the QUIC windows of a peer loses messages for it, at the
+///   publisher or at a relay. The repair recovers only part of them.
 /// - **Repair.** A lost broadcast is announced again only while it is cached,
 ///   30 s by default. At most 256 per peer and 4096 per topic wait for it, and
 ///   64 per peer go out per second. A message with neighbor scope is never
@@ -630,19 +631,19 @@ impl Actor {
         self.handle_in_event(InEvent::UpdatePeerData(peer_data), Instant::now());
     }
 
-    /// Pauses the publishers of `topic` while every neighbor has its data queue half full.
+    /// Pauses the publishers of `topic` while every eager peer has its data queue half full.
     ///
     /// Then our own link is the limit, and a broadcast would be lost for every
-    /// neighbor. One slow neighbor among others pauses nothing.
+    /// peer that we push it to. One slow eager peer among others pauses
+    /// nothing. Lazy peers get only announcements, so they do not count.
     fn update_gate(&mut self, topic: TopicId) {
-        let busy = self.topics.get(&topic).is_some_and(|state| {
-            !state.neighbors.is_empty()
-                && state.neighbors.iter().all(|peer| {
-                    self.peers
-                        .get(peer)
-                        .is_some_and(|peer| peer.queue.send_tx.is_busy())
-                })
-        });
+        let mut eager = self.state.eager_peers(&topic).peekable();
+        let busy = eager.peek().is_some()
+            && eager.all(|peer| {
+                self.peers
+                    .get(peer)
+                    .is_some_and(|peer| peer.queue.send_tx.is_busy())
+            });
         if let Some(state) = self.topics.get(&topic) {
             state.gate.set_paused(busy);
         }
@@ -4833,10 +4834,11 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// A publisher whose every neighbor has a full queue waits, and loses nothing.
+    /// A publisher whose every eager peer has a full queue waits, and loses nothing.
     ///
-    /// The only neighbor reads nothing, as when our own uplink is the limit for
-    /// all neighbors. Without the wait, the queue drops the broadcasts.
+    /// The only neighbor, an eager peer, reads nothing, as when our own uplink
+    /// is the limit for all peers. Without the wait, the queue drops the
+    /// broadcasts.
     #[tokio::test(flavor = "multi_thread")]
     #[traced_test]
     async fn publisher_waits_while_all_neighbors_are_full() -> Result {
