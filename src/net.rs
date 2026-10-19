@@ -1326,10 +1326,18 @@ pub(crate) mod tests {
             actor.event_loop(addr_update_stream, *step).await
         }
 
-        async fn steps(&mut self, n: usize) {
-            for _ in 0..n {
+        /// Steps until `done` holds, at most `max` times, and returns whether it holds.
+        ///
+        /// The actor picks its branches in no fixed order, so a count of steps can
+        /// miss an event.
+        async fn steps_until(&mut self, max: usize, done: impl Fn(&Actor) -> bool) -> bool {
+            for _ in 0..max {
+                if done(&self.actor) {
+                    return true;
+                }
                 self.step().await;
             }
+            done(&self.actor)
         }
 
         async fn finish(mut self) {
@@ -1685,24 +1693,34 @@ pub(crate) mod tests {
         let go1_handle = task::spawn(go1_task);
 
         // advance and check that the topic is now subscribed
-        actor.steps(3).await; // handle our subscribe;
-                              // get peer connection;
-                              // receive the other peer's information for a NeighborUp
-        let state = actor.topics.get(&topic).expect("get registered topic");
-        assert!(state.joined());
+        let commands = |actor: &Actor| {
+            actor
+                .topics
+                .get(&topic)
+                .map_or(0, |state| state.command_rx_keys.len())
+        };
+        // Our subscribe, the connection, and the NeighborUp from the peer's information.
+        let joined = |actor: &Actor| actor.topics.get(&topic).is_some_and(|s| s.joined());
+        assert!(actor.steps_until(20, joined).await, "not joined");
 
         // signal the second subscribe, we should remain subscribed
         tx.send(())
             .await
             .std_context("signal additional subscribe")?;
-        actor.steps(3).await; // subscribe; first receiver gone; first sender gone
+        assert!(actor.steps_until(20, |a| commands(a) == 2).await);
+        // The first handle goes.
+        assert!(actor.steps_until(20, |a| commands(a) == 1).await);
         let state = actor.topics.get(&topic).expect("get registered topic");
         assert!(state.joined());
 
         // signal to drop the second handle, the topic should no longer be subscribed
         tx.send(()).await.std_context("signal drop handles")?;
-        actor.steps(2).await; // second receiver gone; second sender gone
-        assert!(!actor.topics.contains_key(&topic));
+        assert!(
+            actor
+                .steps_until(20, |a| !a.topics.contains_key(&topic))
+                .await,
+            "the topic is still subscribed"
+        );
 
         // cleanup and ensure everything went as expected
         ct.cancel();
