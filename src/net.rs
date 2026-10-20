@@ -704,7 +704,7 @@ impl Actor {
         } else {
             let queue_lease =
                 PeerState::get_or_pending(&mut self.peers, peer_id, self.send_queue_size)
-                    .accept_conn(conn.clone(), dropped_dial);
+                    .accept_conn(conn.stable_id(), dropped_dial);
             // The queue goes out, then the connection closes. A connection the peer
             // opened stays, as the peer is about to use it.
             if dropped_dial && dial {
@@ -796,17 +796,12 @@ impl Actor {
         let error = task_result.err();
         debug!(%reason, ?error, "connection closed");
         match self.peers.get_mut(&peer_id).map(|state| &mut state.conn) {
-            Some(ConnState::Active {
-                active_conn,
-                other_conns,
-                ..
-            }) => {
-                if conn.stable_id() == active_conn.stable_id() {
+            Some(ConnState::Active { active_conn, .. }) => {
+                if conn.stable_id() == *active_conn {
                     debug!("active send connection closed, mark peer as disconnected");
                     self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now());
                 } else {
-                    other_conns.retain(|x| *x != conn.stable_id());
-                    debug!("remaining {} other connections", other_conns.len() + 1);
+                    debug!("an older connection closed, the active one stays");
                 }
             }
             // The connection that wrote the queue of a dropped peer is gone, and the queue with it.
@@ -1054,8 +1049,7 @@ enum ConnState {
     },
     Active {
         /// The connection that we send on.
-        active_conn: Connection,
-        other_conns: Vec<ConnId>,
+        active_conn: ConnId,
         /// Whether our running dial is for a peer we dropped, so it must not replace this one.
         stale_dial: bool,
     },
@@ -1090,7 +1084,7 @@ fn disconnect_peer(peers: &mut HashMap<EndpointId, PeerState>, peer_id: Endpoint
     let conn = match &state.conn {
         ConnState::Pending => None,
         ConnState::Dropped { conn } => *conn,
-        ConnState::Active { active_conn, .. } => Some(active_conn.stable_id()),
+        ConnState::Active { active_conn, .. } => Some(*active_conn),
     };
     state.conn = ConnState::Dropped { conn };
     state.queue.set_closing(true);
@@ -1128,22 +1122,14 @@ impl PeerState {
     ///
     /// The writer of the old connection stops after its current message, and
     /// finishes its streams. The new connection then takes the rest of the queue.
-    fn accept_conn(&mut self, conn: Connection, stale_dial: bool) -> QueueLease {
+    fn accept_conn(&mut self, conn: ConnId, stale_dial: bool) -> QueueLease {
         match &mut self.conn {
-            ConnState::Active {
-                active_conn,
-                other_conns,
-                ..
-            } => {
-                // We keep the old connection intact, as the peer may still send on it.
-                other_conns.push(active_conn.stable_id());
-                *active_conn = conn;
-            }
+            // We keep the old connection intact, as the peer may still send on it.
+            ConnState::Active { active_conn, .. } => *active_conn = conn,
             ConnState::Pending | ConnState::Dropped { .. } => {
                 self.queue.set_closing(false);
                 self.conn = ConnState::Active {
                     active_conn: conn,
-                    other_conns: Vec::new(),
                     stale_dial,
                 };
             }
@@ -2623,7 +2609,7 @@ pub(crate) mod tests {
         let peer = pair.ep2.id();
         let mut actor = t_actor().await?;
         let mut state = PeerState::pending(queue::MIN_QUEUE_SIZE);
-        let queue_lease = state.accept_conn(conn.clone(), false);
+        let queue_lease = state.accept_conn(conn.stable_id(), false);
         actor.peers.insert(peer, state);
         let (in_event_tx, _in_event_rx) = mpsc::channel(16);
         // The runtime has one thread, so the writer takes nothing before the queue is full.
@@ -2774,7 +2760,7 @@ pub(crate) mod tests {
         let topic: TopicId = blake3::hash(b"revived").into();
         let mut peers = HashMap::new();
         let mut state = PeerState::pending(queue::MIN_QUEUE_SIZE);
-        let queue_lease = state.accept_conn(conn.clone(), false);
+        let queue_lease = state.accept_conn(conn.stable_id(), false);
         let (in_event_tx, _in_event_rx) = mpsc::channel(16);
         let _conn_loop = AbortOnDropHandle::new(spawn(connection_loop(
             peer_id,
@@ -3099,7 +3085,7 @@ pub(crate) mod tests {
         let mut peers = HashMap::new();
         let mut state = PeerState::pending(queue::MIN_QUEUE_SIZE);
         // Nothing takes from the queue, as from that of a peer that does not read.
-        let _queue_lease = state.accept_conn(conn, false);
+        let _queue_lease = state.accept_conn(conn.stable_id(), false);
         peers.insert(peer_id, state);
         let push = |peers: &mut HashMap<EndpointId, PeerState>| {
             let state = peers.get_mut(&peer_id).expect("known");
@@ -3525,7 +3511,7 @@ pub(crate) mod tests {
         assert!(
             matches!(
                 conn_state(&actor, peer_id),
-                Some(ConnState::Active { active_conn, .. }) if active_conn.stable_id() == inbound_id
+                Some(ConnState::Active { active_conn, .. }) if *active_conn == inbound_id
             ),
             "the dial replaced the peer's connection"
         );
