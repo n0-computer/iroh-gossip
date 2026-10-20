@@ -241,11 +241,15 @@ impl SharedReceiver {
 ///
 /// The actor revokes it when a new connection replaces this one. The writer
 /// then lets go of the queue after its current message, and the writer of the
-/// new connection takes it.
+/// new connection takes it. When the actor fails the peer, it cancels
+/// `failed`, which revokes every lease on the queue, and each writer closes
+/// its connection.
 #[derive(Debug)]
 pub(super) struct QueueLease {
     pub(super) queue: SharedReceiver,
+    /// A child of `failed`.
     pub(super) revoked: CancellationToken,
+    pub(super) failed: CancellationToken,
 }
 
 /// Reads a queue, and keeps the message that a writer has not finished.

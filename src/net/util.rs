@@ -91,6 +91,9 @@ pub(super) const HANDOVER_LIMIT: Duration = Duration::from_secs(5);
 #[cfg(test)]
 pub(super) const HANDOVER_LIMIT: Duration = Duration::from_secs(1);
 
+/// The code of a close for a peer whose send queue had no room for a control message.
+const CLOSE_QUEUE_FULL: u32 = 2;
+
 /// The code of a close for a write or a stream open that made no progress in time.
 const CLOSE_STALLED: u32 = 3;
 
@@ -336,6 +339,7 @@ impl SendLoop {
         let closed = conn.closed();
         tokio::pin!(closed);
         let revoked = self.lease.revoked.clone();
+        let failed = self.lease.failed.clone();
         // A replaced connection of the peer may still write its current message.
         let queue = tokio::select! {
             biased;
@@ -375,7 +379,9 @@ impl SendLoop {
                 // the part of this one.
                 let handover = async {
                     revoked.cancelled().await;
-                    n0_future::time::sleep(HANDOVER_LIMIT).await;
+                    if !failed.is_cancelled() {
+                        n0_future::time::sleep(HANDOVER_LIMIT).await;
+                    }
                 };
                 tokio::select! {
                     biased;
@@ -387,6 +393,13 @@ impl SendLoop {
                 }
                 queue.written();
             }
+        }
+        if failed.is_cancelled() {
+            // An old node may lose its later messages to us, see
+            // `StreamHeader::handles_close`, but it cannot work with us anyway.
+            warn!("the peer failed, close the connection");
+            self.conn.close(CLOSE_QUEUE_FULL.into(), b"send queue full");
+            return Ok(());
         }
 
         // Close remaining streams.

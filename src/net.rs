@@ -276,8 +276,8 @@ impl Builder {
 ///   connection. A node up to version 0.101 may then lose its later messages
 ///   to us, if the connection was no neighbor link on its side.
 /// - **Handover.** A control message that does not fit while a replaced
-///   connection still writes its last message closes the new connection, not
-///   the old one.
+///   connection still writes its last message fails the peer, and closes the
+///   new connection too, though only the old one is stuck.
 ///
 /// Ignored tests show the order, the stream limit and the handover.
 #[derive(Debug, Clone, Copy)]
@@ -1026,17 +1026,11 @@ fn fail_peer(
         return;
     };
     warn!(peer = %peer_id.fmt_short(), "send queue full with a control message, drop the peer");
-    state.queue.revoke.cancel();
-    if let ConnState::Active { active_conn, .. } = state.conn {
-        // An old node may lose its later messages to us, see
-        // `StreamHeader::handles_close`, but it cannot work with us anyway.
-        active_conn.close(CLOSE_QUEUE_FULL.into(), b"send queue full");
-    }
+    // Each writer of the queue closes its connection: the active one, and an
+    // older one that still writes the queue of a peer we dropped and revived.
+    state.queue.failed.cancel();
     follow_ups.push_back(InEvent::PeerDisconnected(peer_id));
 }
-
-/// The code of a close for a peer whose send queue had no room for a control message.
-const CLOSE_QUEUE_FULL: u32 = 2;
 
 type ConnId = usize;
 
@@ -1076,6 +1070,8 @@ struct SendQueue {
     send_rx: SharedReceiver,
     /// Revokes the lease of the connection that writes the queue now.
     revoke: CancellationToken,
+    /// Fails the peer: every writer of the queue closes its connection.
+    failed: CancellationToken,
 }
 
 /// Whether a peer sent [`util::StreamHeader::handles_close`], shared by its connections.
@@ -1098,20 +1094,23 @@ impl Default for CloseFlag {
 impl SendQueue {
     fn new(size: usize) -> Self {
         let (send_tx, send_rx) = QueueSender::new(size);
+        let failed = CancellationToken::new();
         Self {
             send_tx,
             send_rx,
-            revoke: Default::default(),
+            revoke: failed.child_token(),
+            failed,
         }
     }
 
     /// Revokes the lease of the connection that writes the queue, and returns one for the next.
     fn lease(&mut self) -> QueueLease {
         self.revoke.cancel();
-        self.revoke = CancellationToken::new();
+        self.revoke = self.failed.child_token();
         QueueLease {
             queue: self.send_rx.clone(),
             revoked: self.revoke.clone(),
+            failed: self.failed.clone(),
         }
     }
 }
@@ -2652,7 +2651,7 @@ pub(crate) mod tests {
     ///
     /// The old connection does not read, so its writer keeps the queue for up
     /// to the handover limit, and control fills the queue meanwhile. Today the
-    /// overflow closes the active connection, which is the new and healthy one.
+    /// overflow fails the peer, and closes the new and healthy connection too.
     #[tokio::test(flavor = "current_thread")]
     #[traced_test]
     #[ignore = "known limit: see the known limits of QueueOptions"]
@@ -2754,20 +2753,23 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// An overflow of a revived queue drops the peer, and stops the writer of the queue with the gap.
+    /// An overflow of a revived queue drops the peer, and closes the connection that still writes it.
     ///
     /// The protocol dropped the peer while its connection still wrote the
-    /// queue, and wanted it again. The queue lives on, so an overflow must not
-    /// leave it to the old writer.
+    /// queue, and wanted it again. The state is pending, but the old connection
+    /// writes the queue with the gap, so it must close for the peer to learn.
     #[tokio::test]
     #[traced_test]
-    async fn overflow_of_a_revived_queue_drops_the_peer() -> Result {
+    async fn overflow_of_a_revived_queue_closes_its_writer() -> Result {
         let pair = TestPair::new(1).await?;
-        let (conn, _peer_conn) = pair.connect().await?;
+        let (conn, peer_conn) = pair.connect().await?;
         let peer_id = pair.ep2.id();
         let mut peers = HashMap::new();
         let mut state = PeerState::pending(queue::MIN_QUEUE_SIZE);
-        let lease = state.accept_conn(conn, false);
+        let lease = state.accept_conn(conn.clone(), false);
+        // The writer keeps a handle of the connection, so only its close ends it.
+        let send = SendLoop::new(conn, lease, TEST_FRAME_LIMIT);
+        let _send = AbortOnDropHandle::new(spawn(send.run()));
         peers.insert(peer_id, state);
         disconnect_peer(&mut peers, peer_id);
         peers.get_mut(&peer_id).expect("dropped").revive();
@@ -2779,7 +2781,17 @@ pub(crate) mod tests {
             matches!(follow_ups.pop_front(), Some(InEvent::PeerDisconnected(p)) if p == peer_id),
             "the protocol was not told"
         );
-        assert!(lease.revoked.is_cancelled(), "the old writer goes on");
+        let reason = timeout(Duration::from_secs(2), peer_conn.closed())
+            .await
+            .std_context("the connection that wrote the queue stayed open")?;
+        assert!(
+            matches!(
+                &reason,
+                iroh::endpoint::ConnectionError::ApplicationClosed(close)
+                    if close.error_code == VarInt::from_u32(2)
+            ),
+            "{reason:?}"
+        );
         Ok(())
     }
 
@@ -3561,9 +3573,11 @@ pub(crate) mod tests {
 
     /// Returns a lease on `queue` that nothing revokes.
     fn lease(queue: SharedReceiver) -> QueueLease {
+        let failed = CancellationToken::new();
         QueueLease {
             queue,
-            revoked: Default::default(),
+            revoked: failed.child_token(),
+            failed,
         }
     }
 
