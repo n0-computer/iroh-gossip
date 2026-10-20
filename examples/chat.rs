@@ -12,7 +12,7 @@ use iroh::{
     RelayMode, RelayUrl, SecretKey,
 };
 use iroh_gossip::{
-    api::{Event, GossipReceiver},
+    api::{Event, GossipReceiver, GossipSender},
     net::{Gossip, GOSSIP_ALPN},
     proto::TopicId,
 };
@@ -156,17 +156,19 @@ async fn main() -> Result<()> {
     println!("> connected!");
 
     // broadcast our name, if set
-    if let Some(name) = args.name {
-        let message = Message::AboutMe {
-            name,
-            nonce: rand::random(),
-        };
-        let encoded_message = SignedMessage::sign_and_encode(endpoint.secret_key(), &message)?;
-        sender.broadcast(encoded_message).await?;
+    if let Some(name) = &args.name {
+        sender
+            .broadcast(about_me(endpoint.secret_key(), name)?)
+            .await?;
     }
 
     // subscribe and print loop
-    task::spawn(subscribe_loop(receiver));
+    task::spawn(subscribe_loop(
+        receiver,
+        sender.clone(),
+        endpoint.secret_key().clone(),
+        args.name,
+    ));
 
     // spawn an input thread that reads stdin
     // not using tokio here because they recommend this for "technical reasons"
@@ -193,7 +195,12 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn subscribe_loop(mut receiver: GossipReceiver) -> Result<()> {
+async fn subscribe_loop(
+    mut receiver: GossipReceiver,
+    sender: GossipSender,
+    secret_key: SecretKey,
+    our_name: Option<String>,
+) -> Result<()> {
     // init a peerid -> name hashmap
     let mut names = HashMap::new();
     while let Some(event) = receiver.try_next().await? {
@@ -201,8 +208,14 @@ async fn subscribe_loop(mut receiver: GossipReceiver) -> Result<()> {
             let (from, message) = SignedMessage::verify_and_decode(&msg.content)?;
             match message {
                 Message::AboutMe { name, nonce: _ } => {
-                    names.insert(from, name.clone());
-                    println!("> {} is now known as {}", from.fmt_short(), name);
+                    let previous = names.insert(from, name.clone());
+                    if previous.as_ref() != Some(&name) {
+                        println!("> {} is now known as {}", from.fmt_short(), name);
+                    }
+                    // A peer that joined after us missed our name, so send it again.
+                    if let (None, Some(our_name)) = (previous, &our_name) {
+                        sender.broadcast(about_me(&secret_key, our_name)?).await?;
+                    }
                 }
                 Message::Message { text, nonce: _ } => {
                     let name = names
@@ -214,6 +227,15 @@ async fn subscribe_loop(mut receiver: GossipReceiver) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Returns our name as a signed message, with a fresh nonce.
+fn about_me(secret_key: &SecretKey, name: &str) -> Result<Bytes> {
+    let message = Message::AboutMe {
+        name: name.to_string(),
+        nonce: rand::random(),
+    };
+    SignedMessage::sign_and_encode(secret_key, &message)
 }
 
 fn input_loop(line_tx: tokio::sync::mpsc::Sender<String>) -> Result<()> {
