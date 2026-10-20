@@ -12,7 +12,7 @@ use iroh::{
     RelayMode, RelayUrl, SecretKey,
 };
 use iroh_gossip::{
-    api::{Event, GossipReceiver},
+    api::{Event, GossipReceiver, GossipSender},
     net::{Gossip, GOSSIP_ALPN},
     proto::TopicId,
 };
@@ -156,14 +156,19 @@ async fn main() -> Result<()> {
     println!("> connected!");
 
     // broadcast our name, if set
-    if let Some(name) = args.name {
-        let message = Message::AboutMe { name };
-        let encoded_message = SignedMessage::sign_and_encode(endpoint.secret_key(), &message)?;
-        sender.broadcast(encoded_message).await?;
+    if let Some(name) = &args.name {
+        sender
+            .broadcast(about_me(endpoint.secret_key(), name)?)
+            .await?;
     }
 
     // subscribe and print loop
-    task::spawn(subscribe_loop(receiver));
+    task::spawn(subscribe_loop(
+        receiver,
+        sender.clone(),
+        endpoint.secret_key().clone(),
+        args.name,
+    ));
 
     // spawn an input thread that reads stdin
     // not using tokio here because they recommend this for "technical reasons"
@@ -173,7 +178,12 @@ async fn main() -> Result<()> {
     // broadcast each line we type
     println!("> type a message and hit enter to broadcast...");
     while let Some(text) = line_rx.recv().await {
-        let message = Message::Message { text: text.clone() };
+        let message = Message::Message {
+            text: text.clone(),
+            // use a random nonce to ensure the message is unique - the gossip protocol deduplicates
+            // messages based on the hash of the message, so identical messages are ignored.
+            nonce: rand::random(),
+        };
         let encoded_message = SignedMessage::sign_and_encode(endpoint.secret_key(), &message)?;
         sender.broadcast(encoded_message).await?;
         println!("> sent: {text}");
@@ -185,18 +195,29 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn subscribe_loop(mut receiver: GossipReceiver) -> Result<()> {
+async fn subscribe_loop(
+    mut receiver: GossipReceiver,
+    sender: GossipSender,
+    secret_key: SecretKey,
+    our_name: Option<String>,
+) -> Result<()> {
     // init a peerid -> name hashmap
     let mut names = HashMap::new();
     while let Some(event) = receiver.try_next().await? {
         if let Event::Received(msg) = event {
             let (from, message) = SignedMessage::verify_and_decode(&msg.content)?;
             match message {
-                Message::AboutMe { name } => {
-                    names.insert(from, name.clone());
-                    println!("> {} is now known as {}", from.fmt_short(), name);
+                Message::AboutMe { name, nonce: _ } => {
+                    let previous = names.insert(from, name.clone());
+                    if previous.as_ref() != Some(&name) {
+                        println!("> {} is now known as {}", from.fmt_short(), name);
+                    }
+                    // A peer that joined after us missed our name, so send it again.
+                    if let (None, Some(our_name)) = (previous, &our_name) {
+                        sender.broadcast(about_me(&secret_key, our_name)?).await?;
+                    }
                 }
-                Message::Message { text } => {
+                Message::Message { text, nonce: _ } => {
                     let name = names
                         .get(&from)
                         .map_or_else(|| from.fmt_short().to_string(), String::to_string);
@@ -206,6 +227,15 @@ async fn subscribe_loop(mut receiver: GossipReceiver) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Returns our name as a signed message, with a fresh nonce.
+fn about_me(secret_key: &SecretKey, name: &str) -> Result<Bytes> {
+    let message = Message::AboutMe {
+        name: name.to_string(),
+        nonce: rand::random(),
+    };
+    SignedMessage::sign_and_encode(secret_key, &message)
 }
 
 fn input_loop(line_tx: tokio::sync::mpsc::Sender<String>) -> Result<()> {
@@ -259,10 +289,17 @@ impl SignedMessage {
     }
 }
 
+/// A message of the chat.
+///
+/// iroh-gossip delivers a message only once per hash of its content. Each
+/// message carries a random nonce, so that two equal messages are both
+/// delivered.
 #[derive(Debug, Serialize, Deserialize)]
 enum Message {
-    AboutMe { name: String },
-    Message { text: String },
+    /// Our name, which the other peers show instead of our endpoint id.
+    AboutMe { name: String, nonce: [u8; 16] },
+    /// A line of chat.
+    Message { text: String, nonce: [u8; 16] },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
