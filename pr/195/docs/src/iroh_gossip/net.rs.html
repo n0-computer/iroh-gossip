@@ -3490,23 +3490,24 @@
 <a href=#3490 id=3490 data-nosnippet>3490</a>            <span class="number">1024</span>,
 <a href=#3491 id=3491 data-nosnippet>3491</a>            <span class="macro">vec!</span>[],
 <a href=#3492 id=3492 data-nosnippet>3492</a>            watch::channel(<span class="bool-val">true</span>).<span class="number">1</span>,
-<a href=#3493 id=3493 data-nosnippet>3493</a>        )));
-<a href=#3494 id=3494 data-nosnippet>3494</a>
-<a href=#3495 id=3495 data-nosnippet>3495</a>        send_tx
-<a href=#3496 id=3496 data-nosnippet>3496</a>            .send(join_message(topic, <span class="number">4096</span>))
-<a href=#3497 id=3497 data-nosnippet>3497</a>            .<span class="kw">await
-<a href=#3498 id=3498 data-nosnippet>3498</a>            </span>.std_context(<span class="string">"send"</span>)<span class="question-mark">?</span>;
-<a href=#3499 id=3499 data-nosnippet>3499</a>        send_tx
-<a href=#3500 id=3500 data-nosnippet>3500</a>            .send(join_message(topic, <span class="number">16</span>))
-<a href=#3501 id=3501 data-nosnippet>3501</a>            .<span class="kw">await
-<a href=#3502 id=3502 data-nosnippet>3502</a>            </span>.std_context(<span class="string">"send"</span>)<span class="question-mark">?</span>;
-<a href=#3503 id=3503 data-nosnippet>3503</a>
-<a href=#3504 id=3504 data-nosnippet>3504</a>        <span class="kw">let </span>(<span class="kw">_</span>, message) = timeout(Duration::from_secs(<span class="number">5</span>), read_next_message(<span class="kw-2">&amp;</span>peer_conn))
-<a href=#3505 id=3505 data-nosnippet>3505</a>            .<span class="kw">await
-<a href=#3506 id=3506 data-nosnippet>3506</a>            </span>.std_context(<span class="string">"nothing arrived after the oversized message"</span>)<span class="question-mark">??</span>;
-<a href=#3507 id=3507 data-nosnippet>3507</a>        <span class="kw">let </span>size = postcard::experimental::serialized_size(<span class="kw-2">&amp;</span>message).std_context(<span class="string">"size"</span>)<span class="question-mark">?</span>;
-<a href=#3508 id=3508 data-nosnippet>3508</a>        <span class="macro">assert!</span>(size &lt; <span class="number">1024</span>, <span class="string">"the oversized message went out"</span>);
-<a href=#3509 id=3509 data-nosnippet>3509</a>        <span class="macro">assert!</span>(!task.is_finished(), <span class="string">"the connection ended"</span>);
-<a href=#3510 id=3510 data-nosnippet>3510</a>        <span class="prelude-val">Ok</span>(())
-<a href=#3511 id=3511 data-nosnippet>3511</a>    }
-<a href=#3512 id=3512 data-nosnippet>3512</a>}</code></pre></div></section></main></body></html>
+<a href=#3493 id=3493 data-nosnippet>3493</a>            close_flag(),
+<a href=#3494 id=3494 data-nosnippet>3494</a>        )));
+<a href=#3495 id=3495 data-nosnippet>3495</a>
+<a href=#3496 id=3496 data-nosnippet>3496</a>        send_tx
+<a href=#3497 id=3497 data-nosnippet>3497</a>            .send(join_message(topic, <span class="number">4096</span>))
+<a href=#3498 id=3498 data-nosnippet>3498</a>            .<span class="kw">await
+<a href=#3499 id=3499 data-nosnippet>3499</a>            </span>.std_context(<span class="string">"send"</span>)<span class="question-mark">?</span>;
+<a href=#3500 id=3500 data-nosnippet>3500</a>        send_tx
+<a href=#3501 id=3501 data-nosnippet>3501</a>            .send(join_message(topic, <span class="number">16</span>))
+<a href=#3502 id=3502 data-nosnippet>3502</a>            .<span class="kw">await
+<a href=#3503 id=3503 data-nosnippet>3503</a>            </span>.std_context(<span class="string">"send"</span>)<span class="question-mark">?</span>;
+<a href=#3504 id=3504 data-nosnippet>3504</a>
+<a href=#3505 id=3505 data-nosnippet>3505</a>        <span class="kw">let </span>(<span class="kw">_</span>, message) = timeout(Duration::from_secs(<span class="number">5</span>), read_next_message(<span class="kw-2">&amp;</span>peer_conn))
+<a href=#3506 id=3506 data-nosnippet>3506</a>            .<span class="kw">await
+<a href=#3507 id=3507 data-nosnippet>3507</a>            </span>.std_context(<span class="string">"nothing arrived after the oversized message"</span>)<span class="question-mark">??</span>;
+<a href=#3508 id=3508 data-nosnippet>3508</a>        <span class="kw">let </span>size = postcard::experimental::serialized_size(<span class="kw-2">&amp;</span>message).std_context(<span class="string">"size"</span>)<span class="question-mark">?</span>;
+<a href=#3509 id=3509 data-nosnippet>3509</a>        <span class="macro">assert!</span>(size &lt; <span class="number">1024</span>, <span class="string">"the oversized message went out"</span>);
+<a href=#3510 id=3510 data-nosnippet>3510</a>        <span class="macro">assert!</span>(!task.is_finished(), <span class="string">"the connection ended"</span>);
+<a href=#3511 id=3511 data-nosnippet>3511</a>        <span class="prelude-val">Ok</span>(())
+<a href=#3512 id=3512 data-nosnippet>3512</a>    }
+<a href=#3513 id=3513 data-nosnippet>3513</a>}</code></pre></div></section></main></body></html>
