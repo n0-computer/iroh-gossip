@@ -45,18 +45,6 @@ impl<PI> Message<PI> {
     }
 }
 
-impl<PI: Serialize> Message<PI> {
-    pub(crate) fn postcard_header_size() -> usize {
-        // We create a message that has no payload (gossip::Message::Prune), calculate the encoded size,
-        // and subtract 1 for the discriminator of the inner gossip::Message enum.
-        let m = Self {
-            topic: TopicId(Default::default()),
-            message: topic::Message::<PI>::Gossip(super::plumtree::Message::Prune),
-        };
-        postcard::experimental::serialized_size(&m).unwrap() - 1
-    }
-}
-
 /// Whether this is a control or data message
 #[derive(Debug)]
 pub enum MessageKind {

@@ -188,6 +188,28 @@ impl DeliveryScope {
     }
 }
 
+/// Returns the largest encoded size of a [`Message::Gossip`] with `content_len` bytes of content.
+///
+/// Each hop counts the round of a broadcast to the swarm one up, so its encoding
+/// grows on the way. This assumes the largest round.
+pub(crate) fn max_gossip_size(content_len: usize, scope: Scope) -> usize {
+    let scope = match scope {
+        Scope::Swarm => DeliveryScope::Swarm(Round(u16::MAX)),
+        Scope::Neighbors => DeliveryScope::Neighbors,
+    };
+    let empty = Message::Gossip(Gossip {
+        id: MessageId([0; 32]),
+        content: Bytes::new(),
+        scope,
+    });
+    let empty_size = postcard::experimental::serialized_size(&empty).expect("encodes");
+    // The content adds its bytes, and its length prefix grows from one byte.
+    let prefix_size = (usize::BITS - content_len.leading_zeros())
+        .div_ceil(7)
+        .max(1) as usize;
+    empty_size - 1 + prefix_size + content_len
+}
+
 /// The broadcast scope of a gossip message.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Ord, PartialOrd, Copy)]
 pub enum Scope {
@@ -484,8 +506,8 @@ impl<PI: PeerIdentity> State<PI> {
         let chunk_size = self.max_message_size
             // Space for discriminator
             - 1
-            // Space for length prefix
-            - 2;
+            // Space for the length of the list: 5 bytes hold any length that fits a frame
+            - 5;
         let chunk_len = chunk_size / IHave::POSTCARD_MAX_SIZE;
         while let Some((peer, list)) = self.lazy_push_queue.pop_first() {
             for chunk in list.chunks(chunk_len) {
@@ -501,6 +523,12 @@ impl<PI: PeerIdentity> State<PI> {
     /// Will be pushed in full to eager peers.
     /// Pushing the message id to the lazy peers is delayed by a timer.
     fn broadcast(&mut self, content: Bytes, scope: Scope, now: Instant, io: &mut impl IO<PI>) {
+        // A message over the limit, at any hop, cannot go out, so we neither cache
+        // nor announce it.
+        if max_gossip_size(content.len(), scope) > self.max_message_size {
+            warn!(max = self.max_message_size, "broadcast too large, dropped");
+            return;
+        }
         let id = MessageId::from_content(&content);
         let scope = match scope {
             Scope::Neighbors => DeliveryScope::Neighbors,
@@ -1220,5 +1248,60 @@ mod test {
         state.handle(InEvent::TimerExpired(Timer::SendGraft(id)), now, &mut io);
 
         assert!(state.missing_messages.is_empty());
+    }
+
+    /// A batch of announcements fits the size limit, also when its length takes 3 bytes.
+    ///
+    /// A list of 16384 entries or more has a length of 3 bytes, and an announcement
+    /// of a round of 16384 or more takes 35 bytes.
+    #[test]
+    fn announcement_batch_fits_the_size_limit() {
+        let max_message_size = 16_384 * IHave::POSTCARD_MAX_SIZE + 3;
+        let mut state = State::new(1u32, Config::default(), max_message_size);
+        let now = Instant::now();
+        let mut io = VecDeque::new();
+        state.handle(InEvent::NeighborUp(2), now, &mut io);
+        let ihaves = (0..20_000u32).map(|i| IHave {
+            id: MessageId::from_content(&i.to_be_bytes()),
+            round: Round(20_000),
+        });
+        state.lazy_push_queue.insert(2, ihaves.collect());
+        io.clear();
+        state.handle(InEvent::TimerExpired(Timer::DispatchLazyPush), now, &mut io);
+
+        let mut sent = 0;
+        for event in io {
+            if let topic::OutEvent::SendMessage(2, topic::Message::Gossip(message)) = event {
+                let size = postcard::experimental::serialized_size(&message).expect("encodes");
+                assert!(size <= max_message_size, "{size} > {max_message_size}");
+                sent += 1;
+            }
+        }
+        assert!(sent >= 2, "the batch was not split");
+    }
+
+    /// `max_gossip_size` is the size at the largest round, and no less at any other.
+    #[test]
+    fn max_gossip_size_covers_every_round() {
+        let size = |content: &Bytes, scope| {
+            let message = Message::Gossip(Gossip {
+                id: MessageId::from_content(content),
+                content: content.clone(),
+                scope,
+            });
+            postcard::experimental::serialized_size(&message).expect("encodes")
+        };
+        for len in [0, 127, 128, 4000, 20_000] {
+            let content = Bytes::from(vec![0; len]);
+            let max = max_gossip_size(len, Scope::Swarm);
+            for round in [0, 127, 128, 16_383, 16_384] {
+                assert!(size(&content, DeliveryScope::Swarm(Round(round))) <= max);
+            }
+            assert_eq!(size(&content, DeliveryScope::Swarm(Round(u16::MAX))), max);
+            assert_eq!(
+                size(&content, DeliveryScope::Neighbors),
+                max_gossip_size(len, Scope::Neighbors)
+            );
+        }
     }
 }

@@ -374,7 +374,14 @@ impl SendLoop {
         };
         let stream = entry.get_mut();
 
-        write_frame(stream, message, &mut self.buffer, self.max_message_size).await?;
+        match write_frame(stream, message, &mut self.buffer, self.max_message_size).await {
+            // Refused before any byte went out, so the stream is intact.
+            Err(WriteError::TooLarge { .. }) => {
+                warn!(max = self.max_message_size, "message too large, dropped");
+                return Ok(());
+            }
+            res => res?,
+        }
 
         if is_last {
             trace!(topic=%topic_id.fmt_short(), "stream closing");
@@ -465,6 +472,8 @@ pub async fn write_frame<T: Serialize>(
     max_message_size: usize,
 ) -> Result<(), WriteError> {
     let len = postcard::experimental::serialized_size(&message)?;
+    // A frame must be shorter than the limit. Nodes up to 0.101 read a frame of
+    // the limit, but refuse to write one, so they could not forward it.
     if len >= max_message_size {
         return Err(e!(WriteError::TooLarge));
     }
