@@ -24,26 +24,32 @@ use super::{util::IndexSet, PeerData, PeerIdentity, PeerInfo, IO};
 /// paper shuffles at a fixed period, without jitter.
 const INITIAL_SHUFFLE_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Interval of the check that refills a short active view.
+/// Interval of the maintenance pass.
+///
+/// A maintenance pass is a check that runs at this interval. A node without
+/// any peer rejoins through its bootstrap peers in it, and a node short of
+/// neighbors starts a refill. A node is short of neighbors if its active view
+/// is less than half full.
 ///
 /// The HyParView paper has no such check. Partisan runs the same check, its
 /// "random promotion", every 5s.
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Maximum number of maintenance passes between two rejoins or two refills.
+/// Maximum number of maintenance passes between two rejoins, or between two refills.
 ///
-/// An isolated node rejoins in its 1st, 2nd, 4th, and 8th maintenance pass
-/// alone, and then in every 12th: at first after 5s, and later once a minute.
-/// A short node refills from its passive view on the same schedule, counted
-/// from the last neighbor it gained.
+/// A node without any peer rejoins in its 1st, 2nd, 4th, and 8th maintenance
+/// pass alone, and then in every 12th: at first after 5s, and later once a
+/// minute. A node short of neighbors starts a refill on the same schedule,
+/// counted from the last time it gained a neighbor.
 const MAX_BACKOFF_PASSES: u32 = 12;
 
-/// Maximum number of neighbor requests that one maintenance pass sends.
+/// Maximum number of neighbor requests in a refill that a maintenance pass starts.
 ///
-/// A node with too few neighbors asks its passive peers, one after the other,
-/// to become its neighbor. A peer whose active view is full refuses. If all
-/// passive peers are full, every request fails, and each one costs a new
-/// connection. This limit caps that cost for each pass.
+/// A node with too few neighbors asks a passive peer to become its neighbor.
+/// If the request fails, it asks the next passive peer right away, and so on.
+/// If all passive peers have full active views, they all refuse, and the
+/// node would dial every one of them each time maintenance runs. With this
+/// limit, the refill stops after this many requests.
 const MAX_REQUESTS_PER_REFILL: usize = 3;
 
 /// Returns whether a node rejoins or refills in the `n`th maintenance pass of a backoff.
@@ -365,11 +371,12 @@ pub struct State<PI, RG = ThreadRng> {
     peer_data: HashMap<PI, PeerData>,
     /// List of peers that are disconnecting, but which we want to keep in the passive set once the connection closes
     alive_disconnect_peers: HashSet<PI>,
-    /// Passive peers that refused our neighbor request.
+    /// Passive peers that refused our neighbor request, as their active views were full.
     ///
-    /// A refill skips them. Else a node short of neighbors, whose passive peers
-    /// are all full, asks them in turn without end. A neighbor loss and the
-    /// maintenance passes that may refill clear them, as the peers may have room by then.
+    /// A refill skips them. Else a short node whose passive peers are all full
+    /// would ask them in turn without end. We forget them when a neighbor
+    /// leaves, when a maintenance pass starts a refill, and in each pass while
+    /// the node is not short, as they may have room by then.
     refused: HashSet<PI>,
     /// How many more requests the refill in progress may send.
     refill: RefillLimit,
@@ -803,16 +810,20 @@ where
         self.schedule_shuffle(io);
     }
 
-    /// Refills the active view if it is short, and rejoins if both views are empty.
+    /// Runs a maintenance pass, see [`MAINTENANCE_INTERVAL`].
     ///
-    /// A refill otherwise starts only when a neighbor leaves, and it stops once
-    /// the passive view has no peer left to try. A node with no neighbors cannot
-    /// shuffle either, so its passive view stays empty. Only the bootstrap
-    /// peers and the recent neighbors can get it back into the swarm.
+    /// What the node does depends on its views:
+    /// - Without any peer, it rejoins through its bootstrap peers and a recent
+    ///   neighbor. It cannot shuffle without neighbors, so nothing else fills
+    ///   its views again. It backs off, see [`MAX_BACKOFF_PASSES`].
+    /// - With passive peers but no neighbor, it starts a refill without a
+    ///   limit, in each pass. It asks with high priority, which no peer refuses.
+    /// - Short of neighbors, it starts a refill of a few requests, see
+    ///   [`MAX_REQUESTS_PER_REFILL`]. It backs off, as its passive peers are
+    ///   likely full.
     ///
-    /// Both back off while the node stays alone or short, see [`MAX_BACKOFF_PASSES`].
-    /// A node with no neighbors but passive peers does not back off: it asks
-    /// with high priority, which no peer refuses, until one accepts.
+    /// Outside of these passes, a refill starts when a neighbor leaves, and
+    /// when a shuffle reply brings new passive peers.
     fn handle_maintenance_timer(&mut self, io: &mut impl IO<PI>) {
         // Neighbors that stay count as seen again, so that churn does not push
         // them out.
@@ -1147,13 +1158,17 @@ where
 ///
 /// A refill asks one passive peer at a time to become a neighbor. If the
 /// request fails, because the peer refuses, cannot be dialed, or does not
-/// answer in time, the refill asks the next passive peer, if this limit allows.
+/// answer in time, the refill asks the next passive peer right away, if this
+/// limit allows. It does not wait for the next maintenance pass.
 ///
 /// The refill ends when a peer accepts, or when no passive peer is left to
 /// ask. Then the limit goes back to [`RefillLimit::None`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RefillLimit {
-    /// No refill is in progress, so nothing limits the requests.
+    /// No refill is in progress.
+    ///
+    /// A request that fails anyway, for example one for a forwarded join,
+    /// makes the node ask the next passive peer without a limit.
     None,
     /// A maintenance pass started the refill. It may send this many more requests.
     ///
