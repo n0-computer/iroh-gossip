@@ -5015,8 +5015,10 @@ pub(crate) mod tests {
         let reader = conn.clone();
         let _read = AbortOnDropHandle::new(spawn(async move {
             let mut stream = reader.accept_uni().await.expect("the topic stream");
+            // The end of the previous chunk, as the marker may span two.
             let mut seen = Vec::new();
             while let Ok(Some(chunk)) = stream.read_chunk(usize::MAX).await {
+                seen.drain(..seen.len().saturating_sub(LAST.len()));
                 seen.extend_from_slice(&chunk);
                 if seen.windows(LAST.len()).any(|w| w == LAST) {
                     seen_tx.send(()).ok();
