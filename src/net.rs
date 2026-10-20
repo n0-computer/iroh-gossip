@@ -634,9 +634,10 @@ impl Actor {
 
     /// Pauses the publishers of `topic` while every eager peer has its data queue half full.
     ///
-    /// Then our own link is the limit, and a broadcast would be lost for every
-    /// peer that we push it to. One slow eager peer among others pauses
-    /// nothing. Lazy peers get only announcements, so they do not count.
+    /// This guesses that our own link is the limit, and that a broadcast would
+    /// be lost for every peer that we push it to. Slow peers alone can fill all
+    /// the queues too. One slow eager peer among others pauses nothing. Lazy
+    /// peers get only announcements, so they do not count.
     fn update_gate(&mut self, topic: TopicId) {
         let mut eager = self.state.eager_peers(&topic).peekable();
         let busy = eager.peek().is_some()
@@ -5009,10 +5010,18 @@ pub(crate) mod tests {
         assert!(waited, "the publisher never waited");
 
         // B reads again, so the gate opens, and the publisher goes on.
+        const LAST: &[u8] = b"after 99";
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
         let reader = conn.clone();
         let _read = AbortOnDropHandle::new(spawn(async move {
-            while let Ok(mut stream) = reader.accept_uni().await {
-                spawn(async move { stream.read_to_end(usize::MAX).await.ok() });
+            let mut stream = reader.accept_uni().await.expect("the topic stream");
+            let mut seen = Vec::new();
+            while let Ok(Some(chunk)) = stream.read_chunk(usize::MAX).await {
+                seen.extend_from_slice(&chunk);
+                if seen.windows(LAST.len()).any(|w| w == LAST) {
+                    seen_tx.send(()).ok();
+                    break;
+                }
             }
         }));
         for i in 0..100u32 {
@@ -5021,6 +5030,11 @@ pub(crate) mod tests {
                 .await
                 .std_context("the publisher still waits after B read again")??;
         }
+        timeout(Duration::from_secs(10), seen_rx)
+            .await
+            .std_context("B did not get the last broadcast")?
+            .std_context("B stopped reading")?;
+        assert!(conn.close_reason().is_none(), "the connection closed");
         assert_eq!(a.gossip.metrics().msgs_dropped.get(), 0, "messages dropped");
         conn.close(0u32.into(), b"done");
         Ok(())
