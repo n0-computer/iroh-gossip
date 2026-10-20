@@ -27,7 +27,7 @@ use crate::proto::state::MessageKind;
 ///
 /// It is the size of a [`QueuedMessage`] in memory, and the length prefix of
 /// its frame. It also caps the number of messages in a queue.
-pub(super) const MESSAGE_OVERHEAD: usize = mem::size_of::<QueuedMessage>() + 4;
+const MESSAGE_OVERHEAD: usize = mem::size_of::<QueuedMessage>() + 4;
 
 /// The least size of a queue, whatever its options.
 pub(super) const MIN_QUEUE_SIZE: usize = 64 * 1024;
@@ -46,7 +46,7 @@ pub(super) fn queue_size(size: usize, max_message_size: usize) -> usize {
     size.max(MIN_QUEUE_SIZE).max(least)
 }
 
-/// What [`QueueSender::push`] did with a message.
+/// What [`SendQueue::push`] did with a message.
 #[derive(Debug)]
 pub(super) enum Pushed {
     /// The message was queued.
@@ -198,7 +198,139 @@ impl Drop for Reservation {
     }
 }
 
-/// The receiving half of the queue to a peer, which its connections take in turn.
+/// The queue of messages to a peer, which its connections take in turn.
+///
+/// It lives as long as we know the peer, also while we drop it. A writer may
+/// still drain an older queue for a short time after a failure, so the bytes
+/// to a peer can briefly reach two queues.
+///
+/// The [`Capacity`] bounds the queue, so its channel needs no bound of its own.
+/// Each message reserves at least [`MESSAGE_OVERHEAD`] bytes until the writer drops it.
+#[derive(Debug)]
+pub(super) struct SendQueue {
+    tx: mpsc::UnboundedSender<QueuedMessage>,
+    capacity: Arc<Capacity>,
+    closing: watch::Sender<bool>,
+    reader: SharedReader,
+    /// Revokes the lease of the connection that writes the queue now.
+    revoke: CancellationToken,
+    /// Fails the peer: every writer of the queue closes its connection.
+    failed: CancellationToken,
+}
+
+impl SendQueue {
+    /// Creates a queue of `size` bytes, of which data may fill 3/4 and announcements 1/8.
+    pub(super) fn new(size: usize) -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let capacity = Arc::new(Capacity {
+            total: Limit::new(size),
+            data: Limit::new(size / 4 * 3),
+            announcements: Limit::new(size / 8),
+        });
+        let (closing, closing_rx) = watch::channel(false);
+        let reader = QueueReader {
+            rx,
+            unfinished: None,
+            closing: closing_rx,
+        };
+        let failed = CancellationToken::new();
+        Self {
+            tx,
+            capacity,
+            closing,
+            reader: SharedReader(Arc::new(tokio::sync::Mutex::new(reader))),
+            revoke: failed.child_token(),
+            failed,
+        }
+    }
+
+    /// Queues `message` if it fits, and never waits.
+    pub(super) fn push(&self, message: ProtoMessage) -> Pushed {
+        let section = Section::of(&message);
+        let Some(reservation) = Reservation::new(&self.capacity, &message, section) else {
+            return match section {
+                Section::Control => Pushed::Overflow,
+                Section::Data | Section::Announcements => Pushed::Dropped(message),
+            };
+        };
+        let item = QueuedMessage {
+            message,
+            reservation,
+        };
+        let sent = self.tx.send(item);
+        debug_assert!(sent.is_ok(), "the queue keeps its reader");
+        Pushed::Queued
+    }
+
+    /// Returns whether data fills at least half of its section.
+    pub(super) fn is_busy(&self) -> bool {
+        let data = &self.capacity.data;
+        data.used.load(Ordering::Relaxed) >= data.max / 2
+    }
+
+    /// Sets whether the writer ends once the queue is empty, as it does for a dropped peer.
+    pub(super) fn set_closing(&self, closing: bool) {
+        self.closing.send_replace(closing);
+    }
+
+    /// Revokes the lease of the connection that writes the queue, and returns one for the next.
+    pub(super) fn lease(&mut self) -> QueueLease {
+        self.revoke.cancel();
+        self.revoke = self.failed.child_token();
+        QueueLease {
+            reader: self.reader.clone(),
+            revoked: self.revoke.clone(),
+            failed: self.failed.clone(),
+        }
+    }
+
+    /// Revokes every lease on the queue, and makes each writer close its connection.
+    pub(super) fn fail(&self) {
+        self.failed.cancel();
+    }
+
+    /// Returns the reader of the queue, if no writer reads it.
+    #[cfg(test)]
+    pub(super) fn try_reader(&self) -> Option<OwnedMutexGuard<QueueReader>> {
+        self.reader.0.clone().try_lock_owned().ok()
+    }
+}
+
+/// The lease of a connection on the queue to its peer.
+///
+/// The actor revokes it when a new connection replaces this one. The writer
+/// then lets go of the queue after its current message, and the writer of the
+/// new connection takes it. When the actor fails the peer, it cancels
+/// `failed`, which revokes every lease on the queue, and each writer closes
+/// its connection.
+#[derive(Debug)]
+pub(super) struct QueueLease {
+    reader: SharedReader,
+    /// A child of `failed`.
+    revoked: CancellationToken,
+    failed: CancellationToken,
+}
+
+impl QueueLease {
+    /// Waits until no other writer reads the queue, and returns its reader.
+    ///
+    /// Waits only at a handover, see [`SharedReader`].
+    pub(super) async fn lock(&self) -> OwnedMutexGuard<QueueReader> {
+        self.reader.0.clone().lock_owned().await
+    }
+
+    /// Returns the token that ends the lease, at a handover or when the peer fails.
+    pub(super) fn revoked(&self) -> &CancellationToken {
+        &self.revoked
+    }
+
+    /// Returns the token that the actor cancels when it fails the peer.
+    pub(super) fn failed(&self) -> &CancellationToken {
+        &self.failed
+    }
+}
+
+/// The reader of the queue to a peer, which its connections take in turn.
 ///
 /// The writer of a connection locks it once, and keeps the lock for as long as
 /// it writes: across all its messages, not per message. So the lock is free of
@@ -206,7 +338,7 @@ impl Drop for Reservation {
 /// never locks.
 ///
 /// Two writers contend only at a handover, when a new connection replaces the
-/// active one. The new writer waits in [`Self::lock`], and the old writer
+/// active one. The new writer waits in [`QueueLease::lock`], and the old writer
 /// unlocks after its current message. Waiters get the lock in order, and a
 /// writer that stops while it waits leaves the line. We thus write the
 /// messages in the order of the queue. The peer may still handle them in
@@ -220,37 +352,7 @@ impl Drop for Reservation {
 /// current message. Then it stops the write, and the next connection writes
 /// the message again.
 #[derive(Debug, Clone)]
-pub(super) struct SharedReceiver(Arc<tokio::sync::Mutex<QueueReader>>);
-
-impl SharedReceiver {
-    /// Waits until no other writer reads the queue, and returns its reader.
-    ///
-    /// Waits only at a handover, see [`SharedReceiver`].
-    pub(super) async fn lock(&self) -> OwnedMutexGuard<QueueReader> {
-        self.0.clone().lock_owned().await
-    }
-
-    /// Returns the reader of the queue, if no writer reads it.
-    #[cfg(test)]
-    pub(super) fn try_lock(&self) -> Option<OwnedMutexGuard<QueueReader>> {
-        self.0.clone().try_lock_owned().ok()
-    }
-}
-
-/// The lease of a connection on the queue to its peer.
-///
-/// The actor revokes it when a new connection replaces this one. The writer
-/// then lets go of the queue after its current message, and the writer of the
-/// new connection takes it. When the actor fails the peer, it cancels
-/// `failed`, which revokes every lease on the queue, and each writer closes
-/// its connection.
-#[derive(Debug)]
-pub(super) struct QueueLease {
-    pub(super) queue: SharedReceiver,
-    /// A child of `failed`.
-    pub(super) revoked: CancellationToken,
-    pub(super) failed: CancellationToken,
-}
+struct SharedReader(Arc<tokio::sync::Mutex<QueueReader>>);
 
 /// Reads a queue, and keeps the message that a writer has not finished.
 ///
@@ -266,8 +368,8 @@ pub(super) struct QueueReader {
 impl QueueReader {
     /// Waits for the next message to write, and returns `false` once no more will come.
     ///
-    /// No more come once the sender is gone, or the queue is empty while it
-    /// closes, see [`QueueSender::set_closing`]. The message stays the current
+    /// No more come once the queue is gone, or the queue is empty while it
+    /// closes, see [`SendQueue::set_closing`]. The message stays the current
     /// one until [`Self::written`]. This is cancellation-safe.
     pub(super) async fn next(&mut self) -> bool {
         if self.unfinished.is_none() {
@@ -293,74 +395,6 @@ impl QueueReader {
     /// Returns whether no message waits to be written.
     pub(super) fn is_empty(&self) -> bool {
         self.unfinished.is_none() && self.rx.is_empty()
-    }
-}
-
-/// The sending half of a queue.
-///
-/// The [`Capacity`] bounds the queue, so its channel needs no bound of its own.
-/// Each message reserves at least [`MESSAGE_OVERHEAD`] bytes until the writer drops it.
-#[derive(Debug)]
-pub(super) struct QueueSender {
-    tx: mpsc::UnboundedSender<QueuedMessage>,
-    capacity: Arc<Capacity>,
-    closing: watch::Sender<bool>,
-}
-
-impl QueueSender {
-    /// Creates a queue of `size` bytes, of which data may fill 3/4 and announcements 1/8.
-    pub(super) fn new(size: usize) -> (Self, SharedReceiver) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let capacity = Arc::new(Capacity {
-            total: Limit::new(size),
-            data: Limit::new(size / 4 * 3),
-            announcements: Limit::new(size / 8),
-        });
-        let (closing, closing_rx) = watch::channel(false);
-        let reader = QueueReader {
-            rx,
-            unfinished: None,
-            closing: closing_rx,
-        };
-        let rx = SharedReceiver(Arc::new(tokio::sync::Mutex::new(reader)));
-        let sender = Self {
-            tx,
-            capacity,
-            closing,
-        };
-        (sender, rx)
-    }
-
-    /// Returns whether data fills at least half of its section.
-    pub(super) fn is_busy(&self) -> bool {
-        let data = &self.capacity.data;
-        data.used.load(Ordering::Relaxed) >= data.max / 2
-    }
-
-    /// Sets whether the writer ends once the queue is empty, as it does for a dropped peer.
-    pub(super) fn set_closing(&self, closing: bool) {
-        self.closing.send_replace(closing);
-    }
-
-    /// Queues `message` if it fits, and never waits.
-    ///
-    /// The queue to a peer lives as long as the state of the peer, so its
-    /// receiver is never gone while the actor pushes.
-    pub(super) fn push(&self, message: ProtoMessage) -> Pushed {
-        let section = Section::of(&message);
-        let Some(reservation) = Reservation::new(&self.capacity, &message, section) else {
-            return match section {
-                Section::Control => Pushed::Overflow,
-                Section::Data | Section::Announcements => Pushed::Dropped(message),
-            };
-        };
-        let item = QueuedMessage {
-            message,
-            reservation,
-        };
-        let sent = self.tx.send(item);
-        debug_assert!(sent.is_ok(), "the state of the peer keeps the receiver");
-        Pushed::Queued
     }
 }
 
@@ -397,14 +431,14 @@ mod tests {
     }
 
     /// Returns the bytes in use of the whole queue and of its data section.
-    fn used(queue: &QueueSender) -> (usize, usize) {
+    fn used(queue: &SendQueue) -> (usize, usize) {
         let capacity = &queue.capacity;
         let used = |limit: &Limit| limit.used.load(Ordering::Relaxed);
         (used(&capacity.total), used(&capacity.data))
     }
 
     /// Pushes `message` until the queue no longer queues it, and returns how many it queued.
-    fn fill(queue: &QueueSender, message: impl Fn() -> ProtoMessage) -> (usize, Pushed) {
+    fn fill(queue: &SendQueue, message: impl Fn() -> ProtoMessage) -> (usize, Pushed) {
         let mut queued = 0;
         loop {
             match queue.push(message()) {
@@ -417,12 +451,12 @@ mod tests {
     /// The reader gets data, control and a `Disconnect` in the order of the pushes.
     #[test]
     fn messages_keep_their_order() {
-        let (queue, rx) = QueueSender::new(MIN_QUEUE_SIZE);
+        let queue = SendQueue::new(MIN_QUEUE_SIZE);
         let pushed = [data(10), shuffle(), ihave(), disconnect(), data(20)];
         for message in pushed.clone() {
             assert!(matches!(queue.push(message), Pushed::Queued));
         }
-        let mut reader = rx.try_lock().unwrap();
+        let mut reader = queue.try_reader().unwrap();
         for message in pushed {
             let item = reader.rx.try_recv().unwrap();
             assert_eq!(item.message.message, message.message);
@@ -433,7 +467,7 @@ mod tests {
     #[test]
     fn sections_leave_room_for_control() {
         let queue_bytes = MIN_QUEUE_SIZE;
-        let (queue, _rx) = QueueSender::new(queue_bytes);
+        let queue = SendQueue::new(queue_bytes);
         let (queued, last) = fill(&queue, || data(1000));
         assert_eq!(queued, queue_bytes / 4 * 3 / size(&data(1000)));
         assert!(matches!(last, Pushed::Dropped(_)));
@@ -451,7 +485,7 @@ mod tests {
     /// A `Disconnect` takes room as any control message, so many of them overflow the queue.
     #[test]
     fn disconnects_overflow_the_queue() {
-        let (queue, _rx) = QueueSender::new(MIN_QUEUE_SIZE);
+        let queue = SendQueue::new(MIN_QUEUE_SIZE);
         let (queued, last) = fill(&queue, disconnect);
         assert_eq!(queued, MIN_QUEUE_SIZE / size(&disconnect()));
         assert!(matches!(last, Pushed::Overflow));
@@ -460,7 +494,7 @@ mod tests {
     /// A message that fits its section but not the whole queue leaves its section as it was.
     #[test]
     fn failed_reservation_releases_its_section() {
-        let (queue, _rx) = QueueSender::new(MIN_QUEUE_SIZE);
+        let queue = SendQueue::new(MIN_QUEUE_SIZE);
         let (_, last) = fill(&queue, shuffle);
         assert!(matches!(last, Pushed::Overflow));
         assert!(matches!(queue.push(data(10)), Pushed::Dropped(_)));
@@ -470,10 +504,10 @@ mod tests {
     /// A message keeps its reservation until the writer drops it, also once it left the channel.
     #[test]
     fn message_keeps_its_reservation_until_dropped() {
-        let (queue, rx) = QueueSender::new(MIN_QUEUE_SIZE);
+        let queue = SendQueue::new(MIN_QUEUE_SIZE);
         let one = size(&data(1000));
         assert!(matches!(queue.push(data(1000)), Pushed::Queued));
-        let in_writing = rx.try_lock().unwrap().rx.try_recv().unwrap();
+        let in_writing = queue.try_reader().unwrap().rx.try_recv().unwrap();
         assert_eq!(used(&queue), (one, one));
         drop(in_writing);
         assert_eq!(used(&queue), (0, 0));
@@ -482,10 +516,10 @@ mod tests {
     /// A closing queue ends once it is empty, and goes on if it opens again.
     #[tokio::test]
     async fn closing_queue_ends_when_empty() {
-        let (queue, rx) = QueueSender::new(MIN_QUEUE_SIZE);
+        let queue = SendQueue::new(MIN_QUEUE_SIZE);
         assert!(matches!(queue.push(disconnect()), Pushed::Queued));
         queue.set_closing(true);
-        let mut reader = rx.try_lock().unwrap();
+        let mut reader = queue.try_reader().unwrap();
         assert!(reader.next().await, "the queued message went");
         reader.written();
         assert!(!reader.next().await, "the empty closing queue did not end");
@@ -497,34 +531,22 @@ mod tests {
     /// A message that a writer did not finish stays first, for the next writer.
     #[tokio::test]
     async fn unfinished_message_stays_first() {
-        let (queue, reader) = QueueSender::new(MIN_QUEUE_SIZE);
+        let mut queue = SendQueue::new(MIN_QUEUE_SIZE);
         assert!(matches!(queue.push(data(10)), Pushed::Queued));
         assert!(matches!(queue.push(data(20)), Pushed::Queued));
-        let first = |len| {
-            let reader = reader.clone();
-            async move {
-                let mut reader = reader.lock().await;
-                assert!(reader.next().await);
-                let current = &reader.current().unwrap().message.message;
-                assert_eq!(current, &data(len).message);
-                reader
-            }
+        let first = |queue_lease: QueueLease, len| async move {
+            let mut reader = queue_lease.lock().await;
+            assert!(reader.next().await);
+            let current = &reader.current().unwrap().message.message;
+            assert_eq!(current, &data(len).message);
+            reader
         };
         // The first writer stops without `written`.
-        drop(first(10).await);
-        let mut reader = first(10).await;
+        drop(first(queue.lease(), 10).await);
+        let mut reader = first(queue.lease(), 10).await;
         reader.written();
         drop(reader);
-        first(20).await.written();
-        assert_eq!(used(&queue), (0, 0));
-    }
-
-    /// A dropped reader releases the reservations of the messages that it kept.
-    #[test]
-    fn closed_queue_frees_its_room() {
-        let (queue, rx) = QueueSender::new(MIN_QUEUE_SIZE);
-        assert!(matches!(queue.push(data(1000)), Pushed::Queued));
-        drop(rx);
+        first(queue.lease(), 20).await.written();
         assert_eq!(used(&queue), (0, 0));
     }
 

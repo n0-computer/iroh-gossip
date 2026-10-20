@@ -305,20 +305,20 @@ pub(crate) struct SendLoop {
     buffer: Vec<u8>,
     max_message_size: usize,
     finishing: JoinSet<()>,
-    lease: QueueLease,
+    queue_lease: QueueLease,
     /// Whether a message is queued or written, or a stream is not yet finished.
     sending: watch::Sender<bool>,
 }
 
 impl SendLoop {
-    pub(crate) fn new(conn: Connection, lease: QueueLease, max_message_size: usize) -> Self {
+    pub(crate) fn new(conn: Connection, queue_lease: QueueLease, max_message_size: usize) -> Self {
         Self {
             conn,
             max_message_size,
             buffer: Default::default(),
             streams: Default::default(),
             finishing: Default::default(),
-            lease,
+            queue_lease,
             // The queue may hold messages before the loop takes it.
             sending: watch::channel(true).0,
         }
@@ -341,14 +341,14 @@ impl SendLoop {
         let conn = self.conn.clone();
         let closed = conn.closed();
         tokio::pin!(closed);
-        let revoked = self.lease.revoked.clone();
-        let failed = self.lease.failed.clone();
+        let revoked = self.queue_lease.revoked().clone();
+        let failed = self.queue_lease.failed().clone();
         // A replaced connection of the peer may still write its current message.
         let queue = tokio::select! {
             biased;
             _ = &mut closed => None,
             _ = revoked.cancelled() => None,
-            queue = self.lease.queue.lock() => Some(queue),
+            queue = self.queue_lease.lock() => Some(queue),
         };
         if let Some(mut queue) = queue {
             loop {
