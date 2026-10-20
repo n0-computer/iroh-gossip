@@ -4972,11 +4972,11 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// A publisher whose every eager peer has a full queue waits, and loses nothing.
+    /// A publisher whose every eager peer has a full queue waits, loses nothing, and goes on later.
     ///
     /// The only neighbor, an eager peer, reads nothing, as when our own uplink
     /// is the limit for all peers. Without the wait, the queue drops the
-    /// broadcasts.
+    /// broadcasts. Once the peer reads again, the gate opens.
     #[tokio::test(flavor = "multi_thread")]
     #[traced_test]
     async fn publisher_waits_while_all_neighbors_are_full() -> Result {
@@ -5013,6 +5013,20 @@ pub(crate) mod tests {
             }
         }
         assert!(waited, "the publisher never waited");
+
+        // B reads again, so the gate opens, and the publisher goes on.
+        let reader = conn.clone();
+        let _read = AbortOnDropHandle::new(spawn(async move {
+            while let Ok(mut stream) = reader.accept_uni().await {
+                spawn(async move { stream.read_to_end(usize::MAX).await.ok() });
+            }
+        }));
+        for i in 0..100u32 {
+            let message = Bytes::from(format!("after {i}"));
+            timeout(PROMPT, a_tx.broadcast(message))
+                .await
+                .std_context("the publisher still waits after B read again")??;
+        }
         assert_eq!(a.gossip.metrics().msgs_dropped.get(), 0, "messages dropped");
         conn.close(0u32.into(), b"done");
         Ok(())
