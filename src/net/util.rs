@@ -66,7 +66,7 @@ pub(crate) struct StreamHeader {
     ///
     /// A node without it loses every later message to a peer that closes a
     /// connection that is no neighbor link of the node. So we close no
-    /// connection on which the peer did not send it.
+    /// connection to a peer that did not send it.
     pub(crate) handles_close: bool,
 }
 
@@ -124,6 +124,8 @@ pub(crate) struct RecvLoop {
     max_message_size: usize,
     in_event_tx: mpsc::Sender<InEvent>,
     /// Whether a stream header of the peer had [`StreamHeader::handles_close`].
+    ///
+    /// The actor shares it between all connections to the peer.
     handles_close: watch::Sender<bool>,
 }
 
@@ -133,19 +135,15 @@ impl RecvLoop {
         conn: Connection,
         in_event_tx: mpsc::Sender<InEvent>,
         max_message_size: usize,
+        handles_close: watch::Sender<bool>,
     ) -> Self {
         Self {
             remote_endpoint_id,
             conn,
             max_message_size,
             in_event_tx,
-            handles_close: watch::channel(false).0,
+            handles_close,
         }
-    }
-
-    /// Returns whether the peer handles a close of this connection, as it learns it.
-    pub(crate) fn handles_close(&self) -> watch::Receiver<bool> {
-        self.handles_close.subscribe()
     }
 
     pub(crate) async fn run(&mut self) -> Result<(), ReadError> {
