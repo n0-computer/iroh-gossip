@@ -22,6 +22,7 @@ use tokio::{
     io::AsyncReadExt,
     sync::{mpsc, watch},
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn, Instrument};
 
 use super::{
@@ -85,7 +86,9 @@ pub(super) const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long a replaced connection may write its current message before it hands it over.
 ///
-/// The new connection of the peer waits for it, so that we write the messages in order.
+/// The new connection of the peer waits for it, so that we write the messages
+/// in order. A stream header that started is written in full first, up to
+/// the write timeout.
 #[cfg(not(test))]
 pub(super) const HANDOVER_LIMIT: Duration = Duration::from_secs(5);
 #[cfg(test)]
@@ -364,13 +367,15 @@ impl SendLoop {
                 }
                 self.set_sending(true);
                 let item = queue.current().expect("next returned a message");
-                // A handover never cuts a stream header: a node up to 0.101 drops the
-                // whole connection on a partial one. The open and the header have
-                // their own time limits.
-                if let Err(err) = self.open_stream(item.message.topic).await {
-                    self.handle_error(item.message.topic, err)?;
-                    queue.written();
-                    continue;
+                match self.open_stream(item.message.topic, &revoked).await {
+                    Ok(true) => {}
+                    // The next connection opens a stream for the message.
+                    Ok(false) => break,
+                    Err(err) => {
+                        self.handle_error(item.message.topic, err)?;
+                        queue.written();
+                        continue;
+                    }
                 }
                 // A stuck write would keep the queue from the connection that replaced
                 // this one. A message that we stop in the middle stays in the queue,
@@ -470,19 +475,31 @@ impl SendLoop {
     }
 
     /// Opens the stream of `topic` and writes its header, unless it is open.
-    async fn open_stream(&mut self, topic: TopicId) -> Result<(), WriteError> {
+    ///
+    /// Returns `false` if `revoked` ends the lease before the stream opened. A
+    /// header that started is written in full, as a node up to 0.101 drops the
+    /// whole connection on a partial one: the write timeout bounds it.
+    async fn open_stream(
+        &mut self,
+        topic: TopicId,
+        revoked: &CancellationToken,
+    ) -> Result<bool, WriteError> {
         let hash_map::Entry::Vacant(entry) = self.streams.entry(topic) else {
-            return Ok(());
+            return Ok(true);
         };
-        let mut stream = n0_future::time::timeout(OPEN_TIMEOUT, self.conn.open_uni())
-            .await
-            .map_err(|_| e!(WriteError::OpenStalled))??;
+        let mut stream = tokio::select! {
+            biased;
+            open = n0_future::time::timeout(OPEN_TIMEOUT, self.conn.open_uni()) => {
+                open.map_err(|_| e!(WriteError::OpenStalled))??
+            }
+            _ = revoked.cancelled() => return Ok(false),
+        };
         StreamHeader::new(topic)
             .write(&mut stream, &mut self.buffer, self.max_message_size)
             .await?;
         debug!(topic=%topic.fmt_short(), "stream opened");
         entry.insert(stream);
-        Ok(())
+        Ok(true)
     }
 
     /// Writes a [`ProtoMessage`] of `len` encoded bytes as a length-prefixed frame on its open stream.

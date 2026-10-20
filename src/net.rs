@@ -3099,6 +3099,55 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// A replaced connection that waits to open a stream hands the queue over at once.
+    ///
+    /// The peer allows one stream per connection, and the old connection used
+    /// it, so its writer waits to open the stream of a second topic. Nothing
+    /// of that stream went out, so the new connection takes the message at
+    /// once, not after the open timeout.
+    #[tokio::test]
+    #[traced_test]
+    async fn replaced_connection_waiting_to_open_hands_over_at_once() -> Result {
+        let lookup = MemoryLookup::new();
+        let ours = direct_endpoint(&lookup, QuicTransportConfig::builder().build()).await?;
+        let one_stream = QuicTransportConfig::builder()
+            .max_concurrent_uni_streams(VarInt::from_u32(1))
+            .build();
+        let theirs = direct_endpoint(&lookup, one_stream).await?;
+        let connect = || async {
+            let dial = async {
+                ours.connect(theirs.id(), GOSSIP_ALPN)
+                    .await
+                    .std_context("connect")
+            };
+            let accept = async {
+                let incoming = theirs.accept().await.std_context("endpoint closed")?;
+                incoming.await.std_context("accept")
+            };
+            (dial, accept).try_join().await
+        };
+        let (old, _peer_old) = connect().await?;
+        let (new, peer_new) = connect().await?;
+        let peer_id = theirs.id();
+        let (first, second): (TopicId, TopicId) = (
+            blake3::hash(b"first").into(),
+            blake3::hash(b"second").into(),
+        );
+        let mut actor = t_actor().await?;
+        actor.handle_connection(peer_id, ConnOrigin::Accept, old);
+        push_active(&actor, peer_id, join_message(first, 0));
+        push_active(&actor, peer_id, join_message(second, 0));
+        // Wait until the old writer opened the first stream and waits for the second.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        actor.handle_connection(peer_id, ConnOrigin::Accept, new);
+
+        let (topic, _) = timeout(Duration::from_secs(2), read_next_message(&peer_new))
+            .await
+            .std_context("the new connection waited for the open of the old one")??;
+        assert_eq!(topic, second);
+        Ok(())
+    }
+
     /// A replaced connection keeps the message that it wrote, and new messages go on the new connection.
     #[tokio::test]
     #[traced_test]
