@@ -66,7 +66,7 @@ pub(crate) struct StreamHeader {
     ///
     /// A node without it loses every later message to a peer that closes a
     /// connection that is no neighbor link of the node. So we close no
-    /// connection on which the peer did not send it.
+    /// connection to a peer that did not send it.
     pub(crate) handles_close: bool,
 }
 
@@ -130,6 +130,8 @@ pub(crate) struct RecvLoop {
     max_message_size: usize,
     in_event_tx: mpsc::Sender<InEvent>,
     /// Whether a stream header of the peer had [`StreamHeader::handles_close`].
+    ///
+    /// The actor shares it between all connections to the peer.
     handles_close: watch::Sender<bool>,
 }
 
@@ -139,19 +141,15 @@ impl RecvLoop {
         conn: Connection,
         in_event_tx: mpsc::Sender<InEvent>,
         max_message_size: usize,
+        handles_close: watch::Sender<bool>,
     ) -> Self {
         Self {
             remote_endpoint_id,
             conn,
             max_message_size,
             in_event_tx,
-            handles_close: watch::channel(false).0,
+            handles_close,
         }
-    }
-
-    /// Returns whether the peer handles a close of this connection, as it learns it.
-    pub(crate) fn handles_close(&self) -> watch::Receiver<bool> {
-        self.handles_close.subscribe()
     }
 
     /// Reads the streams of the connection until it closes or the actor stops.
@@ -396,7 +394,14 @@ impl SendLoop {
         };
         let stream = entry.get_mut();
 
-        write_frame(stream, message, &mut self.buffer, self.max_message_size).await?;
+        match write_frame(stream, message, &mut self.buffer, self.max_message_size).await {
+            // Refused before any byte went out, so the stream is intact.
+            Err(WriteError::TooLarge { .. }) => {
+                warn!(max = self.max_message_size, "message too large, dropped");
+                return Ok(());
+            }
+            res => res?,
+        }
 
         if is_last {
             trace!(topic=%topic_id.fmt_short(), "stream closing");
@@ -487,6 +492,8 @@ pub async fn write_frame<T: Serialize>(
     max_message_size: usize,
 ) -> Result<(), WriteError> {
     let len = postcard::experimental::serialized_size(&message)?;
+    // A frame must be shorter than the limit. Nodes up to 0.101 read a frame of
+    // the limit, but refuse to write one, so they could not forward it.
     if len >= max_message_size {
         return Err(e!(WriteError::TooLarge));
     }
