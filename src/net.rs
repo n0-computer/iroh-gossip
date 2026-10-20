@@ -3490,6 +3490,7 @@ pub(crate) mod tests {
             1024,
             vec![],
             watch::channel(true).1,
+            close_flag(),
         )));
 
         send_tx
