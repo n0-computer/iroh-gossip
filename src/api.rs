@@ -444,6 +444,7 @@ impl Stream for GossipReceiver {
 ///
 /// These are the events emitted from a [`GossipReceiver`].
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Event {
     /// We have a new, direct neighbor in the swarm membership layer for this topic.
     NeighborUp(EndpointId),
@@ -484,6 +485,7 @@ pub struct Message {
 
 /// Command for a gossip topic.
 #[derive(Serialize, Deserialize, derive_more::Debug, Clone)]
+#[non_exhaustive]
 pub enum Command {
     /// Broadcasts a message to all endpoints in the swarm.
     Broadcast(#[debug("Bytes({})", _0.len())] Bytes),

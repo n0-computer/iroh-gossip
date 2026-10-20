@@ -4,6 +4,7 @@ use iroh_metrics::{Counter, MetricsGroup};
 
 /// Enum of metrics for the module
 #[derive(Debug, Default, MetricsGroup)]
+#[non_exhaustive]
 #[metrics(name = "gossip")]
 pub struct Metrics {
     /// Number of control messages sent
