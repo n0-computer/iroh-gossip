@@ -316,14 +316,15 @@ pub struct State<PI, RG = ThreadRng> {
     next_shuffle_interval: Duration,
     /// The latest peers the application asked us to join, oldest first.
     ///
-    /// A node with empty views has nobody else left to dial. See
-    /// [`MAX_BOOTSTRAP_PEERS`].
+    /// A node with empty views has only them and its recent neighbors left to
+    /// dial. See [`MAX_BOOTSTRAP_PEERS`].
     bootstrap_peers: VecDeque<PI>,
     /// Maintenance passes in a row with both views empty, see [`MAX_REJOIN_INTERVALS`].
     passes_alone: u32,
     /// The latest peers that were our neighbors, least recently seen first.
     ///
-    /// Peers only leave by age, never because they failed: a node that loses
+    /// Peers only leave when newer neighbors push them out, never because they
+    /// failed: a node that loses
     /// its own network takes every peer as failed, and empties its views of
     /// exactly the peers it needs once it is back. See [`MAX_RECENT_NEIGHBORS`].
     recent_neighbors: VecDeque<PI>,
@@ -766,7 +767,7 @@ where
     /// A refill otherwise starts only when a neighbor leaves, and it stops once
     /// the passive view has no peer left to try. A node with no neighbors cannot
     /// shuffle either, so its passive view stays empty. Only the bootstrap
-    /// peers can get it back into the swarm.
+    /// peers and the recent neighbors can get it back into the swarm.
     fn handle_maintenance_timer(&mut self, io: &mut impl IO<PI>) {
         self.refused.clear();
         for peer in self.active_view.iter() {
@@ -790,11 +791,14 @@ where
                     self.join(*peer, io);
                 }
                 // The bootstrap peers may be gone for good. Also try a random
-                // recent neighbor.
-                if let Some(peer) = self.recent_neighbors.iter().choose(&mut self.rng) {
-                    if !self.bootstrap_peers.contains(peer) {
-                        self.join(*peer, io);
-                    }
+                // recent neighbor that is not one of them.
+                let recent = self
+                    .recent_neighbors
+                    .iter()
+                    .filter(|peer| !self.bootstrap_peers.contains(peer))
+                    .choose(&mut self.rng);
+                if let Some(peer) = recent {
+                    self.join(*peer, io);
                 }
             }
         } else {
@@ -1616,6 +1620,24 @@ mod tests {
         let io = &mut Io::new();
         state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
         assert_eq!(joined(io), vec![1]);
+    }
+
+    /// The recent neighbor of a rejoin is never a bootstrap peer, which gets a join anyway.
+    #[test]
+    fn rejoin_picks_a_recent_neighbor_that_is_no_bootstrap_peer() {
+        // A pick before the filter misses the other neighbor for about half the seeds.
+        for seed in 0..16 {
+            let mut state = State::new(0, None, Config::default(), StdRng::seed_from_u64(seed));
+            state.bootstrap_peers.push_back(1);
+            state.active_view.insert(1);
+            state.active_view.insert(2);
+            state.handle(InEvent::TimerExpired(Timer::DoMaintenance), &mut Io::new());
+            state.active_view.remove(&1);
+            state.active_view.remove(&2);
+            let io = &mut Io::new();
+            state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
+            assert_eq!(joined(io), vec![1, 2], "seed {seed}");
+        }
     }
 
     /// A node that loses its last neighbor, with an empty passive view,
