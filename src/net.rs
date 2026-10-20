@@ -151,7 +151,15 @@ pub struct Builder {
 
 impl Builder {
     /// Sets the maximum message size in bytes.
-    /// By default this is `4096` bytes.
+    ///
+    /// By default this is `4096` bytes. The limit applies to the encoded message,
+    /// which is about 40 bytes longer than its content. [`GossipSender::broadcast`]
+    /// refuses a message over the limit.
+    ///
+    /// Use the same limit on every node of a swarm. A node drops a message over
+    /// its own limit, and the peers that sent it do not learn of it.
+    ///
+    /// [`GossipSender::broadcast`]: crate::api::GossipSender::broadcast
     pub fn max_message_size(mut self, size: usize) -> Self {
         self.config.max_message_size = size;
         self
@@ -206,7 +214,7 @@ impl Builder {
 
         let actor_handle = task::spawn(actor.run().instrument(error_span!("gossip", %me)));
 
-        let api = GossipApi::local(rpc_tx);
+        let api = GossipApi::local(rpc_tx, max_message_size);
 
         Gossip {
             inner: Inner {
@@ -686,6 +694,11 @@ impl Actor {
                     now,
                 )
                 .await;
+            }
+            RpcMessage::MaxContentSize(msg) => {
+                let max_message_size = self.state.max_message_size();
+                let max_content = proto::topic::max_content_size(max_message_size);
+                msg.tx.send(max_content).await.ok();
             }
         }
     }
@@ -1343,7 +1356,7 @@ pub(crate) mod tests {
             let _actor_handle = AbortOnDropHandle::new(task::spawn(n0_future::future::pending()));
             let gossip = Self {
                 inner: Inner {
-                    api: GossipApi::local(to_actor_tx),
+                    api: GossipApi::local(to_actor_tx, max_message_size),
                     local_tx: conn_tx,
                     _actor_handle,
                     max_message_size,
@@ -2750,6 +2763,40 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// `broadcast` refuses a message that does not fit a frame at every hop.
+    #[tokio::test]
+    #[traced_test]
+    async fn broadcast_refuses_an_oversized_message() -> Result {
+        const MAX: usize = 1024;
+        let endpoint = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await?;
+        let gossip = Gossip::builder().max_message_size(MAX).spawn(endpoint);
+        let topic = gossip.subscribe([1; 32].into(), vec![]).await?;
+        let (sender, _receiver) = topic.split();
+        // The limit is the largest content that fits a frame at every hop.
+        let fits = (0..MAX)
+            .rev()
+            .find(|len| proto::topic::broadcast_fits(*len, Scope::Swarm, MAX))
+            .expect("some content fits");
+        assert_eq!(sender.max_content_size(), fits);
+
+        sender.broadcast(vec![0; fits].into()).await?;
+        let refused = sender.broadcast(vec![0; fits + 1].into()).await;
+        assert!(
+            matches!(refused, Err(ApiError::TooLarge { size, max_content, .. }) if size == fits + 1 && max_content == fits),
+            "{refused:?}"
+        );
+        sender.broadcast_neighbors(vec![0; fits].into()).await?;
+        let refused = sender.broadcast_neighbors(vec![0; fits + 1].into()).await;
+        assert!(
+            matches!(refused, Err(ApiError::TooLarge { .. })),
+            "{refused:?}"
+        );
+        Ok(())
+    }
+
     /// Test that endpoints can reconnect to each other.
     ///
     /// This test will create two endpoints subscribed to the same topic. The second endpoint will
@@ -3188,6 +3235,104 @@ pub(crate) mod tests {
         drop(rx2);
         router1.shutdown().await.std_context("shutdown router1")?;
         router2.shutdown().await.std_context("shutdown router2")?;
+        Ok(())
+    }
+
+    /// A frame one byte over the size limit is refused on read.
+    #[tokio::test]
+    #[traced_test]
+    async fn frame_over_the_size_limit_is_refused() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let topic: TopicId = blake3::hash(b"frame_over_the_size_limit").into();
+        let message = join_message(topic, 64).message;
+        let size = postcard::experimental::serialized_size(&message).std_context("size")?;
+
+        let mut stream = conn.open_uni().await.std_context("open stream")?;
+        util::write_frame(&mut stream, &message, &mut Vec::new(), size + 1)
+            .await
+            .std_context("write")?;
+        stream.finish().std_context("finish")?;
+
+        let mut stream = peer_conn.accept_uni().await.std_context("accept")?;
+        let read: Result<Option<TopicMessage>, _> =
+            util::read_frame(&mut stream, &mut BytesMut::new(), size - 1).await;
+        assert!(
+            matches!(read, Err(util::ReadError::TooLarge { .. })),
+            "{read:?}"
+        );
+        Ok(())
+    }
+
+    /// A frame shorter than the size limit goes through, and one of the limit does not.
+    ///
+    /// Nodes up to 0.101 read a frame of the limit, but refuse to write one, so
+    /// they could not forward it.
+    #[tokio::test]
+    #[traced_test]
+    async fn frame_shorter_than_the_size_limit_goes_through() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let topic: TopicId = blake3::hash(b"frame_shorter_than_the_size_limit").into();
+        let message = join_message(topic, 64).message;
+        let size = postcard::experimental::serialized_size(&message).std_context("size")?;
+
+        let mut stream = conn.open_uni().await.std_context("open stream")?;
+        let mut buffer = Vec::new();
+        let refused = util::write_frame(&mut stream, &message, &mut buffer, size).await;
+        assert!(
+            matches!(refused, Err(util::WriteError::TooLarge { .. })),
+            "{refused:?}"
+        );
+        util::write_frame(&mut stream, &message, &mut buffer, size + 1)
+            .await
+            .std_context("write")?;
+        stream.finish().std_context("finish")?;
+
+        let mut stream = peer_conn.accept_uni().await.std_context("accept")?;
+        let read: Option<TopicMessage> = util::read_frame(&mut stream, &mut BytesMut::new(), size)
+            .await
+            .std_context("read")?;
+        assert!(read.is_some(), "the frame did not arrive");
+        Ok(())
+    }
+
+    /// The send task drops a message over the size limit, and the connection stays.
+    #[tokio::test]
+    #[traced_test]
+    async fn oversized_message_is_dropped() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
+        let topic: TopicId = blake3::hash(b"oversized_message").into();
+        let (send_tx, send_rx) = mpsc::channel(2);
+        let (in_event_tx, _in_event_rx) = mpsc::channel(16);
+        let task = AbortOnDropHandle::new(spawn(connection_loop(
+            peer_id,
+            conn,
+            ConnOrigin::Dial,
+            send_rx,
+            in_event_tx,
+            1024,
+            vec![],
+            watch::channel(true).1,
+        )));
+
+        send_tx
+            .send(join_message(topic, 4096))
+            .await
+            .std_context("send")?;
+        send_tx
+            .send(join_message(topic, 16))
+            .await
+            .std_context("send")?;
+
+        let (_, message) = timeout(Duration::from_secs(5), read_next_message(&peer_conn))
+            .await
+            .std_context("nothing arrived after the oversized message")??;
+        let size = postcard::experimental::serialized_size(&message).std_context("size")?;
+        assert!(size < 1024, "the oversized message went out");
+        assert!(!task.is_finished(), "the connection ended");
         Ok(())
     }
 }
