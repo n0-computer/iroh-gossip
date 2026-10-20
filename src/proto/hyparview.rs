@@ -34,7 +34,8 @@ const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5);
 ///
 /// An isolated node rejoins in its 1st, 2nd, 4th, and 8th maintenance pass
 /// alone, and then in every 12th: at first after 5s, and later once a minute.
-/// A short node refills from its passive view on the same schedule.
+/// A short node refills from its passive view on the same schedule, counted
+/// from the last neighbor it gained.
 const MAX_BACKOFF_PASSES: u32 = 12;
 
 /// Maximum number of neighbor requests that a refill from a maintenance pass sends.
@@ -335,7 +336,7 @@ pub struct State<PI, RG = ThreadRng> {
     bootstrap_peers: VecDeque<PI>,
     /// Maintenance passes in a row with both views empty, see [`MAX_BACKOFF_PASSES`].
     passes_alone: u32,
-    /// Maintenance passes in a row with a short active view, see [`MAX_BACKOFF_PASSES`].
+    /// Maintenance passes with a short active view since we last gained a neighbor, see [`MAX_BACKOFF_PASSES`].
     passes_short: u32,
     /// Random number generator
     rng: RG,
@@ -349,10 +350,11 @@ pub struct State<PI, RG = ThreadRng> {
     peer_data: HashMap<PI, PeerData>,
     /// List of peers that are disconnecting, but which we want to keep in the passive set once the connection closes
     alive_disconnect_peers: HashSet<PI>,
-    /// Passive peers that refused our neighbor request since the last refill pass or neighbor loss.
+    /// Passive peers that refused our neighbor request.
     ///
     /// A refill skips them. Else a node short of neighbors, whose passive peers
-    /// are all full, asks them in turn without end.
+    /// are all full, asks them in turn without end. A neighbor loss and the
+    /// maintenance passes that may refill clear them, as the peers may have room by then.
     refused: HashSet<PI>,
     /// The limit of the refill in progress.
     refill: RefillLimit,
@@ -787,8 +789,6 @@ where
     /// with high priority, which no peer refuses, until one accepts.
     fn handle_maintenance_timer(&mut self, io: &mut impl IO<PI>) {
         if self.active_view.is_empty() && self.passive_view.is_empty() {
-            self.passes_short = 0;
-            self.refused.clear();
             self.passes_alone += 1;
             if backoff_due(self.passes_alone) {
                 debug!("no neighbors and no passive peers, rejoin");
@@ -798,21 +798,18 @@ where
             }
         } else {
             self.passes_alone = 0;
-            if !self.is_short() {
-                self.passes_short = 0;
-                self.refused.clear();
-                self.refill = RefillLimit::None;
-            } else if self.active_view.is_empty() {
-                self.refused.clear();
+            if self.active_view.is_empty() {
                 self.refill = RefillLimit::Recovery;
                 self.refill_active_from_passive(&[], io);
-            } else {
+            } else if self.is_short() {
                 self.passes_short += 1;
                 if backoff_due(self.passes_short) && self.refill != RefillLimit::Recovery {
                     self.refused.clear();
                     self.refill = RefillLimit::Requests(MAX_REQUESTS_PER_REFILL);
                     self.refill_active_from_passive(&[], io);
                 }
+            } else {
+                self.refused.clear();
             }
         }
         io.push(OutEvent::ScheduleTimer(
@@ -1060,9 +1057,7 @@ where
             debug!(other = ?peer, "add to active view");
             io.push(OutEvent::EmitEvent(Event::NeighborUp(peer)));
             self.refill = RefillLimit::None;
-            if !self.is_short() {
-                self.passes_short = 0;
-            }
+            self.passes_short = 0;
             if reply {
                 self.send_neighbor(peer, priority, io);
             }
@@ -1929,7 +1924,7 @@ mod tests {
         assert_eq!(asked, (10..20).collect::<Vec<_>>());
     }
 
-    /// A node that stays short refills less often, on the schedule of the rejoins.
+    /// A node that stays short refills less often, and starts over once it gains a neighbor.
     #[test]
     fn refills_back_off() {
         let mut state = short_state(10..40);
@@ -1943,31 +1938,12 @@ mod tests {
             }
         }
         assert_eq!(refills, vec![0, 1, 3, 7, 11, 23, 35, 47, 59]);
-    }
 
-    /// A node that is no longer short starts over with the backoff, also between two passes.
-    #[test]
-    fn refill_backoff_resets_once_not_short() {
-        let mut state = short_state(10..40);
-        for _ in 0..60 {
-            state.handle(InEvent::TimerExpired(Timer::DoMaintenance), &mut Io::new());
-            refuse_pending(&mut state);
-        }
-        for peer in [2, 3] {
-            state.handle(
-                InEvent::RecvMessage(peer, Message::Join(None)),
-                &mut Io::new(),
-            );
-        }
-        state.handle(InEvent::PeerDisconnected(3), &mut Io::new());
-        refuse_pending(&mut state);
-
+        let join = Message::Join(None);
+        state.handle(InEvent::RecvMessage(2, join), &mut Io::new());
         let io = &mut Io::new();
         state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
-        assert!(
-            !neighbors_sent(io).is_empty(),
-            "the first short pass did not refill"
-        );
+        assert!(!neighbors_sent(io).is_empty(), "the backoff went on");
     }
 
     /// A node with no neighbors asks until a peer accepts, also when its requests time out.
