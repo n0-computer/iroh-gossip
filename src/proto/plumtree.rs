@@ -35,6 +35,11 @@ impl MessageId {
     pub fn from_content(message: &[u8]) -> Self {
         Self::from(blake3::hash(message))
     }
+
+    /// Returns the first 5 bytes as hex, a short form for logs.
+    pub fn fmt_short(&self) -> String {
+        data_encoding::HEXLOWER.encode(&self.as_bytes()[..5])
+    }
 }
 
 /// Events Plumtree is informed of from the peer sampling service and IO layer.
@@ -573,7 +578,7 @@ impl<PI: PeerIdentity> State<PI> {
         // if we already received this message: move peer to lazy set
         // and notify peer about this.
         if self.received_messages.contains_key(&message.id) {
-            debug!("Received duplicate message... ignoring");
+            debug!(hash = %message.id.fmt_short(), "Received duplicate message... ignoring");
             if from_peer {
                 self.add_lazy(sender);
             }
