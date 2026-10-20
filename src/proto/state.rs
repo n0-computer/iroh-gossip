@@ -90,6 +90,7 @@ impl<PI> Timer<PI> {
 
 /// Input event to the protocol state.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum InEvent<PI> {
     /// Message received from the network.
     RecvMessage(PI, Message<PI>),
@@ -105,6 +106,7 @@ pub enum InEvent<PI> {
 
 /// Output event from the protocol state.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum OutEvent<PI> {
     /// Send a message on the network
     SendMessage(PI, Message<PI>),

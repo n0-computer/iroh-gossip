@@ -18,6 +18,7 @@ use crate::proto::MIN_MAX_MESSAGE_SIZE;
 
 /// Input event to the topic state handler.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum InEvent<PI> {
     /// Message received from the network.
     RecvMessage(PI, Message<PI>),
@@ -33,6 +34,7 @@ pub enum InEvent<PI> {
 
 /// An output event from the state handler.
 #[derive(Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OutEvent<PI> {
     /// Send a message on the network
     SendMessage(PI, Message<PI>),
@@ -156,6 +158,7 @@ impl<PI> Message<PI> {
 
 /// An event to be emitted to the application for a particular topic.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Event<PI> {
     /// We have a new, direct neighbor in the swarm membership layer for this topic
     NeighborUp(PI),
@@ -196,6 +199,7 @@ pub enum Timer<PI> {
 
 /// A command to the protocol state for a particular topic.
 #[derive(Clone, derive_more::Debug)]
+#[non_exhaustive]
 pub enum Command<PI> {
     /// Join this topic and connect to peers.
     ///
