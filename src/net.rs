@@ -249,13 +249,14 @@ impl Builder {
 /// Known limits:
 ///
 /// - **Backpressure.** A broadcast waits only while every eager peer of its
-///   topic, each peer that we push data to, has its data section half full:
-///   then our own link is the limit. The other commands of the topic wait
-///   with it, in order: a join of more peers, and a leave, which takes effect
-///   once the broadcasts before it went out. Otherwise a broadcast never
-///   waits, and a node that relays it never waits either. A burst larger than
-///   the queue and the QUIC windows of a peer loses messages for it, at the
-///   publisher or at a relay. The repair recovers only part of them.
+///   topic, each peer that we push data to, has its data section half full.
+///   This is a conservative guess that our own link is the limit; slow peers
+///   or the traffic of other topics fill the queues as well. The commands
+///   after a waiting broadcast wait behind it, in order: a join of more
+///   peers, and a leave. Otherwise a broadcast never waits, and a node that
+///   relays it never waits either. A burst larger than the queue and the QUIC
+///   windows of a peer loses messages for it, at the publisher or at a relay.
+///   The repair recovers only part of them.
 /// - **Repair.** A lost broadcast is announced again only while it is cached,
 ///   30 s by default. At most 256 per peer and 4096 per topic wait for it, and
 ///   64 per peer go out per second. A message with neighbor scope is never
@@ -1217,9 +1218,10 @@ const GATE_CHECK: Duration = Duration::from_millis(10);
 
 /// Lets the publishers of a topic wait, see [`Actor::update_gate`].
 ///
-/// A broadcast that waits keeps its publisher waiting, as on a full channel.
-/// The gate holds the whole command stream, so a join of more peers, and the
-/// end of the stream, which leaves the topic, wait behind it.
+/// Only a broadcast waits, and keeps its publisher waiting, as on a full
+/// channel. The commands after it wait behind it, so that they keep their
+/// order. A stream without a waiting broadcast passes its other commands and
+/// its end, which leaves the topic.
 #[derive(Debug, Default)]
 struct PublishGate(Mutex<GateState>);
 
@@ -1470,6 +1472,8 @@ struct TopicCommandStream {
     stream: BoxedCommandReceiver,
     closed: bool,
     gate: Arc<PublishGate>,
+    /// A broadcast that waits for the gate.
+    held: Option<Command>,
 }
 
 impl TopicCommandStream {
@@ -1479,6 +1483,7 @@ impl TopicCommandStream {
             stream,
             closed: false,
             gate,
+            held: None,
         }
     }
 }
@@ -1489,17 +1494,26 @@ impl Stream for TopicCommandStream {
         if self.closed {
             return Poll::Ready(None);
         }
-        if self.gate.poll_open(cx).is_pending() {
+        let command = match self.held.take() {
+            Some(command) => command,
+            None => match Pin::new(&mut self.stream).poll_next(cx) {
+                Poll::Ready(Some(Ok(command))) => command,
+                Poll::Ready(None) | Poll::Ready(Some(Err(_))) => {
+                    self.closed = true;
+                    return Poll::Ready(Some((self.topic_id, None)));
+                }
+                Poll::Pending => return Poll::Pending,
+            },
+        };
+        let broadcast = matches!(
+            command,
+            Command::Broadcast(_) | Command::BroadcastNeighbors(_)
+        );
+        if broadcast && self.gate.poll_open(cx).is_pending() {
+            self.held = Some(command);
             return Poll::Pending;
         }
-        match Pin::new(&mut self.stream).poll_next(cx) {
-            Poll::Ready(Some(Ok(item))) => Poll::Ready(Some((self.topic_id, Some(item)))),
-            Poll::Ready(None) | Poll::Ready(Some(Err(_))) => {
-                self.closed = true;
-                Poll::Ready(Some((self.topic_id, None)))
-            }
-            Poll::Pending => Poll::Pending,
-        }
+        Poll::Ready(Some((self.topic_id, Some(command))))
     }
 }
 
@@ -4555,6 +4569,67 @@ pub(crate) mod tests {
             .await
             .std_context("the partial header blocked the other stream")?;
         assert!(matches!(event, Some(InEvent::RecvMessage(..))), "{event:?}");
+        Ok(())
+    }
+
+    /// A closed gate holds back only broadcasts, keeps the order, and lets the end of a stream through.
+    ///
+    /// A topic whose publishers wait must still see that its last handle went,
+    /// even while traffic of another topic keeps the shared queues full.
+    #[tokio::test]
+    async fn closed_gate_holds_only_broadcasts() -> Result {
+        let topic = TopicId::from_bytes([1; 32]);
+        let gate = Arc::new(PublishGate::default());
+        gate.set_paused(true);
+        let commands = vec![
+            Ok(Command::JoinPeers(vec![])),
+            Ok(Command::Broadcast(Bytes::from_static(b"held"))),
+            Ok(Command::JoinPeers(vec![])),
+        ];
+        let stream = Box::pin(n0_future::stream::iter(commands));
+        let mut stream = TopicCommandStream::new(topic, stream, gate.clone());
+        let next = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .std_context("a join waited for the gate")?;
+        assert!(
+            matches!(next, Some((_, Some(Command::JoinPeers(_))))),
+            "{next:?}"
+        );
+        // The broadcast waits, and the join after it keeps its place.
+        let reader = AbortOnDropHandle::new(spawn(async move {
+            let mut items = Vec::new();
+            while let Some(item) = stream.next().await {
+                items.push(item.1);
+            }
+            items
+        }));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!reader.is_finished(), "the broadcast did not wait");
+        gate.set_paused(false);
+        let items = timeout(Duration::from_secs(2), reader)
+            .await
+            .std_context("the open gate did not wake the stream")?
+            .std_context("reader task")?;
+        assert!(
+            matches!(
+                items.as_slice(),
+                [
+                    Some(Command::Broadcast(_)),
+                    Some(Command::JoinPeers(_)),
+                    None
+                ]
+            ),
+            "{items:?}"
+        );
+
+        // A stream with nothing held ends at once, also while the gate is closed.
+        gate.set_paused(true);
+        let empty = Box::pin(n0_future::stream::iter(Vec::new()));
+        let mut stream = TopicCommandStream::new(topic, empty, gate);
+        let next = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .std_context("the end of the stream waited for the gate")?;
+        assert!(matches!(next, Some((_, None))), "{next:?}");
         Ok(())
     }
 
