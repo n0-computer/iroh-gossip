@@ -151,7 +151,15 @@ pub struct Builder {
 
 impl Builder {
     /// Sets the maximum message size in bytes.
-    /// By default this is `4096` bytes.
+    ///
+    /// By default this is `4096` bytes. The limit applies to the encoded message,
+    /// which is about 40 bytes longer than its content. [`GossipSender::broadcast`]
+    /// refuses a message over the limit.
+    ///
+    /// Use the same limit on every node of a swarm. A node drops a message over
+    /// its own limit, and the peers that sent it do not learn of it.
+    ///
+    /// [`GossipSender::broadcast`]: crate::api::GossipSender::broadcast
     pub fn max_message_size(mut self, size: usize) -> Self {
         self.config.max_message_size = size;
         self
@@ -206,7 +214,7 @@ impl Builder {
 
         let actor_handle = task::spawn(actor.run().instrument(error_span!("gossip", %me)));
 
-        let api = GossipApi::local(rpc_tx);
+        let api = GossipApi::local(rpc_tx, max_message_size);
 
         Gossip {
             inner: Inner {
@@ -299,6 +307,13 @@ struct Actor {
     ///
     /// It outlives the peer's state, so that a peer we want again keeps them.
     wanted: HashMap<EndpointId, watch::Sender<bool>>,
+    /// Whether each peer with a connection sent [`util::StreamHeader::handles_close`].
+    ///
+    /// It belongs to the peer, not to one connection. So a connection on which
+    /// neither side sends closes too, as after two dials cross. A set flag
+    /// outlives the last connection by [`RETIRE_LIMIT`], so that a dial that
+    /// completes late still finds it.
+    handles_close: HashMap<EndpointId, CloseFlag>,
     /// Stream of commands from topic handles.
     command_rx: stream_group::Keyed<TopicCommandStream>,
     /// Internal queue of topic to close because all handles were dropped.
@@ -346,6 +361,7 @@ impl Actor {
             command_rx: StreamGroup::new().keyed(),
             peers: Default::default(),
             wanted: Default::default(),
+            handles_close: Default::default(),
             topics: Default::default(),
             quit_queue: Default::default(),
             connection_tasks: Default::default(),
@@ -367,6 +383,28 @@ impl Actor {
         }
     }
 
+    /// Handles a message from the [`Gossip`] handle, and returns `false` to stop the actor.
+    async fn handle_local_message(&mut self, msg: Option<LocalActorMessage>) -> bool {
+        match msg {
+            Some(LocalActorMessage::Shutdown { reply }) => {
+                debug!("received shutdown message, quit all topics");
+                self.quit_queue.extend(self.topics.keys().copied());
+                self.process_quit_queue().await;
+                debug!("all topics quit, stop gossip actor");
+                reply.send(()).ok();
+                false
+            }
+            Some(LocalActorMessage::HandleConnection(conn)) => {
+                self.handle_connection(conn.remote_id(), ConnOrigin::Accept, conn);
+                true
+            }
+            None => {
+                debug!("all gossip handles dropped, stop gossip actor");
+                false
+            }
+        }
+    }
+
     /// Performs the initial actor setup to run the [`Actor::event_loop`].
     ///
     /// This updates our current address and return it. It also returns the home relay stream and
@@ -380,32 +418,27 @@ impl Actor {
 
     /// One event loop processing step.
     ///
-    /// None is returned when no further processing should be performed.
+    /// Returns `false` when the actor should stop.
     async fn event_loop(
         &mut self,
         addr_updates: &mut (impl Stream<Item = EndpointAddr> + Send + Unpin),
         i: usize,
     ) -> bool {
         self.metrics.actor_tick_main.inc();
+        // A shutdown skips the other branches. It waits only for the local messages
+        // queued before it. Each tick still runs the select below, so local messages
+        // starve no other branch.
+        if let Ok(msg) = self.local_rx.try_recv() {
+            if !self.handle_local_message(Some(msg)).await {
+                return false;
+            }
+        }
+        // Not biased: a publisher that always has a command ready would starve the
+        // branches after it, such as received messages, timers and closed connections.
         tokio::select! {
-            biased;
-            conn = self.local_rx.recv() => {
-                match conn {
-                    Some(LocalActorMessage::Shutdown { reply }) => {
-                        debug!("received shutdown message, quit all topics");
-                        self.quit_queue.extend(self.topics.keys().copied());
-                        self.process_quit_queue().await;
-                        debug!("all topics quit, stop gossip actor");
-                        reply.send(()).ok();
-                        return false;
-                    },
-                    Some(LocalActorMessage::HandleConnection(conn)) => {
-                        self.handle_connection(conn.remote_id(), ConnOrigin::Accept, conn);
-                    }
-                    None => {
-                        debug!("all gossip handles dropped, stop gossip actor");
-                        return false;
-                    }
+            msg = self.local_rx.recv() => {
+                if !self.handle_local_message(msg).await {
+                    return false;
                 }
             }
             msg = self.rpc_rx.recv() => {
@@ -571,6 +604,10 @@ impl Actor {
             .or_insert_with(|| watch::channel(wanted).0);
         tx.send_if_modified(|current| std::mem::replace(current, wanted) != wanted);
         let wanted = tx.subscribe();
+        self.forget_close_flags(Instant::now());
+        let flag = self.handles_close.entry(peer_id).or_default();
+        flag.kept_until = None;
+        let handles_close = (flag.tx.clone(), flag.tx.subscribe());
 
         let max_message_size = self.state.max_message_size();
         let in_event_tx = self.in_event_tx.clone();
@@ -587,6 +624,7 @@ impl Actor {
                     max_message_size,
                     queue,
                     wanted,
+                    handles_close,
                 )
                 .await;
                 // Closed here, so that a busy actor does not delay the close.
@@ -599,6 +637,12 @@ impl Actor {
         );
     }
 
+    /// Drops the set flags kept for peers without a connection, once their time is over at `now`.
+    fn forget_close_flags(&mut self, now: Instant) {
+        self.handles_close
+            .retain(|_, flag| flag.kept_until.is_none_or(|until| until > now));
+    }
+
     #[tracing::instrument(name = "conn", skip_all, fields(peer = %peer_id.fmt_short()))]
     async fn handle_connection_task_finished(
         &mut self,
@@ -606,6 +650,15 @@ impl Actor {
         conn: Connection,
         task_result: Result<(), ConnectionLoopError>,
     ) {
+        // The receive loop sends its messages before its task ends. Handle the ones
+        // still queued first, so that a message never comes after its own close.
+        // Only those: other connections can refill the queue while we handle it.
+        for _ in 0..self.in_event_rx.len() {
+            let Ok(event) = self.in_event_rx.try_recv() else {
+                break;
+            };
+            self.handle_in_event(event, Instant::now()).await;
+        }
         if self
             .wanted
             .get(&peer_id)
@@ -613,6 +666,16 @@ impl Actor {
         {
             self.wanted.remove(&peer_id);
         }
+        if let Some(flag) = self.handles_close.get_mut(&peer_id) {
+            if flag.tx.receiver_count() == 0 {
+                if *flag.tx.borrow() {
+                    flag.kept_until = Some(Instant::now() + RETIRE_LIMIT);
+                } else {
+                    self.handles_close.remove(&peer_id);
+                }
+            }
+        }
+        self.forget_close_flags(Instant::now());
         let reason = conn.close_reason().expect("closed by its task");
         let error = task_result.err();
         debug!(%reason, ?error, "connection closed");
@@ -686,6 +749,11 @@ impl Actor {
                     now,
                 )
                 .await;
+            }
+            RpcMessage::MaxContentSize(msg) => {
+                let max_message_size = self.state.max_message_size();
+                let max_content = proto::topic::max_content_size(max_message_size);
+                msg.tx.send(max_content).await.ok();
             }
         }
     }
@@ -851,6 +919,23 @@ fn disconnect_peer(peers: &mut HashMap<EndpointId, PeerState>, peer_id: Endpoint
     }
 }
 
+/// Whether a peer sent [`util::StreamHeader::handles_close`], shared by its connections.
+#[derive(Debug)]
+struct CloseFlag {
+    tx: watch::Sender<bool>,
+    /// When we drop the flag, once the peer has no connection left.
+    kept_until: Option<Instant>,
+}
+
+impl Default for CloseFlag {
+    fn default() -> Self {
+        Self {
+            tx: watch::channel(false).0,
+            kept_until: None,
+        }
+    }
+}
+
 impl PeerState {
     /// Sends on the new connection from now on, and returns its queue.
     fn accept_conn(
@@ -947,10 +1032,6 @@ enum ConnectionLoopError {
         source: self::util::WriteError,
     },
     #[error(transparent)]
-    Read {
-        source: self::util::ReadError,
-    },
-    #[error(transparent)]
     Connection {
         #[error(std_err)]
         source: iroh::endpoint::ConnectionError,
@@ -1037,13 +1118,13 @@ async fn connection_loop(
     max_message_size: usize,
     queue: Vec<ProtoMessage>,
     wanted: watch::Receiver<bool>,
+    (handles_close, mut handles_close_rx): (watch::Sender<bool>, watch::Receiver<bool>),
 ) -> Result<(), ConnectionLoopError> {
     debug!(?origin, "connection established");
 
     let mut send_loop = SendLoop::new(conn.clone(), send_rx, max_message_size);
     let sending = send_loop.sending();
-    let mut recv_loop = RecvLoop::new(from, conn, in_event_tx, max_message_size);
-    let mut handles_close = recv_loop.handles_close();
+    let mut recv_loop = RecvLoop::new(from, conn, in_event_tx, max_message_size, handles_close);
 
     let send_fut = send_loop.run(queue).instrument(error_span!("send"));
     let recv_fut = recv_loop.run().instrument(error_span!("recv"));
@@ -1051,11 +1132,11 @@ async fn connection_loop(
         tokio::pin!(send_fut, recv_fut);
         tokio::select! {
             res = &mut send_fut => res?,
-            res = &mut recv_fut => return Ok(res?),
+            _ = &mut recv_fut => return Ok(()),
         }
         // We are done sending. A peer we want may still send on this connection,
         // as two peers that dialed each other can each use a different one.
-        recv_fut.await?;
+        recv_fut.await;
         Ok(())
     };
     tokio::select! {
@@ -1063,7 +1144,7 @@ async fn connection_loop(
         // An old node would lose its later messages to us after a close, see
         // `StreamHeader::handles_close`.
         _ = async {
-            if handles_close.wait_for(|known| *known).await.is_err() {
+            if handles_close_rx.wait_for(|known| *known).await.is_err() {
                 std::future::pending::<()>().await;
             }
             retire(wanted, sending).await
@@ -1259,7 +1340,7 @@ pub(crate) mod tests {
     use n0_error::{AnyError, Result, StdResultExt};
     use n0_tracing_test::traced_test;
     use rand::{CryptoRng, RngExt};
-    use tokio::{io::AsyncWriteExt, spawn, time::timeout};
+    use tokio::{spawn, time::timeout};
     use tokio_util::sync::CancellationToken;
     use tracing::{info, instrument};
 
@@ -1304,10 +1385,18 @@ pub(crate) mod tests {
             actor.event_loop(addr_update_stream, *step).await
         }
 
-        async fn steps(&mut self, n: usize) {
-            for _ in 0..n {
+        /// Steps until `done` holds, at most `max` times, and returns whether it holds.
+        ///
+        /// The actor picks its branches in no fixed order, so a count of steps can
+        /// miss an event.
+        async fn steps_until(&mut self, max: usize, done: impl Fn(&Actor) -> bool) -> bool {
+            for _ in 0..max {
+                if done(&self.actor) {
+                    return true;
+                }
                 self.step().await;
             }
+            done(&self.actor)
         }
 
         async fn finish(mut self) {
@@ -1343,7 +1432,7 @@ pub(crate) mod tests {
             let _actor_handle = AbortOnDropHandle::new(task::spawn(n0_future::future::pending()));
             let gossip = Self {
                 inner: Inner {
-                    api: GossipApi::local(to_actor_tx),
+                    api: GossipApi::local(to_actor_tx, max_message_size),
                     local_tx: conn_tx,
                     _actor_handle,
                     max_message_size,
@@ -1663,24 +1752,34 @@ pub(crate) mod tests {
         let go1_handle = task::spawn(go1_task);
 
         // advance and check that the topic is now subscribed
-        actor.steps(3).await; // handle our subscribe;
-                              // get peer connection;
-                              // receive the other peer's information for a NeighborUp
-        let state = actor.topics.get(&topic).expect("get registered topic");
-        assert!(state.joined());
+        let commands = |actor: &Actor| {
+            actor
+                .topics
+                .get(&topic)
+                .map_or(0, |state| state.command_rx_keys.len())
+        };
+        // Our subscribe, the connection, and the NeighborUp from the peer's information.
+        let joined = |actor: &Actor| actor.topics.get(&topic).is_some_and(|s| s.joined());
+        assert!(actor.steps_until(20, joined).await, "not joined");
 
         // signal the second subscribe, we should remain subscribed
         tx.send(())
             .await
             .std_context("signal additional subscribe")?;
-        actor.steps(3).await; // subscribe; first receiver gone; first sender gone
+        assert!(actor.steps_until(20, |a| commands(a) == 2).await);
+        // The first handle goes.
+        assert!(actor.steps_until(20, |a| commands(a) == 1).await);
         let state = actor.topics.get(&topic).expect("get registered topic");
         assert!(state.joined());
 
         // signal to drop the second handle, the topic should no longer be subscribed
         tx.send(()).await.std_context("signal drop handles")?;
-        actor.steps(2).await; // second receiver gone; second sender gone
-        assert!(!actor.topics.contains_key(&topic));
+        assert!(
+            actor
+                .steps_until(20, |a| !a.topics.contains_key(&topic))
+                .await,
+            "the topic is still subscribed"
+        );
 
         // cleanup and ensure everything went as expected
         ct.cancel();
@@ -1876,6 +1975,11 @@ pub(crate) mod tests {
             .get(&peer)
             .expect("the peer has a connection")
             .send_replace(wanted);
+    }
+
+    /// Returns an unset flag of [`util::StreamHeader::handles_close`] for one connection.
+    fn close_flag() -> (watch::Sender<bool>, watch::Receiver<bool>) {
+        watch::channel(false)
     }
 
     /// Runs `retire` on paused time, applies `steps` at their offsets, and returns when it ended.
@@ -2362,6 +2466,127 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// A late dial on which the peer never sends closes.
+    ///
+    /// Two peers that dial each other at once can each end up with a
+    /// connection on which neither side sends. The peer showed on its other
+    /// connection that it handles a close, and that connection ends before
+    /// the dial runs.
+    #[tokio::test]
+    #[traced_test]
+    async fn silent_late_dial_closes() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (accepted, peer_accepted) = pair.connect().await?;
+        let (dialed, peer_dialed) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
+        let topic: TopicId = blake3::hash(b"silent_late_dial").into();
+        let mut actor = t_actor().await?;
+
+        actor.handle_connection(peer_id, ConnOrigin::Accept, accepted);
+        show_that_it_handles_a_close(&peer_accepted, topic).await;
+        disconnect_peer(&mut actor.peers, peer_id);
+        let ended = timeout(
+            IDLE_GRACE + Duration::from_secs(3),
+            actor.connection_tasks.join_next(),
+        )
+        .await
+        .std_context("the accepted connection stayed open")?;
+        let (peer, conn, res) = ended.expect("one task").expect("no panic");
+
+        // The test runtime runs the dial task only at the next await.
+        actor.handle_connection(peer_id, ConnOrigin::Dial, dialed);
+        actor.handle_connection_task_finished(peer, conn, res).await;
+        assert!(
+            actor.handles_close.contains_key(&peer_id),
+            "the flag went while the dial holds it"
+        );
+
+        let ended = timeout(
+            IDLE_GRACE + Duration::from_secs(3),
+            actor.connection_tasks.join_next(),
+        )
+        .await
+        .std_context("the dial stayed open")?;
+        let (peer, conn, res) = ended.expect("one task").expect("no panic");
+        actor.handle_connection_task_finished(peer, conn, res).await;
+        timeout(Duration::from_secs(1), peer_dialed.closed())
+            .await
+            .std_context("the peer did not see the close")?;
+        actor.forget_close_flags(Instant::now() + RETIRE_LIMIT);
+        assert!(
+            !actor.handles_close.contains_key(&peer_id),
+            "the flag outlived its time"
+        );
+        Ok(())
+    }
+
+    /// A silent late dial closes, also when the other connection of the peer ended before it.
+    ///
+    /// The flag of the peer outlives its last connection for a while.
+    #[tokio::test]
+    #[traced_test]
+    async fn silent_dial_after_the_last_connection_closes() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (accepted, peer_accepted) = pair.connect().await?;
+        let (dialed, peer_dialed) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
+        let topic: TopicId = blake3::hash(b"silent_dial_after_the_last").into();
+        let mut actor = t_actor().await?;
+
+        actor.handle_connection(peer_id, ConnOrigin::Accept, accepted);
+        show_that_it_handles_a_close(&peer_accepted, topic).await;
+        disconnect_peer(&mut actor.peers, peer_id);
+        let ended = timeout(
+            IDLE_GRACE + Duration::from_secs(3),
+            actor.connection_tasks.join_next(),
+        )
+        .await
+        .std_context("the accepted connection stayed open")?;
+        let (peer, conn, res) = ended.expect("one task").expect("no panic");
+        actor.handle_connection_task_finished(peer, conn, res).await;
+        assert!(
+            actor.handles_close.contains_key(&peer_id),
+            "the flag went with the last connection"
+        );
+
+        actor.handle_connection(peer_id, ConnOrigin::Dial, dialed);
+        let ended = timeout(
+            IDLE_GRACE + Duration::from_secs(3),
+            actor.connection_tasks.join_next(),
+        )
+        .await
+        .std_context("the dial stayed open")?;
+        let (peer, conn, res) = ended.expect("one task").expect("no panic");
+        actor.handle_connection_task_finished(peer, conn, res).await;
+        timeout(Duration::from_secs(1), peer_dialed.closed())
+            .await
+            .std_context("the peer did not see the close")?;
+        Ok(())
+    }
+
+    /// The unset flag of a peer goes with its last connection.
+    #[tokio::test]
+    #[traced_test]
+    async fn unset_flag_goes_with_the_last_connection() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
+        let mut actor = t_actor().await?;
+
+        actor.handle_connection(peer_id, ConnOrigin::Accept, conn);
+        peer_conn.close(0u32.into(), b"done");
+        let ended = timeout(Duration::from_secs(3), actor.connection_tasks.join_next())
+            .await
+            .std_context("the connection stayed open")?;
+        let (peer, conn, res) = ended.expect("one task").expect("no panic");
+        actor.handle_connection_task_finished(peer, conn, res).await;
+        assert!(
+            !actor.handles_close.contains_key(&peer_id),
+            "an unset flag outlived the connection"
+        );
+        Ok(())
+    }
+
     /// A late dial stays open if we want the peer again within the grace.
     ///
     /// The peer may take the dial as its active connection. Closing it would
@@ -2603,6 +2828,7 @@ pub(crate) mod tests {
             TEST_FRAME_LIMIT,
             vec![],
             watch::channel(true).1,
+            close_flag(),
         )));
 
         let (read_topic, read_message, peer_conn) = timeout(Duration::from_secs(5), peer)
@@ -2615,51 +2841,39 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// A failed receive loop closes the connection despite a live send loop.
+    /// A receive loop that ended ends the connection loop despite a live send loop.
+    ///
+    /// The receive loop ends once the actor takes no more messages. A bad
+    /// stream header does not end it: it drops only its stream.
     #[tokio::test]
     #[traced_test]
-    async fn recv_error_closes_connection() -> Result {
-        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
-        let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
-        let ep1 = create_endpoint(rng, relay_map.clone(), None).await?;
-        let ep2 = create_endpoint(rng, relay_map, None).await?;
-        let ep2_id = ep2.id();
-        let ep2_addr = EndpointAddr::new(ep2_id).with_relay_url(relay_url);
+    async fn ended_receive_loop_ends_connection_loop() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let topic: TopicId = blake3::hash(b"ended_receive_loop").into();
+        let join = join_message(topic, 0).message;
+        let _stream = open_stream(&peer_conn, topic, &[join]).await?;
 
-        // The peer opens a stream with a header over the size limit, and keeps
-        // the connection open.
-        let _accept = AbortOnDropHandle::new(spawn(async move {
-            let incoming = ep2.accept().await.expect("endpoint closed");
-            let conn = incoming.await.expect("accept failed");
-            let mut stream = conn.open_uni().await.expect("open_uni");
-            stream.write_u32(u32::MAX).await.expect("write length");
-            conn.closed().await;
-        }));
-
-        let conn = ep1
-            .connect(ep2_addr, GOSSIP_ALPN)
-            .await
-            .std_context("connect")?;
         // The sender stays alive, so only the receive loop can end the connection.
         let (_send_tx, send_rx) = mpsc::channel(1);
-        let (in_event_tx, _in_event_rx) = mpsc::channel(16);
-
-        let res = timeout(
+        let (in_event_tx, in_event_rx) = mpsc::channel(16);
+        drop(in_event_rx);
+        timeout(
             Duration::from_secs(5),
             connection_loop(
-                ep2_id,
+                pair.ep2.id(),
                 conn,
                 ConnOrigin::Dial,
                 send_rx,
                 in_event_tx,
-                1024,
+                TEST_FRAME_LIMIT,
                 vec![],
                 watch::channel(true).1,
+                close_flag(),
             ),
         )
         .await
-        .std_context("connection loop still runs after the receive loop failed")?;
-        assert!(res.is_err(), "the oversize header did not fail");
+        .std_context("connection loop still runs after the receive loop ended")??;
         Ok(())
     }
 
@@ -2746,6 +2960,243 @@ pub(crate) mod tests {
         assert!(
             !actor.peers.contains_key(&origin_id),
             "the origin's state was kept"
+        );
+        Ok(())
+    }
+
+    /// A stream with a header that does not decode does not end the other streams.
+    #[tokio::test]
+    #[traced_test]
+    async fn bad_header_drops_only_its_stream() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let (in_event_tx, mut in_event_rx) = mpsc::channel(4);
+        let mut recv_loop = RecvLoop::new(
+            peer_conn.remote_id(),
+            conn,
+            in_event_tx,
+            1024,
+            close_flag().0,
+        );
+        let _recv = AbortOnDropHandle::new(spawn(async move { recv_loop.run().await }));
+
+        // A complete frame of three bytes, too short for a topic id.
+        let mut bad = peer_conn.open_uni().await.std_context("open stream")?;
+        bad.write_all(&[0, 0, 0, 3, 1, 2, 3])
+            .await
+            .std_context("write bad header")?;
+        bad.finish().std_context("finish")?;
+        let topic: TopicId = [1; 32].into();
+        let _stream = open_stream(&peer_conn, topic, &[join_message(topic, 0).message]).await?;
+
+        let event = timeout(Duration::from_secs(2), in_event_rx.recv())
+            .await
+            .std_context("the bad header ended the receive loop")?;
+        assert!(matches!(event, Some(InEvent::RecvMessage(..))), "{event:?}");
+        Ok(())
+    }
+
+    /// A stream whose header was incomplete at the close still delivers its message.
+    ///
+    /// The loop picks its next branch at random, so a single round can miss the bug.
+    #[tokio::test]
+    #[traced_test]
+    async fn pending_header_is_read_after_a_close() -> Result {
+        for round in 0..4 {
+            let pair = TestPair::new(1).await?;
+            let (conn, peer_conn) = pair.connect().await?;
+            let (in_event_tx, mut in_event_rx) = mpsc::channel(2);
+            let mut recv_loop = RecvLoop::new(
+                peer_conn.remote_id(),
+                conn.clone(),
+                in_event_tx,
+                1024,
+                close_flag().0,
+            );
+            // We poll it by hand, so that it sees the rest of the header only after the close.
+            let run = recv_loop.run();
+            tokio::pin!(run);
+
+            let topic: TopicId = [1; 32].into();
+            let mut partial = peer_conn.open_uni().await.std_context("open stream")?;
+            partial
+                .write_all(&[0, 0])
+                .await
+                .std_context("write partial header")?;
+            // The loop accepts streams in order, so this message means it has the partial one.
+            let mut stream =
+                open_stream(&peer_conn, topic, &[join_message(topic, 0).message]).await?;
+            stream.finish().std_context("finish")?;
+            tokio::select! {
+                res = &mut run => panic!("the recv loop ended: {res:?}"),
+                event = in_event_rx.recv() => {
+                    assert!(matches!(event, Some(InEvent::RecvMessage(..))), "{event:?}");
+                }
+            }
+            // Let the loop see the end of the full stream, so that only the header remains.
+            stream.stopped().await.std_context("stopped")?;
+            let res = n0_future::future::poll_once(&mut run).await;
+            assert!(res.is_none(), "the recv loop ended: {res:?}");
+
+            partial
+                .write_all(&[0, 32])
+                .await
+                .std_context("write header length")?;
+            partial
+                .write_all(&[1; 32])
+                .await
+                .std_context("write topic")?;
+            let mut buffer = Vec::new();
+            util::write_frame(
+                &mut partial,
+                &join_message(topic, 0).message,
+                &mut buffer,
+                1024,
+            )
+            .await
+            .std_context("write frame")?;
+            partial.finish().std_context("finish")?;
+            partial.stopped().await.std_context("stopped")?;
+            peer_conn.close(0u32.into(), b"done");
+            conn.closed().await;
+
+            timeout(Duration::from_secs(2), &mut run)
+                .await
+                .std_context("the recv loop did not end")?;
+            let event = in_event_rx.try_recv();
+            assert!(
+                matches!(event, Ok(InEvent::RecvMessage(..))),
+                "round {round}: {event:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// A peer with too many partial headers waits until one of them is complete.
+    #[tokio::test]
+    #[traced_test]
+    async fn partial_headers_are_limited() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let (in_event_tx, mut in_event_rx) = mpsc::channel(4);
+        let mut recv_loop = RecvLoop::new(
+            peer_conn.remote_id(),
+            conn,
+            in_event_tx,
+            1024,
+            close_flag().0,
+        );
+        let _recv = AbortOnDropHandle::new(spawn(async move { recv_loop.run().await }));
+
+        let mut partials = Vec::new();
+        for _ in 0..util::MAX_PENDING_HEADERS {
+            let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
+            stream
+                .write_all(&[0, 0])
+                .await
+                .std_context("write partial header")?;
+            partials.push(stream);
+        }
+        let topic: TopicId = [1; 32].into();
+        let _stream = open_stream(&peer_conn, topic, &[join_message(topic, 0).message]).await?;
+        let event = timeout(Duration::from_millis(500), in_event_rx.recv()).await;
+        assert!(event.is_err(), "the loop read more headers than its limit");
+
+        let partial = &mut partials[0];
+        partial
+            .write_all(&[0, 32])
+            .await
+            .std_context("write header length")?;
+        partial
+            .write_all(&[1; 32])
+            .await
+            .std_context("write topic")?;
+        let event = timeout(Duration::from_secs(2), in_event_rx.recv())
+            .await
+            .std_context("a complete header did not free its place")?;
+        assert!(matches!(event, Some(InEvent::RecvMessage(..))), "{event:?}");
+        Ok(())
+    }
+
+    /// A close handles the messages queued before it, not those that arrive meanwhile.
+    ///
+    /// Other connections can refill the queue as fast as the actor handles it.
+    #[tokio::test(flavor = "multi_thread")]
+    #[traced_test]
+    async fn close_does_not_wait_for_an_empty_queue() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, _peer_conn) = pair.connect().await?;
+        let peer = conn.remote_id();
+        let (mut actor, _rpc_tx, _local_tx) = Actor::new(
+            pair.ep1.clone(),
+            Default::default(),
+            Default::default(),
+            None,
+            Default::default(),
+        );
+        conn.close(0u32.into(), b"done");
+        actor.handle_connection(peer, ConnOrigin::Accept, conn);
+        let (peer, conn, result) = actor
+            .connection_tasks
+            .join_next()
+            .await
+            .expect("one task")
+            .expect("no panic");
+
+        // Another connection: it sends ten full queues, as fast as the actor takes them.
+        let in_event_tx = actor.in_event_tx.clone();
+        let other = SecretKey::generate().public();
+        let producer = AbortOnDropHandle::new(spawn(async move {
+            for _ in 0..10 * IN_EVENT_CAP {
+                in_event_tx
+                    .send(InEvent::PeerDisconnected(other))
+                    .await
+                    .expect("actor alive");
+            }
+        }));
+        while actor.in_event_rx.len() < IN_EVENT_CAP {
+            tokio::task::yield_now().await;
+        }
+        actor
+            .handle_connection_task_finished(peer, conn, result)
+            .await;
+        assert!(
+            !producer.is_finished(),
+            "the close waited for an empty queue"
+        );
+        Ok(())
+    }
+
+    /// `broadcast` refuses a message that does not fit a frame at every hop.
+    #[tokio::test]
+    #[traced_test]
+    async fn broadcast_refuses_an_oversized_message() -> Result {
+        const MAX: usize = 1024;
+        let endpoint = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await?;
+        let gossip = Gossip::builder().max_message_size(MAX).spawn(endpoint);
+        let topic = gossip.subscribe([1; 32].into(), vec![]).await?;
+        let (sender, _receiver) = topic.split();
+        // The limit is the largest content that fits a frame at every hop.
+        let fits = (0..MAX)
+            .rev()
+            .find(|len| proto::topic::broadcast_fits(*len, Scope::Swarm, MAX))
+            .expect("some content fits");
+        assert_eq!(sender.max_content_size(), fits);
+
+        sender.broadcast(vec![0; fits].into()).await?;
+        let refused = sender.broadcast(vec![0; fits + 1].into()).await;
+        assert!(
+            matches!(refused, Err(ApiError::TooLarge { size, max_content, .. }) if size == fits + 1 && max_content == fits),
+            "{refused:?}"
+        );
+        sender.broadcast_neighbors(vec![0; fits].into()).await?;
+        let refused = sender.broadcast_neighbors(vec![0; fits + 1].into()).await;
+        assert!(
+            matches!(refused, Err(ApiError::TooLarge { .. })),
+            "{refused:?}"
         );
         Ok(())
     }
@@ -3188,6 +3639,282 @@ pub(crate) mod tests {
         drop(rx2);
         router1.shutdown().await.std_context("shutdown router1")?;
         router2.shutdown().await.std_context("shutdown router2")?;
+        Ok(())
+    }
+
+    /// A message that a connection delivered before its close is handled before the close.
+    ///
+    /// The receive loop queues the message before its task ends, but the actor can
+    /// see the end first. A join from the peer then made it our neighbor after its
+    /// connection was gone.
+    #[tokio::test]
+    #[traced_test]
+    async fn message_before_a_close_is_handled_first() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, _peer_conn) = pair.connect().await?;
+        let peer = conn.remote_id();
+        let (mut actor, _rpc_tx, _local_tx) = Actor::new(
+            pair.ep1.clone(),
+            Default::default(),
+            Default::default(),
+            None,
+            Default::default(),
+        );
+        let topic = [1; 32].into();
+        let state = TopicState::default();
+        let mut events = state.event_sender.subscribe();
+        actor.topics.insert(topic, state);
+        actor
+            .handle_in_event(
+                InEvent::Command(topic, ProtoCommand::Join(vec![])),
+                Instant::now(),
+            )
+            .await;
+        actor
+            .in_event_tx
+            .send(InEvent::RecvMessage(peer, join_message(topic, 0)))
+            .await
+            .std_context("queue join")?;
+        conn.close(0u32.into(), b"done");
+        actor.handle_connection(peer, ConnOrigin::Accept, conn);
+        let (peer, conn, result) = actor
+            .connection_tasks
+            .join_next()
+            .await
+            .expect("one task")
+            .expect("no panic");
+        actor
+            .handle_connection_task_finished(peer, conn, result)
+            .await;
+
+        assert!(
+            !actor.state.has_active_peers(&topic),
+            "the join made a neighbor after its close"
+        );
+        let up = events.try_recv().std_context("no event")?;
+        let down = events.try_recv().std_context("no second event")?;
+        assert!(
+            matches!(up, ProtoEvent::NeighborUp(p) if p == peer),
+            "{up:?}"
+        );
+        assert!(
+            matches!(down, ProtoEvent::NeighborDown(p) if p == peer),
+            "{down:?}"
+        );
+        Ok(())
+    }
+
+    /// A stream with an incomplete header does not block the other streams.
+    #[tokio::test]
+    #[traced_test]
+    async fn partial_header_does_not_block_other_streams() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let (in_event_tx, mut in_event_rx) = mpsc::channel(4);
+        let mut recv_loop = RecvLoop::new(
+            peer_conn.remote_id(),
+            conn,
+            in_event_tx,
+            1024,
+            close_flag().0,
+        );
+        let _recv = AbortOnDropHandle::new(spawn(async move { recv_loop.run().await }));
+
+        let mut partial = peer_conn.open_uni().await.std_context("open stream")?;
+        partial
+            .write_all(&[0, 0, 0, 32, 0])
+            .await
+            .std_context("write partial header")?;
+        let topic: TopicId = [1; 32].into();
+        let _stream = open_stream(&peer_conn, topic, &[join_message(topic, 0).message]).await?;
+
+        let event = timeout(Duration::from_secs(2), in_event_rx.recv())
+            .await
+            .std_context("the partial header blocked the other stream")?;
+        assert!(matches!(event, Some(InEvent::RecvMessage(..))), "{event:?}");
+        Ok(())
+    }
+
+    /// Joins a topic with a publisher that always has a command ready.
+    async fn publish_forever(actor: &mut Actor) {
+        let topic = [1; 32].into();
+        actor.topics.insert(topic, TopicState::default());
+        actor
+            .handle_in_event(
+                InEvent::Command(topic, ProtoCommand::Join(vec![])),
+                Instant::now(),
+            )
+            .await;
+        let commands = n0_future::stream::iter(std::iter::repeat_with(|| {
+            Ok(Command::Broadcast(Bytes::new()))
+        }));
+        let key = actor
+            .command_rx
+            .insert(TopicCommandStream::new(topic, Box::pin(commands)));
+        actor
+            .topics
+            .get_mut(&topic)
+            .expect("inserted above")
+            .command_rx_keys
+            .insert(key);
+    }
+
+    /// A publisher that always has a command ready does not starve a finished connection.
+    #[tokio::test]
+    #[traced_test]
+    async fn busy_publisher_does_not_starve_finished_connections() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, _peer_conn) = pair.connect().await?;
+        let peer = conn.remote_id();
+        let (mut actor, _rpc_tx, _local_tx) = Actor::new(
+            pair.ep1.clone(),
+            Default::default(),
+            Default::default(),
+            None,
+            Default::default(),
+        );
+        publish_forever(&mut actor).await;
+        conn.close(0u32.into(), b"done");
+        actor.handle_connection(peer, ConnOrigin::Accept, conn);
+        let mut addresses = n0_future::stream::pending();
+        for i in 0..256 {
+            actor.event_loop(&mut addresses, i).await;
+            tokio::task::yield_now().await;
+            if actor.connection_tasks.is_empty() {
+                return Ok(());
+            }
+        }
+        panic!("publishing starved the finished connection");
+    }
+
+    /// A shutdown comes before the commands of a busy publisher.
+    ///
+    /// Without a priority, the actor picks its next branch at random, so a single
+    /// round can miss the bug.
+    #[tokio::test]
+    #[traced_test]
+    async fn shutdown_comes_before_a_busy_publisher() -> Result {
+        let pair = TestPair::new(1).await?;
+        for round in 0..8 {
+            let (mut actor, _rpc_tx, local_tx) = Actor::new(
+                pair.ep1.clone(),
+                Default::default(),
+                Default::default(),
+                None,
+                Default::default(),
+            );
+            publish_forever(&mut actor).await;
+            let (reply, mut reply_rx) = oneshot::channel();
+            local_tx
+                .send(LocalActorMessage::Shutdown { reply })
+                .await
+                .std_context("send shutdown")?;
+            let mut addresses = n0_future::stream::pending();
+            assert!(
+                !actor.event_loop(&mut addresses, 0).await,
+                "round {round}: the actor did not stop"
+            );
+            reply_rx.try_recv().std_context("no shutdown reply")?;
+        }
+        Ok(())
+    }
+
+    /// A frame one byte over the size limit is refused on read.
+    #[tokio::test]
+    #[traced_test]
+    async fn frame_over_the_size_limit_is_refused() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let topic: TopicId = blake3::hash(b"frame_over_the_size_limit").into();
+        let message = join_message(topic, 64).message;
+        let size = postcard::experimental::serialized_size(&message).std_context("size")?;
+
+        let mut stream = conn.open_uni().await.std_context("open stream")?;
+        util::write_frame(&mut stream, &message, &mut Vec::new(), size + 1)
+            .await
+            .std_context("write")?;
+        stream.finish().std_context("finish")?;
+
+        let mut stream = peer_conn.accept_uni().await.std_context("accept")?;
+        let read: Result<Option<TopicMessage>, _> =
+            util::read_frame(&mut stream, &mut BytesMut::new(), size - 1).await;
+        assert!(
+            matches!(read, Err(util::ReadError::TooLarge { .. })),
+            "{read:?}"
+        );
+        Ok(())
+    }
+
+    /// A frame shorter than the size limit goes through, and one of the limit does not.
+    ///
+    /// Nodes up to 0.101 read a frame of the limit, but refuse to write one, so
+    /// they could not forward it.
+    #[tokio::test]
+    #[traced_test]
+    async fn frame_shorter_than_the_size_limit_goes_through() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let topic: TopicId = blake3::hash(b"frame_shorter_than_the_size_limit").into();
+        let message = join_message(topic, 64).message;
+        let size = postcard::experimental::serialized_size(&message).std_context("size")?;
+
+        let mut stream = conn.open_uni().await.std_context("open stream")?;
+        let mut buffer = Vec::new();
+        let refused = util::write_frame(&mut stream, &message, &mut buffer, size).await;
+        assert!(
+            matches!(refused, Err(util::WriteError::TooLarge { .. })),
+            "{refused:?}"
+        );
+        util::write_frame(&mut stream, &message, &mut buffer, size + 1)
+            .await
+            .std_context("write")?;
+        stream.finish().std_context("finish")?;
+
+        let mut stream = peer_conn.accept_uni().await.std_context("accept")?;
+        let read: Option<TopicMessage> = util::read_frame(&mut stream, &mut BytesMut::new(), size)
+            .await
+            .std_context("read")?;
+        assert!(read.is_some(), "the frame did not arrive");
+        Ok(())
+    }
+
+    /// The send task drops a message over the size limit, and the connection stays.
+    #[tokio::test]
+    #[traced_test]
+    async fn oversized_message_is_dropped() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
+        let topic: TopicId = blake3::hash(b"oversized_message").into();
+        let (send_tx, send_rx) = mpsc::channel(2);
+        let (in_event_tx, _in_event_rx) = mpsc::channel(16);
+        let task = AbortOnDropHandle::new(spawn(connection_loop(
+            peer_id,
+            conn,
+            ConnOrigin::Dial,
+            send_rx,
+            in_event_tx,
+            1024,
+            vec![],
+            watch::channel(true).1,
+            close_flag(),
+        )));
+
+        send_tx
+            .send(join_message(topic, 4096))
+            .await
+            .std_context("send")?;
+        send_tx
+            .send(join_message(topic, 16))
+            .await
+            .std_context("send")?;
+
+        let (_, message) = timeout(Duration::from_secs(5), read_next_message(&peer_conn))
+            .await
+            .std_context("nothing arrived after the oversized message")??;
+        let size = postcard::experimental::serialized_size(&message).std_context("size")?;
+        assert!(size < 1024, "the oversized message went out");
+        assert!(!task.is_finished(), "the connection ended");
         Ok(())
     }
 }

@@ -66,7 +66,7 @@ pub(crate) struct StreamHeader {
     ///
     /// A node without it loses every later message to a peer that closes a
     /// connection that is no neighbor link of the node. So we close no
-    /// connection on which the peer did not send it.
+    /// connection to a peer that did not send it.
     pub(crate) handles_close: bool,
 }
 
@@ -118,12 +118,20 @@ impl StreamHeader {
     }
 }
 
+/// The maximum number of stream headers that a [`RecvLoop`] reads at the same time.
+///
+/// At this limit, the loop accepts no new stream until a header is complete.
+/// A peer that keeps many partial headers thus delays only its own streams.
+pub(crate) const MAX_PENDING_HEADERS: usize = 16;
+
 pub(crate) struct RecvLoop {
     remote_endpoint_id: EndpointId,
     conn: Connection,
     max_message_size: usize,
     in_event_tx: mpsc::Sender<InEvent>,
     /// Whether a stream header of the peer had [`StreamHeader::handles_close`].
+    ///
+    /// The actor shares it between all connections to the peer.
     handles_close: watch::Sender<bool>,
 }
 
@@ -133,32 +141,33 @@ impl RecvLoop {
         conn: Connection,
         in_event_tx: mpsc::Sender<InEvent>,
         max_message_size: usize,
+        handles_close: watch::Sender<bool>,
     ) -> Self {
         Self {
             remote_endpoint_id,
             conn,
             max_message_size,
             in_event_tx,
-            handles_close: watch::channel(false).0,
+            handles_close,
         }
     }
 
-    /// Returns whether the peer handles a close of this connection, as it learns it.
-    pub(crate) fn handles_close(&self) -> watch::Receiver<bool> {
-        self.handles_close.subscribe()
-    }
-
-    pub(crate) async fn run(&mut self) -> Result<(), ReadError> {
+    /// Reads the streams of the connection until it closes or the actor stops.
+    ///
+    /// A bad stream loses only itself, so this never fails.
+    pub(crate) async fn run(&mut self) {
+        // Each header is read in its own future, so a partial one blocks no other stream.
+        let mut header_futures = FuturesUnordered::new();
         let mut read_futures = FuturesUnordered::new();
         let mut conn_is_closed = false;
         let closed = self.conn.closed();
         tokio::pin!(closed);
-        while !conn_is_closed || !read_futures.is_empty() {
+        while !conn_is_closed || !header_futures.is_empty() || !read_futures.is_empty() {
             tokio::select! {
                 _ = &mut closed, if !conn_is_closed => {
                     conn_is_closed = true;
                 }
-                stream = self.conn.accept_uni(), if !conn_is_closed => {
+                stream = self.conn.accept_uni(), if !conn_is_closed && header_futures.len() < MAX_PENDING_HEADERS => {
                     let stream = match stream {
                         Ok(stream) => stream,
                         Err(_) => {
@@ -166,7 +175,17 @@ impl RecvLoop {
                             continue;
                         }
                     };
-                    let state = RecvStreamState::new(stream, self.max_message_size).await?;
+                    header_futures.push(RecvStreamState::new(stream, self.max_message_size));
+                }
+                Some(state) = header_futures.next(), if !header_futures.is_empty() => {
+                    // A bad header loses only its stream, as a bad frame does.
+                    let state = match state {
+                        Ok(state) => state,
+                        Err(err) => {
+                            debug!("stream header failed: {err:#}");
+                            continue;
+                        }
+                    };
                     debug!(topic=%state.header.topic_id.fmt_short(), "stream opened");
                     if state.header.handles_close {
                         self.handles_close.send_replace(true);
@@ -195,7 +214,6 @@ impl RecvLoop {
             }
         }
         debug!("recv loop closed");
-        Ok(())
     }
 }
 
@@ -376,7 +394,14 @@ impl SendLoop {
         };
         let stream = entry.get_mut();
 
-        write_frame(stream, message, &mut self.buffer, self.max_message_size).await?;
+        match write_frame(stream, message, &mut self.buffer, self.max_message_size).await {
+            // Refused before any byte went out, so the stream is intact.
+            Err(WriteError::TooLarge { .. }) => {
+                warn!(max = self.max_message_size, "message too large, dropped");
+                return Ok(());
+            }
+            res => res?,
+        }
 
         if is_last {
             trace!(topic=%topic_id.fmt_short(), "stream closing");
@@ -467,6 +492,8 @@ pub async fn write_frame<T: Serialize>(
     max_message_size: usize,
 ) -> Result<(), WriteError> {
     let len = postcard::experimental::serialized_size(&message)?;
+    // A frame must be shorter than the limit. Nodes up to 0.101 read a frame of
+    // the limit, but refuse to write one, so they could not forward it.
     if len >= max_message_size {
         return Err(e!(WriteError::TooLarge));
     }
