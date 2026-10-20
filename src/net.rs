@@ -302,8 +302,10 @@ struct Actor {
     /// Whether each peer with a connection sent [`util::StreamHeader::handles_close`].
     ///
     /// It belongs to the peer, not to one connection. So a connection on which
-    /// neither side sends closes too, as after two dials cross.
-    handles_close: HashMap<EndpointId, watch::Sender<bool>>,
+    /// neither side sends closes too, as after two dials cross. A set flag
+    /// outlives the last connection by [`RETIRE_LIMIT`], so that a dial that
+    /// completes late still finds it.
+    handles_close: HashMap<EndpointId, CloseFlag>,
     /// Stream of commands from topic handles.
     command_rx: stream_group::Keyed<TopicCommandStream>,
     /// Internal queue of topic to close because all handles were dropped.
@@ -577,11 +579,10 @@ impl Actor {
             .or_insert_with(|| watch::channel(wanted).0);
         tx.send_if_modified(|current| std::mem::replace(current, wanted) != wanted);
         let wanted = tx.subscribe();
-        let handles_close = self
-            .handles_close
-            .entry(peer_id)
-            .or_insert_with(|| watch::channel(false).0)
-            .clone();
+        self.forget_close_flags(Instant::now());
+        let flag = self.handles_close.entry(peer_id).or_default();
+        flag.kept_until = None;
+        let handles_close = (flag.tx.clone(), flag.tx.subscribe());
 
         let max_message_size = self.state.max_message_size();
         let in_event_tx = self.in_event_tx.clone();
@@ -611,6 +612,12 @@ impl Actor {
         );
     }
 
+    /// Drops the set flags kept for peers without a connection, once their time is over at `now`.
+    fn forget_close_flags(&mut self, now: Instant) {
+        self.handles_close
+            .retain(|_, flag| flag.kept_until.is_none_or(|until| until > now));
+    }
+
     #[tracing::instrument(name = "conn", skip_all, fields(peer = %peer_id.fmt_short()))]
     async fn handle_connection_task_finished(
         &mut self,
@@ -625,14 +632,16 @@ impl Actor {
         {
             self.wanted.remove(&peer_id);
         }
-        if self
-            .handles_close
-            .get(&peer_id)
-            // A task subscribes only once it runs, but holds a clone from its spawn.
-            .is_some_and(|tx| tx.sender_count() == 1)
-        {
-            self.handles_close.remove(&peer_id);
+        if let Some(flag) = self.handles_close.get_mut(&peer_id) {
+            if flag.tx.receiver_count() == 0 {
+                if *flag.tx.borrow() {
+                    flag.kept_until = Some(Instant::now() + RETIRE_LIMIT);
+                } else {
+                    self.handles_close.remove(&peer_id);
+                }
+            }
         }
+        self.forget_close_flags(Instant::now());
         let reason = conn.close_reason().expect("closed by its task");
         let error = task_result.err();
         debug!(%reason, ?error, "connection closed");
@@ -871,6 +880,23 @@ fn disconnect_peer(peers: &mut HashMap<EndpointId, PeerState>, peer_id: Endpoint
     }
 }
 
+/// Whether a peer sent [`util::StreamHeader::handles_close`], shared by its connections.
+#[derive(Debug)]
+struct CloseFlag {
+    tx: watch::Sender<bool>,
+    /// When we drop the flag, once the peer has no connection left.
+    kept_until: Option<Instant>,
+}
+
+impl Default for CloseFlag {
+    fn default() -> Self {
+        Self {
+            tx: watch::channel(false).0,
+            kept_until: None,
+        }
+    }
+}
+
 impl PeerState {
     /// Sends on the new connection from now on, and returns its queue.
     fn accept_conn(
@@ -1057,13 +1083,12 @@ async fn connection_loop(
     max_message_size: usize,
     queue: Vec<ProtoMessage>,
     wanted: watch::Receiver<bool>,
-    handles_close: watch::Sender<bool>,
+    (handles_close, mut handles_close_rx): (watch::Sender<bool>, watch::Receiver<bool>),
 ) -> Result<(), ConnectionLoopError> {
     debug!(?origin, "connection established");
 
     let mut send_loop = SendLoop::new(conn.clone(), send_rx, max_message_size);
     let sending = send_loop.sending();
-    let mut handles_close_rx = handles_close.subscribe();
     let mut recv_loop = RecvLoop::new(from, conn, in_event_tx, max_message_size, handles_close);
 
     let send_fut = send_loop.run(queue).instrument(error_span!("send"));
@@ -1899,6 +1924,11 @@ pub(crate) mod tests {
             .send_replace(wanted);
     }
 
+    /// Returns an unset flag of [`util::StreamHeader::handles_close`] for one connection.
+    fn close_flag() -> (watch::Sender<bool>, watch::Receiver<bool>) {
+        watch::channel(false)
+    }
+
     /// Runs `retire` on paused time, applies `steps` at their offsets, and returns when it ended.
     ///
     /// A step sets `wanted` and `sending`. `None` means `retire` did not end within a minute.
@@ -2429,9 +2459,77 @@ pub(crate) mod tests {
         timeout(Duration::from_secs(1), peer_dialed.closed())
             .await
             .std_context("the peer did not see the close")?;
+        actor.forget_close_flags(Instant::now() + RETIRE_LIMIT);
         assert!(
             !actor.handles_close.contains_key(&peer_id),
-            "the flag outlived the connections"
+            "the flag outlived its time"
+        );
+        Ok(())
+    }
+
+    /// A silent late dial closes, also when the other connection of the peer ended before it.
+    ///
+    /// The flag of the peer outlives its last connection for a while.
+    #[tokio::test]
+    #[traced_test]
+    async fn silent_dial_after_the_last_connection_closes() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (accepted, peer_accepted) = pair.connect().await?;
+        let (dialed, peer_dialed) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
+        let topic: TopicId = blake3::hash(b"silent_dial_after_the_last").into();
+        let mut actor = t_actor().await?;
+
+        actor.handle_connection(peer_id, ConnOrigin::Accept, accepted);
+        show_that_it_handles_a_close(&peer_accepted, topic).await;
+        disconnect_peer(&mut actor.peers, peer_id);
+        let ended = timeout(
+            IDLE_GRACE + Duration::from_secs(3),
+            actor.connection_tasks.join_next(),
+        )
+        .await
+        .std_context("the accepted connection stayed open")?;
+        let (peer, conn, res) = ended.expect("one task").expect("no panic");
+        actor.handle_connection_task_finished(peer, conn, res).await;
+        assert!(
+            actor.handles_close.contains_key(&peer_id),
+            "the flag went with the last connection"
+        );
+
+        actor.handle_connection(peer_id, ConnOrigin::Dial, dialed);
+        let ended = timeout(
+            IDLE_GRACE + Duration::from_secs(3),
+            actor.connection_tasks.join_next(),
+        )
+        .await
+        .std_context("the dial stayed open")?;
+        let (peer, conn, res) = ended.expect("one task").expect("no panic");
+        actor.handle_connection_task_finished(peer, conn, res).await;
+        timeout(Duration::from_secs(1), peer_dialed.closed())
+            .await
+            .std_context("the peer did not see the close")?;
+        Ok(())
+    }
+
+    /// The unset flag of a peer goes with its last connection.
+    #[tokio::test]
+    #[traced_test]
+    async fn unset_flag_goes_with_the_last_connection() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
+        let mut actor = t_actor().await?;
+
+        actor.handle_connection(peer_id, ConnOrigin::Accept, conn);
+        peer_conn.close(0u32.into(), b"done");
+        let ended = timeout(Duration::from_secs(3), actor.connection_tasks.join_next())
+            .await
+            .std_context("the connection stayed open")?;
+        let (peer, conn, res) = ended.expect("one task").expect("no panic");
+        actor.handle_connection_task_finished(peer, conn, res).await;
+        assert!(
+            !actor.handles_close.contains_key(&peer_id),
+            "an unset flag outlived the connection"
         );
         Ok(())
     }
@@ -2677,7 +2775,7 @@ pub(crate) mod tests {
             TEST_FRAME_LIMIT,
             vec![],
             watch::channel(true).1,
-            watch::channel(false).0,
+            close_flag(),
         )));
 
         let (read_topic, read_message, peer_conn) = timeout(Duration::from_secs(5), peer)
@@ -2730,7 +2828,7 @@ pub(crate) mod tests {
                 1024,
                 vec![],
                 watch::channel(true).1,
-                watch::channel(false).0,
+                close_flag(),
             ),
         )
         .await
