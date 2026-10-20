@@ -398,15 +398,8 @@ impl SendLoop {
         }
         // Close remaining streams.
         self.set_sending(!self.streams.is_empty() || !self.finishing.is_empty());
-        for (topic_id, mut stream) in self.streams.drain() {
-            stream.finish().ok();
-            self.finishing.spawn(
-                async move {
-                    stream.stopped().await.ok();
-                    debug!(topic=%topic_id.fmt_short(), "stream closed");
-                }
-                .instrument(tracing::Span::current()),
-            );
+        for (topic, stream) in std::mem::take(&mut self.streams) {
+            self.finish_stream(topic, stream);
         }
         if !self.finishing.is_empty() {
             trace!(
@@ -529,19 +522,25 @@ impl SendLoop {
 
         if is_last {
             trace!(topic=%topic_id.fmt_short(), "stream closing");
-            let mut stream = entry.remove();
-            if stream.finish().is_ok() {
-                self.finishing.spawn(
-                    async move {
-                        stream.stopped().await.ok();
-                        debug!(topic=%topic_id.fmt_short(), "stream closed");
-                    }
-                    .instrument(tracing::Span::current()),
-                );
-            }
+            let stream = entry.remove();
+            self.finish_stream(topic_id, stream);
         }
 
         Ok(())
+    }
+
+    /// Finishes `stream`, and waits in [`Self::finishing`] until the peer read all of it.
+    fn finish_stream(&mut self, topic: TopicId, mut stream: SendStream) {
+        if stream.finish().is_err() {
+            return;
+        }
+        self.finishing.spawn(
+            async move {
+                stream.stopped().await.ok();
+                debug!(topic = %topic.fmt_short(), "stream closed");
+            }
+            .instrument(tracing::Span::current()),
+        );
     }
 }
 
