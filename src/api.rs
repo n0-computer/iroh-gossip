@@ -147,18 +147,21 @@ impl GossipApi {
     /// Returns the largest content that a broadcast takes, and asks the server once.
     ///
     /// A server older than 0.102.0 does not know the request, see
-    /// [`GossipSender::max_content_size`].
+    /// [`GossipSender::max_content_size`]. Such a server stops serving the
+    /// connection on it, so we ask only once, as the first request, and keep
+    /// the fallback too.
     async fn max_content_size(&self) -> usize {
         if let Some(max_content) = self.max_content.get() {
             return *max_content;
         }
-        match self.client.rpc(MaxContentSizeRequest).await {
-            Ok(max_content) => *self.max_content.get_or_init(|| max_content),
+        let max_content = match self.client.rpc(MaxContentSizeRequest).await {
+            Ok(max_content) => max_content,
             Err(err) => {
                 tracing::debug!("the server reported no size limit: {err:#}");
                 usize::MAX
             }
-        }
+        };
+        *self.max_content.get_or_init(|| max_content)
     }
 
     /// Join a gossip topic with options.
@@ -635,6 +638,35 @@ mod tests {
             .await
             .std_context("shutdown second router")?;
         Ok(())
+    }
+
+    /// A server that does not answer the size request is asked once, and its client keeps `usize::MAX`.
+    ///
+    /// A server older than 0.102.0 stops serving the connection on that request,
+    /// so a second request would cut off the topics on it.
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn unanswered_size_request_is_asked_once() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<super::RpcMessage>(4);
+        let api = super::GossipApi {
+            client: irpc::LocalSender::<super::Request>::from(tx).into(),
+            max_content: Default::default(),
+        };
+        // Drops each request unanswered.
+        let asked = tokio::spawn(async move {
+            let mut asked = 0;
+            while let Some(message) = rx.recv().await {
+                if matches!(message, super::RpcMessage::MaxContentSize(_)) {
+                    asked += 1;
+                }
+            }
+            asked
+        });
+
+        assert_eq!(api.max_content_size().await, usize::MAX);
+        assert_eq!(api.max_content_size().await, usize::MAX);
+        drop(api);
+        assert_eq!(asked.await.expect("server task"), 1);
     }
 
     #[test]
