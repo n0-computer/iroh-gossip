@@ -1339,9 +1339,16 @@ async fn connection_loop(
 ) -> Result<(), ConnectionLoopError> {
     debug!(?origin, "connection established");
 
+    let failed = queue_lease.failed().clone();
     let send_loop = SendLoop::new(conn.clone(), queue_lease, max_message_size);
     let sending = send_loop.sending();
-    let mut recv_loop = RecvLoop::new(from, conn, in_event_tx, max_message_size, handles_close);
+    let mut recv_loop = RecvLoop::new(
+        from,
+        conn.clone(),
+        in_event_tx,
+        max_message_size,
+        handles_close,
+    );
 
     let send_fut = send_loop.run().instrument(error_span!("send"));
     let recv_fut = recv_loop.run().instrument(error_span!("recv"));
@@ -1357,6 +1364,16 @@ async fn connection_loop(
         Ok(())
     };
     tokio::select! {
+        biased;
+        // Each connection that took the queue closes, also one that only
+        // receives now, so the peer learns on the connection that it uses. An
+        // old node may lose its later messages to us, but it cannot work with
+        // us anyway.
+        _ = failed.cancelled() => {
+            warn!("the peer failed, close the connection");
+            conn.close(util::CLOSE_QUEUE_FULL.into(), b"send queue full");
+            Ok(())
+        }
         res = loops => res,
         // An old node would lose its later messages to us after a close, see
         // `StreamHeader::handles_close`.
@@ -2605,10 +2622,21 @@ pub(crate) mod tests {
         let (conn, peer_conn) = pair.connect().await?;
         let peer = pair.ep2.id();
         let mut actor = t_actor().await?;
-        // Nothing takes from this queue, as from that of a peer that does not read.
         let mut state = PeerState::pending(queue::MIN_QUEUE_SIZE);
-        let _queue_lease = state.accept_conn(conn, false);
+        let queue_lease = state.accept_conn(conn.clone(), false);
         actor.peers.insert(peer, state);
+        let (in_event_tx, _in_event_rx) = mpsc::channel(16);
+        // The runtime has one thread, so the writer takes nothing before the queue is full.
+        let _conn_loop = AbortOnDropHandle::new(spawn(connection_loop(
+            peer,
+            conn,
+            ConnOrigin::Dial,
+            queue_lease,
+            in_event_tx,
+            TEST_FRAME_LIMIT,
+            watch::channel(true).1,
+            close_flag(),
+        )));
 
         join_until_full(&mut actor, peer);
         assert_eq!(actor.metrics.peers_send_queue_full.get(), 1);
@@ -2731,25 +2759,50 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// An overflow of a revived queue drops the peer, and closes the connection that still writes it.
+    /// An overflow of a revived queue drops the peer, and closes the connection that took the queue.
     ///
-    /// The protocol dropped the peer while its connection still wrote the
-    /// queue, and wanted it again. The state is pending, but the old connection
-    /// writes the queue with the gap, so it must close for the peer to learn.
+    /// The protocol dropped the peer and wanted it again before a new dial
+    /// completed. The writer of the old connection sent the queue and ended,
+    /// but the connection still reads from the peer, which must learn of the
+    /// drop.
     #[tokio::test]
     #[traced_test]
-    async fn overflow_of_a_revived_queue_closes_its_writer() -> Result {
+    async fn overflow_of_a_revived_queue_closes_its_connection() -> Result {
         let pair = TestPair::new(1).await?;
         let (conn, peer_conn) = pair.connect().await?;
         let peer_id = pair.ep2.id();
+        let topic: TopicId = blake3::hash(b"revived").into();
         let mut peers = HashMap::new();
         let mut state = PeerState::pending(queue::MIN_QUEUE_SIZE);
         let queue_lease = state.accept_conn(conn.clone(), false);
-        // The writer keeps a handle of the connection, so only its close ends it.
-        let send = SendLoop::new(conn, queue_lease, TEST_FRAME_LIMIT);
-        let _send = AbortOnDropHandle::new(spawn(send.run()));
+        let (in_event_tx, _in_event_rx) = mpsc::channel(16);
+        let _conn_loop = AbortOnDropHandle::new(spawn(connection_loop(
+            peer_id,
+            conn,
+            ConnOrigin::Dial,
+            queue_lease,
+            in_event_tx,
+            TEST_FRAME_LIMIT,
+            watch::channel(true).1,
+            close_flag(),
+        )));
+        assert!(matches!(
+            state.queue.push(join_message(topic, 0)),
+            Pushed::Queued
+        ));
+        timeout(Duration::from_secs(5), read_next_message(&peer_conn))
+            .await
+            .std_context("the queue did not go out")??;
         peers.insert(peer_id, state);
         disconnect_peer(&mut peers, peer_id);
+        // The writer lets go of the queue once it ended.
+        timeout(Duration::from_secs(5), async {
+            while peers[&peer_id].queue.try_reader().is_none() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .std_context("the writer did not end")?;
         peers.get_mut(&peer_id).expect("dropped").revive();
 
         let mut follow_ups = VecDeque::new();
@@ -2761,7 +2814,7 @@ pub(crate) mod tests {
         );
         let reason = timeout(Duration::from_secs(2), peer_conn.closed())
             .await
-            .std_context("the connection that wrote the queue stayed open")?;
+            .std_context("the connection that took the queue stayed open")?;
         assert!(
             matches!(
                 &reason,
