@@ -307,13 +307,6 @@ struct Actor {
     ///
     /// It outlives the peer's state, so that a peer we want again keeps them.
     wanted: HashMap<EndpointId, watch::Sender<bool>>,
-    /// Whether each peer with a connection sent [`util::StreamHeader::handles_close`].
-    ///
-    /// It belongs to the peer, not to one connection. So a connection on which
-    /// neither side sends closes too, as after two dials cross. A set flag
-    /// outlives the last connection by [`RETIRE_LIMIT`], so that a dial that
-    /// completes late still finds it.
-    handles_close: HashMap<EndpointId, CloseFlag>,
     /// Stream of commands from topic handles.
     command_rx: stream_group::Keyed<TopicCommandStream>,
     /// Internal queue of topic to close because all handles were dropped.
@@ -361,7 +354,6 @@ impl Actor {
             command_rx: StreamGroup::new().keyed(),
             peers: Default::default(),
             wanted: Default::default(),
-            handles_close: Default::default(),
             topics: Default::default(),
             quit_queue: Default::default(),
             connection_tasks: Default::default(),
@@ -587,10 +579,6 @@ impl Actor {
             .or_insert_with(|| watch::channel(wanted).0);
         tx.send_if_modified(|current| std::mem::replace(current, wanted) != wanted);
         let wanted = tx.subscribe();
-        self.forget_close_flags(Instant::now());
-        let flag = self.handles_close.entry(peer_id).or_default();
-        flag.kept_until = None;
-        let handles_close = (flag.tx.clone(), flag.tx.subscribe());
 
         let max_message_size = self.state.max_message_size();
         let in_event_tx = self.in_event_tx.clone();
@@ -607,7 +595,6 @@ impl Actor {
                     max_message_size,
                     queue,
                     wanted,
-                    handles_close,
                 )
                 .await;
                 // Closed here, so that a busy actor does not delay the close.
@@ -618,12 +605,6 @@ impl Actor {
             }
             .instrument(error_span!("conn", peer = %peer_id.fmt_short())),
         );
-    }
-
-    /// Drops the set flags kept for peers without a connection, once their time is over at `now`.
-    fn forget_close_flags(&mut self, now: Instant) {
-        self.handles_close
-            .retain(|_, flag| flag.kept_until.is_none_or(|until| until > now));
     }
 
     #[tracing::instrument(name = "conn", skip_all, fields(peer = %peer_id.fmt_short()))]
@@ -640,16 +621,6 @@ impl Actor {
         {
             self.wanted.remove(&peer_id);
         }
-        if let Some(flag) = self.handles_close.get_mut(&peer_id) {
-            if flag.tx.receiver_count() == 0 {
-                if *flag.tx.borrow() {
-                    flag.kept_until = Some(Instant::now() + RETIRE_LIMIT);
-                } else {
-                    self.handles_close.remove(&peer_id);
-                }
-            }
-        }
-        self.forget_close_flags(Instant::now());
         let reason = conn.close_reason().expect("closed by its task");
         let error = task_result.err();
         debug!(%reason, ?error, "connection closed");
@@ -893,23 +864,6 @@ fn disconnect_peer(peers: &mut HashMap<EndpointId, PeerState>, peer_id: Endpoint
     }
 }
 
-/// Whether a peer sent [`util::StreamHeader::handles_close`], shared by its connections.
-#[derive(Debug)]
-struct CloseFlag {
-    tx: watch::Sender<bool>,
-    /// When we drop the flag, once the peer has no connection left.
-    kept_until: Option<Instant>,
-}
-
-impl Default for CloseFlag {
-    fn default() -> Self {
-        Self {
-            tx: watch::channel(false).0,
-            kept_until: None,
-        }
-    }
-}
-
 impl PeerState {
     /// Sends on the new connection from now on, and returns its queue.
     fn accept_conn(
@@ -1096,13 +1050,12 @@ async fn connection_loop(
     max_message_size: usize,
     queue: Vec<ProtoMessage>,
     wanted: watch::Receiver<bool>,
-    (handles_close, mut handles_close_rx): (watch::Sender<bool>, watch::Receiver<bool>),
 ) -> Result<(), ConnectionLoopError> {
     debug!(?origin, "connection established");
 
     let mut send_loop = SendLoop::new(conn.clone(), send_rx, max_message_size);
     let sending = send_loop.sending();
-    let mut recv_loop = RecvLoop::new(from, conn, in_event_tx, max_message_size, handles_close);
+    let mut recv_loop = RecvLoop::new(from, conn, in_event_tx, max_message_size);
 
     let send_fut = send_loop.run(queue).instrument(error_span!("send"));
     let recv_fut = recv_loop.run().instrument(error_span!("recv"));
@@ -1119,14 +1072,7 @@ async fn connection_loop(
     };
     tokio::select! {
         res = loops => res,
-        // An old node would lose its later messages to us after a close, see
-        // `StreamHeader::handles_close`.
-        _ = async {
-            if handles_close_rx.wait_for(|known| *known).await.is_err() {
-                std::future::pending::<()>().await;
-            }
-            retire(wanted, sending).await
-        } => {
+        _ = retire(wanted, sending) => {
             debug!("no topic uses the peer, close");
             Ok(())
         }
@@ -1937,11 +1883,6 @@ pub(crate) mod tests {
             .send_replace(wanted);
     }
 
-    /// Returns an unset flag of [`util::StreamHeader::handles_close`] for one connection.
-    fn close_flag() -> (watch::Sender<bool>, watch::Receiver<bool>) {
-        watch::channel(false)
-    }
-
     /// Runs `retire` on paused time, applies `steps` at their offsets, and returns when it ended.
     ///
     /// A step sets `wanted` and `sending`. `None` means `retire` did not end within a minute.
@@ -2090,135 +2031,6 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// Opens a stream with our header, as a new node does on each stream.
-    ///
-    /// The header tells the other side that the peer handles a close.
-    async fn show_that_it_handles_a_close(conn: &Connection, topic: TopicId) {
-        let mut stream = conn.open_uni().await.expect("open stream");
-        util::StreamHeader::new(topic)
-            .write(&mut stream, &mut Vec::new(), TEST_FRAME_LIMIT)
-            .await
-            .expect("write header");
-        stream.finish().expect("finish");
-    }
-
-    /// The stream header that nodes from 0.90 to 0.101 write and read.
-    ///
-    /// Their `StreamHeader` and `read_frame` are the same in every release from
-    /// 0.90 to 0.101, and their `read_lp` and `write_frame` are the same as ours
-    /// since 0.95. So `util::read_frame` and `util::write_frame` of this struct
-    /// read and write a header as those nodes do.
-    #[derive(Debug, serde::Serialize, serde::Deserialize)]
-    struct OldStreamHeader {
-        topic_id: TopicId,
-    }
-
-    /// Old and new nodes read the stream headers of each other on a stream, and the frames after them.
-    #[tokio::test]
-    #[traced_test]
-    async fn stream_headers_cross_versions_on_a_stream() -> Result {
-        let pair = TestPair::new(1).await?;
-        let (conn, peer_conn) = pair.connect().await?;
-        let topic: TopicId = blake3::hash(b"versions").into();
-        let join = join_message(topic, 0).message;
-        let encoded_join = postcard::to_stdvec(&join).std_context("encode")?;
-        let mut buffer = Vec::new();
-        let mut read_buffer = BytesMut::new();
-
-        // We write, an old node reads.
-        let mut stream = conn.open_uni().await.std_context("open stream")?;
-        util::StreamHeader::new(topic)
-            .write(&mut stream, &mut buffer, TEST_FRAME_LIMIT)
-            .await
-            .std_context("write header")?;
-        util::write_frame(&mut stream, &join, &mut buffer, TEST_FRAME_LIMIT)
-            .await
-            .std_context("write frame")?;
-        stream.finish().std_context("finish")?;
-        let mut recv = peer_conn.accept_uni().await.std_context("accept stream")?;
-        let header: OldStreamHeader =
-            util::read_frame(&mut recv, &mut read_buffer, TEST_FRAME_LIMIT)
-                .await
-                .std_context("old node reads header")?
-                .expect("a header");
-        assert_eq!(header.topic_id, topic);
-        let frame = util::read_lp(&mut recv, &mut read_buffer, TEST_FRAME_LIMIT)
-            .await
-            .std_context("old node reads frame")?
-            .expect("a frame");
-        assert_eq!(&frame[..], &encoded_join[..], "the frame after the header");
-
-        // An old node writes, we read.
-        let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
-        util::write_frame(
-            &mut stream,
-            &OldStreamHeader { topic_id: topic },
-            &mut buffer,
-            TEST_FRAME_LIMIT,
-        )
-        .await
-        .std_context("write old header")?;
-        util::write_frame(&mut stream, &join, &mut buffer, TEST_FRAME_LIMIT)
-            .await
-            .std_context("write frame")?;
-        stream.finish().std_context("finish")?;
-        let mut recv = conn.accept_uni().await.std_context("accept stream")?;
-        let header = util::StreamHeader::read(&mut recv, &mut read_buffer, TEST_FRAME_LIMIT)
-            .await
-            .std_context("read old header")?;
-        assert_eq!(header.topic_id, topic);
-        assert!(!header.handles_close);
-        let frame = util::read_lp(&mut recv, &mut read_buffer, TEST_FRAME_LIMIT)
-            .await
-            .std_context("read frame")?
-            .expect("a frame");
-        assert_eq!(
-            &frame[..],
-            &encoded_join[..],
-            "the frame after the old header"
-        );
-        Ok(())
-    }
-
-    /// An unused connection to a peer whose header has no flags stays open.
-    ///
-    /// Nodes up to 0.101 send the topic alone. Such a node would lose its later
-    /// messages to us if we closed a connection that is no neighbor link of it.
-    #[tokio::test]
-    #[traced_test]
-    async fn unused_connection_from_an_old_peer_stays() -> Result {
-        let pair = TestPair::new(1).await?;
-        let (conn, peer_conn) = pair.connect().await?;
-        let peer_id = pair.ep2.id();
-        let topic: TopicId = blake3::hash(b"old_peer").into();
-        let mut actor = t_actor().await?;
-        actor.handle_connection(peer_id, ConnOrigin::Accept, conn);
-        let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
-        let mut buffer = Vec::new();
-        util::write_frame(&mut stream, &topic, &mut buffer, TEST_FRAME_LIMIT)
-            .await
-            .std_context("write header")?;
-        let join = join_message(topic, 0).message;
-        util::write_frame(&mut stream, &join, &mut buffer, TEST_FRAME_LIMIT)
-            .await
-            .std_context("write frame")?;
-        let event = timeout(Duration::from_secs(5), actor.in_event_rx.recv())
-            .await
-            .std_context("the message did not arrive")?;
-        assert!(
-            matches!(event, Some(InEvent::RecvMessage(peer, _)) if peer == peer_id),
-            "{event:?}"
-        );
-
-        tokio::time::sleep(IDLE_GRACE + Duration::from_secs(1)).await;
-        assert!(
-            actor.connection_tasks.try_join_next().is_none(),
-            "the connection closed"
-        );
-        assert!(peer_conn.close_reason().is_none(), "the connection closed");
-        Ok(())
-    }
-
     /// An inbound connection that no topic uses closes, even with a partial header.
     #[tokio::test]
     #[traced_test]
@@ -2227,7 +2039,6 @@ pub(crate) mod tests {
         let (conn, peer_conn) = pair.connect().await?;
         let mut actor = t_actor().await?;
         actor.handle_connection(pair.ep2.id(), ConnOrigin::Accept, conn);
-        show_that_it_handles_a_close(&peer_conn, [0; 32].into()).await;
         let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
         stream
             .write_all(&[0, 0, 0, 32, 0])
@@ -2308,7 +2119,7 @@ pub(crate) mod tests {
     async fn replaced_connection_stays_while_the_peer_is_wanted() -> Result {
         let pair = TestPair::new(1).await?;
         let (first, peer_first) = pair.connect().await?;
-        let (second, peer_second) = pair.connect().await?;
+        let (second, _peer_second) = pair.connect().await?;
         let peer_id = pair.ep2.id();
         let topic: TopicId = blake3::hash(b"replaced_connection_stays").into();
         let mut actor = t_actor().await?;
@@ -2316,7 +2127,6 @@ pub(crate) mod tests {
         actor.handle_connection(peer_id, ConnOrigin::Accept, second);
         set_wanted(&actor, peer_id, true);
 
-        show_that_it_handles_a_close(&peer_second, topic).await;
         let mut stream = peer_first.open_uni().await.std_context("open stream")?;
         let mut buffer = Vec::new();
         util::StreamHeader::new(topic)
@@ -2429,38 +2239,17 @@ pub(crate) mod tests {
     /// A late dial on which the peer never sends closes.
     ///
     /// Two peers that dial each other at once can each end up with a
-    /// connection on which neither side sends. The peer showed on its other
-    /// connection that it handles a close, and that connection ends before
-    /// the dial runs.
+    /// connection on which neither side sends.
     #[tokio::test]
     #[traced_test]
     async fn silent_late_dial_closes() -> Result {
         let pair = TestPair::new(1).await?;
-        let (accepted, peer_accepted) = pair.connect().await?;
         let (dialed, peer_dialed) = pair.connect().await?;
         let peer_id = pair.ep2.id();
-        let topic: TopicId = blake3::hash(b"silent_late_dial").into();
         let mut actor = t_actor().await?;
 
-        actor.handle_connection(peer_id, ConnOrigin::Accept, accepted);
-        show_that_it_handles_a_close(&peer_accepted, topic).await;
-        disconnect_peer(&mut actor.peers, peer_id);
-        let ended = timeout(
-            IDLE_GRACE + Duration::from_secs(3),
-            actor.connection_tasks.join_next(),
-        )
-        .await
-        .std_context("the accepted connection stayed open")?;
-        let (peer, conn, res) = ended.expect("one task").expect("no panic");
-
-        // The test runtime runs the dial task only at the next await.
         actor.handle_connection(peer_id, ConnOrigin::Dial, dialed);
-        actor.handle_connection_task_finished(peer, conn, res).await;
-        assert!(
-            actor.handles_close.contains_key(&peer_id),
-            "the flag went while the dial holds it"
-        );
-
+        assert!(!actor.peers.contains_key(&peer_id), "the dial got a state");
         let ended = timeout(
             IDLE_GRACE + Duration::from_secs(3),
             actor.connection_tasks.join_next(),
@@ -2472,78 +2261,6 @@ pub(crate) mod tests {
         timeout(Duration::from_secs(1), peer_dialed.closed())
             .await
             .std_context("the peer did not see the close")?;
-        actor.forget_close_flags(Instant::now() + RETIRE_LIMIT);
-        assert!(
-            !actor.handles_close.contains_key(&peer_id),
-            "the flag outlived its time"
-        );
-        Ok(())
-    }
-
-    /// A silent late dial closes, also when the other connection of the peer ended before it.
-    ///
-    /// The flag of the peer outlives its last connection for a while.
-    #[tokio::test]
-    #[traced_test]
-    async fn silent_dial_after_the_last_connection_closes() -> Result {
-        let pair = TestPair::new(1).await?;
-        let (accepted, peer_accepted) = pair.connect().await?;
-        let (dialed, peer_dialed) = pair.connect().await?;
-        let peer_id = pair.ep2.id();
-        let topic: TopicId = blake3::hash(b"silent_dial_after_the_last").into();
-        let mut actor = t_actor().await?;
-
-        actor.handle_connection(peer_id, ConnOrigin::Accept, accepted);
-        show_that_it_handles_a_close(&peer_accepted, topic).await;
-        disconnect_peer(&mut actor.peers, peer_id);
-        let ended = timeout(
-            IDLE_GRACE + Duration::from_secs(3),
-            actor.connection_tasks.join_next(),
-        )
-        .await
-        .std_context("the accepted connection stayed open")?;
-        let (peer, conn, res) = ended.expect("one task").expect("no panic");
-        actor.handle_connection_task_finished(peer, conn, res).await;
-        assert!(
-            actor.handles_close.contains_key(&peer_id),
-            "the flag went with the last connection"
-        );
-
-        actor.handle_connection(peer_id, ConnOrigin::Dial, dialed);
-        let ended = timeout(
-            IDLE_GRACE + Duration::from_secs(3),
-            actor.connection_tasks.join_next(),
-        )
-        .await
-        .std_context("the dial stayed open")?;
-        let (peer, conn, res) = ended.expect("one task").expect("no panic");
-        actor.handle_connection_task_finished(peer, conn, res).await;
-        timeout(Duration::from_secs(1), peer_dialed.closed())
-            .await
-            .std_context("the peer did not see the close")?;
-        Ok(())
-    }
-
-    /// The unset flag of a peer goes with its last connection.
-    #[tokio::test]
-    #[traced_test]
-    async fn unset_flag_goes_with_the_last_connection() -> Result {
-        let pair = TestPair::new(1).await?;
-        let (conn, peer_conn) = pair.connect().await?;
-        let peer_id = pair.ep2.id();
-        let mut actor = t_actor().await?;
-
-        actor.handle_connection(peer_id, ConnOrigin::Accept, conn);
-        peer_conn.close(0u32.into(), b"done");
-        let ended = timeout(Duration::from_secs(3), actor.connection_tasks.join_next())
-            .await
-            .std_context("the connection stayed open")?;
-        let (peer, conn, res) = ended.expect("one task").expect("no panic");
-        actor.handle_connection_task_finished(peer, conn, res).await;
-        assert!(
-            !actor.handles_close.contains_key(&peer_id),
-            "an unset flag outlived the connection"
-        );
         Ok(())
     }
 
@@ -2647,7 +2364,6 @@ pub(crate) mod tests {
                 util::read_frame(&mut stream, &mut buf, 1024)
                     .await
                     .expect("frame");
-            show_that_it_handles_a_close(&conn, header.topic_id).await;
             conn.closed().await;
             (header.topic_id, message.is_some())
         });
@@ -2788,7 +2504,6 @@ pub(crate) mod tests {
             TEST_FRAME_LIMIT,
             vec![],
             watch::channel(true).1,
-            close_flag(),
         )));
 
         let (read_topic, read_message, peer_conn) = timeout(Duration::from_secs(5), peer)
@@ -2841,7 +2556,6 @@ pub(crate) mod tests {
                 1024,
                 vec![],
                 watch::channel(true).1,
-                close_flag(),
             ),
         )
         .await
@@ -2890,14 +2604,13 @@ pub(crate) mod tests {
             let conn = incoming.await.expect("accept failed");
             let mut stream = conn.accept_uni().await.expect("accept_uni");
             let mut buf = bytes::BytesMut::new();
-            let header = util::StreamHeader::read(&mut stream, &mut buf, 1024)
+            let _header = util::StreamHeader::read(&mut stream, &mut buf, 1024)
                 .await
                 .expect("header");
             let reply: Option<proto::topic::Message<PublicKey>> =
                 util::read_frame(&mut stream, &mut buf, 1024)
                     .await
                     .expect("frame");
-            show_that_it_handles_a_close(&conn, header.topic_id).await;
             conn.closed().await;
             reply.is_some()
         }));
@@ -3490,7 +3203,6 @@ pub(crate) mod tests {
             1024,
             vec![],
             watch::channel(true).1,
-            close_flag(),
         )));
 
         send_tx
