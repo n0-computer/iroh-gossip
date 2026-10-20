@@ -157,7 +157,10 @@ async fn main() -> Result<()> {
 
     // broadcast our name, if set
     if let Some(name) = args.name {
-        let message = Message::AboutMe { name };
+        let message = Message::AboutMe {
+            name,
+            nonce: rand::random(),
+        };
         let encoded_message = SignedMessage::sign_and_encode(endpoint.secret_key(), &message)?;
         sender.broadcast(encoded_message).await?;
     }
@@ -197,7 +200,7 @@ async fn subscribe_loop(mut receiver: GossipReceiver) -> Result<()> {
         if let Event::Received(msg) = event {
             let (from, message) = SignedMessage::verify_and_decode(&msg.content)?;
             match message {
-                Message::AboutMe { name } => {
+                Message::AboutMe { name, nonce: _ } => {
                     names.insert(from, name.clone());
                     println!("> {} is now known as {}", from.fmt_short(), name);
                 }
@@ -264,21 +267,17 @@ impl SignedMessage {
     }
 }
 
-/// A chat message.
+/// A message of the chat.
+///
+/// iroh-gossip delivers a message only once per hash of its content. Each
+/// message carries a random nonce, so that two equal messages are both
+/// delivered.
 #[derive(Debug, Serialize, Deserialize)]
 enum Message {
-    AboutMe {
-        name: String,
-    },
-    /// A chat message.
-    ///
-    /// `nonce` is used to uniquely identify each message - iroh-gossip deduplicates
-    /// based on the hash of the message, so we need to ensure that the message is
-    /// unique, so two identical chat messages are still delivered.
-    Message {
-        text: String,
-        nonce: u32,
-    },
+    /// Our name, which the other peers show instead of our endpoint id.
+    AboutMe { name: String, nonce: [u8; 16] },
+    /// A line of chat.
+    Message { text: String, nonce: [u8; 16] },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
