@@ -38,14 +38,19 @@ const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5);
 /// from the last neighbor it gained.
 const MAX_BACKOFF_PASSES: u32 = 12;
 
-/// Maximum number of neighbor requests that a refill from a maintenance pass sends.
+/// Maximum number of neighbor requests that one maintenance pass sends.
 ///
-/// A peer with a full active view refuses a request, and a short node then
-/// asks the next passive peer. If all of them are full, each request costs a
-/// dial for nothing.
+/// A node with too few neighbors asks its passive peers, one after the other,
+/// to become its neighbor. A peer whose active view is full refuses. If all
+/// passive peers are full, every request fails, and each one costs a new
+/// connection. This limit caps that cost for each pass.
 const MAX_REQUESTS_PER_REFILL: usize = 3;
 
-/// Returns whether the `n`th maintenance pass in a row acts, see [`MAX_BACKOFF_PASSES`].
+/// Returns whether a node rejoins or refills in the `n`th maintenance pass of a backoff.
+///
+/// The passes count while the node is alone, or while it is short of
+/// neighbors since it last gained one. It acts in passes 1, 2, 4, and 8, and
+/// then in every 12th pass, see [`MAX_BACKOFF_PASSES`].
 fn backoff_due(n: u32) -> bool {
     if n < MAX_BACKOFF_PASSES {
         n.is_power_of_two()
@@ -366,7 +371,7 @@ pub struct State<PI, RG = ThreadRng> {
     /// are all full, asks them in turn without end. A neighbor loss and the
     /// maintenance passes that may refill clear them, as the peers may have room by then.
     refused: HashSet<PI>,
-    /// The limit of the refill in progress.
+    /// How many more requests the refill in progress may send.
     refill: RefillLimit,
 }
 
@@ -752,11 +757,17 @@ where
         for node in message.nodes {
             new_peers |= self.add_passive(node.id, node.data, io);
         }
-        // A peer that refuses our request sends this reply first. Only a short
-        // node goes on to the next passive peer at once. Any other reply starts
-        // a refill only if it brought new peers to ask.
-        let refusal = self.pending_neighbor_requests.contains_key(&from);
-        if (refusal && self.is_short()) || (!refusal && new_peers) {
+        // A shuffle reply comes in two cases. A peer that refuses our neighbor
+        // request sends one before its `Disconnect`: then we ask the next
+        // passive peer, but only if we are short of neighbors. Otherwise the
+        // reply answers our shuffle: then we ask a passive peer only if the
+        // reply brought peers we did not know.
+        let refused_us = self.pending_neighbor_requests.contains_key(&from);
+        let ask_next = match refused_us {
+            true => self.is_short(),
+            false => new_peers,
+        };
+        if ask_next {
             self.refill_active_from_passive(&[], io);
         }
     }
@@ -1132,21 +1143,28 @@ where
     }
 }
 
-/// The limit on the neighbor requests of the refill in progress.
+/// How many more neighbor requests a refill of the active view may send.
 ///
-/// A request that fails, by refusal, dial, or timeout, makes the refill ask
-/// the next passive peer, within this limit. A gained neighbor ends the refill,
-/// and so does a passive view with no peer left to ask.
+/// A refill asks one passive peer at a time to become a neighbor. If the
+/// request fails, because the peer refuses, cannot be dialed, or does not
+/// answer in time, the refill asks the next passive peer, if this limit allows.
+///
+/// The refill ends when a peer accepts, or when no passive peer is left to
+/// ask. Then the limit goes back to [`RefillLimit::None`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RefillLimit {
-    /// No refill runs. A request that fails asks the next peer.
+    /// No refill is in progress, so nothing limits the requests.
     None,
-    /// A refill from a maintenance pass runs, and may send this many more requests.
-    Requests(usize),
-    /// A refill after a neighbor left, or without any neighbor, runs.
+    /// A maintenance pass started the refill. It may send this many more requests.
     ///
-    /// A short node asks until a peer accepts, as the paper does. A maintenance
-    /// pass does not limit it: the failure may have made room in other views.
+    /// Such a refill only tries to fill a short active view, so it gives up
+    /// early, see [`MAX_REQUESTS_PER_REFILL`].
+    Requests(usize),
+    /// A neighbor left, or the node has no neighbor at all.
+    ///
+    /// The refill has no limit: a short node asks until a peer accepts, as the
+    /// paper does. A maintenance pass does not limit it either, as the failure
+    /// may have made room in the views of other peers.
     Recovery,
 }
 
