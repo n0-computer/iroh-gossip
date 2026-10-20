@@ -87,8 +87,8 @@ pub(super) const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a replaced connection may write its current message before it hands it over.
 ///
 /// The new connection of the peer waits for it, so that we write the messages
-/// in order. A stream header that started is written in full first, up to
-/// the write timeout.
+/// in order. A stream header that started is written in full first. Only
+/// the write timeout bounds it, which counts the time without progress.
 #[cfg(not(test))]
 pub(super) const HANDOVER_LIMIT: Duration = Duration::from_secs(5);
 #[cfg(test)]
@@ -467,7 +467,8 @@ impl SendLoop {
     ///
     /// Returns `false` if `revoked` ends the lease before the stream opened. A
     /// header that started is written in full, as a node up to 0.101 drops the
-    /// whole connection on a partial one: the write timeout bounds it.
+    /// whole connection on a partial one. A failure of the peer closes the
+    /// connection anyway, and cuts the header.
     async fn open_stream(
         &mut self,
         topic: TopicId,
@@ -478,10 +479,11 @@ impl SendLoop {
         };
         let mut stream = tokio::select! {
             biased;
+            // Before the open, so that a revoked lease starts no header.
+            _ = revoked.cancelled() => return Ok(false),
             open = n0_future::time::timeout(OPEN_TIMEOUT, self.conn.open_uni()) => {
                 open.map_err(|_| e!(WriteError::OpenStalled))??
             }
-            _ = revoked.cancelled() => return Ok(false),
         };
         StreamHeader::new(topic)
             .write(&mut stream, &mut self.buffer, self.max_message_size)
