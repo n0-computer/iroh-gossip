@@ -323,10 +323,10 @@ pub struct State<PI, RG = ThreadRng> {
     passes_alone: u32,
     /// The latest peers that were our neighbors, least recently seen first.
     ///
-    /// Peers only leave when newer neighbors push them out, never because they
-    /// failed: a node that loses
-    /// its own network takes every peer as failed, and empties its views of
-    /// exactly the peers it needs once it is back. See [`MAX_RECENT_NEIGHBORS`].
+    /// Peers leave when newer neighbors push them out, or when they leave the
+    /// topic. They do not leave because they failed: a node that loses its own
+    /// network takes every peer as failed, and empties its views of exactly the
+    /// peers it needs once it is back. See [`MAX_RECENT_NEIGHBORS`].
     recent_neighbors: VecDeque<PI>,
     /// Random number generator
     rng: RG,
@@ -494,6 +494,10 @@ where
 
     /// We received a disconnect message.
     fn on_disconnect(&mut self, peer: PI, details: Disconnect, io: &mut impl IO<PI>) {
+        if !details.alive {
+            // The peer left the topic, a rejoin through it would fail.
+            self.recent_neighbors.retain(|known| *known != peer);
+        }
         let requested = self.pending_neighbor_requests.remove(&peer).is_some();
         if requested && !self.active_view.contains(&peer) {
             self.refused.insert(peer);
@@ -770,12 +774,11 @@ where
     /// peers and the recent neighbors can get it back into the swarm.
     fn handle_maintenance_timer(&mut self, io: &mut impl IO<PI>) {
         self.refused.clear();
-        for peer in self.active_view.iter() {
-            self.recent_neighbors.retain(|known| known != peer);
-            self.recent_neighbors.push_back(*peer);
-        }
-        while self.recent_neighbors.len() > MAX_RECENT_NEIGHBORS {
-            self.recent_neighbors.pop_front();
+        // Neighbors that stay count as seen again, so that churn does not push
+        // them out.
+        let active: Vec<_> = self.active_view.iter().copied().collect();
+        for peer in active {
+            self.remember_neighbor(peer);
         }
         if self.active_view.is_empty() && self.passive_view.is_empty() {
             self.passes_alone += 1;
@@ -1038,10 +1041,20 @@ where
         self.alive_disconnect_peers.remove(&peer);
         if self.active_view.insert(peer) {
             debug!(other = ?peer, "add to active view");
+            self.remember_neighbor(peer);
             io.push(OutEvent::EmitEvent(Event::NeighborUp(peer)));
             if reply {
                 self.send_neighbor(peer, priority, io);
             }
+        }
+    }
+
+    /// Moves a peer to the end of the recent neighbors, see [`MAX_RECENT_NEIGHBORS`].
+    fn remember_neighbor(&mut self, peer: PI) {
+        self.recent_neighbors.retain(|known| *known != peer);
+        self.recent_neighbors.push_back(peer);
+        if self.recent_neighbors.len() > MAX_RECENT_NEIGHBORS {
+            self.recent_neighbors.pop_front();
         }
     }
 
@@ -1638,6 +1651,56 @@ mod tests {
             state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
             assert_eq!(joined(io), vec![1, 2], "seed {seed}");
         }
+    }
+
+    /// A neighbor is remembered when it joins, without waiting for a maintenance pass.
+    #[test]
+    fn recent_neighbors_record_a_new_neighbor_at_once() {
+        let mut state = new_state();
+        state.handle(InEvent::RecvMessage(1, Message::Join(None)), &mut Io::new());
+        assert_eq!(state.recent_neighbors, [1]);
+    }
+
+    /// A neighbor that failed stays a recent neighbor, and a rejoin tries it.
+    #[test]
+    fn recent_neighbors_keep_a_failed_neighbor() {
+        let mut state = new_state();
+        state.handle(InEvent::RecvMessage(1, Message::Join(None)), &mut Io::new());
+        state.handle(InEvent::PeerDisconnected(1), &mut Io::new());
+        assert!(state.active_view.is_empty() && state.passive_view.is_empty());
+        assert_eq!(state.recent_neighbors, [1]);
+
+        let io = &mut Io::new();
+        state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
+        assert_eq!(joined(io), vec![1]);
+    }
+
+    /// A neighbor that left the topic is no recent neighbor anymore.
+    #[test]
+    fn recent_neighbors_forget_a_neighbor_that_left() {
+        let mut state = new_state();
+        state.handle(InEvent::RecvMessage(1, Message::Join(None)), &mut Io::new());
+        let leave = Message::Disconnect(Disconnect {
+            alive: false,
+            _respond: false,
+        });
+        state.handle(InEvent::RecvMessage(1, leave), &mut Io::new());
+        assert!(state.recent_neighbors.is_empty());
+    }
+
+    /// The recent neighbors keep the latest ones, and drop the oldest beyond the limit.
+    #[test]
+    fn recent_neighbors_drop_the_oldest() {
+        let mut state = new_state();
+        let last = MAX_RECENT_NEIGHBORS as u32 + 2;
+        for peer in 1..=last {
+            state.handle(
+                InEvent::RecvMessage(peer, Message::Join(None)),
+                &mut Io::new(),
+            );
+        }
+        let expected: Vec<u32> = (3..=last).collect();
+        assert_eq!(Vec::from(state.recent_neighbors.clone()), expected);
     }
 
     /// A node that loses its last neighbor, with an empty passive view,
