@@ -250,13 +250,17 @@ impl Builder {
 ///
 /// - **Backpressure.** A broadcast waits only while every eager peer of its
 ///   topic, each peer that we push data to, has its data section half full.
-///   This is a conservative guess that our own link is the limit; slow peers
-///   or the traffic of other topics fill the queues as well. The commands
-///   after a waiting broadcast wait behind it, in order: a join of more
-///   peers, and a leave. Otherwise a broadcast never waits, and a node that
-///   relays it never waits either. A burst larger than the queue and the QUIC
-///   windows of a peer loses messages for it, at the publisher or at a relay.
-///   The repair recovers only part of them.
+///   This guesses that our own link is the limit, and the guess fails in two
+///   cases. If all eager peers are slow, the publisher runs at their pace,
+///   even if a lazy peer could take more. And the data that we relay, or send
+///   on other topics, fills the same queues, so it can pause a publisher. A
+///   node that relays never waits. The commands after a waiting broadcast
+///   wait behind it, in order: a join of more peers, and a leave. A broadcast
+///   with neighbor scope waits on the same check.
+/// - **Late signal.** A queue fills only once QUIC buffers all it can for the
+///   peer, so the wait bounds loss, not delay. A burst larger than the queue
+///   and the QUIC windows of a peer loses messages for it, at the publisher
+///   or at a relay. The repair recovers only part of them.
 /// - **Repair.** A lost broadcast is announced again only while it is cached,
 ///   30 s by default. At most 256 per peer and 4096 per topic wait for it, and
 ///   64 per peer go out per second. A message with neighbor scope is never
@@ -407,6 +411,8 @@ struct Actor {
     /// The topics whose publishers wait, see [`PublishGate`].
     paused_topics: BTreeSet<TopicId>,
     /// When to check the paused topics again.
+    ///
+    /// The actor polls it only while [`Self::paused_topics`] is not empty.
     gate_check: Interval,
 }
 
@@ -434,6 +440,8 @@ impl Actor {
         let (rpc_tx, rpc_rx) = mpsc::channel(TO_ACTOR_CAP);
         let (local_tx, local_rx) = mpsc::channel(16);
         let (in_event_tx, in_event_rx) = mpsc::channel(IN_EVENT_CAP);
+        // Ticks only while a topic is paused, see the select in `event_loop`. After
+        // a time without pauses, the first tick fires at once, then every GATE_CHECK.
         let mut gate_check = n0_future::time::interval(GATE_CHECK);
         gate_check.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
@@ -551,8 +559,11 @@ impl Actor {
                 self.handle_command(topic, key, command);
                 self.update_gate(topic);
             },
+            // A queue gives no signal when it drains, so the gate of a paused topic
+            // opens only on this check. It runs only while a topic is paused.
             _ = self.gate_check.tick(), if !self.paused_topics.is_empty() => {
-                for topic in self.paused_topics.clone() {
+                // `update_gate` puts back each topic that stays paused.
+                for topic in std::mem::take(&mut self.paused_topics) {
                     self.update_gate(topic);
                 }
             },
@@ -1163,6 +1174,8 @@ impl Default for TopicState {
 }
 
 /// How often the actor checks whether the neighbors of a paused topic took data again.
+///
+/// The checks run only while a topic is paused, see [`Actor::gate_check`].
 const GATE_CHECK: Duration = Duration::from_millis(10);
 
 /// Lets the publishers of a topic wait, see [`Actor::update_gate`].
