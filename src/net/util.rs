@@ -336,7 +336,7 @@ impl SendLoop {
 
     /// Writes the queue until it ends, the lease is revoked, or the connection closes.
     ///
-    /// It takes the loop, so that the lease and the finishing streams go once it is done.
+    /// Takes `self`, so that the lease and the finishing streams drop once it returns.
     pub(crate) async fn run(mut self) -> Result<(), WriteError> {
         let conn = self.conn.clone();
         let closed = conn.closed();
@@ -357,7 +357,8 @@ impl SendLoop {
                     _ = &mut closed => break,
                     // The next connection takes the rest of the queue.
                     _ = revoked.cancelled() => break,
-                    // Before the queue, which a busy peer keeps ready.
+                    // Before the queue: the queue of a busy peer is always ready, and
+                    // would keep finished streams from being collected.
                     Some(_) = self.finishing.join_next(), if !self.finishing.is_empty() => continue,
                     more = queue.next() => more,
                 };
@@ -368,7 +369,8 @@ impl SendLoop {
                 let item = queue.current().expect("next returned a message");
                 match self.open_stream(item.message.topic, &revoked).await {
                     Ok(true) => {}
-                    // The next connection opens a stream for the message.
+                    // The lease ended before the stream opened. The message stays
+                    // in the queue for the next connection.
                     Ok(false) => break,
                     Err(err) => {
                         self.handle_error(item.message.topic, err)?;

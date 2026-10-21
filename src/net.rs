@@ -239,53 +239,73 @@ impl Builder {
     }
 }
 
-/// Options of the queue of messages to each peer, for [`Builder::send_queue`].
+/// Options of the send queue to each peer, for [`Builder::send_queue`].
 ///
-/// The queue bounds the bytes that wait to be sent to one peer. When it is
-/// full, a data message or announcement is lost, and we announce a lost
-/// broadcast again later. Any other control message closes the connection.
-/// A publisher waits while the queues to all peers that its topic pushes data to fill.
-/// [`Metrics::msgs_dropped`] and [`Metrics::peers_send_queue_full`] count both.
+/// # How sending works
 ///
-/// Known limits:
+/// Gossip keeps one send queue per peer, shared by all topics. The queue
+/// holds the messages that wait to go out to that peer, up to [`Self::size`]
+/// bytes. Gossip never waits for room in a queue, so one peer that reads
+/// slowly, or not at all, holds up nothing else.
 ///
-/// - **Backpressure.** A broadcast waits only while every eager peer of its
-///   topic, each peer that we push data to, has its data section half full.
-///   This guesses that our own link is the limit, and the guess fails in two
-///   cases. If all eager peers are slow, the publisher runs at their pace,
-///   even if a lazy peer could take more. And the data that we relay, or send
-///   on other topics, fills the same queues, so it can pause a publisher. A
-///   node that relays never waits. The commands after a waiting broadcast
-///   wait behind it, in order: a join of more peers, and a leave. A broadcast
-///   with neighbor scope waits on the same check.
-/// - **Late signal.** A queue fills only once QUIC buffers all it can for the
-///   peer, so the wait bounds loss, not delay. A burst larger than the queue
-///   and the QUIC windows of a peer loses messages for it, at the publisher
-///   or at a relay. The repair recovers only part of them.
-/// - **Repair.** A lost broadcast is announced again only while it is cached,
-///   30 s by default. At most 256 per peer and 4096 per topic wait for it, and
-///   64 per peer go out per second. A message with neighbor scope is never
-///   repaired.
-/// - **One queue per peer.** All topics share it, so a busy topic can crowd
-///   out the data of another. Control waits behind the data queued before it.
-/// - **Age.** The queue bounds bytes, not time. QUIC buffers more on top: at
-///   1 Mbit/s, data can arrive 30-40 s after it was sent.
-/// - **Order across streams.** We write the messages to a peer in order, but
-///   the peer reads each stream on its own. It may handle a `Join` before a
-///   `Disconnect` that we sent earlier, and then drop a neighbor that just
-///   joined. A restarted peer may get the last messages for its former run.
-/// - **Stream limit.** Each topic on which we sent a peer anything keeps a
-///   stream open. Over the limit of concurrent streams of the peer, 100 by
-///   default, the connection closes after 15 s, and again after each rejoin.
-/// - **Closes.** A control message that does not fit, a write without
-///   progress for 60 s, and a stream open that waits for 15 s close the
-///   connection. A node up to version 0.101 may then lose its later messages
-///   to us, if the connection was no neighbor link on its side.
-/// - **Handover.** A control message that does not fit while a replaced
-///   connection still writes its last message fails the peer, and closes the
-///   new connection too, though only the old one is stuck.
+/// When the queue to a peer is full:
 ///
-/// Ignored tests show the order, the stream limit and the handover.
+/// - A broadcast to that peer, or the announcement of one, is dropped.
+///   [`Metrics::msgs_dropped`] counts the drops. Gossip announces a dropped
+///   broadcast again later, and the peer fetches it, as long as it stays
+///   cached.
+/// - Any other message closes the connection instead. These messages manage
+///   the membership, and after a missed one the two sides would no longer
+///   agree on who their neighbors are. Each side treats the other as gone,
+///   and finds new neighbors. [`Metrics::peers_send_queue_full`] counts
+///   these closes.
+///
+/// Broadcasts are the one place where gossip does wait. When the queues to
+/// all peers that a topic pushes broadcasts to are half full with data, the
+/// node's own uplink is probably the limit, and more data would only be
+/// dropped for every peer. [`GossipSender::broadcast`] then waits for room,
+/// up to 100 ms per message.
+///
+/// # What this means for your app
+///
+/// - **Delivery is not guaranteed.** A peer that cannot keep up misses
+///   messages. The repair recovers many of them, but not all: at most 256
+///   per peer at a time, 64 per second, and only while the message stays
+///   cached, 30 s by default
+///   ([`PlumtreeConfig::message_cache_retention`]). A broadcast to direct
+///   neighbors ([`GossipSender::broadcast_neighbors`]) is never repaired.
+///   If your app needs every message, number them, and fetch the gaps
+///   another way.
+/// - **Delivery can be late.** The queue bounds bytes, not time, and QUIC
+///   buffers more on top. On a 1 Mbit/s link, a message can arrive 30 to
+///   40 s after it was sent. If only the latest state matters, timestamp
+///   your messages and skip the old ones.
+/// - **A burst can outrun the wait.** A publisher waits only once the QUIC
+///   buffers and part of each queue are full. A burst larger than that
+///   loses messages at the peers that cannot keep up.
+/// - **Other traffic can slow your publisher, but not stop it.** The wait
+///   also starts when all the peers a topic pushes to are slow, or when
+///   relayed traffic and other topics fill the same queues. The 100 ms
+///   bound keeps every publisher at ten broadcasts per second or more.
+/// - **Each shared topic keeps a stream open.** Share more topics with one
+///   peer than the stream limit of its endpoint allows, 100 by default, and
+///   the connection closes after 15 s, again after each rejoin. Raise
+///   `max_concurrent_uni_streams` on your endpoints if you need more.
+/// - **A peer that stalls loses its connection.** A peer that takes no data
+///   for 60 s gets its connection closed. A node of iroh-gossip 0.101 or
+///   older does not handle such closes, and the messages it then sends to
+///   this node are lost until it reconnects.
+///
+/// # Choosing a size
+///
+/// A larger queue absorbs larger bursts and longer stalls without loss. It
+/// costs up to its size in memory for each peer, and a slow peer gets older
+/// data, since more of it waits. A smaller queue drops sooner and stays
+/// fresher.
+///
+/// [`GossipSender::broadcast`]: crate::api::GossipSender::broadcast
+/// [`GossipSender::broadcast_neighbors`]: crate::api::GossipSender::broadcast_neighbors
+/// [`PlumtreeConfig::message_cache_retention`]: crate::proto::PlumtreeConfig::message_cache_retention
 #[derive(Debug, Clone, Copy)]
 pub struct QueueOptions {
     size: usize,
@@ -698,7 +718,8 @@ impl Actor {
 
     fn handle_connection(&mut self, peer_id: EndpointId, origin: ConnOrigin, conn: Connection) {
         let dial = origin == ConnOrigin::Dial;
-        // Our dial for a peer that we dropped while we dialed it.
+        // We dropped the peer while our dial to it ran. That dial is stale once
+        // this connection takes over, and closes when it completes.
         let dropped_dial = self
             .peers
             .get(&peer_id)
@@ -712,7 +733,7 @@ impl Actor {
             };
         let queue_lease = if stale_dial {
             debug!(peer = %peer_id.fmt_short(), "dial completed after the peer was dropped, close it");
-            // The queue drops at once, so the send loop ends.
+            // An empty queue of its own, which drops at once, so the send loop ends.
             SendQueue::new(0).lease()
         } else {
             let queue_lease =
@@ -939,14 +960,14 @@ impl Actor {
                     let state =
                         PeerState::get_or_pending(&mut self.peers, peer_id, self.send_queue_size);
                     state.revive();
-                    // Waiting for room would stop the actor, and with it every
-                    // topic, for as long as this one peer does not read.
                     if !matches!(state.conn, ConnState::Active { .. })
                         && !self.dialer.is_pending(peer_id)
                     {
                         debug!(peer = %peer_id.fmt_short(), "start to dial");
                         self.dialer.queue_dial(peer_id, self.alpn.clone());
                     }
+                    // The push never waits. Waiting for room would stop the actor, and
+                    // with it every topic, for as long as this one peer does not read.
                     let pushed = state.queue.push(message);
                     match pushed {
                         Pushed::Queued => {}
@@ -1374,9 +1395,9 @@ async fn connection_loop(
     tokio::select! {
         biased;
         // Each connection that took the queue closes, also one that only
-        // receives now, so the peer learns on the connection that it uses. An
-        // old node may lose its later messages to us, but it cannot work with
-        // us anyway.
+        // receives now, so the peer learns it on the connection that it uses. A
+        // node up to 0.101 may then lose its later messages to us (#155). It
+        // missed a control message, so its views differ from ours anyway.
         _ = failed.cancelled() => {
             warn!("the peer failed, close the connection");
             conn.close(util::CLOSE_QUEUE_FULL.into(), b"send queue full");
@@ -2679,7 +2700,7 @@ pub(crate) mod tests {
     /// overflow fails the peer, and closes the new and healthy connection too.
     #[tokio::test(flavor = "current_thread")]
     #[traced_test]
-    #[ignore = "known limit: see the known limits of QueueOptions"]
+    #[ignore = "known limit: see the known limits of SendQueue"]
     async fn overflow_during_a_handover_keeps_the_new_connection() -> Result {
         let pair = TestPair::new(1).await?;
         let (old, peer_old) = pair.connect().await?;
@@ -4976,7 +4997,7 @@ pub(crate) mod tests {
     /// it closes again. The limit of iroh is 100 streams by default.
     #[tokio::test(flavor = "multi_thread")]
     #[traced_test]
-    #[ignore = "known limit: one stream per topic, see the known limits of QueueOptions"]
+    #[ignore = "known limit: one stream per topic, see the known limits of SendQueue"]
     async fn topics_over_the_stream_limit_keep_their_neighbors() -> Result {
         let lookup = MemoryLookup::new();
         let limited = || {

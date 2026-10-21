@@ -1168,7 +1168,7 @@ mod tests {
     /// a later message changes them. Only a wire change can fix it, for example
     /// a membership epoch that a `Disconnect` names.
     #[test]
-    #[ignore = "known limit of the v1 wire, see the known limits of QueueOptions"]
+    #[ignore = "known limit of the v1 wire, see the known limits of SendQueue"]
     fn late_disconnect_keeps_a_rejoined_neighbor() {
         let mut contact = new_state();
         let mut joiner = State::new(1, None, Config::default(), StdRng::seed_from_u64(2));
