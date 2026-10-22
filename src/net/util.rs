@@ -98,7 +98,7 @@ pub(super) const HANDOVER_LIMIT: Duration = Duration::from_secs(1);
 pub(super) const CLOSE_QUEUE_FULL: u32 = 2;
 
 /// The code of a close for a write or a stream open that made no progress in time.
-const CLOSE_STALLED: u32 = 3;
+pub(super) const CLOSE_STALLED: u32 = 3;
 
 /// The first frame of a stream: the topic of its messages, and a byte of flags.
 ///

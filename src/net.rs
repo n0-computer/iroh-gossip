@@ -252,10 +252,10 @@ impl Builder {
 ///   it. Gossip announces the broadcast to the peer again, and the peer
 ///   fetches it while it is still cached, 30 s by default. A broadcast to
 ///   direct neighbors is never repaired.
-/// - A membership message to the peer closes the connection, and
+/// - A control message to the peer closes the connection, and
 ///   [`Metrics::peers_send_queue_full`] counts it. Both sides find new
 ///   neighbors.
-/// - Once the queues to all peers that a topic pushes to are half full,
+/// - Once the queues to all peers that a topic pushes to are half full of data,
 ///   [`GossipSender::broadcast`] on that topic waits for room, up to 100 ms
 ///   per message. Relayed traffic and other topics fill the same queues, so
 ///   this slows a publisher that sends little as well.
@@ -288,7 +288,7 @@ impl QueueOptions {
     /// A larger queue absorbs larger bursts and longer stalls without a
     /// loss. It costs up to its size in memory for each peer, and it lets
     /// more old data wait for a slow one. A message takes its encoded size
-    /// and about a hundred bytes more. Whatever the setting, the queue is at
+    /// and about 130 bytes more. Whatever the setting, the queue is at
     /// least 64 KiB, and fits eight messages of [`Builder::max_message_size`].
     pub fn size(mut self, size: usize) -> Self {
         self.size = size;
@@ -2236,6 +2236,22 @@ pub(crate) mod tests {
             .send_replace(wanted);
     }
 
+    /// Waits until `conn` closed, and checks that our side closed it with `code`.
+    async fn closed_with(conn: &Connection, code: u32) -> Result {
+        let reason = timeout(Duration::from_secs(2), conn.closed())
+            .await
+            .std_context("the connection stayed open")?;
+        assert!(
+            matches!(
+                &reason,
+                iroh::endpoint::ConnectionError::ApplicationClosed(close)
+                    if close.error_code == VarInt::from_u32(code)
+            ),
+            "{reason:?}"
+        );
+        Ok(())
+    }
+
     /// Returns an unset flag of [`util::StreamHeader::handles_close`] for one connection.
     fn close_flag() -> (watch::Sender<bool>, watch::Receiver<bool>) {
         watch::channel(false)
@@ -2546,10 +2562,7 @@ pub(crate) mod tests {
             matches!(result, Err(util::WriteError::Stalled { .. })),
             "{result:?}"
         );
-        timeout(Duration::from_secs(2), peer_conn.closed())
-            .await
-            .std_context("the connection to the stalled peer stayed open")?;
-        Ok(())
+        closed_with(&peer_conn, util::CLOSE_STALLED).await
     }
 
     /// A peer that reads one frame slower than the write timeout keeps the connection.
@@ -2613,10 +2626,7 @@ pub(crate) mod tests {
             matches!(result, Err(util::WriteError::OpenStalled { .. })),
             "{result:?}"
         );
-        timeout(Duration::from_secs(2), peer_conn.closed())
-            .await
-            .std_context("the connection stayed open")?;
-        Ok(())
+        closed_with(&peer_conn, util::CLOSE_STALLED).await
     }
 
     /// A peer whose queue has no room for a control message loses its connection (#47).
@@ -2767,7 +2777,7 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// An overflow of a revived queue drops the peer, and closes the connection that took the queue.
+    /// A failed peer loses the connection that took its queue, also once its writer ended.
     ///
     /// The protocol dropped the peer and wanted it again before a new dial
     /// completed. The writer of the old connection sent the queue and ended,
@@ -2775,7 +2785,7 @@ pub(crate) mod tests {
     /// drop.
     #[tokio::test]
     #[traced_test]
-    async fn overflow_of_a_revived_queue_closes_its_connection() -> Result {
+    async fn failed_peer_loses_the_connection_that_took_its_queue() -> Result {
         let pair = TestPair::new(1).await?;
         let (conn, peer_conn) = pair.connect().await?;
         let peer_id = pair.ep2.id();
@@ -2820,18 +2830,7 @@ pub(crate) mod tests {
             matches!(follow_ups.pop_front(), Some(InEvent::PeerDisconnected(p)) if p == peer_id),
             "the protocol was not told"
         );
-        let reason = timeout(Duration::from_secs(2), peer_conn.closed())
-            .await
-            .std_context("the connection that took the queue stayed open")?;
-        assert!(
-            matches!(
-                &reason,
-                iroh::endpoint::ConnectionError::ApplicationClosed(close)
-                    if close.error_code == VarInt::from_u32(2)
-            ),
-            "{reason:?}"
-        );
-        Ok(())
+        closed_with(&peer_conn, util::CLOSE_QUEUE_FULL).await
     }
 
     /// A dropped peer that the protocol wants again keeps its queue, and the dial delivers all of it.
@@ -5023,8 +5022,8 @@ pub(crate) mod tests {
         .await
         .std_context("B did not become a neighbor")??;
 
-        // The gate lets one broadcast through per limit, so a send that took
-        // half of it waited for the gate.
+        // The gate never opens while B reads nothing, so a held broadcast
+        // takes the whole limit.
         let mut waited = false;
         for i in 0..2000u32 {
             let mut message = vec![7u8; 3000];
@@ -5033,7 +5032,7 @@ pub(crate) mod tests {
             timeout(PROMPT, a_tx.broadcast(message.into()))
                 .await
                 .std_context("the publisher waited past the limit")??;
-            if start.elapsed() >= GATE_LIMIT / 2 {
+            if start.elapsed() >= GATE_LIMIT {
                 waited = true;
                 break;
             }
@@ -5057,12 +5056,15 @@ pub(crate) mod tests {
                 }
             }
         }));
-        for i in 0..100u32 {
-            let message = Bytes::from(format!("after {i}"));
-            timeout(PROMPT, a_tx.broadcast(message))
-                .await
-                .std_context("the publisher still waits after B read again")??;
-        }
+        // Far less than a limit per broadcast, so the gate opened rather than timed out.
+        timeout(GATE_LIMIT * 20, async {
+            for i in 0..100u32 {
+                a_tx.broadcast(Bytes::from(format!("after {i}"))).await?;
+            }
+            Ok::<_, AnyError>(())
+        })
+        .await
+        .std_context("the publisher still waits after B read again")??;
         timeout(Duration::from_secs(10), seen_rx)
             .await
             .std_context("B did not get the last broadcast")?
