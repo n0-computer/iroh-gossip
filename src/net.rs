@@ -2669,14 +2669,14 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// A control overflow during a handover closes the stuck old connection, not the new one (known limit).
+    /// A control overflow during a handover closes the stuck old connection, not the new one (a cost of the design).
     ///
     /// The old connection does not read, so its writer keeps the queue for up
     /// to the handover limit, and control fills the queue meanwhile. Today the
     /// overflow fails the peer, and closes the new and healthy connection too.
     #[tokio::test(flavor = "current_thread")]
     #[traced_test]
-    #[ignore = "known limit: see the known limits of SendQueue"]
+    #[ignore = "a cost of the design, see SendQueue"]
     async fn overflow_during_a_handover_keeps_the_new_connection() -> Result {
         let pair = TestPair::new(1).await?;
         let (old, peer_old) = pair.connect().await?;
@@ -5098,7 +5098,7 @@ pub(crate) mod tests {
         Err(n0_error::anyerr!("the subscription ended"))
     }
 
-    /// A healthy peer that shares more topics with us than its stream limit keeps its neighbors (known limit).
+    /// A healthy peer that shares more topics with us than its stream limit keeps its neighbors (a cost of the design).
     ///
     /// v1 keeps a stream per topic open while the topic uses the peer. Over the
     /// peer's limit of concurrent streams, the open of the next stream waits for
@@ -5106,7 +5106,7 @@ pub(crate) mod tests {
     /// it closes again. The limit of iroh is 100 streams by default.
     #[tokio::test(flavor = "multi_thread")]
     #[traced_test]
-    #[ignore = "known limit: one stream per topic, see the known limits of SendQueue"]
+    #[ignore = "a cost of the design: one stream per topic, see SendQueue"]
     async fn topics_over_the_stream_limit_keep_their_neighbors() -> Result {
         let lookup = MemoryLookup::new();
         let limited = || {
