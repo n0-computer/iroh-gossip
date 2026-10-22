@@ -351,6 +351,8 @@ async fn receive(
                 s.neighbors.remove(&peer);
             }
             Event::Lagged => s.lagged += 1,
+            // The enum is non-exhaustive since iroh-gossip 0.102.
+            _ => {}
         }
     }
 }
