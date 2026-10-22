@@ -102,6 +102,11 @@ pub enum InEvent<PI> {
     PeerDisconnected(PI),
     /// Update the opaque peer data about yourself.
     UpdatePeerData(PeerData),
+    /// The network dropped a message to the peer, as the queue to it was full.
+    ///
+    /// Plumtree announces a dropped broadcast to the peer later, so that the
+    /// peer can request it.
+    SendDropped(PI, Message<PI>),
 }
 
 /// Output event from the protocol state.
@@ -143,6 +148,9 @@ impl<PI> From<InEvent<PI>> for InEventMapped<PI> {
             }
             InEvent::PeerDisconnected(peer) => Self::All(topic::InEvent::PeerDisconnected(peer)),
             InEvent::UpdatePeerData(data) => Self::All(topic::InEvent::UpdatePeerData(data)),
+            InEvent::SendDropped(peer, Message { topic, message }) => {
+                Self::TopicEvent(topic, topic::InEvent::SendDropped(peer, message))
+            }
         }
     }
 }
@@ -229,6 +237,14 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
     #[cfg(feature = "net")]
     pub(crate) fn uses_peer(&self, peer: &PI) -> bool {
         self.peer_topics.contains_key(peer)
+    }
+
+    /// Returns the peers to which `topic` pushes its payloads.
+    #[cfg(feature = "net")]
+    pub(crate) fn eager_peers(&self, topic: &TopicId) -> impl Iterator<Item = &PI> {
+        self.state(topic)
+            .into_iter()
+            .flat_map(|state| state.gossip.eager_push_peers.iter())
     }
 
     /// Check if a topic has any active (connected) peers.

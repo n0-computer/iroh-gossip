@@ -220,6 +220,15 @@ impl GossipApi {
 }
 
 /// Sender for a gossip topic.
+///
+/// The commands of a topic keep their order. When the send queues to all
+/// peers that the topic pushes broadcasts to are half full of data, a broadcast
+/// waits for room, up to 100 ms. The commands behind it wait with it: a
+/// join of more peers, and the leave when the last handle drops.
+///
+/// See [`QueueOptions`] for what this means for your app.
+///
+/// [`QueueOptions`]: crate::net::QueueOptions
 #[derive(Debug, Clone)]
 pub struct GossipSender {
     sender: mpsc::Sender<Command>,
