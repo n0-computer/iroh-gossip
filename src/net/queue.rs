@@ -200,8 +200,8 @@ impl Drop for Reservation {
 
 /// The queue of messages to a peer, which its connections take in turn.
 ///
-/// It lives as long as we know the peer, also while we drop it. A writer may
-/// still drain an older queue for a short time after a failure, so the bytes
+/// It lives as long as we know the peer, also while we close it. A writer may
+/// still drain an older queue for a short time after an abort, so the bytes
 /// to a peer can briefly reach two queues.
 ///
 /// The [`Capacity`] bounds the queue, so its channel needs no bound of its own.
@@ -214,7 +214,7 @@ impl Drop for Reservation {
 /// tells apps the short version.
 ///
 /// - We never wait on a peer. A full queue drops data, and a control message
-///   that does not fit fails the peer. What was queued for a failed peer is
+///   that does not fit aborts the peer. What was queued for an aborted peer is
 ///   lost, and no metric counts it.
 /// - Each topic has one stream to a peer, and we write it in order. The peer
 ///   reads each stream on its own, so it may handle a `Join` before an
@@ -223,7 +223,7 @@ impl Drop for Reservation {
 ///   [`OPEN_TIMEOUT`](super::util::OPEN_TIMEOUT) and closes the connection,
 ///   again after each rejoin. Only a wire change fixes either.
 /// - A handover keeps the order: the new connection waits for the old one to
-///   finish its message. A control overflow meanwhile fails the peer, and
+///   finish its message. A control overflow meanwhile aborts the peer, and
 ///   closes the new connection too, though only the old one is stuck.
 /// - The queue bounds bytes, not time. It fills only once QUIC buffered all
 ///   it can for the peer, so a burst larger than both loses messages before
@@ -247,8 +247,8 @@ pub(super) struct SendQueue {
     reader: SharedReader,
     /// Revokes the lease of the connection that writes the queue now.
     revoke: CancellationToken,
-    /// Fails the peer: every writer of the queue closes its connection.
-    failed: CancellationToken,
+    /// Aborts the peer: every writer of the queue closes its connection.
+    aborted: CancellationToken,
 }
 
 impl SendQueue {
@@ -266,14 +266,14 @@ impl SendQueue {
             unfinished: None,
             closing: closing_rx,
         };
-        let failed = CancellationToken::new();
+        let aborted = CancellationToken::new();
         Self {
             tx,
             capacity,
             closing,
             reader: Arc::new(tokio::sync::Mutex::new(reader)),
-            revoke: failed.child_token(),
-            failed,
+            revoke: aborted.child_token(),
+            aborted,
         }
     }
 
@@ -301,7 +301,7 @@ impl SendQueue {
         data.used.load(Ordering::Relaxed) >= data.max / 2
     }
 
-    /// Sets whether the writer ends once the queue is empty, as it does for a dropped peer.
+    /// Sets whether the writer ends once the queue is empty, as it does for a closing peer.
     pub(super) fn set_closing(&self, closing: bool) {
         self.closing.send_replace(closing);
     }
@@ -309,17 +309,17 @@ impl SendQueue {
     /// Revokes the lease of the connection that writes the queue, and returns one for the next.
     pub(super) fn lease(&mut self) -> QueueLease {
         self.revoke.cancel();
-        self.revoke = self.failed.child_token();
+        self.revoke = self.aborted.child_token();
         QueueLease {
             reader: self.reader.clone(),
             revoked: self.revoke.clone(),
-            failed: self.failed.clone(),
+            aborted: self.aborted.clone(),
         }
     }
 
     /// Revokes every lease on the queue, and makes each writer close its connection.
-    pub(super) fn fail(&self) {
-        self.failed.cancel();
+    pub(super) fn abort(&self) {
+        self.aborted.cancel();
     }
 
     /// Returns the reader of the queue, if no writer reads it.
@@ -333,15 +333,15 @@ impl SendQueue {
 ///
 /// The actor revokes it when a new connection replaces this one. The writer
 /// then lets go of the queue after its current message, and the writer of the
-/// new connection takes it. When the actor fails the peer, it cancels
-/// `failed`, which revokes every lease on the queue, and each writer closes
+/// new connection takes it. When the actor aborts the peer, it cancels
+/// `aborted`, which revokes every lease on the queue, and each writer closes
 /// its connection.
 #[derive(Debug)]
 pub(super) struct QueueLease {
     reader: SharedReader,
-    /// A child of `failed`.
+    /// A child of `aborted`.
     revoked: CancellationToken,
-    failed: CancellationToken,
+    aborted: CancellationToken,
 }
 
 impl QueueLease {
@@ -352,14 +352,14 @@ impl QueueLease {
         self.reader.clone().lock_owned().await
     }
 
-    /// Returns the token that ends the lease, at a handover or when the peer fails.
+    /// Returns the token that ends the lease, at a handover or at an abort of the peer.
     pub(super) fn revoked(&self) -> &CancellationToken {
         &self.revoked
     }
 
-    /// Returns the token that the actor cancels when it fails the peer.
-    pub(super) fn failed(&self) -> &CancellationToken {
-        &self.failed
+    /// Returns the token that the actor cancels when it aborts the peer.
+    pub(super) fn aborted(&self) -> &CancellationToken {
+        &self.aborted
     }
 }
 

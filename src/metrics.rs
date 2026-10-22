@@ -21,7 +21,7 @@ pub struct Metrics {
     pub msgs_data_recv: Counter,
     /// Number of data messages and announcements dropped because the send queue to their peer was full
     pub msgs_dropped: Counter,
-    /// Number of times a peer failed because its send queue had no room for a control message
+    /// Number of peers aborted because their send queue had no room for a control message
     pub peers_send_queue_full: Counter,
     /// Total size of all data messages sent
     pub msgs_data_sent_size: Counter,

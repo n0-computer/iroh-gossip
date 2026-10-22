@@ -462,7 +462,7 @@ impl SendLoop {
     ///
     /// Returns `false` if `revoked` ends the lease before the stream opened. A
     /// header that started is written in full, as a node up to 0.101 drops the
-    /// whole connection on a partial one. A failure of the peer closes the
+    /// whole connection on a partial one. An abort of the peer closes the
     /// connection anyway, and cuts the header.
     async fn open_stream(
         &mut self,
