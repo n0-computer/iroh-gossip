@@ -1173,7 +1173,7 @@
 <a href=#1173 id=1173 data-nosnippet>1173</a><span class="doccomment">/// How long a broadcast waits at most for the gate of its topic.
 <a href=#1174 id=1174 data-nosnippet>1174</a>///
 <a href=#1175 id=1175 data-nosnippet>1175</a>/// The gate cannot tell our own data from relayed data, and relays never
-<a href=#1176 id=1176 data-nosnippet>1176</a>/// wait. Other traffic can thus keep the gate closed for good. The bound keeps
+<a href=#1176 id=1176 data-nosnippet>1176</a>/// wait. Other traffic can thus keep the gate closed forever. The bound keeps
 <a href=#1177 id=1177 data-nosnippet>1177</a>/// each publisher at ten broadcasts per second or more.
 <a href=#1178 id=1178 data-nosnippet>1178</a></span><span class="kw">const </span>GATE_LIMIT: Duration = Duration::from_millis(<span class="number">100</span>);
 <a href=#1179 id=1179 data-nosnippet>1179</a>
@@ -2546,7 +2546,7 @@
 <a href=#2546 id=2546 data-nosnippet>2546</a>    <span class="doccomment">/// A write that makes no progress for the write timeout closes the connection.
 <a href=#2547 id=2547 data-nosnippet>2547</a>    ///
 <a href=#2548 id=2548 data-nosnippet>2548</a>    /// The peer never reads, so flow control blocks every write once the
-<a href=#2549 id=2549 data-nosnippet>2549</a>    /// receive window is full. The writer waited for good.
+<a href=#2549 id=2549 data-nosnippet>2549</a>    /// receive window is full. The writer never ended.
 <a href=#2550 id=2550 data-nosnippet>2550</a>    </span><span class="attr">#[tokio::test]
 <a href=#2551 id=2551 data-nosnippet>2551</a>    #[traced_test]
 <a href=#2552 id=2552 data-nosnippet>2552</a>    </span><span class="kw">async fn </span>stalled_write_closes_the_connection() -&gt; <span class="prelude-ty">Result</span> {
@@ -2558,7 +2558,7 @@
 <a href=#2558 id=2558 data-nosnippet>2558</a>        <span class="kw">let </span>send_loop = SendLoop::new(conn, queue_lease, TEST_FRAME_LIMIT);
 <a href=#2559 id=2559 data-nosnippet>2559</a>        <span class="kw">let </span>result = timeout(util::WRITE_TIMEOUT * <span class="number">5</span>, send_loop.run())
 <a href=#2560 id=2560 data-nosnippet>2560</a>            .<span class="kw">await
-<a href=#2561 id=2561 data-nosnippet>2561</a>            </span>.std_context(<span class="string">"the writer waited for good"</span>)<span class="question-mark">?</span>;
+<a href=#2561 id=2561 data-nosnippet>2561</a>            </span>.std_context(<span class="string">"the writer never ended"</span>)<span class="question-mark">?</span>;
 <a href=#2562 id=2562 data-nosnippet>2562</a>        <span class="macro">assert!</span>(
 <a href=#2563 id=2563 data-nosnippet>2563</a>            <span class="macro">matches!</span>(result, <span class="prelude-val">Err</span>(util::WriteError::Stalled { .. })),
 <a href=#2564 id=2564 data-nosnippet>2564</a>            <span class="string">"{result:?}"
@@ -2622,7 +2622,7 @@
 <a href=#2622 id=2622 data-nosnippet>2622</a>        <span class="kw">let </span>send_loop = SendLoop::new(conn, queue.lease(), TEST_FRAME_LIMIT);
 <a href=#2623 id=2623 data-nosnippet>2623</a>        <span class="kw">let </span>result = timeout(util::OPEN_TIMEOUT * <span class="number">5</span>, send_loop.run())
 <a href=#2624 id=2624 data-nosnippet>2624</a>            .<span class="kw">await
-<a href=#2625 id=2625 data-nosnippet>2625</a>            </span>.std_context(<span class="string">"the writer waited for good"</span>)<span class="question-mark">?</span>;
+<a href=#2625 id=2625 data-nosnippet>2625</a>            </span>.std_context(<span class="string">"the writer never ended"</span>)<span class="question-mark">?</span>;
 <a href=#2626 id=2626 data-nosnippet>2626</a>        <span class="macro">assert!</span>(
 <a href=#2627 id=2627 data-nosnippet>2627</a>            <span class="macro">matches!</span>(result, <span class="prelude-val">Err</span>(util::WriteError::OpenStalled { .. })),
 <a href=#2628 id=2628 data-nosnippet>2628</a>            <span class="string">"{result:?}"
