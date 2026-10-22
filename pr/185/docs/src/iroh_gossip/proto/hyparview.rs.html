@@ -1168,7 +1168,7 @@
 <a href=#1168 id=1168 data-nosnippet>1168</a>    /// a later message changes them. Only a wire change can fix it, for example
 <a href=#1169 id=1169 data-nosnippet>1169</a>    /// a membership epoch that a `Disconnect` names.
 <a href=#1170 id=1170 data-nosnippet>1170</a>    </span><span class="attr">#[test]
-<a href=#1171 id=1171 data-nosnippet>1171</a>    #[ignore = <span class="string">"known limit of the v1 wire, see the known limits of QueueOptions"</span>]
+<a href=#1171 id=1171 data-nosnippet>1171</a>    #[ignore = <span class="string">"known limit of the v1 wire, see the known limits of SendQueue"</span>]
 <a href=#1172 id=1172 data-nosnippet>1172</a>    </span><span class="kw">fn </span>late_disconnect_keeps_a_rejoined_neighbor() {
 <a href=#1173 id=1173 data-nosnippet>1173</a>        <span class="kw">let </span><span class="kw-2">mut </span>contact = new_state();
 <a href=#1174 id=1174 data-nosnippet>1174</a>        <span class="kw">let </span><span class="kw-2">mut </span>joiner = State::new(<span class="number">1</span>, <span class="prelude-val">None</span>, Config::default(), StdRng::seed_from_u64(<span class="number">2</span>));
