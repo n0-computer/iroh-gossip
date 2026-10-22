@@ -122,6 +122,8 @@ pub struct Network<PI, R> {
     queue: TimedEventQueue<PI>,
     /// Whether shuffles and maintenance passes stopped, see [`Self::stop_membership_cycles`].
     cycles_stopped: bool,
+    /// Peers that are alive but cannot reach anyone, see [`Self::set_offline`].
+    offline: BTreeSet<PI>,
 }
 
 impl<PI, R> Network<PI, R> {
@@ -135,6 +137,7 @@ impl<PI, R> Network<PI, R> {
             config,
             queue: Default::default(),
             cycles_stopped: false,
+            offline: Default::default(),
             peers: Default::default(),
             conns: Default::default(),
             closed_at: Default::default(),
@@ -236,6 +239,40 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
         self.peers.remove(peer);
     }
 
+    /// Takes a peer off the network, or puts it back on.
+    ///
+    /// An offline peer keeps its state and its timers run, as on a device that
+    /// lost its network. Its connections break, and every message to or from it
+    /// fails at the sender, as a dial does without a route.
+    pub fn set_offline(&mut self, peer: &PI, offline: bool) {
+        if !offline {
+            self.offline.remove(peer);
+            return;
+        }
+        self.offline.insert(*peer);
+        let conns: Vec<_> = self
+            .conns
+            .iter()
+            .filter(|&c| c.peers().contains(peer))
+            .cloned()
+            .collect();
+        for conn in conns {
+            let other = conn.other(*peer).unwrap();
+            self.kill_connection(*peer, other);
+            // `kill_connection` tells only the other side. The offline peer
+            // notices the break too.
+            let latency = latency_between(
+                &self.config.latency,
+                &mut self.latencies,
+                peer,
+                &other,
+                &mut self.rng,
+            );
+            self.queue
+                .insert(self.time + latency, *peer, InEvent::PeerDisconnected(other));
+        }
+    }
+
     /// Returns the time elapsed since starting the network.
     pub fn elapsed(&self) -> Duration {
         self.time.duration_since(self.start)
@@ -335,7 +372,13 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
         let _guard = span.enter();
         debug!("~~ TICK ");
 
-        if !self.peers.contains_key(&peer) {
+        let unreachable = match &event {
+            InEvent::RecvMessage(from, _) => {
+                self.offline.contains(&peer) || self.offline.contains(from)
+            }
+            _ => false,
+        };
+        if !self.peers.contains_key(&peer) || unreachable {
             // A message sent to a peer that has gone fails at the sender, the way
             // a send over a closed connection does. Without this, a peer that
             // never had a connection to the dead one never learns it is gone,
