@@ -395,7 +395,7 @@ struct Actor {
     send_queue_size: usize,
     /// Events that the handling of an event caused, handled after it.
     follow_ups: VecDeque<InEvent>,
-    /// The topics whose publishers wait, see [`PublishGate`].
+    /// The topics whose publishers wait, see [`BroadcastGate`].
     paused_topics: BTreeSet<TopicId>,
     /// When to check the paused topics again.
     ///
@@ -544,14 +544,14 @@ impl Actor {
             Some((key, (topic, command))) = self.command_rx.next(), if !self.command_rx.is_empty() => {
                 trace!(?i, "tick: command_rx");
                 self.handle_command(topic, key, command);
-                self.update_gate(topic);
+                self.update_broadcast_gate(topic);
             },
             // A queue gives no signal when it drains, so the gate of a paused topic
             // opens only on this check. It runs only while a topic is paused.
             _ = self.gate_check.tick(), if !self.paused_topics.is_empty() => {
-                // `update_gate` puts back each topic that stays paused.
+                // `update_broadcast_gate` puts back each topic that stays paused.
                 for topic in std::mem::take(&mut self.paused_topics) {
-                    self.update_gate(topic);
+                    self.update_broadcast_gate(topic);
                 }
             },
             Some(new_address) = addr_updates.next() => {
@@ -636,7 +636,7 @@ impl Actor {
     /// be lost for every peer that we push it to. Slow peers alone can fill all
     /// the queues too. One slow eager peer among others pauses nothing. Lazy
     /// peers get only announcements, so they do not count.
-    fn update_gate(&mut self, topic: TopicId) {
+    fn update_broadcast_gate(&mut self, topic: TopicId) {
         let mut eager = self.state.eager_peers(&topic).peekable();
         let busy = eager.peek().is_some()
             && eager.all(|peer| {
@@ -645,7 +645,7 @@ impl Actor {
                     .is_some_and(|peer| peer.queue.is_busy())
             });
         if let Some(state) = self.topics.get(&topic) {
-            state.gate.set_paused(busy);
+            state.broadcast_gate.set_paused(busy);
         }
         if busy {
             self.paused_topics.insert(topic);
@@ -831,7 +831,7 @@ impl Actor {
                     neighbors,
                     event_sender,
                     command_rx_keys,
-                    gate,
+                    broadcast_gate,
                 } = self.topics.entry(topic_id).or_default();
                 let mut sender_dead = false;
                 if !neighbors.is_empty() {
@@ -852,8 +852,11 @@ impl Actor {
                     self.topic_event_forwarders
                         .spawn(fut.instrument(tracing::Span::current()));
                 }
-                let command_rx =
-                    TopicCommandStream::new(topic_id, Box::pin(rx.into_stream()), gate.clone());
+                let command_rx = TopicCommandStream::new(
+                    topic_id,
+                    Box::pin(rx.into_stream()),
+                    broadcast_gate.clone(),
+                );
                 let key = self.command_rx.insert(command_rx);
                 command_rx_keys.insert(key);
 
@@ -1146,7 +1149,7 @@ struct TopicState {
     ///
     /// This represents the receiver side of gossip's publish public API.
     command_rx_keys: HashSet<stream_group::Key>,
-    gate: Arc<PublishGate>,
+    broadcast_gate: Arc<BroadcastGate>,
 }
 
 impl Default for TopicState {
@@ -1156,7 +1159,7 @@ impl Default for TopicState {
             neighbors: Default::default(),
             command_rx_keys: Default::default(),
             event_sender,
-            gate: Default::default(),
+            broadcast_gate: Default::default(),
         }
     }
 }
@@ -1173,14 +1176,14 @@ const GATE_CHECK: Duration = Duration::from_millis(10);
 /// each publisher at ten broadcasts per second or more.
 const GATE_LIMIT: Duration = Duration::from_millis(100);
 
-/// Lets the publishers of a topic wait, see [`Actor::update_gate`].
+/// Lets the publishers of a topic wait, see [`Actor::update_broadcast_gate`].
 ///
 /// Only a broadcast waits, for at most [`GATE_LIMIT`]. The commands after it
 /// wait behind it, so that they keep their order, and the publisher waits once
 /// its command channel is full. A stream without a waiting broadcast passes
 /// its other commands and its end, which leaves the topic.
 #[derive(Debug, Default)]
-struct PublishGate(Mutex<GateState>);
+struct BroadcastGate(Mutex<GateState>);
 
 #[derive(Debug, Default)]
 struct GateState {
@@ -1189,7 +1192,7 @@ struct GateState {
     waiting: Vec<Waker>,
 }
 
-impl PublishGate {
+impl BroadcastGate {
     /// Returns ready while the gate is open, and wakes the caller once it opens.
     fn poll_open(&self, cx: &mut Context<'_>) -> Poll<()> {
         let mut state = self.0.lock().expect("poisoned");
@@ -1445,19 +1448,23 @@ struct TopicCommandStream {
     #[debug("CommandStream")]
     stream: BoxedCommandReceiver,
     closed: bool,
-    gate: Arc<PublishGate>,
+    broadcast_gate: Arc<BroadcastGate>,
     /// A broadcast that waits for the gate, and when it passes even if the gate stays closed.
     #[debug(skip)]
     waiting: Option<(Command, Pin<Box<Sleep>>)>,
 }
 
 impl TopicCommandStream {
-    fn new(topic_id: TopicId, stream: BoxedCommandReceiver, gate: Arc<PublishGate>) -> Self {
+    fn new(
+        topic_id: TopicId,
+        stream: BoxedCommandReceiver,
+        broadcast_gate: Arc<BroadcastGate>,
+    ) -> Self {
         Self {
             topic_id,
             stream,
             closed: false,
-            gate,
+            broadcast_gate,
             waiting: None,
         }
     }
@@ -1484,7 +1491,7 @@ impl Stream for TopicCommandStream {
             command,
             Command::Broadcast(_) | Command::BroadcastNeighbors(_)
         );
-        if broadcast && self.gate.poll_open(cx).is_pending() {
+        if broadcast && self.broadcast_gate.poll_open(cx).is_pending() {
             // The timer starts when the gate first holds back this broadcast.
             let mut deadline =
                 deadline.unwrap_or_else(|| Box::pin(n0_future::time::sleep(GATE_LIMIT)));
@@ -4663,7 +4670,7 @@ pub(crate) mod tests {
     #[tokio::test(start_paused = true)]
     async fn closed_gate_holds_only_broadcasts() -> Result {
         let topic = TopicId::from_bytes([1; 32]);
-        let gate = Arc::new(PublishGate::default());
+        let gate = Arc::new(BroadcastGate::default());
         gate.set_paused(true);
         let commands = vec![
             Ok(Command::JoinPeers(vec![])),
@@ -4728,7 +4735,7 @@ pub(crate) mod tests {
     #[tokio::test(start_paused = true)]
     async fn open_gate_wakes_every_publisher() -> Result {
         let topic = TopicId::from_bytes([1; 32]);
-        let gate = Arc::new(PublishGate::default());
+        let gate = Arc::new(BroadcastGate::default());
         gate.set_paused(true);
         let publisher = |name: &'static str| {
             let commands = vec![Ok(Command::Broadcast(Bytes::from_static(name.as_bytes())))];
@@ -4800,7 +4807,7 @@ pub(crate) mod tests {
         let paused = |actor: &Actor| actor.paused_topics.contains(&topic);
 
         fill(&actor, full);
-        actor.update_gate(topic);
+        actor.update_broadcast_gate(topic);
         assert!(
             !paused(&actor),
             "one eager peer with room must keep the gate open"
@@ -4812,14 +4819,14 @@ pub(crate) mod tests {
             message: TopicMessage::test_prune(),
         };
         actor.handle_in_event(InEvent::RecvMessage(other, prune), Instant::now());
-        actor.update_gate(topic);
+        actor.update_broadcast_gate(topic);
         assert!(
             paused(&actor),
             "a lazy peer with room must not keep the gate open"
         );
 
         actor.handle_in_event(InEvent::PeerDisconnected(full), Instant::now());
-        actor.update_gate(topic);
+        actor.update_broadcast_gate(topic);
         assert!(
             !paused(&actor),
             "the gate stayed closed without eager peers"
