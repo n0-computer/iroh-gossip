@@ -241,71 +241,34 @@ impl Builder {
 
 /// Options of the send queue to each peer, for [`Builder::send_queue`].
 ///
-/// # How sending works
+/// Gossip keeps one send queue per peer, shared between all topics. The queue
+/// holds up to [`Self::size`] bytes of messages on their way to that peer.
+/// When the queue becomes full, new data and announcement messages to that peer
+/// will be dropped to not hold up the whole swarm. If this peer cannot keep
+/// up with the volume of messages to be sent or relayed, the following
+/// may happen:
 ///
-/// Gossip keeps one send queue per peer, shared by all topics. The queue
-/// holds the messages that wait to go out to that peer, up to [`Self::size`]
-/// bytes. Gossip never waits for room in a queue, so one peer that reads
-/// slowly, or not at all, holds up nothing else.
+/// - A broadcast to the peer is dropped, and [`Metrics::msgs_dropped`] counts
+///   it. Gossip announces the broadcast to the peer again, and the peer
+///   fetches it while it is still cached, 30 s by default. A broadcast to
+///   direct neighbors is never repaired.
+/// - A membership message to the peer closes the connection, and
+///   [`Metrics::peers_send_queue_full`] counts it. Both sides find new
+///   neighbors.
+/// - Once the queues to all peers that a topic pushes to are half full,
+///   [`GossipSender::broadcast`] on that topic waits for room, up to 100 ms
+///   per message. Relayed traffic and other topics fill the same queues, so
+///   this slows a publisher that sends little as well.
 ///
-/// When the queue to a peer is full:
+/// Independent of the size:
 ///
-/// - A broadcast to that peer, or the announcement of one, is dropped.
-///   [`Metrics::msgs_dropped`] counts the drops. Gossip announces a dropped
-///   broadcast again later, and the peer fetches it, as long as it stays
-///   cached.
-/// - Any other message closes the connection instead. These messages manage
-///   the membership, and after a missed one the two sides would no longer
-///   agree on who their neighbors are. Each side treats the other as gone,
-///   and finds new neighbors. [`Metrics::peers_send_queue_full`] counts
-///   these closes.
-///
-/// Broadcasts are the one place where gossip does wait. When the queues to
-/// all peers that a topic pushes broadcasts to are half full with data, the
-/// node's own uplink is probably the limit, and more data would only be
-/// dropped for every peer. [`GossipSender::broadcast`] then waits for room,
-/// up to 100 ms per message.
-///
-/// # What this means for your app
-///
-/// - **Delivery is not guaranteed.** A peer that cannot keep up misses
-///   messages. The repair recovers many of them, but not all: at most 256
-///   per peer at a time, 64 per second, and only while the message stays
-///   cached, 30 s by default
-///   ([`PlumtreeConfig::message_cache_retention`]). A broadcast to direct
-///   neighbors ([`GossipSender::broadcast_neighbors`]) is never repaired.
-///   If your app needs every message, number them, and fetch the gaps
-///   another way.
-/// - **Delivery can be late.** The queue bounds bytes, not time, and QUIC
-///   buffers more on top. On a 1 Mbit/s link, a message can arrive 30 to
-///   40 s after it was sent. If only the latest state matters, timestamp
-///   your messages and skip the old ones.
-/// - **A burst can outrun the wait.** A publisher waits only once the QUIC
-///   buffers and part of each queue are full. A burst larger than that
-///   loses messages at the peers that cannot keep up.
-/// - **Other traffic can slow your publisher, but not stop it.** The wait
-///   also starts when all the peers a topic pushes to are slow, or when
-///   relayed traffic and other topics fill the same queues. The 100 ms
-///   bound keeps every publisher at ten broadcasts per second or more.
-/// - **Each shared topic keeps a stream open.** Share more topics with one
-///   peer than the stream limit of its endpoint allows, 100 by default, and
-///   the connection closes after 15 s, again after each rejoin. Raise
-///   `max_concurrent_uni_streams` on your endpoints if you need more.
-/// - **A peer that stalls loses its connection.** A peer that takes no data
-///   for 60 s gets its connection closed. A node of iroh-gossip 0.101 or
-///   older does not handle such closes, and the messages it then sends to
-///   this node are lost until it reconnects.
-///
-/// # Choosing a size
-///
-/// A larger queue absorbs larger bursts and longer stalls without loss. It
-/// costs up to its size in memory for each peer, and a slow peer gets older
-/// data, since more of it waits. A smaller queue drops sooner and stays
-/// fresher.
+/// - Messages to a slow peer arrive late. The queue bounds bytes, not time,
+///   and QUIC buffers more on top.
+/// - A peer that takes no data for 60 s loses its connection, as does one
+///   that shares more topics with this node than its stream limit allows,
+///   100 by default.
 ///
 /// [`GossipSender::broadcast`]: crate::api::GossipSender::broadcast
-/// [`GossipSender::broadcast_neighbors`]: crate::api::GossipSender::broadcast_neighbors
-/// [`PlumtreeConfig::message_cache_retention`]: crate::proto::PlumtreeConfig::message_cache_retention
 #[derive(Debug, Clone, Copy)]
 pub struct QueueOptions {
     size: usize,
@@ -322,8 +285,11 @@ impl Default for QueueOptions {
 impl QueueOptions {
     /// Sets the size of the queue in bytes, 1 MiB by default.
     ///
-    /// A message takes its encoded size and about a hundred bytes more. The queue is
-    /// at least 64 KiB, and fits eight messages of [`Builder::max_message_size`].
+    /// A larger queue absorbs larger bursts and longer stalls without a
+    /// loss. It costs up to its size in memory for each peer, and it lets
+    /// more old data wait for a slow one. A message takes its encoded size
+    /// and about a hundred bytes more. Whatever the setting, the queue is at
+    /// least 64 KiB, and fits eight messages of [`Builder::max_message_size`].
     pub fn size(mut self, size: usize) -> Self {
         self.size = size;
         self
