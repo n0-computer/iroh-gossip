@@ -1446,11 +1446,9 @@ struct TopicCommandStream {
     stream: BoxedCommandReceiver,
     closed: bool,
     gate: Arc<PublishGate>,
-    /// A broadcast that waits for the gate.
-    held: Option<Command>,
-    /// When the held broadcast passes even if the gate stays closed.
+    /// A broadcast that waits for the gate, and when it passes even if the gate stays closed.
     #[debug(skip)]
-    held_until: Option<Pin<Box<Sleep>>>,
+    held: Option<(Command, Pin<Box<Sleep>>)>,
 }
 
 impl TopicCommandStream {
@@ -1461,7 +1459,6 @@ impl TopicCommandStream {
             closed: false,
             gate,
             held: None,
-            held_until: None,
         }
     }
 }
@@ -1472,10 +1469,10 @@ impl Stream for TopicCommandStream {
         if self.closed {
             return Poll::Ready(None);
         }
-        let command = match self.held.take() {
-            Some(command) => command,
+        let (command, held_until) = match self.held.take() {
+            Some((command, held_until)) => (command, Some(held_until)),
             None => match Pin::new(&mut self.stream).poll_next(cx) {
-                Poll::Ready(Some(Ok(command))) => command,
+                Poll::Ready(Some(Ok(command))) => (command, None),
                 Poll::Ready(None) | Poll::Ready(Some(Err(_))) => {
                     self.closed = true;
                     return Poll::Ready(Some((self.topic_id, None)));
@@ -1487,18 +1484,14 @@ impl Stream for TopicCommandStream {
             command,
             Command::Broadcast(_) | Command::BroadcastNeighbors(_)
         );
-        if broadcast {
-            if self.gate.poll_open(cx).is_pending() {
-                // The timer starts when the gate first holds this broadcast.
-                let held_until = self
-                    .held_until
-                    .get_or_insert_with(|| Box::pin(n0_future::time::sleep(GATE_LIMIT)));
-                if held_until.as_mut().poll(cx).is_pending() {
-                    self.held = Some(command);
-                    return Poll::Pending;
-                }
+        if broadcast && self.gate.poll_open(cx).is_pending() {
+            // The timer starts when the gate first holds this broadcast.
+            let mut held_until =
+                held_until.unwrap_or_else(|| Box::pin(n0_future::time::sleep(GATE_LIMIT)));
+            if held_until.as_mut().poll(cx).is_pending() {
+                self.held = Some((command, held_until));
+                return Poll::Pending;
             }
-            self.held_until = None;
         }
         Poll::Ready(Some((self.topic_id, Some(command))))
     }

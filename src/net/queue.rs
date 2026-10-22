@@ -282,7 +282,7 @@ impl SendQueue {
             tx,
             capacity,
             closing,
-            reader: SharedReader(Arc::new(tokio::sync::Mutex::new(reader))),
+            reader: Arc::new(tokio::sync::Mutex::new(reader)),
             revoke: failed.child_token(),
             failed,
         }
@@ -336,7 +336,7 @@ impl SendQueue {
     /// Returns the reader of the queue, if no writer reads it.
     #[cfg(test)]
     pub(super) fn try_reader(&self) -> Option<OwnedMutexGuard<QueueReader>> {
-        self.reader.0.clone().try_lock_owned().ok()
+        self.reader.clone().try_lock_owned().ok()
     }
 }
 
@@ -360,7 +360,7 @@ impl QueueLease {
     ///
     /// Waits only at a handover, see [`SharedReader`].
     pub(super) async fn lock(&self) -> OwnedMutexGuard<QueueReader> {
-        self.reader.0.clone().lock_owned().await
+        self.reader.clone().lock_owned().await
     }
 
     /// Returns the token that ends the lease, at a handover or when the peer fails.
@@ -394,8 +394,7 @@ impl QueueLease {
 /// stopped writer gets [`HANDOVER_LIMIT`](super::util::HANDOVER_LIMIT) for its
 /// current message. Then it stops the write, and the next connection writes
 /// the message again.
-#[derive(Debug, Clone)]
-struct SharedReader(Arc<tokio::sync::Mutex<QueueReader>>);
+type SharedReader = Arc<tokio::sync::Mutex<QueueReader>>;
 
 /// Reads a queue, and keeps the message that a writer has not finished.
 ///
