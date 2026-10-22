@@ -98,7 +98,7 @@
 <a href=#98 id=98 data-nosnippet>98</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">const </span>CLOSE_QUEUE_FULL: u32 = <span class="number">2</span>;
 <a href=#99 id=99 data-nosnippet>99</a>
 <a href=#100 id=100 data-nosnippet>100</a><span class="doccomment">/// The code of a close for a write or a stream open that made no progress in time.
-<a href=#101 id=101 data-nosnippet>101</a></span><span class="kw">const </span>CLOSE_STALLED: u32 = <span class="number">3</span>;
+<a href=#101 id=101 data-nosnippet>101</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">const </span>CLOSE_STALLED: u32 = <span class="number">3</span>;
 <a href=#102 id=102 data-nosnippet>102</a>
 <a href=#103 id=103 data-nosnippet>103</a><span class="doccomment">/// The first frame of a stream: the topic of its messages, and a byte of flags.
 <a href=#104 id=104 data-nosnippet>104</a>///
@@ -374,7 +374,7 @@
 <a href=#374 id=374 data-nosnippet>374</a>                    </span><span class="prelude-val">Ok</span>(<span class="bool-val">false</span>) =&gt; <span class="kw">break</span>,
 <a href=#375 id=375 data-nosnippet>375</a>                    <span class="prelude-val">Err</span>(err) =&gt; {
 <a href=#376 id=376 data-nosnippet>376</a>                        <span class="self">self</span>.handle_error(item.message.topic, err)<span class="question-mark">?</span>;
-<a href=#377 id=377 data-nosnippet>377</a>                        queue.written();
+<a href=#377 id=377 data-nosnippet>377</a>                        queue.advance();
 <a href=#378 id=378 data-nosnippet>378</a>                        <span class="kw">continue</span>;
 <a href=#379 id=379 data-nosnippet>379</a>                    }
 <a href=#380 id=380 data-nosnippet>380</a>                }
@@ -395,7 +395,7 @@
 <a href=#395 id=395 data-nosnippet>395</a>                        <span class="kw">break</span>;
 <a href=#396 id=396 data-nosnippet>396</a>                    }
 <a href=#397 id=397 data-nosnippet>397</a>                }
-<a href=#398 id=398 data-nosnippet>398</a>                queue.written();
+<a href=#398 id=398 data-nosnippet>398</a>                queue.advance();
 <a href=#399 id=399 data-nosnippet>399</a>            }
 <a href=#400 id=400 data-nosnippet>400</a>        }
 <a href=#401 id=401 data-nosnippet>401</a>        <span class="comment">// Close remaining streams.
@@ -462,7 +462,7 @@
 <a href=#462 id=462 data-nosnippet>462</a>    ///
 <a href=#463 id=463 data-nosnippet>463</a>    /// Returns `false` if `revoked` ends the lease before the stream opened. A
 <a href=#464 id=464 data-nosnippet>464</a>    /// header that started is written in full, as a node up to 0.101 drops the
-<a href=#465 id=465 data-nosnippet>465</a>    /// whole connection on a partial one. A failure of the peer closes the
+<a href=#465 id=465 data-nosnippet>465</a>    /// whole connection on a partial one. An abort of the peer closes the
 <a href=#466 id=466 data-nosnippet>466</a>    /// connection anyway, and cuts the header.
 <a href=#467 id=467 data-nosnippet>467</a>    </span><span class="kw">async fn </span>open_stream(
 <a href=#468 id=468 data-nosnippet>468</a>        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
