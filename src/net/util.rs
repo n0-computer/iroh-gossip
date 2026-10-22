@@ -374,7 +374,7 @@ impl SendLoop {
                     Ok(false) => break,
                     Err(err) => {
                         self.handle_error(item.message.topic, err)?;
-                        queue.written();
+                        queue.advance();
                         continue;
                     }
                 }
@@ -395,7 +395,7 @@ impl SendLoop {
                         break;
                     }
                 }
-                queue.written();
+                queue.advance();
             }
         }
         // Close remaining streams.

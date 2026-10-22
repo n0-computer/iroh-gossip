@@ -1448,7 +1448,7 @@ struct TopicCommandStream {
     gate: Arc<PublishGate>,
     /// A broadcast that waits for the gate, and when it passes even if the gate stays closed.
     #[debug(skip)]
-    held: Option<(Command, Pin<Box<Sleep>>)>,
+    waiting: Option<(Command, Pin<Box<Sleep>>)>,
 }
 
 impl TopicCommandStream {
@@ -1458,7 +1458,7 @@ impl TopicCommandStream {
             stream,
             closed: false,
             gate,
-            held: None,
+            waiting: None,
         }
     }
 }
@@ -1469,8 +1469,8 @@ impl Stream for TopicCommandStream {
         if self.closed {
             return Poll::Ready(None);
         }
-        let (command, held_until) = match self.held.take() {
-            Some((command, held_until)) => (command, Some(held_until)),
+        let (command, deadline) = match self.waiting.take() {
+            Some((command, deadline)) => (command, Some(deadline)),
             None => match Pin::new(&mut self.stream).poll_next(cx) {
                 Poll::Ready(Some(Ok(command))) => (command, None),
                 Poll::Ready(None) | Poll::Ready(Some(Err(_))) => {
@@ -1485,11 +1485,11 @@ impl Stream for TopicCommandStream {
             Command::Broadcast(_) | Command::BroadcastNeighbors(_)
         );
         if broadcast && self.gate.poll_open(cx).is_pending() {
-            // The timer starts when the gate first holds this broadcast.
-            let mut held_until =
-                held_until.unwrap_or_else(|| Box::pin(n0_future::time::sleep(GATE_LIMIT)));
-            if held_until.as_mut().poll(cx).is_pending() {
-                self.held = Some((command, held_until));
+            // The timer starts when the gate first holds back this broadcast.
+            let mut deadline =
+                deadline.unwrap_or_else(|| Box::pin(n0_future::time::sleep(GATE_LIMIT)));
+            if deadline.as_mut().poll(cx).is_pending() {
+                self.waiting = Some((command, deadline));
                 return Poll::Pending;
             }
         }
@@ -4716,7 +4716,7 @@ pub(crate) mod tests {
         );
         assert!(start.elapsed() >= GATE_LIMIT, "the broadcast did not wait");
 
-        // A stream with nothing held ends at once, also while the gate is closed.
+        // A stream with no waiting broadcast ends at once, also while the gate is closed.
         let next = timeout(soon, stream.next())
             .await
             .std_context("the end of the stream waited for the gate")?;
@@ -5150,7 +5150,7 @@ pub(crate) mod tests {
         let _join = open_stream(&conn, topic, &[join_message(topic, 0).message]).await?;
         neighbor_up(&mut a_rx, b.id()).await?;
 
-        // The gate never opens while B reads nothing, so a held broadcast
+        // The gate never opens while B reads nothing, so a waiting broadcast
         // takes the whole limit.
         let mut waited = false;
         for i in 0..2000u32 {

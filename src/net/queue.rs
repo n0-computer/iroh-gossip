@@ -216,7 +216,7 @@ impl Drop for Reservation {
 ///   topic pauses its publishers, as a sign that our own uplink is the limit.
 ///   It is also true when all eager peers are slow, even if a lazy peer could
 ///   take more, and when relayed traffic or other topics fill the queues. A
-///   relay never waits, and a held broadcast passes after
+///   relay never waits, and a waiting broadcast passes after
 ///   [`GATE_LIMIT`](super::GATE_LIMIT), so other traffic cannot slow a
 ///   publisher below ten broadcasts per second. A broadcast with neighbor
 ///   scope waits on the same check, though it goes to all neighbors.
@@ -412,7 +412,7 @@ impl QueueReader {
     ///
     /// No more come once the queue is gone, or the queue is empty while it
     /// closes, see [`SendQueue::set_closing`]. The message stays the current
-    /// one until [`Self::written`]. This is cancellation-safe.
+    /// one until [`Self::advance`]. This is cancellation-safe.
     pub(super) async fn next(&mut self) -> bool {
         if self.unfinished.is_none() {
             self.unfinished = tokio::select! {
@@ -430,7 +430,7 @@ impl QueueReader {
     }
 
     /// Ends the current message, written or dropped, which releases its reservation.
-    pub(super) fn written(&mut self) {
+    pub(super) fn advance(&mut self) {
         self.unfinished = None;
     }
 
@@ -563,7 +563,7 @@ mod tests {
         queue.set_closing(true);
         let mut reader = queue.try_reader().unwrap();
         assert!(reader.next().await, "the queued message went");
-        reader.written();
+        reader.advance();
         assert!(!reader.next().await, "the empty closing queue did not end");
         queue.set_closing(false);
         assert!(matches!(queue.push(shuffle()), Pushed::Queued));
@@ -583,12 +583,12 @@ mod tests {
             assert_eq!(current, &data(len).message);
             reader
         };
-        // The first writer stops without `written`.
+        // The first writer stops without `advance`.
         drop(first(queue.lease(), 10).await);
         let mut reader = first(queue.lease(), 10).await;
-        reader.written();
+        reader.advance();
         drop(reader);
-        first(queue.lease(), 20).await.written();
+        first(queue.lease(), 20).await.advance();
         assert_eq!(used(&queue), (0, 0));
     }
 
