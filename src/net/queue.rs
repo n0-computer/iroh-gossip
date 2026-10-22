@@ -207,29 +207,25 @@ impl Drop for Reservation {
 /// The [`Capacity`] bounds the queue, so its channel needs no bound of its own.
 /// Each message reserves at least [`MESSAGE_OVERHEAD`] bytes until the writer drops it.
 ///
-/// # What the design gives up
-///
-/// Each bullet is a choice and its cost. Ignored tests show the stream
-/// order, the stream limit and the handover. [`QueueOptions`](super::QueueOptions)
-/// tells apps the short version.
+/// # Design and limitations
 ///
 /// - We never wait on a peer. A full queue drops data, and a control message
 ///   that does not fit aborts the peer. What was queued for an aborted peer is
-///   lost, and no metric counts it.
+///   lost.
 /// - Each topic has one stream to a peer, and we write it in order. The peer
 ///   reads each stream on its own, so it may handle a `Join` before an
 ///   earlier `Disconnect`. The peer also limits its streams, to 100 by
 ///   default. Over that limit, an open waits
 ///   [`OPEN_TIMEOUT`](super::util::OPEN_TIMEOUT) and closes the connection,
-///   again after each rejoin. Only a wire change fixes either.
+///   again after each rejoin.
 /// - A handover keeps the order: the new connection waits for the old one to
 ///   finish its message. A control overflow meanwhile aborts the peer, and
-///   closes the new connection too, though only the old one is stuck.
+///   closes the new connection too.
 /// - The queue bounds bytes, not time. It fills only once QUIC buffered all
 ///   it can for the peer, so a burst larger than both loses messages before
-///   anyone waits. Data at a 1 Mbit/s peer is 30 to 40 s old.
-/// - The gate guesses. Busy queues to all eager peers may mean that our
-///   uplink is the limit. They may also mean that all eager peers are slow,
+///   anyone waits.
+/// - Busy queues to all eager peers may mean that our uplink is the limit.
+///   They may also mean that all eager peers are slow,
 ///   or that relayed traffic and other topics fill the queues. A waiting
 ///   broadcast passes after [`GATE_LIMIT`](super::GATE_LIMIT) in any case.
 /// - Repair is capped, at 256 ids per peer, 4096 per topic, and 64 per peer
@@ -237,8 +233,6 @@ impl Drop for Reservation {
 ///   neighbor scope.
 /// - All topics share the queue to a peer. A busy topic crowds out another,
 ///   and control waits behind the data queued before it.
-/// - The new closes hit old nodes. A node up to 0.101 may lose its later
-///   messages to us after a close for an overflow or a stall (#155).
 #[derive(Debug)]
 pub(super) struct SendQueue {
     tx: mpsc::UnboundedSender<QueuedMessage>,
