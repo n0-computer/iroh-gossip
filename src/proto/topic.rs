@@ -149,6 +149,11 @@ impl<PI> Message<PI> {
         Message::Gossip(plumtree::Message::test_ihave())
     }
 
+    /// Returns a `Prune`, for the network tests.
+    pub(crate) fn test_prune() -> Self {
+        Message::Gossip(plumtree::Message::test_prune())
+    }
+
     /// Returns a shuffle from `origin` carrying no nodes, for the network tests.
     pub(crate) fn test_shuffle(origin: PI, ttl: u16) -> Self {
         Message::Swarm(hyparview::Message::test_shuffle(origin, ttl))

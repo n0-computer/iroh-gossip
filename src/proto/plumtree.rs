@@ -182,6 +182,11 @@ impl Message {
             round: Round(0),
         }])
     }
+
+    /// Returns a `Prune`, for the network tests.
+    pub(crate) fn test_prune() -> Self {
+        Message::Prune
+    }
 }
 
 /// Payload messages transmitted by the protocol.

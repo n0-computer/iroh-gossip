@@ -2567,8 +2567,8 @@ pub(crate) mod tests {
         let pair = TestPair::new(1).await?;
         let (conn, peer_conn) = pair.connect().await?;
         let topic: TopicId = blake3::hash(b"slow").into();
-        // At 64 KiB per 300 ms, the frame takes about 9 s.
-        let (count, len) = (1, 2_000_000);
+        // At 64 KiB per 300 ms, the frame takes about 6.5 s, over the write timeout.
+        let (count, len) = (1, 1_400_000);
         let queue_lease = queue_payloads(topic, count, len);
         let send_loop = SendLoop::new(conn, queue_lease, 4 << 20);
         let send = AbortOnDropHandle::new(spawn(async move { send_loop.run().await }));
@@ -2877,14 +2877,18 @@ pub(crate) mod tests {
         }
     }
 
-    /// Pushes `message` to the queue of the active peer `peer_id`.
-    fn push_active(actor: &Actor, peer_id: EndpointId, message: ProtoMessage) {
+    /// Returns the state of `peer_id`, which must have an active connection.
+    fn active_state(actor: &Actor, peer_id: EndpointId) -> &PeerState {
         match actor.peers.get(&peer_id) {
-            Some(state) if matches!(state.conn, ConnState::Active { .. }) => {
-                assert!(matches!(state.queue.push(message), Pushed::Queued));
-            }
+            Some(state) if matches!(state.conn, ConnState::Active { .. }) => state,
             other => panic!("not active: {other:?}"),
         }
+    }
+
+    /// Pushes `message` to the queue of the active peer `peer_id`.
+    fn push_active(actor: &Actor, peer_id: EndpointId, message: ProtoMessage) {
+        let pushed = active_state(actor, peer_id).queue.push(message);
+        assert!(matches!(pushed, Pushed::Queued));
     }
 
     /// A replaced connection hands the rest of the queue to the new one, which keeps its order.
@@ -2904,13 +2908,10 @@ pub(crate) mod tests {
         let mut actor = t_actor().await?;
         actor.handle_connection(peer_id, ConnOrigin::Accept, old);
         // The old writer cannot take the queue before the new connection replaces it.
-        let held = match actor.peers.get(&peer_id) {
-            Some(state) if matches!(state.conn, ConnState::Active { .. }) => {
-                state.queue.try_reader()
-            }
-            other => panic!("not active: {other:?}"),
-        }
-        .std_context("the queue is locked")?;
+        let held = active_state(&actor, peer_id)
+            .queue
+            .try_reader()
+            .std_context("the queue is locked")?;
         push_active(&actor, peer_id, join_message(topic, 1));
         actor.handle_connection(peer_id, ConnOrigin::Accept, new);
         push_active(&actor, peer_id, join_message(topic, 2));
@@ -3086,6 +3087,32 @@ pub(crate) mod tests {
             .std_context("the new queue did not go out")??;
         assert_eq!(topic, joined);
         Ok(())
+    }
+
+    /// A peer that fails during a handover loses both connections at once.
+    ///
+    /// The old writer is stuck in a message and waits out the handover limit.
+    /// The failure must not wait for it, nor for its streams to finish.
+    #[tokio::test]
+    #[traced_test]
+    async fn failed_peer_during_a_handover_loses_both_connections() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (old, peer_old) = pair.connect().await?;
+        let (new, peer_new) = pair.connect().await?;
+        let peer_id = pair.ep2.id();
+        let topic: TopicId = blake3::hash(b"failed handover").into();
+        let mut actor = t_actor().await?;
+        actor.send_queue_size = 64 << 20;
+        actor.handle_connection(peer_id, ConnOrigin::Accept, old);
+        push_many(&actor, peer_id, topic, 3000);
+        // Wait until flow control blocks the old writer.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        actor.handle_connection(peer_id, ConnOrigin::Accept, new);
+
+        let mut follow_ups = VecDeque::new();
+        fail_peer(&mut actor.peers, &mut follow_ups, peer_id);
+        closed_with(&peer_old, util::CLOSE_QUEUE_FULL).await?;
+        closed_with(&peer_new, util::CLOSE_QUEUE_FULL).await
     }
 
     /// A peer that we drop and want again keeps one byte limit for its old and new messages.
@@ -4697,6 +4724,109 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// A gate that opens wakes every publisher that waits on it.
+    #[tokio::test(start_paused = true)]
+    async fn open_gate_wakes_every_publisher() -> Result {
+        let topic = TopicId::from_bytes([1; 32]);
+        let gate = Arc::new(PublishGate::default());
+        gate.set_paused(true);
+        let publisher = |name: &'static str| {
+            let commands = vec![Ok(Command::Broadcast(Bytes::from_static(name.as_bytes())))];
+            TopicCommandStream::new(
+                topic,
+                Box::pin(n0_future::stream::iter(commands)),
+                gate.clone(),
+            )
+        };
+        let (mut first, mut second) = (publisher("first"), publisher("second"));
+        let (mut next_first, mut next_second) = (first.next(), second.next());
+        let soon = GATE_LIMIT / 2;
+        assert!(timeout(soon, &mut next_first).await.is_err());
+        assert!(timeout(soon, &mut next_second).await.is_err());
+        gate.set_paused(false);
+        for next in [next_first, next_second] {
+            let next = timeout(soon, next)
+                .await
+                .std_context("the open gate did not wake a publisher")?;
+            assert!(
+                matches!(next, Some((_, Some(Command::Broadcast(_))))),
+                "{next:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// The gate follows the eager peers of the topic: one with room opens it, a lazy one does not count.
+    ///
+    /// No network: the peers join by received messages, and have active states
+    /// that nothing writes.
+    #[tokio::test]
+    #[traced_test]
+    async fn gate_follows_the_eager_peers() -> Result {
+        let topic: TopicId = blake3::hash(b"eager").into();
+        let mut actor = t_actor().await?;
+        actor.send_queue_size = queue::MIN_QUEUE_SIZE;
+        actor.topics.insert(topic, TopicState::default());
+        // A subscriber keeps the topic, which the actor quits otherwise.
+        let _events = actor.topics[&topic].event_sender.subscribe();
+        actor.handle_in_event(
+            InEvent::Command(topic, ProtoCommand::Join(vec![])),
+            Instant::now(),
+        );
+        let mut peers = Vec::new();
+        for id in 0..2usize {
+            let peer = SecretKey::generate().public();
+            let mut state = PeerState::pending(queue::MIN_QUEUE_SIZE);
+            let _lease = state.accept_conn(id, false);
+            actor.peers.insert(peer, state);
+            let join = join_message(topic, 0);
+            actor.handle_in_event(InEvent::RecvMessage(peer, join), Instant::now());
+            peers.push(peer);
+        }
+        let [full, other] = peers[..] else {
+            unreachable!()
+        };
+        assert_eq!(
+            actor.state.eager_peers(&topic).count(),
+            2,
+            "both joined eager"
+        );
+        let fill = |actor: &Actor, peer| {
+            let queue = &actor.peers[&peer].queue;
+            while !queue.is_busy() {
+                assert!(matches!(queue.push(numbered(topic, 0)), Pushed::Queued));
+            }
+        };
+        let paused = |actor: &Actor| actor.paused_topics.contains(&topic);
+
+        fill(&actor, full);
+        actor.update_gate(topic);
+        assert!(
+            !paused(&actor),
+            "one eager peer with room must keep the gate open"
+        );
+
+        // A prune makes the other peer lazy, so only the full one counts.
+        let prune = ProtoMessage {
+            topic,
+            message: TopicMessage::test_prune(),
+        };
+        actor.handle_in_event(InEvent::RecvMessage(other, prune), Instant::now());
+        actor.update_gate(topic);
+        assert!(
+            paused(&actor),
+            "a lazy peer with room must not keep the gate open"
+        );
+
+        actor.handle_in_event(InEvent::PeerDisconnected(full), Instant::now());
+        actor.update_gate(topic);
+        assert!(
+            !paused(&actor),
+            "the gate stayed closed without eager peers"
+        );
+        Ok(())
+    }
+
     /// Joins a topic with a publisher that always has a command ready.
     fn publish_forever(actor: &mut Actor) {
         let topic = [1; 32].into();
@@ -4932,6 +5062,20 @@ pub(crate) mod tests {
             .build()
     }
 
+    /// Waits until `receiver` reports `peer` as a neighbor.
+    async fn neighbor_up(receiver: &mut GossipReceiver, peer: EndpointId) -> Result {
+        timeout(PROMPT, async {
+            while let Some(event) = receiver.try_next().await? {
+                if matches!(event, api::Event::NeighborUp(up) if up == peer) {
+                    return Ok(());
+                }
+            }
+            Err(n0_error::anyerr!("the subscription ended"))
+        })
+        .await
+        .std_context("the peer did not become a neighbor")?
+    }
+
     /// Waits until `receiver` got a message with `content`, and returns the contents it got.
     async fn receive_until(receiver: &mut GossipReceiver, content: &[u8]) -> Result<Vec<Bytes>> {
         let mut received = Vec::new();
@@ -5004,16 +5148,7 @@ pub(crate) mod tests {
         let b = direct_endpoint(&lookup, small_windows(16 * 1024)).await?;
         let conn = b.connect(a.id(), GOSSIP_ALPN).await?;
         let _join = open_stream(&conn, topic, &[join_message(topic, 0).message]).await?;
-        timeout(PROMPT, async {
-            while let Some(event) = a_rx.try_next().await? {
-                if matches!(event, api::Event::NeighborUp(peer) if peer == b.id()) {
-                    return Ok(());
-                }
-            }
-            Err(n0_error::anyerr!("the subscription ended"))
-        })
-        .await
-        .std_context("B did not become a neighbor")??;
+        neighbor_up(&mut a_rx, b.id()).await?;
 
         // The gate never opens while B reads nothing, so a held broadcast
         // takes the whole limit.
@@ -5092,16 +5227,7 @@ pub(crate) mod tests {
         let conn = b.connect(a.id(), GOSSIP_ALPN).await?;
         let _join1 = open_stream(&conn, t1, &[join_message(t1, 0).message]).await?;
         let _join2 = open_stream(&conn, t2, &[join_message(t2, 0).message]).await?;
-        timeout(PROMPT, async {
-            while let Some(event) = a1_rx.try_next().await? {
-                if matches!(event, api::Event::NeighborUp(peer) if peer == b.id()) {
-                    return Ok(());
-                }
-            }
-            Err(n0_error::anyerr!("the subscription ended"))
-        })
-        .await
-        .std_context("B did not become a neighbor")??;
+        neighbor_up(&mut a1_rx, b.id()).await?;
         let reader = conn.clone();
         let _read = AbortOnDropHandle::new(spawn(async move {
             let mut tasks = JoinSet::new();
@@ -5171,16 +5297,7 @@ pub(crate) mod tests {
         let b = direct_endpoint(&lookup, small_windows(16 * 1024)).await?;
         let conn = b.connect(a.id(), GOSSIP_ALPN).await?;
         let _join = open_stream(&conn, t1, &[join_message(t1, 0).message]).await?;
-        timeout(PROMPT, async {
-            while let Some(event) = a1_rx.try_next().await? {
-                if matches!(event, api::Event::NeighborUp(peer) if peer == b.id()) {
-                    return Ok(());
-                }
-            }
-            Err(n0_error::anyerr!("the subscription ended"))
-        })
-        .await
-        .std_context("B did not become a neighbor")??;
+        neighbor_up(&mut a1_rx, b.id()).await?;
 
         let metrics = a.gossip.metrics().clone();
         let payload = Bytes::from(vec![7u8; 3000]);
