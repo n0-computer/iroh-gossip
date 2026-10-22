@@ -223,7 +223,10 @@ impl Drop for Reservation {
 ///   closes the new connection too.
 /// - The queue bounds bytes, not time. It fills only once QUIC buffered all
 ///   it can for the peer, so a burst larger than both loses messages before
-///   anyone waits.
+///   anyone waits. Under sustained overload, data at a peer on a 1 Mbit/s
+///   link can arrive up to 30 to 40 s late, as it did in tests. Most of it
+///   waits in the send buffer of QUIC, which the flow control window of the
+///   peer sizes, not in our queue.
 /// - Busy queues to all eager peers may mean that our uplink is the limit.
 ///   They may also mean that all eager peers are slow,
 ///   or that relayed traffic and other topics fill the queues. A waiting
@@ -372,7 +375,7 @@ impl QueueLease {
 /// another order, see what the design gives up in [`SendQueue`].
 ///
 /// A writer must not keep the lock without bound, or the next connection waits
-/// for good. Every way out of the loop of a writer unlocks: the end of the
+/// forever. Every way out of the loop of a writer unlocks: the end of the
 /// queue, a stop, a closed connection, an error, and a drop of its future. A
 /// stopped writer gets [`HANDOVER_LIMIT`](super::util::HANDOVER_LIMIT) for its
 /// current message. Then it stops the write, and the next connection writes

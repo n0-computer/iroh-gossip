@@ -1173,7 +1173,7 @@ const GATE_CHECK: Duration = Duration::from_millis(10);
 /// How long a broadcast waits at most for the gate of its topic.
 ///
 /// The gate cannot tell our own data from relayed data, and relays never
-/// wait. Other traffic can thus keep the gate closed for good. The bound keeps
+/// wait. Other traffic can thus keep the gate closed forever. The bound keeps
 /// each publisher at ten broadcasts per second or more.
 const GATE_LIMIT: Duration = Duration::from_millis(100);
 
@@ -2546,7 +2546,7 @@ pub(crate) mod tests {
     /// A write that makes no progress for the write timeout closes the connection.
     ///
     /// The peer never reads, so flow control blocks every write once the
-    /// receive window is full. The writer waited for good.
+    /// receive window is full. The writer never ended.
     #[tokio::test]
     #[traced_test]
     async fn stalled_write_closes_the_connection() -> Result {
@@ -2558,7 +2558,7 @@ pub(crate) mod tests {
         let send_loop = SendLoop::new(conn, queue_lease, TEST_FRAME_LIMIT);
         let result = timeout(util::WRITE_TIMEOUT * 5, send_loop.run())
             .await
-            .std_context("the writer waited for good")?;
+            .std_context("the writer never ended")?;
         assert!(
             matches!(result, Err(util::WriteError::Stalled { .. })),
             "{result:?}"
@@ -2622,7 +2622,7 @@ pub(crate) mod tests {
         let send_loop = SendLoop::new(conn, queue.lease(), TEST_FRAME_LIMIT);
         let result = timeout(util::OPEN_TIMEOUT * 5, send_loop.run())
             .await
-            .std_context("the writer waited for good")?;
+            .std_context("the writer never ended")?;
         assert!(
             matches!(result, Err(util::WriteError::OpenStalled { .. })),
             "{result:?}"
