@@ -209,47 +209,35 @@ impl Drop for Reservation {
 ///
 /// # Known limits
 ///
-/// [`QueueOptions`](super::QueueOptions) explains to users what these mean
-/// for an app. Ignored tests show the order, the stream limit and the handover.
+/// Ignored tests show the first three. [`QueueOptions`](super::QueueOptions)
+/// tells apps the short version.
 ///
-/// - **The publish gate guesses.** [`Self::is_busy`] on all eager peers of a
-///   topic pauses its publishers, as a sign that our own uplink is the limit.
-///   It is also true when all eager peers are slow, even if a lazy peer could
-///   take more, and when relayed traffic or other topics fill the queues. A
-///   relay never waits, and a waiting broadcast passes after
-///   [`GATE_LIMIT`](super::GATE_LIMIT), so other traffic cannot slow a
-///   publisher below ten broadcasts per second. A broadcast with neighbor
-///   scope waits on the same check, though it goes to all neighbors.
-/// - **Late signal.** A message keeps its reservation until the writer handed
-///   it to QUIC, so a queue fills only once QUIC buffers all it can for the
-///   peer. The gate bounds loss, not delay, and a burst larger than the queue
-///   and the QUIC windows loses messages at the publisher or at a relay.
-/// - **Repair.** Plumtree announces a dropped broadcast again only while it
-///   is cached. At most 256 ids per peer and 4096 per topic wait, and 64 per
-///   peer go out per second. Messages with neighbor scope are not cached, so
-///   never repaired. Messages queued for a peer that fails are lost, and no
-///   metric counts them.
-/// - **One queue per peer.** All topics share it, so a busy topic can crowd
-///   out the data of another. Control waits behind the data queued before it.
-/// - **Age.** The queue bounds bytes, not time. At 1 Mbit/s, data can arrive
-///   30 to 40 s after it was sent, most of it held by QUIC.
-/// - **Order across streams.** We write the messages to a peer in order, but
-///   the peer reads each stream on its own. It may handle a `Join` before a
-///   `Disconnect` that we sent earlier, and then drop a neighbor that just
-///   joined. A restarted peer may get the last messages for its former run.
-///   Only a wire change can fix this.
-/// - **Stream limit.** Each topic on which we sent a peer anything keeps a
-///   stream open. Over the peer's limit of concurrent streams, the open waits
-///   [`OPEN_TIMEOUT`](super::util::OPEN_TIMEOUT) and closes the connection,
-///   again after each rejoin.
-/// - **Closes.** A control message that does not fit, a write without
-///   progress for [`WRITE_TIMEOUT`](super::util::WRITE_TIMEOUT), and a stalled
-///   stream open close the connection. A node up to 0.101 may then lose its
-///   later messages to us if the connection was no neighbor link on its side
-///   (#155).
-/// - **Handover.** A control message that does not fit while a replaced
-///   connection still writes its last message fails the peer. That closes the
+/// - **Streams have no order among them.** We write to a peer in order, but
+///   it reads each stream on its own, so it may handle a `Join` before an
+///   earlier `Disconnect`. The same on `main`. Only a wire change fixes it.
+/// - **One stream per topic.** Over the stream limit of the peer, 100 by
+///   default, an open waits [`OPEN_TIMEOUT`](super::util::OPEN_TIMEOUT) and
+///   closes the connection, again after each rejoin.
+/// - **A control overflow during a handover** fails the peer, which closes the
 ///   new connection too, though only the old one is stuck.
+/// - **The gate guesses.** Busy queues to all eager peers may mean that our
+///   uplink is the limit, or that all eager peers are slow, or that relayed
+///   traffic and other topics fill the queues. A waiting broadcast passes after
+///   [`GATE_LIMIT`](super::GATE_LIMIT) in any case. A broadcast with neighbor
+///   scope waits on the same check.
+/// - **The gate bounds loss, not delay.** A queue fills only once QUIC buffered
+///   all it can for the peer. A burst larger than both loses messages before
+///   anyone waits, at the publisher or at a relay. Data at a 1 Mbit/s peer is
+///   30 to 40 s old.
+/// - **Repair is capped.** 256 ids per peer, 4096 per topic, 64 per peer and
+///   second, and only while the message is cached. A message with neighbor
+///   scope is never repaired. Messages queued for a failed peer are lost, and
+///   no metric counts them.
+/// - **Topics share the queue.** A busy topic crowds out another, and control
+///   waits behind the data queued before it.
+/// - **Closes hit old nodes.** A node up to 0.101 may lose its later messages
+///   to us after a close for a control overflow, a stalled write or a stalled
+///   open (#155).
 #[derive(Debug)]
 pub(super) struct SendQueue {
     tx: mpsc::UnboundedSender<QueuedMessage>,
