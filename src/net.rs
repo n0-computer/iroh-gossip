@@ -1,7 +1,7 @@
 //! Networking for the `iroh-gossip` protocol
 
 use std::{
-    collections::{BTreeSet, HashMap, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     future::Future,
     net::SocketAddr,
     pin::Pin,
@@ -539,19 +539,15 @@ impl Actor {
                 trace!(?i, "tick: dialer");
                 self.metrics.actor_tick_dialer.inc();
                 match res {
-                    Some(Ok(conn)) => {
+                    Ok(conn) => {
                         debug!(peer = %peer_id.fmt_short(), "dial successful");
                         self.metrics.actor_tick_dialer_success.inc();
                         self.handle_connection(conn);
                     }
-                    Some(Err(err)) => {
+                    Err(err) => {
                         warn!(peer = %peer_id.fmt_short(), "dial failed: {err}");
                         self.metrics.actor_tick_dialer_failure.inc();
                         self.handle_dial_failed(peer_id);
-                    }
-                    None => {
-                        warn!(peer = %peer_id.fmt_short(), "dial disconnected");
-                        self.metrics.actor_tick_dialer_failure.inc();
                     }
                 }
             }
@@ -1487,11 +1483,8 @@ impl Future for RecvFut {
 #[derive(Debug)]
 struct Dialer {
     endpoint: Endpoint,
-    pending: JoinSet<(
-        EndpointId,
-        Option<Result<Connection, iroh::endpoint::ConnectError>>,
-    )>,
-    pending_dials: HashMap<EndpointId, CancellationToken>,
+    pending: JoinSet<(EndpointId, Result<Connection, iroh::endpoint::ConnectError>)>,
+    pending_dials: HashSet<EndpointId>,
 }
 
 impl Dialer {
@@ -1509,16 +1502,11 @@ impl Dialer {
         if self.is_pending(endpoint_id) {
             return;
         }
-        let cancel = CancellationToken::new();
-        self.pending_dials.insert(endpoint_id, cancel.clone());
+        self.pending_dials.insert(endpoint_id);
         let endpoint = self.endpoint.clone();
         self.pending.spawn(
             async move {
-                let res = tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => None,
-                    res = endpoint.connect(endpoint_id, &alpn) => Some(res),
-                };
+                let res = endpoint.connect(endpoint_id, &alpn).await;
                 (endpoint_id, res)
             }
             .instrument(tracing::Span::current()),
@@ -1527,17 +1515,13 @@ impl Dialer {
 
     /// Checks if a endpoint is currently being dialed.
     fn is_pending(&self, endpoint: EndpointId) -> bool {
-        self.pending_dials.contains_key(&endpoint)
+        self.pending_dials.contains(&endpoint)
     }
 
     /// Waits for the next dial operation to complete.
-    /// `None` means disconnected
     async fn next_conn(
         &mut self,
-    ) -> (
-        EndpointId,
-        Option<Result<Connection, iroh::endpoint::ConnectError>>,
-    ) {
+    ) -> (EndpointId, Result<Connection, iroh::endpoint::ConnectError>) {
         match self.pending_dials.is_empty() {
             false => {
                 let (endpoint_id, res) = loop {
