@@ -231,6 +231,14 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
         self.peer_topics.contains_key(peer)
     }
 
+    /// Returns the peers to which `topic` pushes its payloads.
+    #[cfg(feature = "net")]
+    pub(crate) fn neighbors(&self, topic: &TopicId) -> impl Iterator<Item = &PI> {
+        self.state(topic)
+            .into_iter()
+            .flat_map(|state| state.swarm.active_view.iter())
+    }
+
     /// Check if a topic has any active (connected) peers.
     pub fn has_active_peers(&self, topic: &TopicId) -> bool {
         self.state(topic)

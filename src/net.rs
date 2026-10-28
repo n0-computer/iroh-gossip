@@ -714,17 +714,14 @@ impl Actor {
                     bootstrap,
                 } = inner;
                 let TopicState {
-                    neighbors,
                     event_sender,
                     command_rx_keys,
                 } = self.topics.entry(topic_id).or_default();
                 let mut sender_dead = false;
-                if !neighbors.is_empty() {
-                    for neighbor in neighbors.iter() {
-                        if let Err(_err) = tx.try_send(Event::NeighborUp(*neighbor)).await {
-                            sender_dead = true;
-                            break;
-                        }
+                for neighbor in self.state.neighbors(&topic_id) {
+                    if let Err(_err) = tx.try_send(Event::NeighborUp(*neighbor)).await {
+                        sender_dead = true;
+                        break;
                     }
                 }
 
@@ -834,20 +831,7 @@ impl Actor {
                         warn!(?topic_id, "gossip state emitted event for unknown topic");
                         continue;
                     };
-                    let TopicState {
-                        neighbors,
-                        event_sender,
-                        ..
-                    } = state;
-                    match &event {
-                        ProtoEvent::NeighborUp(neighbor) => {
-                            neighbors.insert(*neighbor);
-                        }
-                        ProtoEvent::NeighborDown(neighbor) => {
-                            neighbors.remove(neighbor);
-                        }
-                        _ => {}
-                    }
+                    let TopicState { event_sender, .. } = state;
                     event_sender.send(event).ok();
                     if !state.still_needed() {
                         self.quit_queue.push_back(topic_id);
@@ -885,6 +869,11 @@ impl Actor {
                 tx.send_if_modified(|current| std::mem::replace(current, wanted) != wanted);
             }
         }
+    }
+
+    #[cfg(test)]
+    fn joined(&self, topic: &TopicId) -> bool {
+        self.state.neighbors(topic).next().is_some()
     }
 }
 
@@ -983,7 +972,6 @@ impl Default for PeerState {
 
 #[derive(Debug)]
 struct TopicState {
-    neighbors: BTreeSet<EndpointId>,
     event_sender: broadcast::Sender<ProtoEvent>,
     /// Keys identifying command receivers in [`Actor::command_rx`].
     ///
@@ -995,7 +983,6 @@ impl Default for TopicState {
     fn default() -> Self {
         let (event_sender, _) = broadcast::channel(TOPIC_EVENT_CAP);
         Self {
-            neighbors: Default::default(),
             command_rx_keys: Default::default(),
             event_sender,
         }
@@ -1008,11 +995,6 @@ impl TopicState {
         // Keep topic alive if either senders or receivers exist.
         // Using || prevents topic closure when senders are dropped while receivers listen.
         !self.command_rx_keys.is_empty() || self.event_sender.receiver_count() > 0
-    }
-
-    #[cfg(test)]
-    fn joined(&self) -> bool {
-        !self.neighbors.is_empty()
     }
 }
 
@@ -1759,7 +1741,7 @@ pub(crate) mod tests {
                 .map_or(0, |state| state.command_rx_keys.len())
         };
         // Our subscribe, the connection, and the NeighborUp from the peer's information.
-        let joined = |actor: &Actor| actor.topics.get(&topic).is_some_and(|s| s.joined());
+        let joined = |actor: &Actor| actor.joined(&topic);
         assert!(actor.steps_until(20, joined).await, "not joined");
 
         // signal the second subscribe, we should remain subscribed
@@ -1769,8 +1751,7 @@ pub(crate) mod tests {
         assert!(actor.steps_until(20, |a| commands(a) == 2).await);
         // The first handle goes.
         assert!(actor.steps_until(20, |a| commands(a) == 1).await);
-        let state = actor.topics.get(&topic).expect("get registered topic");
-        assert!(state.joined());
+        assert!(actor.joined(&topic));
 
         // signal to drop the second handle, the topic should no longer be subscribed
         tx.send(()).await.std_context("signal drop handles")?;
