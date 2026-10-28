@@ -230,7 +230,7 @@ impl Drop for Reservation {
 /// - Busy queues to all eager peers may mean that our uplink is the limit.
 ///   They may also mean that all eager peers are slow,
 ///   or that relayed traffic and other topics fill the queues. A waiting
-///   broadcast passes after [`GATE_LIMIT`](super::GATE_LIMIT) in any case.
+///   broadcast passes after [`BROADCAST_WAIT_LIMIT`](super::BROADCAST_WAIT_LIMIT) in any case.
 /// - Repair is capped, at 256 ids per peer, 4096 per topic, and 64 per peer
 ///   and second. It works only while the message is cached, and never for
 ///   neighbor scope.

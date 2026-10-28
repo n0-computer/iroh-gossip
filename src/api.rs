@@ -221,10 +221,15 @@ impl GossipApi {
 
 /// Sender for a gossip topic.
 ///
-/// The commands of a topic keep their order. When the send queues to all
-/// peers that the topic pushes broadcasts to are half full of data, a broadcast
-/// waits for room, up to 100 ms. The commands behind it wait with it: a
-/// join of more peers, and the leave when the last handle drops.
+/// Each broadcast is checked before the protocol processes it. When the data
+/// sections of all eager-peer send queues are half full, it waits for pressure
+/// to ease, up to 100 ms. Commands behind it in the same subscription keep their
+/// order and wait with it, including joins and the leave when its last handle drops.
+/// Other subscriptions continue independently.
+///
+/// Sending a command waits for space in the subscription's command channel.
+/// The 100 ms limit bounds one broadcast's admission wait, not this API call,
+/// commands queued ahead of it, or delivery to a peer.
 ///
 /// See [`QueueOptions`] for what this means for your app.
 ///
@@ -502,6 +507,13 @@ pub enum Command {
     BroadcastNeighbors(#[debug("Bytes({})", _0.len())] Bytes),
     /// Connects to a set of peers.
     JoinPeers(Vec<EndpointId>),
+}
+
+impl Command {
+    /// Returns whether this command publishes a message.
+    pub(crate) fn is_broadcast(&self) -> bool {
+        matches!(self, Self::Broadcast(_) | Self::BroadcastNeighbors(_))
+    }
 }
 
 /// Options for joining a gossip topic.

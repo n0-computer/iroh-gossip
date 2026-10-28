@@ -1,17 +1,16 @@
 //! Networking for the `iroh-gossip` protocol
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, VecDeque},
     future::Future,
     net::SocketAddr,
     pin::Pin,
-    sync::{Arc, Mutex},
-    task::{Context, Poll, Waker},
+    sync::Arc,
+    task::{ready, Context, Poll},
     time::Duration,
 };
 
 use bytes::Bytes;
-use futures_concurrency::stream::{stream_group, StreamGroup};
 use iroh::{
     endpoint::{Connection, Side},
     protocol::{AcceptError, ProtocolHandler},
@@ -21,8 +20,8 @@ use irpc::WithChannels;
 use n0_error::{e, stack_error};
 use n0_future::{
     task::{self, AbortOnDropHandle, JoinSet},
-    time::{Instant, Interval, MissedTickBehavior, Sleep},
-    Stream, StreamExt as _,
+    time::{self, Instant, Interval, MissedTickBehavior, Sleep},
+    FuturesUnordered, Stream, StreamExt as _,
 };
 use rand::{rngs::StdRng, SeedableRng};
 use serde::{Deserialize, Serialize};
@@ -374,8 +373,8 @@ struct Actor {
     peers: HashMap<EndpointId, PeerState>,
     /// Sweeps idle peers after their retention period.
     peer_cleanup: Interval,
-    /// Stream of commands from topic handles.
-    command_rx: stream_group::Keyed<TopicCommandStream>,
+    /// Receives subscription commands and applies broadcast backpressure.
+    command_rx: SubscriptionCommands,
     /// Internal queue of topic to close because all handles were dropped.
     quit_queue: VecDeque<TopicId>,
     /// Tasks for the connection loops, to keep track of panics.
@@ -387,12 +386,6 @@ struct Actor {
     send_queue_size: usize,
     /// Events that the handling of an event caused, handled after it.
     follow_ups: VecDeque<InEvent>,
-    /// The topics whose publishers wait, see [`BroadcastGate`].
-    paused_topics: BTreeSet<TopicId>,
-    /// When to check the paused topics again.
-    ///
-    /// The actor polls it only while [`Self::paused_topics`] is not empty.
-    gate_check: Interval,
 }
 
 impl Actor {
@@ -419,12 +412,7 @@ impl Actor {
         let (rpc_tx, rpc_rx) = mpsc::channel(TO_ACTOR_CAP);
         let (local_tx, local_rx) = mpsc::channel(16);
         let (in_event_tx, in_event_rx) = mpsc::channel(IN_EVENT_CAP);
-        // Ticks only while a topic is paused, see the select in `event_loop`. After
-        // a time without pauses, the first tick fires at once, then every GATE_CHECK.
-        let mut gate_check = n0_future::time::interval(GATE_CHECK);
-        gate_check.set_missed_tick_behavior(MissedTickBehavior::Delay);
-
-        let mut peer_cleanup = n0_future::time::interval(PEER_RETENTION);
+        let mut peer_cleanup = time::interval(PEER_RETENTION);
         peer_cleanup.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         let actor = Actor {
@@ -436,7 +424,7 @@ impl Actor {
             in_event_rx,
             in_event_tx,
             timers: Timers::new(),
-            command_rx: StreamGroup::new().keyed(),
+            command_rx: SubscriptionCommands::default(),
             peers: Default::default(),
             peer_cleanup,
             topics: Default::default(),
@@ -448,8 +436,6 @@ impl Actor {
             address_lookup,
             send_queue_size,
             follow_ups: Default::default(),
-            paused_topics: Default::default(),
-            gate_check,
         };
 
         (actor, rpc_tx, local_tx)
@@ -535,18 +521,11 @@ impl Actor {
                     }
                 }
             },
-            Some((key, (topic, command))) = self.command_rx.next(), if !self.command_rx.is_empty() => {
+            Some((topic, command)) = self.command_rx.next(|topic| {
+                all_eager_peers_busy(&self.state, &self.peers, topic)
+            }), if !self.command_rx.is_empty() => {
                 trace!(?i, "tick: command_rx");
-                self.handle_command(topic, key, command);
-                self.update_broadcast_gate(topic);
-            },
-            // A queue gives no signal when it drains, so the gate of a paused topic
-            // opens only on this check. It runs only while a topic is paused.
-            _ = self.gate_check.tick(), if !self.paused_topics.is_empty() => {
-                // `update_broadcast_gate` puts back each topic that stays paused.
-                for topic in std::mem::take(&mut self.paused_topics) {
-                    self.update_broadcast_gate(topic);
-                }
+                self.handle_command(topic, command);
             },
             _ = self.peer_cleanup.tick(), if !self.peers.is_empty() => {
                 self.forget_peers(Instant::now());
@@ -621,32 +600,8 @@ impl Actor {
         self.handle_in_event(InEvent::UpdatePeerData(peer_data), Instant::now());
     }
 
-    /// Pauses the publishers of `topic` while every eager peer has its data queue half full.
-    ///
-    /// This guesses that our own link is the limit, and that a broadcast would
-    /// be lost for every peer that we push it to. Slow peers alone can fill all
-    /// the queues too. One slow eager peer among others pauses nothing. Lazy
-    /// peers get only announcements, so they do not count.
-    fn update_broadcast_gate(&mut self, topic: TopicId) {
-        let mut eager = self.state.eager_peers(&topic).peekable();
-        let busy = eager.peek().is_some()
-            && eager.all(|peer| {
-                self.peers
-                    .get(peer)
-                    .is_some_and(|peer| peer.queue.is_busy())
-            });
-        if let Some(state) = self.topics.get(&topic) {
-            state.broadcast_gate.set_paused(busy);
-        }
-        if busy {
-            self.paused_topics.insert(topic);
-        } else {
-            self.paused_topics.remove(&topic);
-        }
-    }
-
-    fn handle_command(&mut self, topic: TopicId, key: stream_group::Key, command: Option<Command>) {
-        debug!(?topic, ?key, ?command, "handle command");
+    fn handle_command(&mut self, topic: TopicId, command: Option<Command>) {
+        debug!(?topic, ?command, "handle command");
         let Some(state) = self.topics.get_mut(&topic) else {
             // TODO: unreachable?
             warn!("received command for unknown topic");
@@ -664,7 +619,10 @@ impl Actor {
                 self.handle_in_event(proto::InEvent::Command(topic, command), Instant::now());
             }
             None => {
-                state.command_rx_keys.remove(&key);
+                state.command_receiver_count = state
+                    .command_receiver_count
+                    .checked_sub(1)
+                    .expect("finished command receiver must have been registered");
                 if !state.still_needed() {
                     self.quit_queue.push_back(topic);
                     self.process_quit_queue();
@@ -782,8 +740,7 @@ impl Actor {
                 let TopicState {
                     neighbors,
                     event_sender,
-                    command_rx_keys,
-                    broadcast_gate,
+                    command_receiver_count,
                 } = self.topics.entry(topic_id).or_default();
                 let mut sender_dead = false;
                 if !neighbors.is_empty() {
@@ -804,13 +761,8 @@ impl Actor {
                     self.topic_event_forwarders
                         .spawn(fut.instrument(tracing::Span::current()));
                 }
-                let command_rx = TopicCommandStream::new(
-                    topic_id,
-                    Box::pin(rx.into_stream()),
-                    broadcast_gate.clone(),
-                );
-                let key = self.command_rx.insert(command_rx);
-                command_rx_keys.insert(key);
+                self.command_rx.insert(topic_id, rx.into_stream());
+                *command_receiver_count += 1;
 
                 self.handle_in_event(
                     InEvent::Command(
@@ -1167,11 +1119,10 @@ impl PeerState {
 struct TopicState {
     neighbors: BTreeSet<EndpointId>,
     event_sender: broadcast::Sender<ProtoEvent>,
-    /// Keys identifying command receivers in [`Actor::command_rx`].
+    /// Counts subscription command receivers, including those waiting to publish.
     ///
-    /// This represents the receiver side of gossip's publish public API.
-    command_rx_keys: HashSet<stream_group::Key>,
-    broadcast_gate: Arc<BroadcastGate>,
+    /// A receiver remains counted until the actor processes its end.
+    command_receiver_count: usize,
 }
 
 impl Default for TopicState {
@@ -1179,65 +1130,33 @@ impl Default for TopicState {
         let (event_sender, _) = broadcast::channel(TOPIC_EVENT_CAP);
         Self {
             neighbors: Default::default(),
-            command_rx_keys: Default::default(),
+            command_receiver_count: 0,
             event_sender,
-            broadcast_gate: Default::default(),
         }
     }
 }
 
-/// How often the actor checks whether the neighbors of a paused topic took data again.
+/// How often a waiting broadcast checks the current queue pressure again.
+const BROADCAST_RECHECK_INTERVAL: Duration = Duration::from_millis(10);
+
+/// How long one broadcast may wait for queue pressure to ease.
 ///
-/// The checks run only while a topic is paused, see [`Actor::gate_check`].
-const GATE_CHECK: Duration = Duration::from_millis(10);
+/// This bounds admission waiting, not API channel backlog or delivery time.
+const BROADCAST_WAIT_LIMIT: Duration = Duration::from_millis(100);
 
-/// How long a broadcast waits at most for the gate of its topic.
+/// Returns whether all eager targets have busy data queues.
 ///
-/// The gate cannot tell our own data from relayed data, and relays never
-/// wait. Other traffic can thus keep the gate closed forever. The bound keeps
-/// each publisher at ten broadcasts per second or more.
-const GATE_LIMIT: Duration = Duration::from_millis(100);
-
-/// Lets the publishers of a topic wait, see [`Actor::update_broadcast_gate`].
-///
-/// Only a broadcast waits, for at most [`GATE_LIMIT`]. The commands after it
-/// wait behind it, so that they keep their order, and the publisher waits once
-/// its command channel is full. A stream without a waiting broadcast passes
-/// its other commands and its end, which leaves the topic.
-#[derive(Debug, Default)]
-struct BroadcastGate(Mutex<GateState>);
-
-#[derive(Debug, Default)]
-struct GateState {
-    paused: bool,
-    /// The command streams that wait for the gate to open.
-    waiting: Vec<Waker>,
-}
-
-impl BroadcastGate {
-    /// Returns ready while the gate is open, and wakes the caller once it opens.
-    fn poll_open(&self, cx: &mut Context<'_>) -> Poll<()> {
-        let mut state = self.0.lock().expect("poisoned");
-        if !state.paused {
-            return Poll::Ready(());
-        }
-        if !state
-            .waiting
-            .iter()
-            .any(|waker| waker.will_wake(cx.waker()))
-        {
-            state.waiting.push(cx.waker().clone());
-        }
-        Poll::Pending
-    }
-
-    fn set_paused(&self, paused: bool) {
-        let mut state = self.0.lock().expect("poisoned");
-        state.paused = paused;
-        if !paused {
-            state.waiting.drain(..).for_each(Waker::wake);
-        }
-    }
+/// No targets, or one target with room, lets a local broadcast proceed. The
+/// receiver calls this before admitting a broadcast and when retrying one.
+/// Pressure can come from local publications, relayed traffic, or slow receivers.
+fn all_eager_peers_busy(
+    state: &proto::State<PublicKey, StdRng>,
+    peers: &HashMap<EndpointId, PeerState>,
+    topic: TopicId,
+) -> bool {
+    let mut eager_peers = state.eager_peers(&topic).peekable();
+    eager_peers.peek().is_some()
+        && eager_peers.all(|peer| peers.get(peer).is_some_and(|peer| peer.queue.is_busy()))
 }
 
 impl TopicState {
@@ -1245,7 +1164,7 @@ impl TopicState {
     fn still_needed(&self) -> bool {
         // Keep topic alive if either senders or receivers exist.
         // Using || prevents topic closure when senders are dropped while receivers listen.
-        !self.command_rx_keys.is_empty() || self.event_sender.receiver_count() > 0
+        self.command_receiver_count != 0 || self.event_sender.receiver_count() > 0
     }
 
     #[cfg(test)]
@@ -1463,69 +1382,123 @@ async fn topic_subscriber_loop(
     }
 }
 
-/// A stream of commands for a gossip subscription.
-type BoxedCommandReceiver =
-    n0_future::stream::Boxed<Result<Command, irpc::channel::mpsc::RecvError>>;
-
-#[derive(derive_more::Debug)]
-struct TopicCommandStream {
-    topic_id: TopicId,
-    #[debug("CommandStream")]
-    stream: BoxedCommandReceiver,
-    closed: bool,
-    broadcast_gate: Arc<BroadcastGate>,
-    /// A broadcast that waits for the gate, and when it passes even if the gate stays closed.
-    #[debug(skip)]
-    waiting: Option<(Command, Pin<Box<Sleep>>)>,
+/// Receives subscription commands, delaying broadcasts while their targets are busy.
+///
+/// A held broadcast keeps ownership of its receiver, so later commands on that
+/// subscription cannot pass it. Other subscriptions continue independently.
+/// Operations use pooled storage; only a held broadcast allocates a retry timer.
+#[derive(Debug, Default)]
+struct SubscriptionCommands {
+    pending: FuturesUnordered<RecvFut>,
 }
 
-impl TopicCommandStream {
-    fn new(
-        topic_id: TopicId,
-        stream: BoxedCommandReceiver,
-        broadcast_gate: Arc<BroadcastGate>,
-    ) -> Self {
-        Self {
-            topic_id,
-            stream,
-            closed: false,
-            broadcast_gate,
-            waiting: None,
+impl SubscriptionCommands {
+    /// Registers a subscription's command receiver.
+    fn insert(
+        &mut self,
+        topic: TopicId,
+        stream: impl Stream<Item = Result<Command, irpc::channel::mpsc::RecvError>> + Send + 'static,
+    ) {
+        let receiver = CommandReceiver {
+            topic,
+            stream: Box::pin(stream),
+            wait: None,
+        };
+        self.pending.push(receiver.recv_next());
+    }
+
+    /// Returns whether all subscription receivers have ended.
+    fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    /// Returns the next command or the end of one subscription receiver.
+    ///
+    /// `topic_is_blocked(topic)` checks the actor's current queues before
+    /// broadcast admission. It is never called for other commands or after a
+    /// held broadcast's deadline. Each admitted command returns to the actor
+    /// before another is checked, so its queue changes affect the next check.
+    ///
+    /// `Some((topic, None))` reports one receiver ending; `None` means no
+    /// receivers remain. Cancelling this future preserves receivers, commands,
+    /// and deadlines: every unfinished receiver is put back before another await.
+    async fn next(
+        &mut self,
+        topic_is_blocked: impl Fn(TopicId) -> bool,
+    ) -> Option<(TopicId, Option<Command>)> {
+        while let Some((receiver, item)) = self.pending.next().await {
+            let topic = receiver.topic;
+            let Some(item) = item else {
+                return Some((topic, None));
+            };
+            let now = Instant::now();
+            if item.is_broadcast() && !receiver.wait_expired(now) && topic_is_blocked(topic) {
+                self.pending.push(receiver.retry(item, now));
+                continue;
+            } else {
+                self.pending.push(receiver.recv_next());
+                return Some((topic, Some(item)));
+            }
         }
+        None
     }
 }
 
-impl Stream for TopicCommandStream {
-    type Item = (TopicId, Option<Command>);
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.closed {
-            return Poll::Ready(None);
+/// Keeps a subscription's stream, current command, and admission timing together.
+#[derive(derive_more::Debug)]
+struct CommandReceiver {
+    topic: TopicId,
+    #[debug("CommandStream")]
+    stream: n0_future::stream::Boxed<Result<Command, irpc::channel::mpsc::RecvError>>,
+    wait: Option<(Instant, Pin<Box<Sleep>>, Option<Command>)>,
+}
+
+impl CommandReceiver {
+    fn wait_expired(&self, now: Instant) -> bool {
+        match self.wait.as_ref() {
+            None => false,
+            Some((deadline, _timer, _)) => now >= *deadline,
         }
-        let (command, deadline) = match self.waiting.take() {
-            Some((command, deadline)) => (command, Some(deadline)),
-            None => match Pin::new(&mut self.stream).poll_next(cx) {
-                Poll::Ready(Some(Ok(command))) => (command, None),
-                Poll::Ready(None) | Poll::Ready(Some(Err(_))) => {
-                    self.closed = true;
-                    return Poll::Ready(Some((self.topic_id, None)));
-                }
-                Poll::Pending => return Poll::Pending,
-            },
+    }
+
+    fn recv_next(mut self) -> RecvFut {
+        self.wait = None;
+        RecvFut(Some(self))
+    }
+
+    fn retry(mut self, item: Command, now: Instant) -> RecvFut {
+        let (deadline, timer) = if let Some((deadline, mut timer, _)) = self.wait.take() {
+            let next_retry = (now + BROADCAST_RECHECK_INTERVAL).min(deadline);
+            timer.as_mut().reset(next_retry);
+            (deadline, timer)
+        } else {
+            let deadline = now + BROADCAST_WAIT_LIMIT;
+            let next_retry = (now + BROADCAST_RECHECK_INTERVAL).min(deadline);
+            let timer = Box::pin(time::sleep_until(next_retry));
+            (deadline, timer)
         };
-        let broadcast = matches!(
-            command,
-            Command::Broadcast(_) | Command::BroadcastNeighbors(_)
-        );
-        if broadcast && self.broadcast_gate.poll_open(cx).is_pending() {
-            // The timer starts when the gate first holds back this broadcast.
-            let mut deadline =
-                deadline.unwrap_or_else(|| Box::pin(n0_future::time::sleep(GATE_LIMIT)));
-            if deadline.as_mut().poll(cx).is_pending() {
-                self.waiting = Some((command, deadline));
-                return Poll::Pending;
-            }
-        }
-        Poll::Ready(Some((self.topic_id, Some(command))))
+        self.wait = Some((deadline, timer, Some(item)));
+        RecvFut(Some(self))
+    }
+}
+
+#[derive(Debug, Default)]
+struct RecvFut(Option<CommandReceiver>);
+
+impl Future for RecvFut {
+    type Output = (CommandReceiver, Option<Command>);
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let receiver = this.0.as_mut().expect("RecvFut polled after completion");
+        let item = if let Some((_deadline, timer, item)) = &mut receiver.wait {
+            ready!(timer.as_mut().poll(cx));
+            item.take()
+        } else {
+            ready!(receiver.stream.as_mut().poll_next(cx)).and_then(Result::ok)
+        };
+        let receiver = this.0.take().expect("checked above");
+        Poll::Ready((receiver, item))
     }
 }
 
@@ -1610,7 +1583,7 @@ impl Dialer {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::{any::Any, time::Duration};
+    use std::{any::Any, collections::HashSet, time::Duration};
 
     use bytes::{Bytes, BytesMut};
     use futures_concurrency::future::TryJoin;
@@ -2040,7 +2013,7 @@ pub(crate) mod tests {
             actor
                 .topics
                 .get(&topic)
-                .map_or(0, |state| state.command_rx_keys.len())
+                .map_or(0, |state| state.command_receiver_count)
         };
         // Our subscribe, the connection, and the NeighborUp from the peer's information.
         let joined = |actor: &Actor| actor.topics.get(&topic).is_some_and(|s| s.joined());
@@ -5021,113 +4994,177 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// A closed gate holds back only broadcasts, for a limited time, and lets the end of a stream through.
+    /// Holds a broadcast without letting subsequent commands pass it.
     ///
-    /// A topic whose publishers wait must still see that its last handle went,
-    /// even while traffic of another topic keeps the shared queues full.
+    /// Other commands and EOF do not consult pressure. Cancelling `next`
+    /// cannot lose the command.
     #[tokio::test(start_paused = true)]
-    async fn closed_gate_holds_only_broadcasts() -> Result {
-        let topic = TopicId::from_bytes([1; 32]);
-        let gate = Arc::new(BroadcastGate::default());
-        gate.set_paused(true);
-        let commands = vec![
-            Ok(Command::JoinPeers(vec![])),
-            Ok(Command::Broadcast(Bytes::from_static(b"held"))),
-            Ok(Command::JoinPeers(vec![])),
-            Ok(Command::Broadcast(Bytes::from_static(b"bounded"))),
-        ];
-        let stream = Box::pin(n0_future::stream::iter(commands));
-        let mut stream = TopicCommandStream::new(topic, stream, gate.clone());
-        let soon = GATE_LIMIT / 2;
-        let next = timeout(soon, stream.next())
-            .await
-            .std_context("a join waited for the gate")?;
-        assert!(
-            matches!(next, Some((_, Some(Command::JoinPeers(_))))),
-            "{next:?}"
+    async fn admission_wait_preserves_command_order() -> Result {
+        let topic = [1; 32].into();
+        let mut commands = SubscriptionCommands::default();
+        commands.insert(
+            topic,
+            n0_future::stream::iter(vec![
+                Ok(Command::JoinPeers(vec![])),
+                Ok(Command::Broadcast(Bytes::from_static(b"held"))),
+                Ok(Command::JoinPeers(vec![])),
+                Ok(Command::BroadcastNeighbors(Bytes::from_static(b"bounded"))),
+            ]),
         );
+        let next = commands
+            .next(|_| panic!("a join must not check pressure"))
+            .await;
+        assert!(matches!(next, Some((_, Some(Command::JoinPeers(_))))));
 
-        // The broadcast waits until the gate opens, and the join after it keeps its place.
-        {
-            let mut next = stream.next();
-            assert!(
-                timeout(soon, &mut next).await.is_err(),
-                "the broadcast did not wait"
-            );
-            gate.set_paused(false);
-            let next = timeout(soon, next)
-                .await
-                .std_context("the open gate did not wake the stream")?;
-            assert!(
-                matches!(next, Some((_, Some(Command::Broadcast(_))))),
-                "{next:?}"
-            );
-        }
-        let next = timeout(soon, stream.next()).await.std_context("join")?;
-        assert!(
-            matches!(next, Some((_, Some(Command::JoinPeers(_))))),
-            "{next:?}"
-        );
-
-        // A broadcast passes once it waited for the limit, though the gate stays closed.
-        gate.set_paused(true);
-        let start = tokio::time::Instant::now();
-        let next = timeout(GATE_LIMIT * 2, stream.next())
+        let soon = BROADCAST_WAIT_LIMIT / 2;
+        assert!(timeout(soon, commands.next(|_| true)).await.is_err());
+        let next = timeout(BROADCAST_RECHECK_INTERVAL * 2, commands.next(|_| false))
             .await
-            .std_context("the broadcast waited past the limit")?;
-        assert!(
-            matches!(next, Some((_, Some(Command::Broadcast(_))))),
-            "{next:?}"
-        );
-        assert!(start.elapsed() >= GATE_LIMIT, "the broadcast did not wait");
+            .std_context("pressure eased but the broadcast did not resume")?;
+        assert!(matches!(next, Some((_, Some(Command::Broadcast(_))))));
+        let next = commands
+            .next(|_| panic!("a join must not check pressure"))
+            .await;
+        assert!(matches!(next, Some((_, Some(Command::JoinPeers(_))))));
 
-        // A stream with no waiting broadcast ends at once, also while the gate is closed.
-        let next = timeout(soon, stream.next())
+        let start = Instant::now();
+        let next = timeout(BROADCAST_WAIT_LIMIT * 2, commands.next(|_| true))
             .await
-            .std_context("the end of the stream waited for the gate")?;
-        assert!(matches!(next, Some((_, None))), "{next:?}");
+            .std_context("the broadcast waited past its deadline")?;
+        assert!(matches!(
+            next,
+            Some((_, Some(Command::BroadcastNeighbors(_))))
+        ));
+        assert_eq!(start.elapsed(), BROADCAST_WAIT_LIMIT);
+        assert!(matches!(
+            commands
+                .next(|_| panic!("EOF must not check pressure"))
+                .await,
+            Some((_, None))
+        ));
+        assert!(commands.is_empty());
         Ok(())
     }
 
-    /// A gate that opens wakes every publisher that waits on it.
+    /// A fixed deadline survives cancelled actor selects and repeated rechecks.
     #[tokio::test(start_paused = true)]
-    async fn open_gate_wakes_every_publisher() -> Result {
-        let topic = TopicId::from_bytes([1; 32]);
-        let gate = Arc::new(BroadcastGate::default());
-        gate.set_paused(true);
-        let publisher = |name: &'static str| {
-            let commands = vec![Ok(Command::Broadcast(Bytes::from_static(name.as_bytes())))];
-            TopicCommandStream::new(
+    async fn admission_deadline_survives_cancellation() -> Result {
+        let mut commands = SubscriptionCommands::default();
+        commands.insert(
+            [1; 32].into(),
+            n0_future::stream::iter(vec![Ok(Command::Broadcast(Bytes::from_static(b"bounded")))]),
+        );
+        let start = Instant::now();
+        for _ in 0..3 {
+            assert!(timeout(BROADCAST_WAIT_LIMIT / 4, commands.next(|_| true))
+                .await
+                .is_err());
+        }
+        let next = timeout(BROADCAST_WAIT_LIMIT, commands.next(|_| true))
+            .await
+            .std_context("the deadline was extended")?;
+        assert!(matches!(next, Some((_, Some(Command::Broadcast(_))))));
+        assert_eq!(start.elapsed(), BROADCAST_WAIT_LIMIT);
+        Ok(())
+    }
+
+    /// Every waiting receiver retries independently when pressure eases.
+    #[tokio::test(start_paused = true)]
+    async fn admission_resumes_every_publisher() -> Result {
+        let topic = [1; 32].into();
+        let mut commands = SubscriptionCommands::default();
+        for name in [b"first".as_slice(), b"second".as_slice()] {
+            commands.insert(
                 topic,
-                Box::pin(n0_future::stream::iter(commands)),
-                gate.clone(),
-            )
-        };
-        let (mut first, mut second) = (publisher("first"), publisher("second"));
-        let (mut next_first, mut next_second) = (first.next(), second.next());
-        let soon = GATE_LIMIT / 2;
-        assert!(timeout(soon, &mut next_first).await.is_err());
-        assert!(timeout(soon, &mut next_second).await.is_err());
-        gate.set_paused(false);
-        for next in [next_first, next_second] {
-            let next = timeout(soon, next)
-                .await
-                .std_context("the open gate did not wake a publisher")?;
-            assert!(
-                matches!(next, Some((_, Some(Command::Broadcast(_))))),
-                "{next:?}"
+                n0_future::stream::iter(vec![Ok(Command::Broadcast(Bytes::copy_from_slice(name)))]),
             );
         }
+        assert!(timeout(BROADCAST_WAIT_LIMIT / 2, commands.next(|_| true))
+            .await
+            .is_err());
+        let start = Instant::now();
+        let mut received = BTreeSet::new();
+        while received.len() < 2 {
+            let next = timeout(BROADCAST_RECHECK_INTERVAL * 2, commands.next(|_| false))
+                .await
+                .std_context("a publisher did not resume")?;
+            if let Some((_, Some(Command::Broadcast(message)))) = next {
+                received.insert(message);
+            } else {
+                assert!(matches!(next, Some((_, None))));
+            }
+        }
+        assert_eq!(received.len(), 2);
+        assert!(start.elapsed() <= BROADCAST_RECHECK_INTERVAL * 2);
         Ok(())
     }
 
-    /// The gate follows the eager peers of the topic: one with room opens it, a lazy one does not count.
+    /// Admitting one publisher can consume the room another publisher needs.
+    #[tokio::test(start_paused = true)]
+    async fn admission_rechecks_between_publishers() -> Result {
+        let topic = [1; 32].into();
+        let mut commands = SubscriptionCommands::default();
+        for _ in 0..2 {
+            commands.insert(
+                topic,
+                n0_future::stream::iter(vec![Ok(Command::Broadcast(Bytes::from_static(
+                    b"waiting",
+                )))]),
+            );
+        }
+        let start = Instant::now();
+        assert!(timeout(BROADCAST_WAIT_LIMIT / 2, commands.next(|_| true))
+            .await
+            .is_err());
+        let first = commands.next(|_| false).await;
+        assert!(matches!(first, Some((_, Some(Command::Broadcast(_))))));
+
+        // Model the first broadcast filling the queues again. EOF from its
+        // receiver may arrive first, but the second broadcast must still wait.
+        loop {
+            let next = commands.next(|_| true).await;
+            if matches!(next, Some((_, Some(Command::Broadcast(_))))) {
+                break;
+            }
+            assert!(matches!(next, Some((_, None))));
+        }
+        assert_eq!(start.elapsed(), BROADCAST_WAIT_LIMIT);
+        Ok(())
+    }
+
+    /// Waiting on one subscription never stalls another topic's commands.
+    #[tokio::test(start_paused = true)]
+    async fn admission_leaves_other_topics_ready() -> Result {
+        let blocked = [1; 32].into();
+        let healthy = [2; 32].into();
+        let mut commands = SubscriptionCommands::default();
+        commands.insert(
+            blocked,
+            n0_future::stream::iter(vec![Ok(Command::Broadcast(Bytes::from_static(b"waiting")))]),
+        );
+        commands.insert(
+            healthy,
+            n0_future::stream::iter(vec![
+                Ok(Command::JoinPeers(vec![])),
+                Ok(Command::Broadcast(Bytes::from_static(b"ready"))),
+            ]),
+        );
+        let start = Instant::now();
+        let next = commands.next(|topic| topic == blocked).await;
+        assert!(matches!(next, Some((topic, Some(Command::JoinPeers(_)))) if topic == healthy));
+        let next = commands.next(|topic| topic == blocked).await;
+        assert!(matches!(next, Some((topic, Some(Command::Broadcast(_)))) if topic == healthy));
+        assert_eq!(start.elapsed(), Duration::ZERO);
+        Ok(())
+    }
+
+    /// Admission uses current eager targets, including before the first broadcast.
     ///
     /// No network: the peers join by received messages, and have active states
     /// that nothing writes.
     #[tokio::test]
     #[traced_test]
-    async fn gate_follows_the_eager_peers() -> Result {
+    async fn admission_follows_current_eager_peers() -> Result {
         let topic: TopicId = blake3::hash(b"eager").into();
         let mut actor = t_actor().await?;
         actor.send_queue_size = queue::MIN_QUEUE_SIZE;
@@ -5164,12 +5201,11 @@ pub(crate) mod tests {
                 assert!(matches!(queue.push(numbered(topic, 0)), Pushed::Queued));
             }
         };
-        let paused = |actor: &Actor| actor.paused_topics.contains(&topic);
+        let backed_up = |actor: &Actor| all_eager_peers_busy(&actor.state, &actor.peers, topic);
 
         fill(&actor, full);
-        actor.update_broadcast_gate(topic);
         assert!(
-            !paused(&actor),
+            !backed_up(&actor),
             "one eager peer with room must keep the gate open"
         );
 
@@ -5179,16 +5215,46 @@ pub(crate) mod tests {
             message: TopicMessage::test_prune(),
         };
         actor.handle_in_event(InEvent::RecvMessage(other, prune), Instant::now());
-        actor.update_broadcast_gate(topic);
         assert!(
-            paused(&actor),
+            backed_up(&actor),
             "a lazy peer with room must not keep the gate open"
         );
 
-        actor.handle_in_event(InEvent::PeerDisconnected(full), Instant::now());
-        actor.update_broadcast_gate(topic);
+        actor.command_rx.insert(
+            topic,
+            n0_future::stream::iter(vec![Ok(Command::Broadcast(Bytes::from_static(b"first")))]),
+        );
+        actor.topics.get_mut(&topic).unwrap().command_receiver_count += 1;
         assert!(
-            !paused(&actor),
+            timeout(
+                BROADCAST_RECHECK_INTERVAL * 2,
+                actor
+                    .command_rx
+                    .next(|topic| { all_eager_peers_busy(&actor.state, &actor.peers, topic) })
+            )
+            .await
+            .is_err(),
+            "the first broadcast must wait before protocol processing"
+        );
+        actor
+            .peers
+            .get_mut(&full)
+            .unwrap()
+            .discard_queue(Instant::now());
+        assert!(!backed_up(&actor), "a replacement queue has room");
+        let next = timeout(
+            BROADCAST_RECHECK_INTERVAL * 2,
+            actor
+                .command_rx
+                .next(|topic| all_eager_peers_busy(&actor.state, &actor.peers, topic)),
+        )
+        .await
+        .std_context("queue replacement did not resume admission")?;
+        assert!(matches!(next, Some((_, Some(Command::Broadcast(_))))));
+
+        actor.handle_in_event(InEvent::PeerDisconnected(full), Instant::now());
+        assert!(
+            !backed_up(&actor),
             "the gate stayed closed without eager peers"
         );
         Ok(())
@@ -5205,17 +5271,12 @@ pub(crate) mod tests {
         let commands = n0_future::stream::iter(std::iter::repeat_with(|| {
             Ok(Command::Broadcast(Bytes::new()))
         }));
-        let key = actor.command_rx.insert(TopicCommandStream::new(
-            topic,
-            Box::pin(commands),
-            Default::default(),
-        ));
+        actor.command_rx.insert(topic, commands);
         actor
             .topics
             .get_mut(&topic)
             .expect("inserted above")
-            .command_rx_keys
-            .insert(key);
+            .command_receiver_count += 1;
     }
 
     /// A publisher that always has a command ready does not starve a finished connection.
@@ -5526,7 +5587,7 @@ pub(crate) mod tests {
             timeout(PROMPT, a_tx.broadcast(message.into()))
                 .await
                 .std_context("the publisher waited past the limit")??;
-            if start.elapsed() >= GATE_LIMIT {
+            if start.elapsed() >= BROADCAST_WAIT_LIMIT {
                 waited = true;
                 break;
             }
@@ -5551,7 +5612,7 @@ pub(crate) mod tests {
             }
         }));
         // Far less than a limit per broadcast, so the gate opened rather than timed out.
-        timeout(GATE_LIMIT * 20, async {
+        timeout(BROADCAST_WAIT_LIMIT * 20, async {
             for i in 0..100u32 {
                 a_tx.broadcast(Bytes::from(format!("after {i}"))).await?;
             }
