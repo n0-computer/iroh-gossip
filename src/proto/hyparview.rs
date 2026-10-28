@@ -1200,6 +1200,50 @@ mod tests {
         panic!("the two sides kept answering each other");
     }
 
+    /// A `Disconnect` that arrives after the peer joined again removes the new neighbor (known bug).
+    ///
+    /// The peer drops us and joins again. The network delivers its `Join`
+    /// before its `Disconnect`: v1 sends them on different streams, maybe on
+    /// different connections, and the receiver reads each stream on its own. The
+    /// `Disconnect` then ends the new membership, and the two views differ until
+    /// a later message changes them. Only a wire change can fix it, for example
+    /// a membership epoch that a `Disconnect` names.
+    #[test]
+    #[ignore = "a cost of the v1 wire, see SendQueue"]
+    fn late_disconnect_keeps_a_rejoined_neighbor() {
+        let mut contact = new_state();
+        let mut joiner = State::new(1, None, Config::default(), StdRng::seed_from_u64(2));
+        let io = &mut Io::new();
+        joiner.handle(InEvent::RequestJoin(0), io);
+        ferry(&mut joiner, &mut contact, io);
+
+        // The joiner drops the contact, and the network holds its `Disconnect` back.
+        joiner.remove_active(&0, RemovalReason::Random, io);
+        let late: Vec<_> = io
+            .drain(..)
+            .filter_map(|event| match event {
+                TopicOut::SendMessage(
+                    0,
+                    topic::Message::Swarm(message @ Message::Disconnect(_)),
+                ) => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(late.len(), 1, "no Disconnect");
+        joiner.handle(InEvent::RequestJoin(0), io);
+        ferry(&mut joiner, &mut contact, io);
+        assert!(joiner.active_view.contains(&0) && contact.active_view.contains(&1));
+
+        for message in late {
+            contact.handle(InEvent::RecvMessage(1, message), io);
+        }
+        assert_eq!(
+            contact.active_view.contains(&1),
+            joiner.active_view.contains(&0),
+            "the late Disconnect left the views apart"
+        );
+    }
+
     /// A join handshake ends with both sides neighbors after three messages.
     ///
     /// The contact's answer to the join is a request the joiner answers, and

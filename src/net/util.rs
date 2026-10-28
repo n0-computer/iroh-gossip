@@ -19,12 +19,16 @@ use n0_future::{
 };
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::AsyncReadExt,
     sync::{mpsc, watch},
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn, Instrument};
 
-use super::{InEvent, ProtoMessage};
+use super::{
+    queue::{QueueLease, QueuedMessage},
+    InEvent, ProtoMessage,
+};
 use crate::proto::{util::TimerMap, TopicId};
 
 /// Errors related to message writing
@@ -53,7 +57,48 @@ pub(crate) enum WriteError {
     /// Message was larger than the configured maximum message size
     #[error("message too large")]
     TooLarge {},
+    /// A write made no progress for [`WRITE_TIMEOUT`]
+    #[error("no write progress for {WRITE_TIMEOUT:?}")]
+    Stalled {},
+    /// Opening a stream waited for [`OPEN_TIMEOUT`] at the stream limit of the peer
+    #[error("stream limit of the peer reached for {OPEN_TIMEOUT:?}")]
+    OpenStalled {},
 }
+
+/// How long a write may make no progress before it fails the connection.
+///
+/// A peer extends its flow control window only after it read part of it, so
+/// the writes to a slow reader block for a while now and then.
+#[cfg(not(test))]
+pub(super) const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(test)]
+pub(super) const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long opening a stream may wait at the stream limit of the peer before it fails the connection.
+///
+/// The peer raises its limit only once one of our streams ends. With as many
+/// topics as the limit, the wait does not end. The limit is the
+/// `max_concurrent_uni_streams` of the peer's endpoint, 100 by default.
+#[cfg(not(test))]
+pub(super) const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(test)]
+pub(super) const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a replaced connection may write its current message before it hands it over.
+///
+/// The new connection of the peer waits for it, so that we write the messages
+/// in order. A stream header that started is written in full first. Only
+/// the write timeout bounds it, which counts the time without progress.
+#[cfg(not(test))]
+pub(super) const HANDOVER_LIMIT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+pub(super) const HANDOVER_LIMIT: Duration = Duration::from_secs(1);
+
+/// The code of a close for a peer whose send queue had no room for a control message.
+pub(super) const CLOSE_QUEUE_FULL: u32 = 2;
+
+/// The code of a close for a write or a stream open that made no progress in time.
+pub(super) const CLOSE_STALLED: u32 = 3;
 
 /// The first frame of a stream: the topic of its messages, and a byte of flags.
 ///
@@ -260,25 +305,22 @@ pub(crate) struct SendLoop {
     buffer: Vec<u8>,
     max_message_size: usize,
     finishing: JoinSet<()>,
-    send_rx: mpsc::Receiver<ProtoMessage>,
+    queue_lease: QueueLease,
     /// Whether a message is queued or written, or a stream is not yet finished.
     sending: watch::Sender<bool>,
 }
 
 impl SendLoop {
-    pub(crate) fn new(
-        conn: Connection,
-        send_rx: mpsc::Receiver<ProtoMessage>,
-        max_message_size: usize,
-    ) -> Self {
+    pub(crate) fn new(conn: Connection, queue_lease: QueueLease, max_message_size: usize) -> Self {
         Self {
             conn,
             max_message_size,
             buffer: Default::default(),
             streams: Default::default(),
             finishing: Default::default(),
-            send_rx,
-            sending: watch::channel(false).0,
+            queue_lease,
+            // The queue may hold messages before the loop takes it.
+            sending: watch::channel(true).0,
         }
     }
 
@@ -292,44 +334,74 @@ impl SendLoop {
             .send_if_modified(|current| std::mem::replace(current, sending) != sending);
     }
 
-    pub(crate) async fn run(&mut self, queue: Vec<ProtoMessage>) -> Result<(), WriteError> {
-        self.set_sending(!queue.is_empty());
-        for msg in queue {
-            self.send(&msg).await?;
-        }
-        let conn_clone = self.conn.clone();
-        let closed = conn_clone.closed();
+    /// Writes the queue until it ends, the lease is revoked, or the connection closes.
+    ///
+    /// Takes `self`, so that the lease and the finishing streams drop once it returns.
+    pub(crate) async fn run(mut self) -> Result<(), WriteError> {
+        let conn = self.conn.clone();
+        let closed = conn.closed();
         tokio::pin!(closed);
-        loop {
-            self.set_sending(!self.send_rx.is_empty() || !self.finishing.is_empty());
-            tokio::select! {
-                biased;
-                _ = &mut closed => break,
-                msg = self.send_rx.recv() => match msg {
-                    Some(msg) => {
-                        self.set_sending(true);
-                        self.send(&msg).await?
+        let revoked = self.queue_lease.revoked().clone();
+        // A replaced connection of the peer may still write its current message.
+        let queue = tokio::select! {
+            biased;
+            _ = &mut closed => None,
+            _ = revoked.cancelled() => None,
+            queue = self.queue_lease.lock() => Some(queue),
+        };
+        if let Some(mut queue) = queue {
+            loop {
+                self.set_sending(!queue.is_empty() || !self.finishing.is_empty());
+                let more = tokio::select! {
+                    biased;
+                    _ = &mut closed => break,
+                    // The next connection takes the rest of the queue.
+                    _ = revoked.cancelled() => break,
+                    // Before the queue: the queue of a busy peer is always ready, and
+                    // would keep finished streams from being collected.
+                    Some(_) = self.finishing.join_next(), if !self.finishing.is_empty() => continue,
+                    more = queue.next() => more,
+                };
+                if !more {
+                    break;
+                }
+                self.set_sending(true);
+                let item = queue.current().expect("next returned a message");
+                match self.open_stream(item.message.topic, &revoked).await {
+                    Ok(true) => {}
+                    // The lease ended before the stream opened. The message stays
+                    // in the queue for the next connection.
+                    Ok(false) => break,
+                    Err(err) => {
+                        self.handle_error(item.message.topic, err)?;
+                        queue.advance();
+                        continue;
                     }
-                    // The actor dropped the sender.
-                    None => break,
-                },
-                _ = self.finishing.join_next(), if !self.finishing.is_empty() => {}
+                }
+                // A stuck write would keep the queue from the connection that replaced
+                // this one. A message that we stop in the middle stays in the queue,
+                // and the next connection writes it first. Its stream stays, and ends
+                // with the others: the peer reads the messages before it, and drops
+                // the part of this one.
+                let handover = async {
+                    revoked.cancelled().await;
+                    n0_future::time::sleep(HANDOVER_LIMIT).await;
+                };
+                tokio::select! {
+                    biased;
+                    res = self.send(item) => res?,
+                    _ = handover => {
+                        warn!("the replaced connection did not finish its message in time, hand it over");
+                        break;
+                    }
+                }
+                queue.advance();
             }
         }
-        // Nothing reads the queue anymore, so the actor must not fill it.
-        self.send_rx.close();
-
         // Close remaining streams.
         self.set_sending(!self.streams.is_empty() || !self.finishing.is_empty());
-        for (topic_id, mut stream) in self.streams.drain() {
-            stream.finish().ok();
-            self.finishing.spawn(
-                async move {
-                    stream.stopped().await.ok();
-                    debug!(topic=%topic_id.fmt_short(), "stream closed");
-                }
-                .instrument(tracing::Span::current()),
-            );
+        for (topic, stream) in std::mem::take(&mut self.streams) {
+            self.finish_stream(topic, stream);
         }
         if !self.finishing.is_empty() {
             trace!(
@@ -355,46 +427,93 @@ impl SendLoop {
     /// The peer stops a stream that it cannot read, for example on a frame over its
     /// size limit or with a message type that it does not know. The message is lost,
     /// and the next message of the topic opens a new stream. Returns the error only
-    /// if the connection is gone.
-    async fn send(&mut self, message: &ProtoMessage) -> Result<(), WriteError> {
-        let Err(err) = self.write_message(message).await else {
-            return Ok(());
-        };
+    /// if the connection is gone, or if the write or the open made no progress in
+    /// time, which closes the connection.
+    async fn send(&mut self, item: &QueuedMessage) -> Result<(), WriteError> {
+        let message = &item.message;
+        match self.write_message(message, item.encoded_len()).await {
+            Ok(()) => Ok(()),
+            Err(err) => self.handle_error(message.topic, err),
+        }
+    }
+
+    /// Drops the stream of `topic` after a failed write, or returns the error if the connection fails.
+    fn handle_error(&mut self, topic: TopicId, err: WriteError) -> Result<(), WriteError> {
+        if matches!(
+            err,
+            WriteError::Stalled { .. } | WriteError::OpenStalled { .. }
+        ) {
+            // A peer that reads nothing blocks every stream, so a new stream would not help.
+            warn!("{err}, close the connection");
+            self.conn.close(CLOSE_STALLED.into(), b"write stalled");
+            return Err(err);
+        }
         if self.conn.close_reason().is_some() {
             return Err(err);
         }
-        warn!(topic = %message.topic.fmt_short(), "write failed, drop the stream: {err:#}");
-        if let Some(mut stream) = self.streams.remove(&message.topic) {
+        warn!(topic = %topic.fmt_short(), "write failed, drop the stream: {err:#}");
+        if let Some(mut stream) = self.streams.remove(&topic) {
             stream.reset(0u32.into()).ok();
         }
         Ok(())
     }
 
-    /// Write a [`ProtoMessage`] as a length-prefixed, postcard-encoded message on its stream.
+    /// Opens the stream of `topic` and writes its header, unless it is open.
     ///
-    /// If no stream is opened yet, this opens a new stream for the topic and writes the topic header.
+    /// Returns `false` if `revoked` ends the lease before the stream opened. A
+    /// header that started is written in full, as a node up to 0.101 drops the
+    /// whole connection on a partial one. An abort of the peer closes the
+    /// connection anyway, and cuts the header.
+    async fn open_stream(
+        &mut self,
+        topic: TopicId,
+        revoked: &CancellationToken,
+    ) -> Result<bool, WriteError> {
+        let hash_map::Entry::Vacant(entry) = self.streams.entry(topic) else {
+            return Ok(true);
+        };
+        let mut stream = tokio::select! {
+            biased;
+            // Before the open, so that a revoked lease starts no header.
+            _ = revoked.cancelled() => return Ok(false),
+            open = n0_future::time::timeout(OPEN_TIMEOUT, self.conn.open_uni()) => {
+                open.map_err(|_| e!(WriteError::OpenStalled))??
+            }
+        };
+        StreamHeader::new(topic)
+            .write(&mut stream, &mut self.buffer, self.max_message_size)
+            .await?;
+        debug!(topic=%topic.fmt_short(), "stream opened");
+        entry.insert(stream);
+        Ok(true)
+    }
+
+    /// Writes a [`ProtoMessage`] of `len` encoded bytes as a length-prefixed frame on its open stream.
     ///
     /// This function is not cancellation-safe.
-    pub async fn write_message(&mut self, message: &ProtoMessage) -> Result<(), WriteError> {
+    async fn write_message(
+        &mut self,
+        message: &ProtoMessage,
+        len: usize,
+    ) -> Result<(), WriteError> {
         let ProtoMessage { topic, message } = message;
         let topic_id = *topic;
         let is_last = message.is_disconnect();
 
-        let mut entry = match self.streams.entry(topic_id) {
-            hash_map::Entry::Occupied(entry) => entry,
-            hash_map::Entry::Vacant(entry) => {
-                let mut stream = self.conn.open_uni().await?;
-                let header = StreamHeader::new(topic_id);
-                header
-                    .write(&mut stream, &mut self.buffer, self.max_message_size)
-                    .await?;
-                debug!(topic=%topic_id.fmt_short(), "stream opened");
-                entry.insert_entry(stream)
-            }
+        let hash_map::Entry::Occupied(mut entry) = self.streams.entry(topic_id) else {
+            unreachable!("the stream was opened before");
         };
         let stream = entry.get_mut();
 
-        match write_frame(stream, message, &mut self.buffer, self.max_message_size).await {
+        match write_sized_frame(
+            stream,
+            message,
+            len,
+            &mut self.buffer,
+            self.max_message_size,
+        )
+        .await
+        {
             // Refused before any byte went out, so the stream is intact.
             Err(WriteError::TooLarge { .. }) => {
                 warn!(max = self.max_message_size, "message too large, dropped");
@@ -405,19 +524,25 @@ impl SendLoop {
 
         if is_last {
             trace!(topic=%topic_id.fmt_short(), "stream closing");
-            let mut stream = entry.remove();
-            if stream.finish().is_ok() {
-                self.finishing.spawn(
-                    async move {
-                        stream.stopped().await.ok();
-                        debug!(topic=%topic_id.fmt_short(), "stream closed");
-                    }
-                    .instrument(tracing::Span::current()),
-                );
-            }
+            let stream = entry.remove();
+            self.finish_stream(topic_id, stream);
         }
 
         Ok(())
+    }
+
+    /// Finishes `stream`, and waits in [`Self::finishing`] until the peer read all of it.
+    fn finish_stream(&mut self, topic: TopicId, mut stream: SendStream) {
+        if stream.finish().is_err() {
+            return;
+        }
+        self.finishing.spawn(
+            async move {
+                stream.stopped().await.ok();
+                debug!(topic = %topic.fmt_short(), "stream closed");
+            }
+            .instrument(tracing::Span::current()),
+        );
     }
 }
 
@@ -492,16 +617,35 @@ pub async fn write_frame<T: Serialize>(
     max_message_size: usize,
 ) -> Result<(), WriteError> {
     let len = postcard::experimental::serialized_size(&message)?;
+    write_sized_frame(stream, message, len, buffer, max_message_size).await
+}
+
+/// Writes a length-prefixed frame of `message`, whose encoded size is `len`.
+async fn write_sized_frame<T: Serialize>(
+    stream: &mut SendStream,
+    message: &T,
+    len: usize,
+    buffer: &mut Vec<u8>,
+    max_message_size: usize,
+) -> Result<(), WriteError> {
     // A frame must be shorter than the limit. Nodes up to 0.101 read a frame of
     // the limit, but refuse to write one, so they could not forward it.
     if len >= max_message_size {
         return Err(e!(WriteError::TooLarge));
     }
     buffer.clear();
-    buffer.resize(len, 0u8);
-    let slice = postcard::to_slice(&message, buffer)?;
-    stream.write_u32(len as u32).await?;
-    stream.write_all(slice).await.map_err(io::Error::other)?;
+    buffer.extend_from_slice(&(len as u32).to_be_bytes());
+    buffer.resize(4 + len, 0u8);
+    postcard::to_slice(&message, &mut buffer[4..])?;
+    // Each write takes some bytes, or fails once the peer takes none for long.
+    // A slow peer thus keeps the connection, however long the frame takes.
+    let mut written = 0;
+    while written < buffer.len() {
+        written += n0_future::time::timeout(WRITE_TIMEOUT, stream.write(&buffer[written..]))
+            .await
+            .map_err(|_| e!(WriteError::Stalled))?
+            .map_err(io::Error::other)?;
+    }
     Ok(())
 }
 
