@@ -37,12 +37,18 @@ const PROMPT: Duration = Duration::from_secs(10);
 /// The idle timeout of the test transport: a silent peer is gone after this.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// A wait longer than a node keeps a connection that it no longer uses.
-///
-/// That is the wait for our finished streams to be acknowledged, then the idle
-/// grace, five seconds each, and a margin. A send that blocks can hold a
-/// connection up to 20 s, but no test here blocks one.
+/// How long a test lets the overlay settle, or watches a link stay up.
 const SETTLE: Duration = Duration::from_secs(12);
+
+/// A wait longer than a node keeps a quiet connection that no topic uses.
+///
+/// A node closes such a connection 10 s after its last message. The rest is a margin.
+const RETIRED: Duration = Duration::from_secs(15);
+
+/// A wait longer than a node keeps any connection that no topic uses.
+///
+/// Messages keep such a connection open for at most 60 s. The rest is a margin.
+const RETIRED_AT_LATEST: Duration = Duration::from_secs(70);
 
 /// Decides whether a node takes a connection, before gossip sees it.
 type AcceptFilter = Arc<dyn Fn(&Connection) -> bool + Send + Sync>;
@@ -388,7 +394,7 @@ async fn repeated_joins_leave_no_connection_open() -> Result {
         sa.neighbor_down(b.id()).await?;
     }
 
-    eventually(SETTLE, "connections were left open", || {
+    eventually(RETIRED, "connections were left open", || {
         open_between(&a, &b) == 0
     })
     .await?;
@@ -657,7 +663,12 @@ async fn churn_leaves_no_connection_open() -> Result {
     };
     // A neighbor request to a node that left times out after 3 s, and only
     // then does the requester drop the node.
-    eventually(SETTLE * 2, "a connection was left open", all_closed).await?;
+    eventually(
+        RETIRED + Duration::from_secs(5),
+        "a connection was left open",
+        all_closed,
+    )
+    .await?;
     exchange(&mut sa, &mut sb, b"01").await
 }
 
@@ -709,7 +720,40 @@ async fn join_to_a_node_off_the_topic_leaves_no_connection() -> Result {
 
     drop(sb);
     let closed = || open_between(&a, &b) == 0;
-    eventually(SETTLE, "a connection was left open", closed).await
+    eventually(RETIRED, "a connection was left open", closed).await
+}
+
+/// A peer that leaves and soon joins again reuses its connection.
+///
+/// The writer of a closed queue waits on its connection, and takes the queue
+/// again when the peer rejoins, so no second connection opens.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn quick_rejoin_reuses_the_connection() -> Result {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (Node::spawn(&lookup).await?, Node::spawn(&lookup).await?);
+    let t = topic("quick_rejoin");
+    let mut sa = Sub::new(&a, t, vec![]).await?;
+    let sb = Sub::join(&b, t, vec![a.id()]).await?;
+    sa.neighbor_up(b.id()).await?;
+    assert_eq!(
+        open_between(&a, &b),
+        1,
+        "the join opened more than one connection"
+    );
+
+    drop(sb);
+    sa.neighbor_down(b.id()).await?;
+    sleep(Duration::from_secs(3)).await;
+    let mut sb = Sub::join(&b, t, vec![a.id()]).await?;
+    sa.neighbor_up(b.id()).await?;
+    exchange(&mut sa, &mut sb, b"01").await?;
+    assert_eq!(
+        open_between(&a, &b),
+        1,
+        "the rejoin opened a second connection"
+    );
+    Ok(())
 }
 
 /// Repeated joins to one peer before it answers make one neighbor.
@@ -758,12 +802,13 @@ async fn open_connections_link_neighbors() -> Result {
     nodes.insert(0, bootstrap);
     sleep(SETTLE).await;
 
-    // A connection we are done with stays open for a grace of a few seconds,
-    // and the overlay keeps opening short-lived ones, for example for a
-    // refused neighbor request. A node short of neighbors asks its full
-    // passive peers again every few seconds, so such a pair may always have
-    // one. A leaked connection stays unlinked, so each connection unlinked now
-    // must be linked or closed at some point within `SETTLE`.
+    // A connection we are done with stays open for 10 s after its last message,
+    // and the overlay keeps opening short-lived ones, for example for a refused
+    // neighbor request. A node short of neighbors asks its full passive peers
+    // again every few seconds, on the same connection, which keeps it open for
+    // up to 60 s. A leaked connection stays unlinked, so each connection
+    // unlinked now must be linked or closed at some point within
+    // `RETIRED_AT_LATEST`.
     for sub in subs.iter_mut() {
         sub.drain().await?;
     }
@@ -779,7 +824,7 @@ async fn open_connections_link_neighbors() -> Result {
         }
         n0_error::Ok(())
     };
-    match timeout(SETTLE, wait).await {
+    match timeout(RETIRED_AT_LATEST, wait).await {
         Ok(drained) => drained,
         Err(_) => {
             let pairs: BTreeSet<_> = unlinked.iter().map(|c| (c.0, c.1)).collect();

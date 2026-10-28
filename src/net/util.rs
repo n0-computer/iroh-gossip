@@ -3,6 +3,10 @@
 use std::{
     collections::{hash_map, HashMap},
     io,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -100,6 +104,9 @@ pub(super) const CLOSE_QUEUE_FULL: u32 = 2;
 /// The code of a close for a write or a stream open that made no progress in time.
 pub(super) const CLOSE_STALLED: u32 = 3;
 
+/// The code of a close for a connection that neither side used for a while.
+pub(super) const CLOSE_RETIRE: u32 = 0;
+
 /// The first frame of a stream: the topic of its messages, and a byte of flags.
 ///
 /// Nodes up to 0.101 send the topic alone, and ignore the flags when they read
@@ -169,6 +176,42 @@ impl StreamHeader {
 /// A peer that keeps many partial headers thus delays only its own streams.
 pub(crate) const MAX_PENDING_HEADERS: usize = 16;
 
+/// When a connection last carried a message, in either direction.
+///
+/// The send loop and the receive loop of the connection store it, and its
+/// retire timer and the actor read it.
+#[derive(Debug, Clone)]
+pub(crate) struct Activity(Arc<ActivityInner>);
+
+#[derive(Debug)]
+struct ActivityInner {
+    start: Instant,
+    /// Milliseconds after `start`.
+    last: AtomicU64,
+}
+
+impl Activity {
+    /// Starts with activity now.
+    pub(crate) fn new() -> Self {
+        Self(Arc::new(ActivityInner {
+            start: Instant::now(),
+            last: AtomicU64::new(0),
+        }))
+    }
+
+    /// Records activity now.
+    pub(crate) fn touch(&self) {
+        let elapsed = self.0.start.elapsed().as_millis();
+        let elapsed = u64::try_from(elapsed).unwrap_or(u64::MAX);
+        self.0.last.fetch_max(elapsed, Ordering::Relaxed);
+    }
+
+    /// Returns when the connection last carried a message.
+    pub(crate) fn last(&self) -> Instant {
+        self.0.start + Duration::from_millis(self.0.last.load(Ordering::Relaxed))
+    }
+}
+
 pub(crate) struct RecvLoop {
     remote_endpoint_id: EndpointId,
     conn: Connection,
@@ -178,6 +221,7 @@ pub(crate) struct RecvLoop {
     ///
     /// The actor shares it between all connections to the peer.
     handles_close: watch::Sender<bool>,
+    activity: Activity,
 }
 
 impl RecvLoop {
@@ -187,6 +231,7 @@ impl RecvLoop {
         in_event_tx: mpsc::Sender<InEvent>,
         max_message_size: usize,
         handles_close: watch::Sender<bool>,
+        activity: Activity,
     ) -> Self {
         Self {
             remote_endpoint_id,
@@ -194,6 +239,7 @@ impl RecvLoop {
             max_message_size,
             in_event_tx,
             handles_close,
+            activity,
         }
     }
 
@@ -232,6 +278,7 @@ impl RecvLoop {
                         }
                     };
                     debug!(topic=%state.header.topic_id.fmt_short(), "stream opened");
+                    self.activity.touch();
                     if state.header.handles_close {
                         self.handles_close.send_replace(true);
                     }
@@ -248,6 +295,7 @@ impl RecvLoop {
                     match msg {
                         None => debug!(topic=%state.header.topic_id.fmt_short(), "stream closed"),
                         Some(msg) => {
+                            self.activity.touch();
                             if self.in_event_tx.send(InEvent::RecvMessage(self.remote_endpoint_id, msg)).await.is_err() {
                                 debug!("stop recv loop: actor closed");
                                 break;
@@ -306,12 +354,16 @@ pub(crate) struct SendLoop {
     max_message_size: usize,
     finishing: JoinSet<()>,
     queue_lease: QueueLease,
-    /// Whether a message is queued or written, or a stream is not yet finished.
-    sending: watch::Sender<bool>,
+    activity: Activity,
 }
 
 impl SendLoop {
-    pub(crate) fn new(conn: Connection, queue_lease: QueueLease, max_message_size: usize) -> Self {
+    pub(crate) fn new(
+        conn: Connection,
+        queue_lease: QueueLease,
+        max_message_size: usize,
+        activity: Activity,
+    ) -> Self {
         Self {
             conn,
             max_message_size,
@@ -319,19 +371,8 @@ impl SendLoop {
             streams: Default::default(),
             finishing: Default::default(),
             queue_lease,
-            // The queue may hold messages before the loop takes it.
-            sending: watch::channel(true).0,
+            activity,
         }
-    }
-
-    /// Returns whether the loop still has data to send, as it changes.
-    pub(crate) fn sending(&self) -> watch::Receiver<bool> {
-        self.sending.subscribe()
-    }
-
-    fn set_sending(&self, sending: bool) {
-        self.sending
-            .send_if_modified(|current| std::mem::replace(current, sending) != sending);
     }
 
     /// Writes the queue until it ends, the lease is revoked, or the connection closes.
@@ -351,7 +392,6 @@ impl SendLoop {
         };
         if let Some(mut queue) = queue {
             loop {
-                self.set_sending(!queue.is_empty() || !self.finishing.is_empty());
                 let more = tokio::select! {
                     biased;
                     _ = &mut closed => break,
@@ -363,9 +403,26 @@ impl SendLoop {
                     more = queue.next() => more,
                 };
                 if !more {
-                    break;
+                    // The queue is closed and empty, or gone. Our streams end, but the
+                    // writer stays, so that the queue reuses this connection once it
+                    // opens again.
+                    for (topic, stream) in std::mem::take(&mut self.streams) {
+                        self.finish_stream(topic, stream);
+                    }
+                    let resumed = loop {
+                        tokio::select! {
+                            biased;
+                            _ = &mut closed => break false,
+                            _ = revoked.cancelled() => break false,
+                            Some(_) = self.finishing.join_next(), if !self.finishing.is_empty() => {}
+                            more = queue.wait_for_message() => break more,
+                        }
+                    };
+                    if !resumed {
+                        break;
+                    }
+                    continue;
                 }
-                self.set_sending(true);
                 let item = queue.current().expect("next returned a message");
                 match self.open_stream(item.message.topic, &revoked).await {
                     Ok(true) => {}
@@ -395,11 +452,11 @@ impl SendLoop {
                         break;
                     }
                 }
+                self.activity.touch();
                 queue.advance();
             }
         }
         // Close remaining streams.
-        self.set_sending(!self.streams.is_empty() || !self.finishing.is_empty());
         for (topic, stream) in std::mem::take(&mut self.streams) {
             self.finish_stream(topic, stream);
         }
@@ -417,7 +474,6 @@ impl SendLoop {
                 debug!("not all send streams finished within timeout, abort")
             }
         }
-        self.set_sending(false);
         debug!("send loop closed");
         Ok(())
     }

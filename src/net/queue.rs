@@ -244,6 +244,8 @@ pub(super) struct SendQueue {
     reader: SharedReader,
     /// Revokes the lease of the connection that writes the queue now.
     revoke: CancellationToken,
+    /// Asks the connection that writes the queue now to close, see [`Self::retire_writer`].
+    retire: CancellationToken,
     /// The parent of each `revoke`. The peer cancels it to revoke every lease.
     parent: CancellationToken,
 }
@@ -277,6 +279,7 @@ impl SendQueue {
             closing,
             reader: Arc::new(tokio::sync::Mutex::new(reader)),
             revoke: parent.child_token(),
+            retire: CancellationToken::new(),
             parent,
         }
     }
@@ -327,13 +330,23 @@ impl SendQueue {
         self.capacity.total.max
     }
 
+    /// Revokes the lease of the connection that writes the queue, and asks it to close.
+    ///
+    /// That connection is stale: neither side used it for a while.
+    pub(super) fn retire_writer(&self) {
+        self.retire.cancel();
+        self.revoke.cancel();
+    }
+
     /// Revokes the lease of the connection that writes the queue, and returns one for the next.
     pub(super) fn lease(&mut self) -> QueueLease {
         self.revoke.cancel();
         self.revoke = self.parent.child_token();
+        self.retire = CancellationToken::new();
         QueueLease {
             reader: self.reader.clone(),
             revoked: self.revoke.clone(),
+            retired: self.retire.clone(),
         }
     }
 
@@ -356,6 +369,8 @@ pub(super) struct QueueLease {
     reader: SharedReader,
     /// A child of the peer abort signal.
     revoked: CancellationToken,
+    /// Cancelled with `revoked` when the connection should close, as it is stale.
+    retired: CancellationToken,
 }
 
 impl QueueLease {
@@ -369,6 +384,11 @@ impl QueueLease {
     /// Returns the token that ends the lease, at a handover or at an abort of the peer.
     pub(super) fn revoked(&self) -> &CancellationToken {
         &self.revoked
+    }
+
+    /// Returns the token that the actor cancels when the connection should close, as it is stale.
+    pub(super) fn retired(&self) -> &CancellationToken {
+        &self.retired
     }
 }
 
@@ -422,6 +442,16 @@ impl QueueReader {
         self.unfinished.is_some()
     }
 
+    /// Waits for a message after [`Self::next`] returned `false`, and returns `false` if the queue is gone.
+    ///
+    /// A closed queue gets a message once it opens again. This is cancellation-safe.
+    pub(super) async fn wait_for_message(&mut self) -> bool {
+        if self.unfinished.is_none() {
+            self.unfinished = self.rx.recv().await;
+        }
+        self.unfinished.is_some()
+    }
+
     /// Returns the message that [`Self::next`] waited for.
     pub(super) fn current(&self) -> Option<&QueuedMessage> {
         self.unfinished.as_ref()
@@ -433,6 +463,7 @@ impl QueueReader {
     }
 
     /// Returns whether no message waits to be written.
+    #[cfg(test)]
     pub(super) fn is_empty(&self) -> bool {
         self.unfinished.is_none() && self.rx.is_empty()
     }
