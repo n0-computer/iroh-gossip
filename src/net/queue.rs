@@ -201,7 +201,7 @@ impl Drop for Reservation {
 /// The queue of messages to a peer, which its connections take in turn.
 ///
 /// It lives as long as we know the peer, also while we close it. A writer may
-/// still drain an older queue for a short time after an abort, so the bytes
+/// still drain an older queue for a short time after a disconnect, so the bytes
 /// to a peer can briefly reach two queues.
 ///
 /// The [`Capacity`] bounds the queue, so its channel needs no bound of its own.
@@ -244,13 +244,21 @@ pub(super) struct SendQueue {
     reader: SharedReader,
     /// Revokes the lease of the connection that writes the queue now.
     revoke: CancellationToken,
-    /// Aborts the peer: every writer of the queue closes its connection.
-    aborted: CancellationToken,
+    /// The parent of each `revoke`. The peer cancels it to revoke every lease.
+    parent: CancellationToken,
 }
 
 impl SendQueue {
-    /// Creates a queue of `size` bytes, of which data may fill 3/4 and announcements 1/8.
+    /// Creates a queue of `size` bytes with a parent token of its own.
+    #[cfg(test)]
     pub(super) fn new(size: usize) -> Self {
+        Self::with_parent(size, CancellationToken::new())
+    }
+
+    /// Creates a queue of `size` bytes, of which data may fill 3/4 and announcements 1/8.
+    ///
+    /// Every lease of the queue ends once `parent` is cancelled.
+    pub(super) fn with_parent(size: usize, parent: CancellationToken) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let capacity = Arc::new(Capacity {
             total: Limit::new(size),
@@ -263,14 +271,13 @@ impl SendQueue {
             unfinished: None,
             closing: closing_rx,
         };
-        let aborted = CancellationToken::new();
         Self {
             tx,
             capacity,
             closing,
             reader: Arc::new(tokio::sync::Mutex::new(reader)),
-            revoke: aborted.child_token(),
-            aborted,
+            revoke: parent.child_token(),
+            parent,
         }
     }
 
@@ -303,20 +310,31 @@ impl SendQueue {
         self.closing.send_replace(closing);
     }
 
+    /// Returns whether the queue holds no messages.
+    ///
+    /// A message that a writer started but did not finish still counts.
+    pub(super) fn is_empty(&self) -> bool {
+        self.capacity.total.used.load(Ordering::Relaxed) == 0
+    }
+
+    /// Returns whether the writer ends once the queue is empty.
+    pub(super) fn is_closing(&self) -> bool {
+        *self.closing.borrow()
+    }
+
+    /// Returns the byte limit of the queue.
+    pub(super) fn size(&self) -> usize {
+        self.capacity.total.max
+    }
+
     /// Revokes the lease of the connection that writes the queue, and returns one for the next.
     pub(super) fn lease(&mut self) -> QueueLease {
         self.revoke.cancel();
-        self.revoke = self.aborted.child_token();
+        self.revoke = self.parent.child_token();
         QueueLease {
             reader: self.reader.clone(),
             revoked: self.revoke.clone(),
-            aborted: self.aborted.clone(),
         }
-    }
-
-    /// Revokes every lease on the queue, and makes each writer close its connection.
-    pub(super) fn abort(&self) {
-        self.aborted.cancel();
     }
 
     /// Returns the reader of the queue, if no writer reads it.
@@ -331,14 +349,13 @@ impl SendQueue {
 /// The actor revokes it when a new connection replaces this one. The writer
 /// then lets go of the queue after its current message, and the writer of the
 /// new connection takes it. When the actor aborts the peer, it cancels
-/// `aborted`, which revokes every lease on the queue, and each writer closes
-/// its connection.
+/// the parent of `revoked`, which revokes every lease. Connections observe
+/// the peer abort signal separately, whether or not they hold a lease.
 #[derive(Debug)]
 pub(super) struct QueueLease {
     reader: SharedReader,
-    /// A child of `aborted`.
+    /// A child of the peer abort signal.
     revoked: CancellationToken,
-    aborted: CancellationToken,
 }
 
 impl QueueLease {
@@ -352,11 +369,6 @@ impl QueueLease {
     /// Returns the token that ends the lease, at a handover or at an abort of the peer.
     pub(super) fn revoked(&self) -> &CancellationToken {
         &self.revoked
-    }
-
-    /// Returns the token that the actor cancels when it aborts the peer.
-    pub(super) fn aborted(&self) -> &CancellationToken {
-        &self.aborted
     }
 }
 
@@ -575,6 +587,37 @@ mod tests {
         reader.advance();
         drop(reader);
         first(queue.lease(), 20).await.advance();
+        assert_eq!(used(&queue), (0, 0));
+    }
+
+    /// A writer revoked while it waits for the lock leaves the line to the next writer.
+    ///
+    /// The next writer gets the unfinished message first, and only once.
+    #[tokio::test]
+    async fn revoked_waiter_leaves_the_unfinished_message_to_the_next() {
+        let mut queue = SendQueue::new(MIN_QUEUE_SIZE);
+        assert!(matches!(queue.push(data(10)), Pushed::Queued));
+        assert!(matches!(queue.push(data(20)), Pushed::Queued));
+        let first = queue.lease();
+        let mut reader = first.lock().await;
+        assert!(reader.next().await);
+
+        let second = queue.lease();
+        let mut waiting = Box::pin(second.lock());
+        assert!(n0_future::future::poll_once(&mut waiting).await.is_none());
+        let third = queue.lease();
+        assert!(second.revoked().is_cancelled());
+        assert!(!third.revoked().is_cancelled());
+        // The second writer stops waiting once revoked, and the first one stops without `advance`.
+        drop(waiting);
+        drop(reader);
+
+        let mut reader = third.lock().await;
+        for len in [10, 20] {
+            assert!(reader.next().await);
+            assert_eq!(reader.current().unwrap().message.message, data(len).message);
+            reader.advance();
+        }
         assert_eq!(used(&queue), (0, 0));
     }
 
