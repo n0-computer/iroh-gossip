@@ -26,41 +26,30 @@ const INITIAL_SHUFFLE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Interval of the maintenance pass.
 ///
-/// A maintenance pass is a check that runs at this interval. A node without
-/// any peer rejoins through its bootstrap peers in it, and a node short of
-/// neighbors starts a refill. A node is short of neighbors if its active view
-/// is less than half full.
+/// In each pass, a node without any peer rejoins through its bootstrap peers,
+/// and a node short of neighbors starts a refill. A node is short of neighbors
+/// when its active view is less than half full.
 ///
-/// The HyParView paper has no such check. Partisan runs the same check, its
-/// "random promotion", every 5s.
+/// The HyParView paper has no such pass. Partisan runs the same check, which
+/// it calls "random promotion", every 5s.
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Maximum number of maintenance passes between two rejoins, or between two refills.
 ///
-/// A node without any peer rejoins in its 1st, 2nd, 4th, and 8th maintenance
-/// pass alone, and then in every 12th: at first after 5s, and later once a
-/// minute. A node short of neighbors starts a refill on the same schedule,
-/// counted from the last time it gained a neighbor. Passes during a recovery
-/// do not count, see [`RefillLimit::Recovery`].
+/// A node without any peer rejoins in its 1st, 2nd, 4th, and 8th pass alone,
+/// and then in every 12th: first after 5s, later once a minute. A short node
+/// refills on the same schedule, counted from the last time it gained a
+/// neighbor.
 const MAX_BACKOFF_PASSES: u32 = 12;
 
-/// Maximum number of neighbor requests in a refill of a short active view.
+/// Maximum number of neighbor requests a short node sends in one refill.
 ///
-/// A node with too few neighbors asks a passive peer to become its neighbor.
-/// If the request fails, it asks the next passive peer right away, and so on.
-/// If all passive peers have full active views, they all refuse, and the
-/// node would dial every one of them each time maintenance runs. With this
-/// limit, the refill stops after this many requests. Refills that shuffle
-/// replies start count against the same limit. A reply to our shuffle that
-/// brings new peers gives a node that used up its requests a new limit. The
-/// node still skips the peers that refused it.
+/// When a request fails, the node asks the next passive peer right away. If
+/// all passive peers have full active views, every request fails, and without
+/// a limit the node would dial each of them in every refill.
 const MAX_REQUESTS_PER_REFILL: usize = 3;
 
-/// Returns whether a node rejoins or refills in the `n`th maintenance pass of a backoff.
-///
-/// The passes count while the node is alone, or while it is short of
-/// neighbors since it last gained one. It acts in passes 1, 2, 4, and 8, and
-/// then in every 12th pass, see [`MAX_BACKOFF_PASSES`].
+/// Returns whether the `n`th pass of a backoff rejoins or refills, see [`MAX_BACKOFF_PASSES`].
 fn backoff_due(n: u32) -> bool {
     if n < MAX_BACKOFF_PASSES {
         n.is_power_of_two()
@@ -356,7 +345,7 @@ pub struct State<PI, RG = ThreadRng> {
     passes_alone: u32,
     /// Maintenance passes with a short active view since we last gained a neighbor.
     ///
-    /// Passes during a recovery do not count. See [`MAX_BACKOFF_PASSES`].
+    /// Passes during a recovery do not count.
     passes_short: u32,
     /// The latest peers that were our neighbors, least recently seen first.
     ///
@@ -377,14 +366,13 @@ pub struct State<PI, RG = ThreadRng> {
     peer_data: HashMap<PI, PeerData>,
     /// List of peers that are disconnecting, but which we want to keep in the passive set once the connection closes
     alive_disconnect_peers: HashSet<PI>,
-    /// Passive peers that refused our neighbor request, as their active views were full.
+    /// Passive peers that refused our neighbor request because their active view was full.
     ///
-    /// A refill with low priority skips them. Else a short node whose passive
-    /// peers are all full would ask them in turn without end. A node without
-    /// neighbors asks with high priority, which no peer refuses, so it does not
-    /// skip them. We forget them when a neighbor leaves, when a maintenance pass
-    /// starts a refill, and in each pass while the node is not short, as they
-    /// may have room by then.
+    /// Requests with low priority skip them, so that a short node does not ask
+    /// the same full peers again and again. Requests with high priority do not
+    /// skip them, as no peer refuses those. We clear the set when a neighbor
+    /// leaves, when a maintenance pass starts a refill, and in each pass while
+    /// the node is not short.
     refused: HashSet<PI>,
     /// How many more requests a refill may send, see [`RefillLimit`].
     refill: RefillLimit,
@@ -772,17 +760,17 @@ where
         for node in message.nodes {
             new_peers |= self.add_passive(node.id, node.data, io);
         }
-        // A peer that refuses our neighbor request sends this reply before its
-        // `Disconnect`. Then only a short node asks the next passive peer.
-        // Otherwise the reply answers our shuffle, and a node with a free slot
-        // asks a passive peer, also without new peers. A node that is not short
-        // has no other refill.
+        // A peer that refuses our request sends this reply before its
+        // `Disconnect`. After a refusal, only a short node asks the next
+        // passive peer. Any other reply answers our shuffle. It lets a node
+        // with a free slot ask a passive peer, which is the only refill of a
+        // node that is not short.
         let has_pending_neighbor = self.pending_neighbor_requests.contains_key(&from);
         if has_pending_neighbor && !self.is_short() {
             return;
         }
-        // New peers give a node that used up its requests a new limit. A
-        // refusal only continues the refill, even if it brings new peers.
+        // A reply to our shuffle with new peers renews a used-up limit. A
+        // refusal does not.
         if !has_pending_neighbor && new_peers && self.refill == RefillLimit::Requests(0) {
             self.start_refill(RefillLimit::Requests(MAX_REQUESTS_PER_REFILL), &[], io);
         } else {
@@ -823,18 +811,16 @@ where
 
     /// Runs a maintenance pass, see [`MAINTENANCE_INTERVAL`].
     ///
-    /// What the node does depends on its views:
-    /// - Without any peer, it rejoins through its bootstrap peers and a recent
-    ///   neighbor. It cannot shuffle without neighbors, so nothing else fills
-    ///   its views again. It backs off, see [`MAX_BACKOFF_PASSES`].
-    /// - With passive peers but no neighbor, it starts a refill without a
-    ///   limit, in each pass. It asks with high priority, which no peer refuses.
-    /// - Short of neighbors, it starts a refill of a few requests, see
-    ///   [`MAX_REQUESTS_PER_REFILL`]. It backs off, as its passive peers are
-    ///   likely full.
+    /// - A node without any peer rejoins through its bootstrap peers and a
+    ///   recent neighbor, with a backoff. Without neighbors it cannot shuffle,
+    ///   so nothing else fills its views.
+    /// - A node with passive peers but no neighbor starts a refill without a
+    ///   limit, in every pass. Its requests have high priority, which no peer
+    ///   refuses.
+    /// - A short node starts a refill of a few requests, with a backoff, as its
+    ///   passive peers are likely full.
     ///
-    /// Outside of these passes, a refill starts when a neighbor leaves, and
-    /// when a shuffle reply comes while the active view has room.
+    /// Other refills start when a neighbor leaves, and on shuffle replies.
     fn handle_maintenance_timer(&mut self, io: &mut impl IO<PI>) {
         // Neighbors that stay count as seen again, so that churn does not push
         // them out.
@@ -862,8 +848,7 @@ where
             }
         } else {
             self.passes_alone = 0;
-            // A recovery also ends when no request is in flight: a peer accepted,
-            // or a node that is not short stopped at a refusal.
+            // A recovery ends when no request is left in flight.
             let requesting = self
                 .pending_neighbor_requests
                 .keys()
@@ -874,7 +859,7 @@ where
             if self.active_view.is_empty() {
                 self.start_refill(RefillLimit::Recovery, &[], io);
             } else if self.is_short() {
-                // The backoff waits while a recovery runs, so that no refill pass gets lost.
+                // The backoff pauses during a recovery.
                 if self.refill != RefillLimit::Recovery {
                     self.passes_short += 1;
                     if backoff_due(self.passes_short) {
@@ -969,10 +954,7 @@ where
         }
     }
 
-    /// Starts a refill with `limit`, and asks a passive peer.
-    ///
-    /// A due maintenance pass and a shuffle reply with new peers set a new
-    /// limit. Neither replaces a recovery that runs.
+    /// Starts a refill with `limit`, unless a recovery runs, and asks a passive peer.
     fn start_refill(&mut self, limit: RefillLimit, skip_peers: &[&PI], io: &mut impl IO<PI>) {
         if self.refill != RefillLimit::Recovery {
             self.refill = limit;
@@ -1003,7 +985,7 @@ where
             true => Priority::High,
             false => Priority::Low,
         };
-        // A short node limits each refill, also one that a shuffle reply starts.
+        // A short node always refills with a limit.
         if self.refill == RefillLimit::Automatic && priority == Priority::Low && self.is_short() {
             self.refill = RefillLimit::Requests(MAX_REQUESTS_PER_REFILL);
         }
@@ -1019,9 +1001,8 @@ where
             .pick_random_without(&skip_peers, &mut self.rng)
             .copied()
         else {
-            // The replies of pending peers can still bring new peers, so a
-            // recovery goes on until they arrive. A limited refill keeps the
-            // requests it has left.
+            // Replies to pending requests can still bring new peers, so a
+            // recovery lasts until they arrive.
             if self.refill == RefillLimit::Recovery && pending_outside == 0 {
                 self.refill = RefillLimit::Automatic;
             }
@@ -1155,7 +1136,7 @@ where
             debug!(other = ?peer, "add to active view");
             self.remember_neighbor(peer);
             io.push(OutEvent::EmitEvent(Event::NeighborUp(peer)));
-            // A recovery goes on, as other neighbors may still be missing.
+            // A recovery goes on, as more neighbors may be missing.
             if self.refill != RefillLimit::Recovery {
                 self.refill = RefillLimit::Automatic;
             }
@@ -1204,36 +1185,31 @@ where
 
 /// How many more neighbor requests a refill of the active view may send.
 ///
-/// A refill asks one passive peer at a time to become a neighbor. If the
-/// request fails, because the peer refuses, cannot be dialed, or does not
-/// answer in time, the refill asks the next passive peer right away, if this
-/// limit allows. Requests can overlap: a refusing peer sends its
-/// `ShuffleReply` before its `Disconnect`, and the reply already starts the
-/// next request. Other events start requests too. All of them share this
-/// limit.
+/// A refill asks one passive peer at a time. When a request fails, because the
+/// peer refuses, cannot be dialed, or does not answer in time, the refill asks
+/// the next passive peer right away, if the limit allows. Requests can
+/// overlap, and all of them share this limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RefillLimit {
-    /// The next refill picks its limit from the active view.
+    /// No limit is set yet.
     ///
-    /// A short node gets [`RefillLimit::Requests`]. Other nodes need no limit.
-    /// A node without neighbors asks with high priority, which no peer
-    /// refuses. A node with half its active view or more stops at the first
-    /// refusal.
+    /// The next refill of a short node sets [`RefillLimit::Requests`]. Other
+    /// nodes need no limit. A node without neighbors asks with high priority,
+    /// which no peer refuses. A node with half its active view or more stops at
+    /// the first refusal.
     Automatic,
-    /// A short node may send this many more requests, also zero.
+    /// A short node may send this many more requests.
     ///
     /// A due maintenance pass, a reply to our shuffle with new peers, or a new
-    /// neighbor gives a new limit. A refusal does not, even if its reply
-    /// brings new peers.
+    /// neighbor renews the limit. A refusal does not.
     Requests(usize),
     /// A neighbor left, or the node has no neighbor at all.
     ///
-    /// The refill has no limit: a short node asks until a peer accepts, as the
-    /// paper does. A maintenance pass does not limit it either, as the failure
-    /// may have made room in the views of other peers. A new neighbor does not
-    /// end it, as more neighbors may be missing. The recovery ends when no
-    /// passive peer is left to ask and no request is in flight, or in a
-    /// maintenance pass with no request in flight.
+    /// The refill has no limit, and asks until a peer accepts, as in the paper.
+    /// The failure may have made room in the views of other peers. Maintenance
+    /// passes and new neighbors do not end it. It ends when no passive peer is
+    /// left and no request is in flight, or in a maintenance pass with no
+    /// request in flight.
     Recovery,
 }
 
@@ -2054,7 +2030,7 @@ mod tests {
             .collect()
     }
 
-    /// Refuses the pending requests as full peers do, also those that the refusals start.
+    /// Refuses the pending requests as full peers do, including those the refusals start.
     ///
     /// In each round, all replies come before the first `Disconnect`, as replies
     /// of different peers can overtake each other. Returns the peers asked
@@ -2095,7 +2071,7 @@ mod tests {
         }
     }
 
-    /// Short node with one neighbor and `passive` peers.
+    /// Returns a short node with the neighbor 1 and the passive peers `passive`.
     fn short_state(passive: std::ops::Range<u32>) -> State<u32, StdRng> {
         let mut state = new_state();
         state.active_view.insert(1);
@@ -2126,10 +2102,7 @@ mod tests {
         assert_eq!(neighbors_sent(io).len(), 1, "the next pass asks again");
     }
 
-    /// A refill from a maintenance pass sends only a few requests, however they fail.
-    ///
-    /// Each request costs a dial. A node whose passive peers are all full would
-    /// else dial each of them.
+    /// A refill from a maintenance pass sends only a few requests, whether they are refused or fail.
     #[test]
     fn maintenance_refill_sends_a_few_requests() {
         let mut state = short_state(10..20);
@@ -2144,10 +2117,10 @@ mod tests {
         assert_eq!(asked.len(), MAX_REQUESTS_PER_REFILL, "asked {asked:?}");
     }
 
-    /// A node with a free slot asks a passive peer at each shuffle reply, also without new peers.
+    /// A node with a free slot asks a passive peer on each shuffle reply, even one without new peers.
     ///
     /// In a swarm smaller than the passive view, shuffles soon bring no new
-    /// peers. A node that is not short has no other refill.
+    /// peers.
     #[test]
     fn shuffle_reply_fills_a_free_slot() {
         let mut state = short_state(10..20);
@@ -2287,7 +2260,7 @@ mod tests {
         }
     }
 
-    /// Only a shuffle reply with new peers gives a node that used up its requests a new limit.
+    /// Only a shuffle reply with new peers renews a used-up limit.
     #[test]
     fn new_shuffle_contacts_restart_an_exhausted_refill() {
         let mut state = short_state(10..20);
@@ -2296,7 +2269,7 @@ mod tests {
         let mut asked = neighbors_sent(io);
         for request in 0..MAX_REQUESTS_PER_REFILL {
             let peer = *state.pending_neighbor_requests.keys().next().unwrap();
-            // The last refusal brings new peers, but gives no new limit.
+            // The last refusal brings new peers, but does not renew the limit.
             let nodes = if request + 1 == MAX_REQUESTS_PER_REFILL {
                 (20..30).map(|peer| (peer, None).into()).collect()
             } else {
@@ -2323,8 +2296,8 @@ mod tests {
         assert_eq!(asked.len(), MAX_REQUESTS_PER_REFILL);
         assert!(state.pending_neighbor_requests.is_empty());
 
-        // Known peers give no new limit. New peers do, before the next
-        // maintenance pass.
+        // Known peers do not renew the limit. New peers do, without waiting
+        // for maintenance.
         for (contacts, expected) in [(20..30, 0), (30..40, MAX_REQUESTS_PER_REFILL), (30..40, 0)] {
             let reply = Message::ShuffleReply(ShuffleReply {
                 nodes: contacts.map(|peer| (peer, None).into()).collect(),
@@ -2339,8 +2312,8 @@ mod tests {
 
     /// A node that loses a neighbor asks passive peers until one accepts, as in the paper.
     ///
-    /// The failure may have made room in their views, also in those of peers
-    /// that refused before. A maintenance pass during the refill does not limit it.
+    /// The failure may have made room, also at peers that refused before. A
+    /// maintenance pass during the refill does not limit it.
     #[test]
     fn refill_after_a_neighbor_left_has_no_limit() {
         let mut state = short_state(10..20);
@@ -2381,7 +2354,7 @@ mod tests {
         assert!(!neighbors_sent(io).is_empty(), "the backoff went on");
     }
 
-    /// The backoff waits while a recovery runs, so that the recovery costs no refill pass.
+    /// The backoff pauses during a recovery, so that the recovery costs no refill pass.
     #[test]
     fn backoff_waits_during_a_recovery() {
         let mut state = short_state(10..40);
@@ -2402,9 +2375,8 @@ mod tests {
 
     /// A node that lost its last neighbor asks a peer whose refusal came after the loss.
     ///
-    /// No peer refuses a request with high priority, so the node does not skip
-    /// the peer. Else it would neither ask the peer nor rejoin, as its passive
-    /// view is not empty.
+    /// Its requests have high priority, which no peer refuses. If it skipped the
+    /// peer, it would never rejoin either, as its passive view is not empty.
     #[test]
     fn node_without_neighbors_asks_a_peer_that_refused() {
         let mut state = short_state(10..11);
