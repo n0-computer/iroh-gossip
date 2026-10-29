@@ -417,6 +417,8 @@ struct Grafts<PI> {
     peers: Vec<PI>,
     /// The sender of the first copy, and the hops it took, once it came.
     first: Option<(PI, Round)>,
+    /// The grafted peer that replaced the sender of the first copy.
+    kept: Option<PI>,
 }
 
 /// The most dropped messages per peer that we keep to announce again.
@@ -458,7 +460,7 @@ pub struct State<PI> {
     received_messages: TimeBoundCache<MessageId, ()>,
     /// The grafts we sent for a message, see [`Self::on_late_graft_reply`].
     ///
-    /// An entry lives as long as the payload cache, as no reply comes later.
+    /// An entry lives as long as our payload cache. A later reply is a plain duplicate.
     grafted: TimeBoundCache<MessageId, Grafts<PI>>,
     /// Payloads of received messages.
     cache: TimeBoundCache<MessageId, Gossip>,
@@ -732,20 +734,26 @@ impl<PI: PeerIdentity> State<PI> {
     ///
     /// If the first copy was a graft reply too, no eager copy was late, and the
     /// rule does not apply. The node does not push the message to a grafted
-    /// peer. If the queue of that peer drops its reply, both stay eager until
-    /// the next duplicate.
+    /// peer. If the queue of that peer drops its reply, the peer announces the
+    /// message again, and the node grafts it again.
     ///
     /// Returns whether it handled the duplicate.
     fn on_late_graft_reply(&mut self, sender: PI, message: &Gossip, io: &mut impl IO<PI>) -> bool {
         let Some(Grafts {
             peers,
             first: Some((first, first_round)),
+            kept,
         }) = self.grafted.get(&message.id)
         else {
             return false;
         };
         let (first, first_round) = (*first, *first_round);
         let grafted = peers.contains(&sender);
+        // A second graft to the same peer, a retry, brings a second reply. The
+        // peer already gave us the message, so it is no redundant path.
+        if grafted && (first == sender || *kept == Some(sender)) {
+            return true;
+        }
         let not_longer = message.round().is_some_and(|round| round <= first_round);
         if !grafted
             || !not_longer
@@ -756,6 +764,9 @@ impl<PI: PeerIdentity> State<PI> {
             return false;
         }
         debug!(peer = ?sender, slower = ?first, "keep a faster grafted peer");
+        if let Some(grafts) = self.grafted.get_mut(&message.id) {
+            grafts.kept = Some(sender);
+        }
         self.add_lazy(first);
         io.push(OutEvent::SendMessage(first, Message::Prune));
         true
@@ -814,10 +825,13 @@ impl<PI: PeerIdentity> State<PI> {
     fn on_ihave(&mut self, sender: PI, ihaves: Vec<IHave>, io: &mut impl IO<PI>) {
         for ihave in ihaves {
             if !self.received_messages.contains_key(&ihave.id) {
-                self.missing_messages
-                    .entry(ihave.id)
-                    .or_default()
-                    .push_back((sender, ihave.round));
+                // Each queued announcement can bring a graft, and the peer
+                // answers each one. A peer that announces again after its
+                // graft is a retry, for example after its reply was dropped.
+                let announcers = self.missing_messages.entry(ihave.id).or_default();
+                if !announcers.iter().any(|(peer, _)| *peer == sender) {
+                    announcers.push_back((sender, ihave.round));
+                }
 
                 if !self.graft_timer_scheduled.contains(&ihave.id) {
                     self.graft_timer_scheduled.insert(ihave.id);
@@ -838,20 +852,11 @@ impl<PI: PeerIdentity> State<PI> {
         if self.received_messages.contains_key(&id) {
             return;
         }
-        // Get the first peer that announced the message. A peer that announced
-        // it twice gets one graft: it would answer each one, and its second
-        // reply would prune it.
-        let grafted = self
-            .grafted
-            .get(&id)
-            .map(|grafts| grafts.peers.as_slice())
-            .unwrap_or_default();
-        let entry = self.missing_messages.get_mut(&id).and_then(|entries| loop {
-            match entries.pop_front() {
-                Some((peer, _)) if grafted.contains(&peer) => continue,
-                entry => break entry,
-            }
-        });
+        // get the first peer that advertised this message
+        let entry = self
+            .missing_messages
+            .get_mut(&id)
+            .and_then(|entries| entries.pop_front());
         if self
             .missing_messages
             .get(&id)
@@ -862,11 +867,13 @@ impl<PI: PeerIdentity> State<PI> {
         if let Some((peer, round)) = entry {
             self.add_eager(peer);
             match self.grafted.get_mut(&id) {
+                Some(grafts) if grafts.peers.contains(&peer) => {}
                 Some(grafts) => grafts.peers.push(peer),
                 None => {
                     let grafts = Grafts {
                         peers: vec![peer],
                         first: None,
+                        kept: None,
                     };
                     let expires = now + self.config.message_cache_retention;
                     self.grafted.insert(id, grafts, expires);
@@ -1573,14 +1580,36 @@ mod test {
         assert!(state.lazy_push_peers.contains(&4));
     }
 
-    /// A peer that announced a message twice gets one graft, and stays eager after its reply.
-    ///
-    /// Two grafts would bring two replies, and the second would prune the peer
-    /// that the first one kept.
+    /// A peer that announced a message twice before the graft timer gets one graft.
     #[test]
-    fn peer_that_announced_twice_gets_one_graft() {
+    fn peer_announced_twice_before_the_graft_gets_one() {
         let now = Instant::now();
-        let slow = gossip(b"announced twice", 6);
+        let id = gossip(b"announced twice", 1).id;
+        let mut state = State::new(1u32, Config::default(), 1024);
+        let mut io = VecDeque::new();
+        state.handle(InEvent::NeighborUp(3), now, &mut io);
+        state.handle(InEvent::RecvMessage(3, Message::Prune), now, &mut io);
+        let ihave = Message::IHave(vec![IHave {
+            id,
+            round: Round(1),
+        }]);
+        state.handle(InEvent::RecvMessage(3, ihave.clone()), now, &mut io);
+        state.handle(InEvent::RecvMessage(3, ihave), now, &mut io);
+        io.clear();
+        for _ in 0..2 {
+            state.handle(InEvent::TimerExpired(Timer::SendGraft(id)), now, &mut io);
+        }
+        assert_eq!(sent_to(&io, 3).len(), 1, "grafts: {:?}", sent_to(&io, 3));
+    }
+
+    /// A kept peer that answers a retried graft stays eager.
+    ///
+    /// The second reply is our own retry, not a redundant path. If it pruned
+    /// the peer, the node would lose both the eager peer and the kept one.
+    #[test]
+    fn retried_reply_of_a_kept_peer_is_ignored() {
+        let now = Instant::now();
+        let slow = gossip(b"retried", 6);
         let mut state = grafted_state(slow.id, 1, now);
         let mut io = VecDeque::new();
         let ihave = Message::IHave(vec![IHave {
@@ -1588,18 +1617,89 @@ mod test {
             round: Round(1),
         }]);
         state.handle(InEvent::RecvMessage(3, ihave), now, &mut io);
+        io.clear();
         state.handle(
             InEvent::TimerExpired(Timer::SendGraft(slow.id)),
             now,
             &mut io,
         );
-        assert!(sent_to(&io, 3).is_empty(), "grafted the peer again");
+        assert!(
+            matches!(sent_to(&io, 3)[..], [Message::Graft(_)]),
+            "no retry"
+        );
 
         state.handle(InEvent::RecvMessage(2, Message::Gossip(slow)), now, &mut io);
-        let fast = gossip(b"announced twice", 1);
+        let fast = gossip(b"retried", 1);
+        state.handle(
+            InEvent::RecvMessage(3, Message::Gossip(fast.clone())),
+            now,
+            &mut io,
+        );
+        io.clear();
         state.handle(InEvent::RecvMessage(3, Message::Gossip(fast)), now, &mut io);
+        assert!(sent_to(&io, 3).is_empty(), "pruned the kept peer");
         assert!(state.eager_push_peers.contains(&3));
         assert!(state.lazy_push_peers.contains(&2));
+    }
+
+    /// A message whose graft replies the source's queue drops reaches the receiver once it clears.
+    ///
+    /// The source announces the message again after each drop, and the
+    /// receiver grafts it again. A second reply, as when a retry crosses a
+    /// reply, prunes nothing.
+    /// With two peers, no other source can hide a missing retry.
+    #[test]
+    fn dropped_graft_replies_are_requested_again() {
+        let now = Instant::now();
+        let (mut source, push) = broadcast_to_2(b"dropped replies", Scope::Swarm);
+        let mut receiver = State::new(2u32, Config::default(), 1024);
+        receiver.handle(InEvent::NeighborUp(1), now, &mut VecDeque::new());
+        source.handle(InEvent::SendDropped(2, push), now, &mut VecDeque::new());
+        let mut reply = None;
+        for attempt in 0..3 {
+            let id = tick(&mut source, now, 2);
+            assert_eq!(id.len(), 1, "attempt {attempt}: no announcement");
+            let ihave = Message::IHave(vec![IHave {
+                id: id[0],
+                round: Round(0),
+            }]);
+            receiver.handle(InEvent::RecvMessage(1, ihave), now, &mut VecDeque::new());
+            let mut io = VecDeque::new();
+            receiver.handle(InEvent::TimerExpired(Timer::SendGraft(id[0])), now, &mut io);
+            let graft = sent_to(&io, 1).pop().expect("a graft");
+            assert!(
+                matches!(graft, Message::Graft(_)),
+                "attempt {attempt}: no graft"
+            );
+            let mut io = VecDeque::new();
+            source.handle(InEvent::RecvMessage(2, graft), now, &mut io);
+            let answer = pushed_to(&io, 2).expect("a reply");
+            if attempt < 2 {
+                source.handle(
+                    InEvent::SendDropped(2, answer.clone()),
+                    now,
+                    &mut VecDeque::new(),
+                );
+                reply = Some(answer);
+            } else {
+                let mut io = VecDeque::new();
+                receiver.handle(InEvent::RecvMessage(1, answer), now, &mut io);
+                let received = io
+                    .iter()
+                    .filter(|event| matches!(event, topic::OutEvent::EmitEvent(_)))
+                    .count();
+                assert_eq!(received, 1);
+            }
+        }
+        // A second reply to the same peer's grafts.
+        let mut io = VecDeque::new();
+        receiver.handle(
+            InEvent::RecvMessage(1, reply.expect("a dropped reply")),
+            now,
+            &mut io,
+        );
+        assert!(io.is_empty(), "late reply caused {io:?}");
+        assert!(receiver.eager_push_peers.contains(&1));
     }
 
     /// While a graft for a message is out, the eager copy does not optimize the tree.
