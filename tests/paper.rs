@@ -1062,8 +1062,8 @@ fn plumtree_recovers_from_massive_failure() {
 /// does not keep such a peer, so a little redundancy stays.
 #[test]
 fn plumtree_graft_timeout_below_the_eager_path_leaves_little_redundancy() {
-    // Measured over 50 seeds, at 80ms and 400ms: at most 0.005 and 0.004 on
-    // 50ms links, and 0.017 and 0.006 on 10 to 100ms links. On main, 80ms cost
+    // Measured over 50 seeds, at 80ms and 400ms: at most 0.007 and 0.003 on
+    // 50ms links, and 0.014 and 0.005 on 10 to 100ms links. On main, 80ms cost
     // 0.05 to 0.66 on 50ms links.
     let links = [
         (
