@@ -479,6 +479,32 @@ async fn restart_while_the_former_instance_runs() -> Result {
     exchange(&mut sa, &mut sb, b"02").await
 }
 
+/// A peer that restarted on other topics leaves the views of its former neighbor.
+///
+/// The new instance dials us for another topic, so the close of the former
+/// instance's connection drops no neighbor. The next membership message on
+/// the first topic, here for a third node that joins, gets the answer that the
+/// peer left.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn restart_on_other_topics_leaves_the_former_neighbor() -> Result {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (Node::spawn(&lookup).await?, Node::spawn(&lookup).await?);
+    let (t, other) = (topic("restart_left"), topic("restart_other"));
+    let mut sa = Sub::new(&a, t, vec![]).await?;
+    let _sa_other = Sub::new(&a, other, vec![]).await?;
+    let _sb_former = Sub::join(&b, t, vec![a.id()]).await?;
+    sa.neighbor_up(b.id()).await?;
+
+    let b_new = Node::spawn_with(&lookup, b.secret.clone()).await?;
+    let _sb = Sub::join(&b_new, other, vec![a.id()]).await?;
+    let b_id = b.id();
+    b.crash().await;
+    let c = Node::spawn(&lookup).await?;
+    let _sc = Sub::join(&c, t, vec![a.id()]).await?;
+    sa.neighbor_down(b_id).await
+}
+
 /// A node that vanishes and restarts again and again keeps working, with no pile-up.
 #[tokio::test(flavor = "multi_thread")]
 #[traced_test]
@@ -695,8 +721,6 @@ async fn neighbor_request_over_a_slow_dial_connects() -> Result {
 }
 
 /// A join to a node that is not on the topic leaves no connection once we leave.
-///
-/// The node never answers, so only our side can drop the other.
 #[tokio::test(flavor = "multi_thread")]
 #[traced_test]
 async fn join_to_a_node_off_the_topic_leaves_no_connection() -> Result {
