@@ -37,12 +37,11 @@ const PROMPT: Duration = Duration::from_secs(10);
 /// The idle timeout of the test transport: a silent peer is gone after this.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// A wait longer than a node keeps a connection that it no longer uses.
+/// A wait longer than a node keeps a connection without streams.
 ///
-/// That is the wait for our finished streams to be acknowledged, then the idle
-/// grace, five seconds each, and a margin. A send that blocks can hold a
-/// connection up to 20 s, but no test here blocks one.
-const SETTLE: Duration = Duration::from_secs(12);
+/// That is the wait for our finished streams to be acknowledged, then the
+/// grace of 10 s, and a margin.
+const SETTLE: Duration = Duration::from_secs(16);
 
 /// Decides whether a node takes a connection, before gossip sees it.
 type AcceptFilter = Arc<dyn Fn(&Connection) -> bool + Send + Sync>;

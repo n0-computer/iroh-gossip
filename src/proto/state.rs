@@ -234,10 +234,16 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
         self.states.iter()
     }
 
-    /// Returns whether a topic uses `peer`, so that its connections must stay.
+    /// Returns whether a topic uses `peer`, so that our queue to it stays open.
     #[cfg(feature = "net")]
     pub(crate) fn uses_peer(&self, peer: &PI) -> bool {
         self.peer_topics.contains_key(peer)
+    }
+
+    /// Returns the topics that use `peer`.
+    #[cfg(feature = "net")]
+    pub(crate) fn topics_of(&self, peer: &PI) -> impl Iterator<Item = TopicId> + '_ {
+        self.peer_topics.get(peer).into_iter().flatten().copied()
     }
 
     /// Returns the peers to which `topic` pushes its payloads.
