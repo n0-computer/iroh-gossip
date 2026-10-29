@@ -61,10 +61,12 @@ const TOPIC_EVENT_CAP: usize = 256;
 ///
 /// Each side times the grace on its own. A stream that we open in the moment
 /// the peer retires the connection loses its message, and the topics do not
-/// learn of it. This needs a topic that uses the peer but has no stream on the
-/// connection that writes for it, which is rare.
+/// learn of it. This needs a connection without streams that still has our
+/// writer: one for a peer that no topic uses, or the rare case of a topic that
+/// uses the peer but has no stream on it.
 #[cfg(not(test))]
 const RETIRE_GRACE: Duration = Duration::from_secs(10);
+/// Shorter for the unit tests. The e2e tests build without `cfg(test)`, so they see 10 s.
 #[cfg(test)]
 const RETIRE_GRACE: Duration = Duration::from_secs(5);
 
@@ -664,7 +666,10 @@ impl Actor {
             .entry(peer_id)
             .or_insert_with(|| PeerState::new(size));
         let queue_lease = peer.handle_connection(side, conn.stable_id());
-        let initial_topics = self.state.topics_of(&peer_id).collect();
+        let initial_topics = match queue_lease {
+            Some(_) => self.state.topics_of(&peer_id).collect(),
+            None => Vec::new(),
+        };
 
         let aborted = peer.aborted.clone();
         let handles_close = peer.handles_close.clone();
@@ -742,7 +747,7 @@ impl Actor {
         if disconnected {
             debug!("active send connection closed, mark peer as disconnected");
             self.handle_in_event(InEvent::PeerDisconnected(peer_id), now);
-        } else if self.peers[&peer_id].needs_dial() {
+        } else if retired && self.peers[&peer_id].needs_dial() {
             debug!("retired connection left messages, dial again");
             self.dialer.queue_dial(peer_id, self.alpn.clone());
         }
@@ -954,8 +959,8 @@ type ConnId = usize;
 /// What we know of a peer: its queue, and its connections.
 ///
 /// The queue always exists. An open queue waits for messages. A closed queue
-/// goes out, and then its writer ends. A closed, empty queue is idle, and the
-/// peer needs no writer and no dial.
+/// goes out, and then its writer finishes its streams and waits on its
+/// connection for the queue to open again. A closed queue needs no dial.
 ///
 /// The state outlives the last connection by [`PEER_RETENTION`], so that a
 /// peer we want again keeps its `handles_close` flag.
@@ -969,8 +974,7 @@ struct PeerState {
     /// The connection that writes the queue, or `None` until a dial takes it.
     ///
     /// A replaced writer finishes its current message first. The queue lease
-    /// keeps the two in order. Reopening clears this slot, but an older lease
-    /// may still write until the replacement dial takes over.
+    /// keeps the two in order.
     writer: Option<ConnId>,
     /// Connection tasks that the actor has not yet seen finish.
     connections: usize,
@@ -1010,10 +1014,9 @@ impl PeerState {
     /// Opens the queue, which keeps its messages and its byte limit.
     fn open_queue(&mut self) -> &SendQueue {
         self.forget_at = None;
+        // The writer of a closed queue waits on its connection, and takes it again.
         if self.queue.is_closing() {
             self.queue.set_closing(false);
-            // The writer of the closed queue may have ended. A pending dial takes over.
-            self.writer = None;
         }
         &self.queue
     }
@@ -1027,7 +1030,7 @@ impl PeerState {
         self.open_queue().push(message)
     }
 
-    /// Closes the queue: the writer sends what is left, and then ends.
+    /// Closes the queue: the writer sends what is left, finishes its streams, and waits.
     fn close_queue(&mut self) {
         self.queue.set_closing(true);
     }
@@ -1064,7 +1067,7 @@ impl PeerState {
         } else {
             self.writer = Some(id);
             // An accepted connection reopens a closed queue. A dial sends what is
-            // left of it, and then ends.
+            // left of it, and then waits.
             if side == Side::Server {
                 self.queue.set_closing(false);
             }
@@ -1077,7 +1080,7 @@ impl PeerState {
     /// It is when the writer of an open queue ended, even if other connections
     /// remain. The caller must immediately process `PeerDisconnected`, which
     /// discards the queue before invoking the protocol. A closed queue is
-    /// discarded here instead, since its writer ended intentionally. A writer
+    /// discarded here instead, as no topic uses the peer. A writer
     /// whose connection `retired` reports no disconnect: an empty queue goes,
     /// and the caller dials for a queue with messages.
     fn connection_finished(&mut self, id: ConnId, now: Instant, retired: bool) -> bool {
@@ -2274,62 +2277,22 @@ pub(crate) mod tests {
         );
     }
 
-    /// A stopped writer's completion must not remove messages queued after reopening.
+    /// A reopened queue goes to the writer that waits on its connection, with no dial.
     #[tokio::test]
-    async fn reopened_queue_survives_its_previous_writer() {
-        let now = Instant::now();
+    async fn reopened_queue_keeps_the_waiting_writer() {
         let topic = [42; 32].into();
         let mut peer = open_peer(queue::MIN_QUEUE_SIZE);
-        let first = peer.handle_connection(Side::Server, 1).unwrap();
+        let lease = peer.handle_connection(Side::Server, 1).unwrap();
         peer.close_queue();
-        assert!(!first.lock().await.next().await, "the writer must stop");
+        let mut reader = lease.lock().await;
+        assert!(!reader.next(true).await, "the closed queue is empty");
 
         let message = join_message(topic, 0);
         assert!(matches!(peer.send(message.clone()), Pushed::Queued));
-        assert!(peer.needs_dial(), "reopening must request a new writer");
-        assert!(!peer.connection_finished(1, now, false));
-        assert!(!peer.can_forget(now + PEER_RETENTION));
-
-        let next = peer
-            .handle_connection(Side::Client, 2)
-            .expect("awaiting writer");
-        assert!(first.revoked().is_cancelled());
-        assert!(!peer.needs_dial());
-        let mut reader = next.lock().await;
-        assert!(reader.next().await);
-        assert_eq!(reader.current().unwrap().message.topic, message.topic);
+        assert!(!lease.revoked().is_cancelled());
+        assert!(!peer.needs_dial(), "the waiting writer takes the queue");
+        assert!(reader.next(false).await);
         assert_eq!(reader.current().unwrap().message.message, message.message);
-    }
-
-    /// The old writer can drain a reopened queue before the actor decides to dial.
-    #[tokio::test]
-    async fn reopened_empty_queue_still_needs_a_dial() {
-        let now = Instant::now();
-        let mut peer = open_peer(queue::MIN_QUEUE_SIZE);
-        let old = peer.handle_connection(Side::Server, 1).unwrap();
-        peer.close_queue();
-        assert!(matches!(
-            peer.send(join_message([43; 32].into(), 0)),
-            Pushed::Queued
-        ));
-
-        // The previous lease is still valid. Model it running between the
-        // actor's push and its decision to schedule a replacement dial.
-        let mut reader = old.lock().await;
-        assert!(reader.next().await);
-        reader.advance();
-        drop(reader);
-
-        assert!(peer.queue.is_empty());
-        assert!(peer.needs_dial(), "an empty open queue still needs a dial");
-        assert!(!peer.connection_finished(1, now, false));
-        assert!(peer.forget_at.is_none(), "the reopened peer is not idle");
-        assert!(!peer.can_forget(now + PEER_RETENTION));
-        let _next = peer
-            .handle_connection(Side::Client, 2)
-            .expect("the replacement dial must take the queue");
-        assert!(old.revoked().is_cancelled());
-        assert!(!peer.needs_dial());
     }
 
     /// A retired writer with an empty queue does not disconnect the peer.
@@ -2415,13 +2378,13 @@ pub(crate) mod tests {
         assert!(!aborted.is_cancelled());
 
         let mut reader = lease.lock().await;
-        assert!(reader.next().await);
+        assert!(reader.next(true).await);
         assert_eq!(reader.current().unwrap().message.message, message.message);
         reader.advance();
-        assert!(!reader.next().await, "the old queue must end");
+        assert!(!reader.next(true).await, "the old queue must end");
     }
 
-    /// A failed dial does not disconnect a peer whose connection still sends the rest of a closed queue.
+    /// A failed dial does not disconnect a peer whose connection still writes a closed queue.
     #[tokio::test]
     async fn failed_dial_leaves_the_draining_writer() -> Result {
         let mut actor = t_actor().await?;
@@ -3164,7 +3127,7 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// A topic that the writer left with a `Disconnect` gets no stream again from the initial topics.
+    /// A topic that the writer left with a `Disconnect` gets no initial stream again.
     #[tokio::test]
     #[traced_test]
     async fn left_topic_gets_no_initial_stream() -> Result {
@@ -3240,6 +3203,32 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// A message to a peer that no topic uses goes out on the waiting writer, with no dial.
+    ///
+    /// Here the peer sends two joins for a topic that we are not on, and gets
+    /// both answers on its connection.
+    #[tokio::test]
+    #[traced_test]
+    async fn answers_to_an_unused_peer_need_no_dial() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect_back().await?;
+        let peer_id = pair.ep2.id();
+        let topic: TopicId = blake3::hash(b"answers_need_no_dial").into();
+        let mut actor = t_actor().await?;
+        actor.handle_connection(conn);
+        for _ in 0..2 {
+            let join = InEvent::RecvMessage(peer_id, join_message(topic, 0));
+            actor.handle_in_event(join, Instant::now());
+            assert!(!actor.dialer.is_pending(peer_id), "the answer dialed");
+            let (sent, message) = timeout(Duration::from_secs(5), read_next_message(&peer_conn))
+                .await
+                .std_context("the answer did not go out")??;
+            assert_eq!(sent, topic);
+            assert!(message.is_disconnect());
+        }
+        Ok(())
+    }
+
     /// A send loop whose connection closed lets go of the queue, for another connection of the peer.
     #[tokio::test]
     #[traced_test]
@@ -3269,10 +3258,9 @@ pub(crate) mod tests {
 
     /// An aborted peer loses the connection that took its queue, also once its writer ended.
     ///
-    /// The protocol closed the peer and reopened it before a new dial
-    /// completed. The writer of the old connection sent the queue and ended,
-    /// but the connection still reads from the peer, which must learn of the
-    /// drop.
+    /// The peer opened another connection, which took over the queue. The
+    /// writer of the old connection sent the queue and let go of it, but the
+    /// connection still reads from the peer, which must learn of the drop.
     #[tokio::test]
     #[traced_test]
     async fn aborted_peer_loses_the_connection_that_took_its_queue() -> Result {
@@ -3304,8 +3292,10 @@ pub(crate) mod tests {
             .await
             .std_context("the queue did not go out")??;
         peers.insert(peer_id, state);
-        peers.get_mut(&peer_id).expect("known peer").close_queue();
-        // The writer lets go of the queue once it ended.
+        let state = peers.get_mut(&peer_id).expect("known peer");
+        state.close_queue();
+        let _next = state.handle_connection(Side::Server, usize::MAX);
+        // The writer lets go of the queue once the next connection revoked it.
         timeout(Duration::from_secs(5), async {
             while peers[&peer_id].queue.try_reader().is_none() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -3313,7 +3303,6 @@ pub(crate) mod tests {
         })
         .await
         .std_context("the writer did not end")?;
-        peers.get_mut(&peer_id).expect("dropped").open_queue();
 
         peers
             .get_mut(&peer_id)

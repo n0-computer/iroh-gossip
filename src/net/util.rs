@@ -66,7 +66,7 @@ pub(super) const CLOSE_QUEUE_FULL: u32 = 2;
 /// The code of a close for a write or a stream open that made no progress in time.
 pub(super) const CLOSE_STALLED: u32 = 3;
 
-/// The code of a close for a connection that had no stream for [`RETIRE_GRACE`](super::RETIRE_GRACE).
+/// The code of a close for a connection without streams, see [`RETIRE_GRACE`](super::RETIRE_GRACE).
 pub(super) const CLOSE_RETIRED: u32 = 4;
 
 /// The flag of [`StreamHeader::handles_close`].
@@ -321,7 +321,9 @@ pub(crate) struct SendLoop {
     queue_lease: QueueLease,
     /// The topics that used the peer when the writer started, for which it opens streams.
     initial_topics: Vec<TopicId>,
-    /// Whether we have a stream to the peer: set before an open, cleared once [`Self::live_streams`] is empty.
+    /// Whether we have a stream to the peer.
+    ///
+    /// It is set before an open, and clears once [`Self::live_streams`] is empty.
     has_streams: watch::Sender<bool>,
 }
 
@@ -347,7 +349,9 @@ impl SendLoop {
 
     /// Writes the queue until it ends, the lease is revoked, or the connection closes.
     ///
-    /// Once no queued message waits, it also opens a stream for each initial topic. Takes `self`, so that the lease drops once it returns.
+    /// Once no queued message waits, it also opens a stream for each initial
+    /// topic. After the queue closed, it waits for the queue to open again.
+    /// Takes `self`, so that the lease drops once it returns.
     pub(crate) async fn run(mut self) -> Result<(), WriteError> {
         let conn = self.conn.clone();
         let closed = conn.closed();
@@ -362,6 +366,8 @@ impl SendLoop {
         };
         if let Some(mut queue) = queue {
             let mut initial_topics = std::mem::take(&mut self.initial_topics);
+            // Whether the queue closed, and the writer waits for it to open again.
+            let mut parked = false;
             loop {
                 // Every pass of the loop starts here, so the flag clears with the last stream.
                 if self.live_streams.is_empty() {
@@ -383,19 +389,34 @@ impl SendLoop {
                         }
                         continue;
                     }
-                    more = queue.next() => more,
+                    more = queue.next(!parked) => more,
                     // After the queue, so that queued messages get the streams of the peer
                     // first. A quiet topic needs a stream to keep the connection.
                     Some(topic) = async { initial_topics.pop() }, if !initial_topics.is_empty() => {
-                        if let Err(err) = self.open_stream(topic, &revoked).await {
-                            self.handle_error(topic, err)?;
+                        match self.open_stream(topic, &revoked).await {
+                            // At the stream limit of the peer, the quiet topics go without.
+                            Err(WriteError::OpenStalled { .. }) => initial_topics.clear(),
+                            Err(err) => self.handle_error(topic, err)?,
+                            Ok(_) => {}
                         }
                         continue;
                     }
                 };
                 if !more {
-                    break;
+                    if parked {
+                        // The queue is gone.
+                        break;
+                    }
+                    // The queue closed. The writer stays on this connection, so that a
+                    // later message to the peer needs no dial.
+                    for mut stream in std::mem::take(&mut self.streams).into_values() {
+                        stream.finish().ok();
+                    }
+                    initial_topics.clear();
+                    parked = true;
+                    continue;
                 }
+                parked = false;
                 let item = queue.current().expect("next returned a message");
                 match self.open_stream(item.message.topic, &revoked).await {
                     Ok(true) => {}
@@ -442,12 +463,15 @@ impl SendLoop {
         Ok(())
     }
 
-    /// Writes a message on the open stream of its topic, and finishes the stream after a `Disconnect`.
+    /// Writes a message on the stream of its topic, and finishes the stream after a `Disconnect`.
     ///
     /// If the write fails because the peer stopped the stream, the message is lost.
     /// Returns the error only if the connection is gone, or if the write made no
-    /// progress in time, which closes the connection. This is not
-    /// cancellation-safe.
+    /// progress in time, which closes the connection.
+    ///
+    /// ## Cancellation safety
+    ///
+    /// This function is not cancellation-safe.
     async fn send(&mut self, item: &QueuedMessage) -> Result<(), WriteError> {
         let ProtoMessage { topic, message } = &item.message;
         let stream = self
