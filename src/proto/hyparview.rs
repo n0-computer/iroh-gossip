@@ -2181,6 +2181,22 @@ mod tests {
         assert_eq!(asked.len(), MAX_REQUESTS_PER_REFILL, "asked {asked:?}");
     }
 
+    /// A node with one neighbor limits the refill that a new peer in a shuffle reply starts.
+    ///
+    /// This is the state of a node that just joined.
+    #[test]
+    fn shuffle_reply_with_a_new_peer_starts_a_limited_refill() {
+        let mut state = short_state(10..40);
+        let reply = Message::ShuffleReply(ShuffleReply {
+            nodes: vec![(40, None).into()],
+        });
+        let io = &mut Io::new();
+        state.handle(InEvent::RecvMessage(1, reply), io);
+        let mut asked = neighbors_sent(io);
+        asked.extend(refuse_pending(&mut state));
+        assert!(asked.len() <= MAX_REQUESTS_PER_REFILL, "asked {asked:?}");
+    }
+
     /// A refill whose passive peers are all pending keeps its limit, and a recovery goes on.
     ///
     /// The replies of the pending peers can still bring new peers.
