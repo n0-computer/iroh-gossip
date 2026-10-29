@@ -952,8 +952,7 @@ fn plumtree_delivery_holds_under_a_constant_failure_rate() {
 ///
 /// The test uses a graft timeout of 400ms. At the default 80ms, a failure of
 /// this size leaves many lazy paths that beat the rest of the eager path, and
-/// each takes a broadcast to settle. Over 200 seeds, that made the RMR settle
-/// one broadcast too late on one more seed.
+/// each takes a broadcast to settle.
 #[test]
 fn plumtree_recovers_from_massive_failure() {
     let peers = swarm_size(400);

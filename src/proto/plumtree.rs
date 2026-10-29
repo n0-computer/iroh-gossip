@@ -413,7 +413,7 @@ pub struct Stats {
 /// The grafts we sent for one message.
 #[derive(Debug)]
 struct Grafts<PI> {
-    /// The peers we grafted, in order.
+    /// The peers we grafted.
     peers: Vec<PI>,
     /// The sender of the first copy, and the hops it took, once it came.
     first: Option<(PI, Round)>,
@@ -719,23 +719,10 @@ impl<PI: PeerIdentity> State<PI> {
     ///
     /// The peer announced the message more than a graft timeout before the
     /// eager copy arrived, so its path is faster. If its copy took no more
-    /// hops, the peer stays eager, and the peer that sent the first copy turns
-    /// lazy. Else the graft would repeat for each message: the duplicate would
-    /// prune the grafted peer, and its next announcement would come first
-    /// again.
-    ///
-    /// This changes the tree next to [`Self::optimize_tree`]: that one acts
-    /// on a gap of [`Config::optimization_threshold`] hops, this one on a gap in
-    /// time that fired a graft. The hop check keeps the tree free of cycles:
-    /// a peer below us would deliver over more hops. A faster path over more
-    /// hops still repeats the graft. Two paths of equal hops swap back and
-    /// forth if their delays vary by more than the graft timeout. Each swap
-    /// costs one duplicate, where the repeated graft cost two.
-    ///
-    /// If the first copy was a graft reply too, no eager copy was late, and the
-    /// rule does not apply. The node does not push the message to a grafted
-    /// peer. If the queue of that peer drops its reply, the peer announces the
-    /// message again, and the node grafts it again.
+    /// hops, it stays eager, and the sender of the eager copy turns lazy.
+    /// Otherwise the graft and its duplicate would repeat for each message.
+    /// The hop check keeps the tree free of cycles: a peer below us delivers
+    /// over more hops. A reply to a retried graft is ignored.
     ///
     /// Returns whether it handled the duplicate.
     fn on_late_graft_reply(&mut self, sender: PI, message: &Gossip, io: &mut impl IO<PI>) -> bool {
