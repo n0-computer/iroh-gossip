@@ -360,6 +360,11 @@ impl<K: Hash + Eq + Clone, V> TimeBoundCache<K, V> {
         self.map.get_mut(key).map(|(_expires, value)| value)
     }
 
+    /// Iterate mutably over all values in the cache.
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
+        self.map.values_mut().map(|(_expires, value)| value)
+    }
+
     /// Get the expiration time for an item.
     pub fn expires(&self, key: &K) -> Option<&Instant> {
         self.map.get(key).map(|(expires, _value)| expires)
