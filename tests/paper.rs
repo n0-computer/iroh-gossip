@@ -950,10 +950,9 @@ fn plumtree_delivery_holds_under_a_constant_failure_rate() {
 /// records the first broadcast that reaches every survivor, and the first
 /// whose RMR is back near zero.
 ///
-/// At the default graft timeout of 80ms, a repaired tree keeps some
-/// redundancy, because a lazy path can beat the remaining eager path of
-/// several links. The test uses 400ms, and
-/// `plumtree_graft_timeout_below_the_eager_path_costs_redundancy` pins down why.
+/// The test uses a graft timeout of 400ms. At the default 80ms, a failure of
+/// this size leaves many lazy paths that beat the rest of the eager path, and
+/// each takes a broadcast to settle.
 #[test]
 fn plumtree_recovers_from_massive_failure() {
     let peers = swarm_size(400);
@@ -1044,51 +1043,51 @@ fn plumtree_recovers_from_massive_failure() {
     }
 }
 
-/// Claim: the graft timeout has to account for the remaining eager path.
+/// Claim: a graft timeout below the remaining eager path leaves little lasting redundancy.
 ///
-/// Plumtree 3.5 makes this a deployment parameter: "The timeout value is a
+/// Plumtree 3.5 makes the timeout a deployment parameter: "The timeout value is a
 /// protocol parameter that should be configured considering the diameter of the
 /// overlay and a target maximum recovery latency" (p. 8). An `IHave` can arrive
 /// over a short lazy path while the eager copy still travels over several
-/// links. A timeout below the rest of that eager path grafts a lazy peer the
-/// node was about to hear from anyway, and the duplicate that follows prunes
-/// the link straight back. The pair repeats every round, so redundancy never
-/// returns to where a healthy tree would put it.
+/// links. A timeout below the rest of that eager path grafts the lazy peer, and
+/// its copy comes after the eager one. In the paper, that duplicate prunes the
+/// lazy peer again, and the pair repeats every round. Here the node keeps the
+/// grafted peer if its copy took no more hops, and prunes the peer of the eager
+/// copy instead, so the next round takes the faster path.
 ///
-/// This pins the relationship rather than any particular default, on links of
-/// 50ms each way. Both timeouts exceed one link. The depth gaps that the tree
-/// optimizer leaves alone reach seven hops, 350ms, so 80ms falls short of them
-/// and 400ms clears them. That figure holds for this implementation and this
-/// overlay, not in general.
+/// On links of 50ms each way, the depth gaps that the tree optimizer leaves
+/// alone reach seven hops, 350ms, so 80ms falls short of them and 400ms clears
+/// them. On links of 10 to 100ms, a faster path can take more hops. The node
+/// does not keep such a peer, so a little redundancy stays.
 #[test]
-fn plumtree_graft_timeout_below_the_eager_path_costs_redundancy() {
-    let mut costs = Vec::new();
-    for seed in seeds() {
-        let impatient = repaired_tree_rmr(seed, Duration::from_millis(80));
-        let patient = repaired_tree_rmr(seed, Duration::from_millis(400));
-        report(
-            "plumtree: graft timeout",
-            seed,
-            format!("RMR {impatient:.3} at 80ms, {patient:.3} at 400ms"),
-        );
-
-        // Measured at most 0.003 over 50 seeds, and 0 on 40.
-        assert!(
-            patient < 0.02,
-            "seed {seed}: a graft timeout above the eager path should leave a clean \
-             tree, got RMR {patient:.3}"
-        );
-        costs.push(impatient);
+fn plumtree_graft_timeout_below_the_eager_path_leaves_little_redundancy() {
+    // Measured over 50 seeds, at 80ms and 400ms: at most 0.007 and 0.003 on
+    // 50ms links, and 0.014 and 0.005 on 10 to 100ms links. On main, 80ms cost
+    // 0.05 to 0.66 on 50ms links.
+    let links = [
+        (
+            "50ms",
+            LatencyConfig::Static(Duration::from_millis(50)),
+            0.02,
+        ),
+        ("10 to 100ms", LatencyConfig::random_ms(10, 100), 0.05),
+    ];
+    for (name, latency, max) in links {
+        for seed in seeds() {
+            let impatient = repaired_tree_rmr(seed, Duration::from_millis(80), latency.clone());
+            let patient = repaired_tree_rmr(seed, Duration::from_millis(400), latency.clone());
+            report(
+                &format!("plumtree: graft timeout, {name} links"),
+                seed,
+                format!("RMR {impatient:.3} at 80ms, {patient:.3} at 400ms"),
+            );
+            assert!(
+                patient < max && impatient < max,
+                "seed {seed}, {name} links: a repaired tree kept RMR {impatient:.3} at 80ms, \
+                 {patient:.3} at 400ms"
+            );
+        }
     }
-    // How much depends on how deep the gaps in a particular tree run, from
-    // little on a tree without deep gaps to much on one with many, so this can
-    // only hold across seeds. Measured 0.05 to 0.64 over 50 seeds, 0.25 on
-    // average.
-    let mean = costs.iter().sum::<f32>() / costs.len() as f32;
-    assert!(
-        mean > 0.1,
-        "a graft timeout below the eager path cost only RMR {mean:.3} on average"
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1318,13 +1317,13 @@ fn fixed_graft_timeout(timeout: Duration) -> Config {
     config
 }
 
-/// Builds a tree on 50ms links, fails a quarter of the swarm, and returns the
+/// Builds a tree on `latency` links, fails a quarter of the swarm, and returns the
 /// settled RMR.
-fn repaired_tree_rmr(seed: u64, graft_timeout: Duration) -> f32 {
+fn repaired_tree_rmr(seed: u64, graft_timeout: Duration, latency: LatencyConfig) -> f32 {
     let peers = swarm_size(PEERS);
     let network = NetworkConfig {
         proto: fixed_graft_timeout(graft_timeout),
-        latency: LatencyConfig::Static(Duration::from_millis(50)),
+        latency,
     };
     let mut sim = swarm_with(peers, seed, network);
     let sender = sim.random_peer();
