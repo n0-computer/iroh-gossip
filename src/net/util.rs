@@ -44,7 +44,9 @@ pub(super) const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// The peer raises its limit only once one of our streams ends. With as many
 /// topics as the limit, the wait does not end. The limit is the
-/// `max_concurrent_uni_streams` of the peer's endpoint, 100 by default.
+/// `max_concurrent_uni_streams` of the peer's endpoint, 100 by default. For
+/// the stream of an initial topic, a stalled open only ends the opens of the
+/// other initial topics.
 #[cfg(not(test))]
 pub(super) const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(test)]

@@ -1239,8 +1239,8 @@ async fn connection_loop(
 ) -> Result<bool, ConnectionLoopError> {
     debug!(side = ?conn.side(), "connection established");
     let mut handles_close_rx = handles_close.subscribe();
-    // Here, so that the flags outlive the loops. A writer counts as having a
-    // stream while it waits for the queue.
+    // Here, so that the flags outlive the loops. A new writer counts as having a
+    // stream while it waits for the lock of the queue.
     let our_streams = watch::Sender::new(queue_lease.is_some());
     let their_streams = watch::Sender::new(false);
 
