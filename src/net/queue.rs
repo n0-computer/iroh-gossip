@@ -244,21 +244,11 @@ pub(super) struct SendQueue {
     reader: SharedReader,
     /// Revokes the lease of the connection that writes the queue now.
     revoke: CancellationToken,
-    /// The parent of each `revoke`. The peer cancels it to revoke every lease.
-    parent: CancellationToken,
 }
 
 impl SendQueue {
-    /// Creates a queue of `size` bytes with a parent token of its own.
-    #[cfg(test)]
-    pub(super) fn new(size: usize) -> Self {
-        Self::with_parent(size, CancellationToken::new())
-    }
-
     /// Creates a queue of `size` bytes, of which data may fill 3/4 and announcements 1/8.
-    ///
-    /// Every lease of the queue ends once `parent` is cancelled.
-    pub(super) fn with_parent(size: usize, parent: CancellationToken) -> Self {
+    pub(super) fn new(size: usize) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let capacity = Arc::new(Capacity {
             total: Limit::new(size),
@@ -276,8 +266,7 @@ impl SendQueue {
             capacity,
             closing,
             reader: Arc::new(tokio::sync::Mutex::new(reader)),
-            revoke: parent.child_token(),
-            parent,
+            revoke: CancellationToken::new(),
         }
     }
 
@@ -305,7 +294,7 @@ impl SendQueue {
         data.used.load(Ordering::Relaxed) >= data.max / 2
     }
 
-    /// Sets whether the writer ends once the queue is empty, as it does for a closing peer.
+    /// Sets whether the writer finishes its streams once the queue is empty, as for a closed peer.
     pub(super) fn set_closing(&self, closing: bool) {
         self.closing.send_replace(closing);
     }
@@ -317,7 +306,7 @@ impl SendQueue {
         self.capacity.total.used.load(Ordering::Relaxed) == 0
     }
 
-    /// Returns whether the writer ends once the queue is empty.
+    /// Returns whether the writer finishes its streams once the queue is empty.
     pub(super) fn is_closing(&self) -> bool {
         *self.closing.borrow()
     }
@@ -330,7 +319,7 @@ impl SendQueue {
     /// Revokes the lease of the connection that writes the queue, and returns one for the next.
     pub(super) fn lease(&mut self) -> QueueLease {
         self.revoke.cancel();
-        self.revoke = self.parent.child_token();
+        self.revoke = CancellationToken::new();
         QueueLease {
             reader: self.reader.clone(),
             revoked: self.revoke.clone(),
@@ -348,13 +337,11 @@ impl SendQueue {
 ///
 /// The actor revokes it when a new connection replaces this one. The writer
 /// then lets go of the queue after its current message, and the writer of the
-/// new connection takes it. When the actor aborts the peer, it cancels
-/// the parent of `revoked`, which revokes every lease. Connections observe
-/// the peer abort signal separately, whether or not they hold a lease.
+/// new connection takes it. An abort of the peer closes the connection, which
+/// ends the writer without a revoke.
 #[derive(Debug)]
 pub(super) struct QueueLease {
     reader: SharedReader,
-    /// A child of the peer abort signal.
     revoked: CancellationToken,
 }
 
@@ -366,7 +353,7 @@ impl QueueLease {
         self.reader.clone().lock_owned().await
     }
 
-    /// Returns the token that ends the lease, at a handover or at an abort of the peer.
+    /// Returns the token that ends the lease at a handover.
     pub(super) fn revoked(&self) -> &CancellationToken {
         &self.revoked
     }
@@ -408,15 +395,16 @@ pub(super) struct QueueReader {
 impl QueueReader {
     /// Waits for the next message to write, and returns `false` once no more will come.
     ///
-    /// No more come once the queue is gone, or the queue is empty while it
-    /// closes, see [`SendQueue::set_closing`]. The message stays the current
-    /// one until [`Self::advance`]. This is cancellation-safe.
-    pub(super) async fn next(&mut self) -> bool {
+    /// No more come once the queue is gone. With `end_on_close`, no more come
+    /// either once the queue is empty while it closes, see
+    /// [`SendQueue::set_closing`]. The message stays the current one until
+    /// [`Self::advance`]. This is cancellation-safe.
+    pub(super) async fn next(&mut self, end_on_close: bool) -> bool {
         if self.unfinished.is_none() {
             self.unfinished = tokio::select! {
                 biased;
                 item = self.rx.recv() => item,
-                _ = self.closing.wait_for(|closing| *closing) => None,
+                _ = self.closing.wait_for(|closing| *closing), if end_on_close => None,
             };
         }
         self.unfinished.is_some()
@@ -433,6 +421,7 @@ impl QueueReader {
     }
 
     /// Returns whether no message waits to be written.
+    #[cfg(test)]
     pub(super) fn is_empty(&self) -> bool {
         self.unfinished.is_none() && self.rx.is_empty()
     }
@@ -560,12 +549,15 @@ mod tests {
         assert!(matches!(queue.push(disconnect()), Pushed::Queued));
         queue.set_closing(true);
         let mut reader = queue.try_reader().unwrap();
-        assert!(reader.next().await, "the queued message went");
+        assert!(reader.next(true).await, "the queued message went");
         reader.advance();
-        assert!(!reader.next().await, "the empty closing queue did not end");
+        assert!(
+            !reader.next(true).await,
+            "the empty closing queue did not end"
+        );
         queue.set_closing(false);
         assert!(matches!(queue.push(shuffle()), Pushed::Queued));
-        assert!(reader.next().await, "the opened queue did not go on");
+        assert!(reader.next(true).await, "the opened queue did not go on");
     }
 
     /// A message that a writer did not finish stays first, for the next writer.
@@ -576,7 +568,7 @@ mod tests {
         assert!(matches!(queue.push(data(20)), Pushed::Queued));
         let first = |queue_lease: QueueLease, len| async move {
             let mut reader = queue_lease.lock().await;
-            assert!(reader.next().await);
+            assert!(reader.next(true).await);
             let current = &reader.current().unwrap().message.message;
             assert_eq!(current, &data(len).message);
             reader
@@ -600,7 +592,7 @@ mod tests {
         assert!(matches!(queue.push(data(20)), Pushed::Queued));
         let first = queue.lease();
         let mut reader = first.lock().await;
-        assert!(reader.next().await);
+        assert!(reader.next(true).await);
 
         let second = queue.lease();
         let mut waiting = Box::pin(second.lock());
@@ -614,7 +606,7 @@ mod tests {
 
         let mut reader = third.lock().await;
         for len in [10, 20] {
-            assert!(reader.next().await);
+            assert!(reader.next(true).await);
             assert_eq!(reader.current().unwrap().message.message, data(len).message);
             reader.advance();
         }

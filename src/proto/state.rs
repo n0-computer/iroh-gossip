@@ -10,6 +10,7 @@ use tracing::trace;
 use crate::{
     metrics::Metrics,
     proto::{
+        hyparview,
         topic::{self, Command},
         util::idbytes_impls,
         Config, PeerData, PeerIdentity, MIN_MAX_MESSAGE_SIZE,
@@ -233,10 +234,16 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
         self.states.iter()
     }
 
-    /// Returns whether a topic uses `peer`, so that its connections must stay.
+    /// Returns whether a topic uses `peer`, so that our queue to it stays open.
     #[cfg(feature = "net")]
     pub(crate) fn uses_peer(&self, peer: &PI) -> bool {
         self.peer_topics.contains_key(peer)
+    }
+
+    /// Returns the topics that use `peer`.
+    #[cfg(feature = "net")]
+    pub(crate) fn topics_of(&self, peer: &PI) -> impl Iterator<Item = TopicId> + '_ {
+        self.peer_topics.get(peer).into_iter().flatten().copied()
     }
 
     /// Returns the peers to which `topic` pushes its payloads.
@@ -319,6 +326,14 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
                     let out = state.handle(event, now);
                     for event in out {
                         handle_out_event(topic, event, &mut self.peer_topics, &mut self.outbox);
+                    }
+                } else if let topic::InEvent::RecvMessage(from, message) = &event {
+                    // The sender thinks that we are on the topic. Plumtree messages are
+                    // mostly stragglers after we left, so they get no answer.
+                    if matches!(message, topic::Message::Swarm(_)) && !message.is_disconnect() {
+                        let message = topic::Message::Swarm(hyparview::Message::left());
+                        self.outbox
+                            .push(OutEvent::SendMessage(*from, Message { topic, message }));
                     }
                 }
 
@@ -477,6 +492,74 @@ mod tests {
     /// Handles `event` and drops what it produces.
     fn handle(state: &mut State<u32, StdRng>, event: InEvent<u32>) {
         state.handle(event, Instant::now(), None).for_each(drop);
+    }
+
+    /// A message for a topic that we are not on gets a `Disconnect`, and uses no peer.
+    ///
+    /// A `Disconnect` and a Plumtree message get no answer.
+    #[test]
+    fn message_for_an_unknown_topic_gets_a_disconnect() {
+        let mut state = State::new(
+            0u32,
+            PeerData::default(),
+            Config::default(),
+            StdRng::seed_from_u64(1),
+        );
+        let topic: TopicId = [0u8; 32].into();
+        let messages = [
+            (topic::Message::Swarm(hyparview::Message::Join(None)), true),
+            (
+                topic::Message::Swarm(hyparview::Message::test_shuffle(2, 3)),
+                true,
+            ),
+            (topic::Message::Gossip(plumtree::Message::Prune), false),
+            (
+                topic::Message::Swarm(hyparview::Message::test_neighbor()),
+                true,
+            ),
+            (
+                topic::Message::Swarm(hyparview::Message::test_disconnect()),
+                false,
+            ),
+            (topic::Message::Swarm(hyparview::Message::left()), false),
+        ];
+        for (peer, (message, answered)) in (1u32..).zip(messages) {
+            let event = InEvent::RecvMessage(peer, Message { topic, message });
+            let out: Vec<_> = state.handle(event, Instant::now(), None).collect();
+            let left = out
+                .iter()
+                .filter(|e| {
+                    matches!(e, OutEvent::SendMessage(to, m)
+                        if *to == peer && m.message == topic::Message::Swarm(hyparview::Message::left()))
+                })
+                .count();
+            assert_eq!(left, usize::from(answered), "{out:?}");
+        }
+        assert!(state.peer_topics.is_empty());
+    }
+
+    /// A repeated join for a topic that we are not on gets an answer each time.
+    #[test]
+    fn unknown_topic_answers_every_join() {
+        let mut state = State::new(
+            0u32,
+            PeerData::default(),
+            Config::default(),
+            StdRng::seed_from_u64(1),
+        );
+        let topic: TopicId = [0u8; 32].into();
+        let answers = |state: &mut State<u32, StdRng>| {
+            let join = Message {
+                topic,
+                message: topic::Message::Swarm(hyparview::Message::Join(None)),
+            };
+            state
+                .handle(InEvent::RecvMessage(1, join), Instant::now(), None)
+                .filter(|e| matches!(e, OutEvent::SendMessage(1, m) if m.message.is_disconnect()))
+                .count()
+        };
+        assert_eq!(answers(&mut state), 1);
+        assert_eq!(answers(&mut state), 1, "the repeated join got no answer");
     }
 
     /// Quitting a topic disconnects a peer the topic only sent a join to.

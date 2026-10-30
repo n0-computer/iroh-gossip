@@ -137,6 +137,16 @@ impl Ttl {
     }
 }
 
+impl<PI> Message<PI> {
+    /// Returns a `Disconnect` that says that we are not on the topic.
+    pub(crate) fn left() -> Self {
+        Message::Disconnect(Disconnect {
+            alive: false,
+            _respond: false,
+        })
+    }
+}
+
 #[cfg(test)]
 impl<PI> Message<PI> {
     /// Returns a shuffle from `origin` carrying no nodes, for tests outside this module.
@@ -148,8 +158,15 @@ impl<PI> Message<PI> {
         })
     }
 
+    /// Returns a neighbor request of low priority, for tests outside this module.
+    pub(crate) fn test_neighbor() -> Self {
+        Message::Neighbor(Neighbor {
+            priority: Priority::Low,
+            data: None,
+        })
+    }
+
     /// Returns a `Disconnect` from a peer that stays alive, for tests outside this module.
-    #[cfg(feature = "net")]
     pub(crate) fn test_disconnect() -> Self {
         Message::Disconnect(Disconnect {
             alive: true,
@@ -226,8 +243,9 @@ pub struct Neighbor {
 /// Message sent when leaving the swarm or closing down to inform peers about us being gone.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct Disconnect {
-    /// Whether we are actually shutting down or closing the connection only because our limits are
-    /// reached.
+    /// Whether we stay on the topic, and only drop the link, as when our limits are reached.
+    ///
+    /// `false` means that we leave the topic, or are not on it.
     alive: bool,
     /// Obsolete field (kept in the struct to maintain wire compatibility).
     _respond: bool,
@@ -499,7 +517,7 @@ where
             self.recent_neighbors.retain(|known| *known != peer);
         }
         let requested = self.pending_neighbor_requests.remove(&peer).is_some();
-        if requested && !self.active_view.contains(&peer) {
+        if requested && details.alive && !self.active_view.contains(&peer) {
             self.refused.insert(peer);
         }
         if self.active_view.contains(&peer) {
@@ -510,8 +528,17 @@ where
                 },
                 io,
             );
-        } else if details.alive && self.passive_view.contains(&peer) {
-            self.alive_disconnect_peers.insert(peer);
+        } else if details.alive {
+            if self.passive_view.contains(&peer) {
+                self.alive_disconnect_peers.insert(peer);
+            }
+        } else {
+            // The peer left the topic, or never joined it. So stop asking it.
+            self.passive_view.remove(&peer);
+            self.forget_peer(&peer);
+            if requested {
+                self.refill_active_from_passive(&[&peer], io);
+            }
         }
     }
 
@@ -1451,6 +1478,45 @@ mod tests {
         assert!(!state.passive_view.contains(&1));
         assert!(!state.pending_neighbor_requests.contains_key(&1));
         assert!(state.pending_neighbor_requests.contains_key(&2));
+    }
+
+    /// A peer that answers our neighbor request with "I left" goes, and we ask another one.
+    #[test]
+    fn left_peer_answering_a_request_is_dropped() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.passive_view.insert(1);
+        state.passive_view.insert(2);
+        state.send_neighbor(1, Priority::High, io);
+        io.clear();
+
+        let left = Disconnect {
+            alive: false,
+            _respond: false,
+        };
+        state.handle(InEvent::RecvMessage(1, Message::Disconnect(left)), io);
+
+        assert!(sent_neighbor(io, 2), "no request to another passive peer");
+        assert!(!state.passive_view.contains(&1));
+        assert!(!state.pending_neighbor_requests.contains_key(&1));
+    }
+
+    /// A passive peer that says it left, without a request of ours, leaves the passive view.
+    #[test]
+    fn left_passive_peer_is_dropped_without_a_refill() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.passive_view.insert(1);
+        state.passive_view.insert(2);
+
+        let left = Disconnect {
+            alive: false,
+            _respond: false,
+        };
+        state.handle(InEvent::RecvMessage(1, Message::Disconnect(left)), io);
+
+        assert!(!state.passive_view.contains(&1));
+        assert!(!sent_neighbor(io, 2), "a refill started without a request");
     }
 
     /// A passive peer whose neighbor request timed out loses its metadata.

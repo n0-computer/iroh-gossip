@@ -12,7 +12,7 @@ use std::{
 
 use bytes::Bytes;
 use iroh::{
-    endpoint::{Connection, Side},
+    endpoint::{Connection, ConnectionError, Side},
     protocol::{AcceptError, ProtocolHandler},
     Endpoint, EndpointAddr, EndpointId, PublicKey, RelayUrl, Watcher,
 };
@@ -53,6 +53,30 @@ const TO_ACTOR_CAP: usize = 64;
 const IN_EVENT_CAP: usize = 1024;
 /// Channel capacity for broadcast subscriber event queue (one per topic)
 const TOPIC_EVENT_CAP: usize = 256;
+
+/// How long a connection stays open once neither side has a stream on it.
+///
+/// A topic that uses the peer keeps a stream open. Each side times the grace on
+/// its own, so a stream that we open as the peer closes loses its message.
+#[cfg(not(test))]
+const RETIRE_GRACE: Duration = Duration::from_secs(10);
+/// The e2e tests build without `cfg(test)`, so they see 10 s.
+#[cfg(test)]
+const RETIRE_GRACE: Duration = Duration::from_secs(5);
+
+/// How long we keep the state of an idle peer.
+///
+/// A dial that completes late still finds the `handles_close` flag of the peer.
+// TODO(frando): Remove the retention once the wire format no longer needs the flag.
+const PEER_RETENTION: Duration = Duration::from_secs(20);
+
+/// How often a waiting broadcast checks the current queue pressure again.
+const BROADCAST_RECHECK_INTERVAL: Duration = Duration::from_millis(10);
+
+/// How long one broadcast may wait for queue pressure to ease.
+///
+/// This bounds admission waiting, not API channel backlog or delivery time.
+const BROADCAST_WAIT_LIMIT: Duration = Duration::from_millis(100);
 
 /// Events emitted from the gossip protocol
 pub type ProtoEvent = proto::Event<PublicKey>;
@@ -378,7 +402,7 @@ struct Actor {
     /// Internal queue of topic to close because all handles were dropped.
     quit_queue: VecDeque<TopicId>,
     /// Tasks for the connection loops, to keep track of panics.
-    connection_tasks: JoinSet<(EndpointId, Connection, Result<(), ConnectionLoopError>)>,
+    connection_tasks: JoinSet<(EndpointId, Connection, Result<bool, ConnectionLoopError>)>,
     metrics: Arc<Metrics>,
     topic_event_forwarders: JoinSet<TopicId>,
     address_lookup: GossipAddressLookup,
@@ -635,11 +659,13 @@ impl Actor {
             .peers
             .entry(peer_id)
             .or_insert_with(|| PeerState::new(size));
-        peer.set_wanted(self.state.uses_peer(&peer_id));
         let queue_lease = peer.handle_connection(side, conn.stable_id());
+        let initial_topics = match queue_lease {
+            Some(_) => self.state.topics_of(&peer_id).collect(),
+            None => Vec::new(),
+        };
 
         let aborted = peer.aborted.clone();
-        let wanted = peer.wanted.subscribe();
         let handles_close = peer.handles_close.clone();
         let max_message_size = self.state.max_message_size();
         let in_event_tx = self.in_event_tx.clone();
@@ -652,9 +678,9 @@ impl Actor {
                     conn.clone(),
                     aborted,
                     queue_lease,
+                    initial_topics,
                     in_event_tx,
                     max_message_size,
-                    wanted,
                     handles_close,
                 )
                 .await;
@@ -669,12 +695,11 @@ impl Actor {
     }
 
     fn handle_dial_failed(&mut self, peer_id: EndpointId) {
-        // An open queue with a writer is already delivering. Anything else,
-        // including a queue that is only draining, still reports the peer gone.
+        // A connection writes the queue, so the failed dial loses nothing.
         if !self
             .peers
             .get(&peer_id)
-            .is_some_and(PeerState::has_active_writer)
+            .is_some_and(|peer| peer.writer.is_some())
         {
             self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now());
         }
@@ -692,7 +717,7 @@ impl Actor {
         &mut self,
         peer_id: EndpointId,
         conn: Connection,
-        task_result: Result<(), ConnectionLoopError>,
+        task_result: Result<bool, ConnectionLoopError>,
     ) {
         // The receive loop sends its messages before its task ends. Handle the ones
         // still queued first, so that a message never comes after its own close.
@@ -704,6 +729,7 @@ impl Actor {
             self.handle_in_event(event, Instant::now());
         }
         let reason = conn.close_reason().expect("closed by its task");
+        let retired = matches!(task_result, Ok(true));
         let error = task_result.err();
         debug!(%reason, ?error, "connection closed");
         let now = Instant::now();
@@ -711,10 +737,13 @@ impl Actor {
             .peers
             .get_mut(&peer_id)
             .expect("unfinished connection must keep its peer state")
-            .connection_finished(conn.stable_id(), now);
+            .connection_finished(conn.stable_id(), now, retired);
         if disconnected {
             debug!("active send connection closed, mark peer as disconnected");
             self.handle_in_event(InEvent::PeerDisconnected(peer_id), now);
+        } else if retired && self.peers[&peer_id].needs_dial() {
+            debug!("retired connection left messages, dial again");
+            self.dialer.queue_dial(peer_id, self.alpn.clone());
         }
     }
 
@@ -805,7 +834,7 @@ impl Actor {
                 peer.discard_queue(now);
             }
         }
-        // The peers whose use by the topics may change, so their flag in `wanted` too.
+        // The peers whose use by a topic may change in this batch.
         let mut touched = Vec::new();
         // Peers that overflowed in this batch. The follow-up disconnect drops what
         // we would queue for them, so we neither reopen their queue nor dial them.
@@ -883,11 +912,8 @@ impl Actor {
                     self.timers.insert(now + delay, timer);
                 }
                 OutEvent::DisconnectPeer(peer_id) => {
-                    debug!(peer=%peer_id.fmt_short(), "gossip state indicates disconnect: drain queue");
+                    debug!(peer=%peer_id.fmt_short(), "gossip state indicates disconnect");
                     touched.push(peer_id);
-                    if let Some(peer) = self.peers.get_mut(&peer_id) {
-                        peer.close_queue();
-                    }
                 }
                 OutEvent::PeerData(endpoint_id, data) => match decode_peer_data(&data) {
                     Err(err) => warn!("Failed to decode {data:?} from {endpoint_id}: {err}"),
@@ -907,8 +933,10 @@ impl Actor {
             }
         }
         for peer in touched {
-            if let Some(state) = self.peers.get(&peer) {
-                state.set_wanted(self.state.uses_peer(&peer));
+            if let Some(state) = self.peers.get_mut(&peer) {
+                if !self.state.uses_peer(&peer) {
+                    state.close_queue();
+                }
             }
         }
     }
@@ -919,42 +947,33 @@ impl Actor {
     }
 }
 
-/// How long we keep the state of an idle peer.
-///
-/// A dial that completes late still finds the `handles_close` flag of the peer.
-// TODO(frando): Remove the retention once the wire format no longer needs the flag.
-const PEER_RETENTION: Duration = RETIRE_LIMIT;
-
 /// The [`Connection::stable_id`] of a connection.
 type ConnId = usize;
 
 /// What we know of a peer: its queue, and its connections.
 ///
 /// The queue always exists. An open queue waits for messages. A closed queue
-/// goes out, and then its writer ends. A closed, empty queue is idle, and the
-/// peer needs no writer and no dial.
+/// goes out, and then its writer waits on its connection for the queue to open
+/// again.
 ///
 /// The state outlives the last connection by [`PEER_RETENTION`], so that a
-/// peer we want again keeps its flags.
+/// peer we want again keeps its `handles_close` flag.
 #[derive(Debug)]
 struct PeerState {
     queue: SendQueue,
-    /// Closes every connection of the peer, also receive-only ones, and revokes every lease.
+    /// Closes every connection of the peer, also receive-only ones.
     ///
     /// An abort cancels it, and a fresh token takes its place for later connections.
     aborted: CancellationToken,
     /// The connection that writes the queue, or `None` until a dial takes it.
     ///
     /// A replaced writer finishes its current message first. The queue lease
-    /// keeps the two in order. Reopening clears this slot, but an older lease
-    /// may still write until the replacement dial takes over.
+    /// keeps the two in order.
     writer: Option<ConnId>,
     /// Connection tasks that the actor has not yet seen finish.
     connections: usize,
     /// When [`Actor::forget_peers`] may remove the idle peer.
     forget_at: Option<Instant>,
-    /// Whether a topic uses the peer, which keeps its connections open.
-    wanted: watch::Sender<bool>,
     /// Whether the peer sent [`util::StreamHeader::handles_close`].
     ///
     /// It belongs to the peer, not to one connection. So a connection on which
@@ -969,7 +988,7 @@ impl PeerState {
     /// dial that completes after we forgot the peer thus has nothing to write.
     fn new(queue_size: usize) -> Self {
         let aborted = CancellationToken::new();
-        let queue = SendQueue::with_parent(queue_size, aborted.clone());
+        let queue = SendQueue::new(queue_size);
         queue.set_closing(true);
         Self {
             queue,
@@ -977,7 +996,6 @@ impl PeerState {
             writer: None,
             connections: 0,
             forget_at: None,
-            wanted: watch::channel(false).0,
             handles_close: watch::channel(false).0,
         }
     }
@@ -987,24 +1005,11 @@ impl PeerState {
         self.writer.is_none() && !self.queue.is_closing()
     }
 
-    /// Whether a connection writes the open queue.
-    fn has_active_writer(&self) -> bool {
-        self.writer.is_some() && !self.queue.is_closing()
-    }
-
-    /// Sets the `wanted` flag, which wakes the connections only on a change.
-    fn set_wanted(&self, wanted: bool) {
-        self.wanted
-            .send_if_modified(|current| std::mem::replace(current, wanted) != wanted);
-    }
-
     /// Opens the queue, which keeps its messages and its byte limit.
     fn open_queue(&mut self) -> &SendQueue {
         self.forget_at = None;
         if self.queue.is_closing() {
             self.queue.set_closing(false);
-            // The writer of the closed queue may have ended. A pending dial takes over.
-            self.writer = None;
         }
         &self.queue
     }
@@ -1018,17 +1023,17 @@ impl PeerState {
         self.open_queue().push(message)
     }
 
-    /// Closes the queue: the writer sends what is left, and then ends.
+    /// Closes the queue: the writer sends what is left, finishes its streams, and waits.
     fn close_queue(&mut self) {
         self.queue.set_closing(true);
     }
 
     /// Puts a closed, empty queue in place of the queue.
     ///
-    /// A writer of the old queue still sends what it holds, and then ends. The
-    /// new queue keeps the abort token, so a later abort still closes that writer.
+    /// A writer of the old queue still sends what it holds, and then ends. A
+    /// later abort still closes its connection.
     fn discard_queue(&mut self, now: Instant) {
-        self.queue = SendQueue::with_parent(self.queue.size(), self.aborted.clone());
+        self.queue = SendQueue::new(self.queue.size());
         self.queue.set_closing(true);
         self.writer = None;
         self.retain_if_idle(now);
@@ -1055,7 +1060,7 @@ impl PeerState {
         } else {
             self.writer = Some(id);
             // An accepted connection reopens a closed queue. A dial sends what is
-            // left of it, and then ends.
+            // left of it, and then waits.
             if side == Side::Server {
                 self.queue.set_closing(false);
             }
@@ -1068,8 +1073,10 @@ impl PeerState {
     /// It is when the writer of an open queue ended, even if other connections
     /// remain. The caller must immediately process `PeerDisconnected`, which
     /// discards the queue before invoking the protocol. A closed queue is
-    /// discarded here instead, since its writer ended intentionally.
-    fn connection_finished(&mut self, id: ConnId, now: Instant) -> bool {
+    /// discarded here instead, as no topic uses the peer. A `retired` writer
+    /// reports no disconnect: an empty queue goes, and the caller dials for the
+    /// rest.
+    fn connection_finished(&mut self, id: ConnId, now: Instant, retired: bool) -> bool {
         self.connections = self
             .connections
             .checked_sub(1)
@@ -1079,6 +1086,14 @@ impl PeerState {
             false
         } else if self.queue.is_closing() {
             self.discard_queue(now);
+            false
+        } else if retired {
+            // The link still works.
+            if self.queue.is_empty() {
+                self.discard_queue(now);
+            } else {
+                self.writer = None;
+            }
             false
         } else {
             true
@@ -1118,14 +1133,6 @@ impl Default for TopicState {
         }
     }
 }
-
-/// How often a waiting broadcast checks the current queue pressure again.
-const BROADCAST_RECHECK_INTERVAL: Duration = Duration::from_millis(10);
-
-/// How long one broadcast may wait for queue pressure to ease.
-///
-/// This bounds admission waiting, not API channel backlog or delivery time.
-const BROADCAST_WAIT_LIMIT: Duration = Duration::from_millis(100);
 
 /// Returns whether all eager targets have busy data queues.
 ///
@@ -1188,57 +1195,28 @@ fn task_output<T>(res: Result<T, task::JoinError>) -> Option<T> {
     }
 }
 
-/// How long a connection stays once no topic uses its peer and our sends ended.
-///
-/// The peer reads what we sent last, its messages in flight still arrive, and a
-/// peer we want again keeps the connection.
-const IDLE_GRACE: Duration = Duration::from_secs(5);
-
-/// How long a connection stays at most once no topic uses its peer.
-///
-/// It bounds the wait for sends that do not end, as the peer does not read.
-const RETIRE_LIMIT: Duration = Duration::from_secs(20);
-
-/// Returns once no topic used the peer for [`IDLE_GRACE`] after our sends ended.
-///
-/// Sends that do not end delay it up to [`RETIRE_LIMIT`] after the peer became unused.
-async fn retire(mut wanted: watch::Receiver<bool>, mut sending: watch::Receiver<bool>) {
-    let (mut wanted_open, mut sending_open) = (true, true);
-    let mut limit = None;
+/// Returns once the connection had no stream in either direction for [`RETIRE_GRACE`].
+async fn retire(mut ours: watch::Receiver<bool>, mut theirs: watch::Receiver<bool>) {
     loop {
-        let unwanted = !*wanted.borrow_and_update();
-        let sending_now = *sending.borrow_and_update();
-        let deadline = if unwanted {
-            let limit = *limit.get_or_insert_with(|| Instant::now() + RETIRE_LIMIT);
-            match sending_now {
-                true => Some(limit),
-                false => Some(limit.min(Instant::now() + IDLE_GRACE)),
-            }
-        } else {
-            limit = None;
-            None
-        };
+        let ours_open = *ours.borrow_and_update();
+        let theirs_open = *theirs.borrow_and_update();
         tokio::select! {
-            // A change that is ready at the deadline wins, and the grace starts over.
+            // A stream that opens at the deadline keeps the connection.
             biased;
-            // Any change starts a new unused period, also one that read false again,
-            // as the peer was wanted in between.
-            res = wanted.changed(), if wanted_open => {
-                wanted_open = res.is_ok();
-                limit = None;
-            }
-            res = sending.changed(), if sending_open => sending_open = res.is_ok(),
-            _ = n0_future::time::sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => return,
-            // Neither can change, and we want the peer.
-            else => std::future::pending().await,
+            // A dropped sender would make `changed` return at once.
+            res = ours.changed() => if res.is_err() { std::future::pending().await },
+            res = theirs.changed() => if res.is_err() { std::future::pending().await },
+            () = time::sleep(RETIRE_GRACE), if !ours_open && !theirs_open => return,
         }
     }
 }
 
-/// Runs the I/O of a connection, and closes it on an abort or when no topic uses the peer.
+/// Runs the I/O of a connection, and closes it on an abort or once it carries no stream.
 ///
-/// Without a lease, the connection only receives. Every connection observes
-/// the peer abort signal, independently of whether it writes.
+/// Returns whether either side retired it. A connection to a node up to 0.101
+/// never retires. Without a lease, the connection only receives.
+/// Every connection observes the peer abort signal, independently of whether
+/// it writes.
 // Each argument is state the loops share. A struct would only wrap them.
 #[allow(clippy::too_many_arguments)]
 async fn connection_loop(
@@ -1246,26 +1224,29 @@ async fn connection_loop(
     conn: Connection,
     aborted: CancellationToken,
     queue_lease: Option<QueueLease>,
+    initial_topics: Vec<TopicId>,
     in_event_tx: mpsc::Sender<InEvent>,
     max_message_size: usize,
-    wanted: watch::Receiver<bool>,
     handles_close: watch::Sender<bool>,
-) -> Result<(), ConnectionLoopError> {
+) -> Result<bool, ConnectionLoopError> {
     debug!(side = ?conn.side(), "connection established");
     let mut handles_close_rx = handles_close.subscribe();
+    // Here, so that the flags outlive the loops. The send flag starts set, as a
+    // new writer can wait for the lock of the queue.
+    let our_streams = watch::Sender::new(queue_lease.is_some());
+    let their_streams = watch::Sender::new(false);
 
-    let send_loop = queue_lease.map(|lease| SendLoop::new(conn.clone(), lease, max_message_size));
-    // Receive-only connections have no send work delaying their idle grace.
-    let sending = send_loop
-        .as_ref()
-        .map(SendLoop::sending)
-        .unwrap_or_else(|| watch::channel(false).1);
+    let send_loop = queue_lease.map(|lease| {
+        let flag = our_streams.clone();
+        SendLoop::new(conn.clone(), lease, max_message_size, flag, initial_topics)
+    });
     let mut recv_loop = RecvLoop::new(
         from,
         conn.clone(),
         in_event_tx,
         max_message_size,
         handles_close,
+        their_streams.clone(),
     );
 
     let io = async {
@@ -1277,8 +1258,8 @@ async fn connection_loop(
                 _ = &mut recv_fut => return Ok(()),
             }
         }
-        // We are done sending. A peer we want may still send on this connection,
-        // as two peers that dialed each other can each use a different one.
+        // We are done sending. The peer may still send on this connection, as two
+        // peers that dialed each other can each use a different one.
         recv_fut.await;
         Ok(())
     };
@@ -1288,7 +1269,7 @@ async fn connection_loop(
         if handles_close_rx.wait_for(|known| *known).await.is_err() {
             std::future::pending::<()>().await;
         }
-        retire(wanted, sending).await;
+        retire(our_streams.subscribe(), their_streams.subscribe()).await;
     };
     tokio::select! {
         biased;
@@ -1299,12 +1280,18 @@ async fn connection_loop(
         _ = aborted.cancelled() => {
             warn!("the peer is aborted, close the connection");
             conn.close(util::CLOSE_QUEUE_FULL.into(), b"send queue full");
-            Ok(())
+            Ok(false)
         }
-        res = io => res,
+        // A retirement by the peer counts also when it cut one of our writes.
+        res = io => match conn.close_reason() {
+            Some(ConnectionError::ApplicationClosed(close))
+                if close.error_code == util::CLOSE_RETIRED.into() => Ok(true),
+            _ => res.map(|()| false),
+        },
         _ = retirement => {
-            debug!("no topic uses the peer, close");
-            Ok(())
+            debug!("no stream for a while, close");
+            conn.close(util::CLOSE_RETIRED.into(), b"no stream");
+            Ok(true)
         }
     }
 }
@@ -2052,9 +2039,6 @@ pub(crate) mod tests {
     /// The frame size limit when tests read or write raw streams.
     const TEST_FRAME_LIMIT: usize = 1 << 16;
 
-    /// How long a connection that we stopped sending on waits before it closes.
-    const IDLE_GRACE: Duration = Duration::from_secs(5);
-
     /// Two endpoints on one test relay, the second reachable by its address.
     struct TestPair {
         ep1: Endpoint,
@@ -2159,6 +2143,15 @@ pub(crate) mod tests {
         }
     }
 
+    /// Accepts the peer's next stream and reads only its header.
+    async fn read_next_header(conn: &Connection) -> Result<TopicId> {
+        let mut stream = conn.accept_uni().await.std_context("accept stream")?;
+        let header = util::StreamHeader::read(&mut stream, &mut BytesMut::new(), TEST_FRAME_LIMIT)
+            .await
+            .std_context("read header")?;
+        Ok(header.topic_id)
+    }
+
     /// Accepts the peer's next stream and reads its first message.
     async fn read_next_message(conn: &Connection) -> Result<(TopicId, TopicMessage)> {
         let mut stream = conn.accept_uni().await.std_context("accept stream")?;
@@ -2190,15 +2183,6 @@ pub(crate) mod tests {
         Ok(actor)
     }
 
-    /// Sets the peer's flag in `wanted`, as the actor does when a topic starts or stops using it.
-    fn set_wanted(actor: &Actor, peer: EndpointId, wanted: bool) {
-        actor
-            .peers
-            .get(&peer)
-            .expect("the peer has a connection")
-            .set_wanted(wanted);
-    }
-
     /// Waits until `conn` closed, and checks that our side closed it with `code`.
     async fn closed_with(conn: &Connection, code: u32) -> Result {
         let reason = timeout(Duration::from_secs(2), conn.closed())
@@ -2215,31 +2199,37 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// Returns an unset flag of [`util::StreamHeader::handles_close`] for one connection.
-    fn close_flag() -> watch::Sender<bool> {
+    fn unset_flag() -> watch::Sender<bool> {
         watch::channel(false).0
+    }
+
+    /// A flag change during a `retire_ends_after` run.
+    #[derive(Debug, Clone, Copy)]
+    enum Step {
+        /// Our send loop reports whether it has streams.
+        Ours(bool),
+        /// The receive loop reports whether the peer has streams.
+        Theirs(bool),
     }
 
     /// Runs `retire` on paused time, applies `steps` at their offsets, and returns when it ended.
     ///
-    /// A step sets `wanted` and `sending`. `None` means `retire` did not end within a minute.
-    async fn retire_ends_after(
-        wanted: bool,
-        sending: bool,
-        steps: &[(u64, bool, bool)],
-    ) -> Option<Duration> {
-        let (wanted_tx, wanted) = watch::channel(wanted);
-        let (sending_tx, sending) = watch::channel(sending);
+    /// Each step comes at its offset in seconds. `None` means `retire` did not end within a minute.
+    async fn retire_ends_after(steps: &[(u64, Step)]) -> Option<Duration> {
+        let ours = unset_flag();
+        let theirs = unset_flag();
         let start = Instant::now();
-        let mut retire = std::pin::pin!(retire(wanted, sending));
-        for (at, wanted, sending) in steps {
+        let mut retire = std::pin::pin!(retire(ours.subscribe(), theirs.subscribe()));
+        for (at, step) in steps {
             let at = start + Duration::from_secs(*at);
             tokio::select! {
                 _ = &mut retire => return Some(start.elapsed()),
                 _ = n0_future::time::sleep_until(at) => {}
             }
-            wanted_tx.send_replace(*wanted);
-            sending_tx.send_replace(*sending);
+            match step {
+                Step::Ours(open) => ours.send_replace(*open),
+                Step::Theirs(open) => theirs.send_replace(*open),
+            };
         }
         timeout(Duration::from_secs(60), retire)
             .await
@@ -2247,121 +2237,82 @@ pub(crate) mod tests {
             .map(|_| start.elapsed())
     }
 
-    /// The grace starts once no topic uses the peer and our sends ended.
+    /// A connection without streams retires after the grace.
     #[tokio::test(start_paused = true)]
-    async fn retire_waits_for_our_sends_to_end() {
-        assert_eq!(retire_ends_after(false, false, &[]).await, Some(IDLE_GRACE));
+    async fn retire_after_the_grace_without_streams() {
+        assert_eq!(retire_ends_after(&[]).await, Some(RETIRE_GRACE));
+    }
+
+    /// A stream in either direction keeps the connection, and the grace starts once both ended.
+    #[tokio::test(start_paused = true)]
+    async fn retire_waits_for_the_last_stream() {
+        assert_eq!(retire_ends_after(&[(1, Step::Ours(true))]).await, None);
+        assert_eq!(retire_ends_after(&[(1, Step::Theirs(true))]).await, None);
         assert_eq!(
-            retire_ends_after(false, true, &[(3, false, false)]).await,
-            Some(Duration::from_secs(3) + IDLE_GRACE)
-        );
-        // A send in the grace starts it over.
-        assert_eq!(
-            retire_ends_after(false, false, &[(4, false, true), (5, false, false)]).await,
-            Some(Duration::from_secs(5) + IDLE_GRACE)
+            retire_ends_after(&[
+                (1, Step::Ours(true)),
+                (2, Step::Theirs(true)),
+                (3, Step::Ours(false)),
+                (4, Step::Theirs(false))
+            ])
+            .await,
+            Some(Duration::from_secs(4) + RETIRE_GRACE)
         );
     }
 
-    /// Sends that do not end delay the close up to the limit.
+    /// A stream that opens and ends within the grace starts it over.
     #[tokio::test(start_paused = true)]
-    async fn retire_limits_the_wait_for_sends() {
+    async fn retire_starts_over_after_a_short_stream() {
         assert_eq!(
-            retire_ends_after(false, true, &[]).await,
-            Some(RETIRE_LIMIT)
-        );
-        // The limit counts from when the peer became unused.
-        assert_eq!(
-            retire_ends_after(true, true, &[(10, false, true)]).await,
-            Some(Duration::from_secs(10) + RETIRE_LIMIT)
+            retire_ends_after(&[(3, Step::Theirs(true)), (4, Step::Theirs(false))]).await,
+            Some(Duration::from_secs(4) + RETIRE_GRACE)
         );
     }
 
-    /// A peer wanted and unused again before `retire` runs gets a new limit and grace.
-    #[tokio::test(start_paused = true)]
-    async fn retire_starts_over_after_an_unseen_revival() {
-        let (wanted_tx, wanted) = watch::channel(false);
-        let (sending_tx, sending) = watch::channel(true);
-        let start = Instant::now();
-        let mut retire = std::pin::pin!(retire(wanted, sending));
-        assert!(timeout(Duration::from_secs(19), &mut retire).await.is_err());
-
-        // All three land before `retire` runs again.
-        wanted_tx.send_replace(true);
-        wanted_tx.send_replace(false);
-        sending_tx.send_replace(false);
-        retire.await;
-        assert_eq!(start.elapsed(), Duration::from_secs(19) + IDLE_GRACE);
-    }
-
-    /// A peer we want again stops the grace.
-    #[tokio::test(start_paused = true)]
-    async fn retire_stops_while_the_peer_is_wanted() {
-        assert_eq!(
-            retire_ends_after(false, false, &[(2, true, false)]).await,
-            None
-        );
-        assert_eq!(
-            retire_ends_after(false, false, &[(2, true, false), (3, false, false)]).await,
-            Some(Duration::from_secs(3) + IDLE_GRACE)
-        );
-    }
-
-    /// A stopped writer's completion must not remove messages queued after reopening.
+    /// A reopened queue goes to the writer that waits on its connection, with no dial.
     #[tokio::test]
-    async fn reopened_queue_survives_its_previous_writer() {
-        let now = Instant::now();
+    async fn reopened_queue_keeps_the_waiting_writer() {
         let topic = [42; 32].into();
         let mut peer = open_peer(queue::MIN_QUEUE_SIZE);
-        let first = peer.handle_connection(Side::Server, 1).unwrap();
+        let lease = peer.handle_connection(Side::Server, 1).unwrap();
         peer.close_queue();
-        assert!(!first.lock().await.next().await, "the writer must stop");
+        let mut reader = lease.lock().await;
+        assert!(!reader.next(true).await, "the closed queue is empty");
 
         let message = join_message(topic, 0);
         assert!(matches!(peer.send(message.clone()), Pushed::Queued));
-        assert!(peer.needs_dial(), "reopening must request a new writer");
-        assert!(!peer.connection_finished(1, now));
-        assert!(!peer.can_forget(now + PEER_RETENTION));
-
-        let next = peer
-            .handle_connection(Side::Client, 2)
-            .expect("awaiting writer");
-        assert!(first.revoked().is_cancelled());
-        assert!(!peer.needs_dial());
-        let mut reader = next.lock().await;
-        assert!(reader.next().await);
-        assert_eq!(reader.current().unwrap().message.topic, message.topic);
+        assert!(!lease.revoked().is_cancelled());
+        assert!(!peer.needs_dial(), "the waiting writer takes the queue");
+        assert!(reader.next(false).await);
         assert_eq!(reader.current().unwrap().message.message, message.message);
     }
 
-    /// The old writer can drain a reopened queue before the actor decides to dial.
-    #[tokio::test]
-    async fn reopened_empty_queue_still_needs_a_dial() {
+    /// A retired writer does not disconnect the peer: an empty queue goes, a queued message dials.
+    #[test]
+    fn retired_writer_does_not_disconnect() {
         let now = Instant::now();
         let mut peer = open_peer(queue::MIN_QUEUE_SIZE);
-        let old = peer.handle_connection(Side::Server, 1).unwrap();
-        peer.close_queue();
+        let _lease = peer.handle_connection(Side::Server, 1).unwrap();
+        assert!(
+            !peer.connection_finished(1, now, true),
+            "the peer was disconnected"
+        );
+        assert!(is_idle(&peer));
+        assert!(
+            peer.can_forget(now + PEER_RETENTION),
+            "the peer state stays"
+        );
+
+        let _lease = peer.handle_connection(Side::Server, 2).unwrap();
         assert!(matches!(
-            peer.send(join_message([43; 32].into(), 0)),
+            peer.send(join_message([3; 32].into(), 0)),
             Pushed::Queued
         ));
-
-        // The previous lease is still valid. Model it running between the
-        // actor's push and its decision to schedule a replacement dial.
-        let mut reader = old.lock().await;
-        assert!(reader.next().await);
-        reader.advance();
-        drop(reader);
-
-        assert!(peer.queue.is_empty());
-        assert!(peer.needs_dial(), "an empty open queue still needs a dial");
-        assert!(!peer.connection_finished(1, now));
-        assert!(peer.forget_at.is_none(), "the reopened peer is not idle");
-        assert!(!peer.can_forget(now + PEER_RETENTION));
-        let _next = peer
-            .handle_connection(Side::Client, 2)
-            .expect("the replacement dial must take the queue");
-        assert!(old.revoked().is_cancelled());
-        assert!(!peer.needs_dial());
+        assert!(
+            !peer.connection_finished(2, now, true),
+            "the peer was disconnected"
+        );
+        assert!(peer.needs_dial(), "the queued message waits without a dial");
     }
 
     /// A completed dial writes only a queue that has no writer.
@@ -2376,9 +2327,9 @@ pub(crate) mod tests {
         assert!(late.is_none(), "the dial must not replace the writer");
 
         let now = Instant::now();
-        assert!(!peer.connection_finished(1, now));
-        assert!(!peer.connection_finished(3, now));
-        assert!(peer.connection_finished(2, now));
+        assert!(!peer.connection_finished(1, now, false));
+        assert!(!peer.connection_finished(3, now, false));
+        assert!(peer.connection_finished(2, now, false));
         peer.discard_queue(now); // The actor processes PeerDisconnected immediately.
         assert!(is_idle(&peer));
 
@@ -2393,9 +2344,9 @@ pub(crate) mod tests {
             late.is_none(),
             "the dial of a closed peer must only receive"
         );
-        assert!(!peer.connection_finished(1, now));
-        assert!(!peer.connection_finished(3, now));
-        assert!(peer.connection_finished(2, now));
+        assert!(!peer.connection_finished(1, now, false));
+        assert!(!peer.connection_finished(3, now, false));
+        assert!(peer.connection_finished(2, now, false));
         peer.discard_queue(now);
         assert!(is_idle(&peer));
         assert!(peer.can_forget(now + PEER_RETENTION));
@@ -2416,13 +2367,13 @@ pub(crate) mod tests {
         assert!(!aborted.is_cancelled());
 
         let mut reader = lease.lock().await;
-        assert!(reader.next().await);
+        assert!(reader.next(true).await);
         assert_eq!(reader.current().unwrap().message.message, message.message);
         reader.advance();
-        assert!(!reader.next().await, "the old queue must end");
+        assert!(!reader.next(true).await, "the old queue must end");
     }
 
-    /// A failed dial does not close the connection that drains a closed queue.
+    /// A failed dial does not disconnect a peer whose connection still writes a closed queue.
     #[tokio::test]
     async fn failed_dial_leaves_the_draining_writer() -> Result {
         let mut actor = t_actor().await?;
@@ -2434,7 +2385,15 @@ pub(crate) mod tests {
         state.close_queue();
         actor.peers.insert(peer_id, state);
         actor.handle_dial_failed(peer_id);
-        assert!(is_idle(&actor.peers[&peer_id]));
+        assert_eq!(
+            actor.peers[&peer_id].writer,
+            Some(1),
+            "the writer was dropped"
+        );
+        assert!(
+            !actor.peers[&peer_id].queue.is_empty(),
+            "the queue was dropped"
+        );
         assert!(!aborted.is_cancelled(), "the writer was aborted");
         Ok(())
     }
@@ -2446,11 +2405,11 @@ pub(crate) mod tests {
         let mut peer = open_peer(queue::MIN_QUEUE_SIZE);
         let _writer = peer.handle_connection(Side::Server, 1).unwrap();
         assert!(peer.handle_connection(Side::Client, 2).is_none());
-        assert!(peer.connection_finished(1, now));
+        assert!(peer.connection_finished(1, now, false));
         peer.discard_queue(now);
         assert!(is_idle(&peer));
         assert!(!peer.needs_dial());
-        assert!(!peer.connection_finished(2, now));
+        assert!(!peer.connection_finished(2, now, false));
         assert!(peer.can_forget(now + PEER_RETENTION));
     }
 
@@ -2462,7 +2421,7 @@ pub(crate) mod tests {
         let _writer = peer.handle_connection(Side::Server, 1).unwrap();
         peer.send(join_message([9; 32].into(), 0));
         peer.close_queue();
-        assert!(!peer.connection_finished(1, now));
+        assert!(!peer.connection_finished(1, now, false));
         assert!(is_idle(&peer));
         assert!(!peer.needs_dial(), "no dial for a closed peer");
     }
@@ -2490,10 +2449,8 @@ pub(crate) mod tests {
         let mut peer = open_peer(queue::MIN_QUEUE_SIZE);
         let old = peer.handle_connection(Side::Server, 1).unwrap();
         let old_aborted = peer.aborted.clone();
-        let mut wanted = peer.wanted.subscribe();
         let handles_close = peer.handles_close.subscribe();
         peer.handles_close.send_replace(true);
-        peer.set_wanted(true);
 
         // Ordinary replacement lets the old queue drain, but all existing
         // connections must still observe a later overflow of the new queue.
@@ -2501,14 +2458,12 @@ pub(crate) mod tests {
         assert!(!old_aborted.is_cancelled());
         assert!(!old.revoked().is_cancelled());
         peer.open_queue();
-        let current = peer.handle_connection(Side::Client, 2).unwrap();
+        let _current = peer.handle_connection(Side::Client, 2).unwrap();
         assert!(peer.handle_connection(Side::Client, 3).is_none());
         let receiving_aborted = peer.aborted.clone();
         peer.abort(now);
         assert!(old_aborted.is_cancelled());
-        assert!(old.revoked().is_cancelled());
         assert!(receiving_aborted.is_cancelled());
-        assert!(current.revoked().is_cancelled());
         assert!(!peer.can_forget(now + PEER_RETENTION));
 
         peer.open_queue();
@@ -2516,16 +2471,15 @@ pub(crate) mod tests {
             .handle_connection(Side::Client, 4)
             .expect("awaiting writer");
         let new_aborted = peer.aborted.clone();
-        assert!(*wanted.borrow_and_update());
         assert!(*handles_close.borrow());
         assert!(!new_aborted.is_cancelled());
         assert!(!new.revoked().is_cancelled());
         assert!(
-            !peer.connection_finished(1, now),
+            !peer.connection_finished(1, now, false),
             "old completion must leave the new queue intact"
         );
-        assert!(!peer.connection_finished(2, now));
-        assert!(!peer.connection_finished(3, now));
+        assert!(!peer.connection_finished(2, now, false));
+        assert!(!peer.connection_finished(3, now, false));
         assert_eq!(peer.writer, Some(4));
         assert!(!new_aborted.is_cancelled());
         assert!(!peer.needs_dial());
@@ -2542,9 +2496,9 @@ pub(crate) mod tests {
             let _second = peer.handle_connection(Side::Server, 2).unwrap();
             peer.handles_close.send_replace(handles_close);
             peer.abort(now);
-            assert!(!peer.connection_finished(1, now));
+            assert!(!peer.connection_finished(1, now, false));
             assert!(!peer.can_forget(later));
-            assert!(!peer.connection_finished(2, later));
+            assert!(!peer.connection_finished(2, later, false));
             assert!(!peer.can_forget(later + PEER_RETENTION - Duration::from_nanos(1)));
             assert!(peer.can_forget(later + PEER_RETENTION));
 
@@ -2558,6 +2512,23 @@ pub(crate) mod tests {
                 "repeated disposal must not prolong retention"
             );
         }
+    }
+
+    /// After an answer to a peer that no topic uses, the queue to it closes.
+    #[tokio::test]
+    async fn answer_to_an_unused_peer_closes_its_queue() -> Result {
+        let mut actor = t_actor().await?;
+        let peer = SecretKey::generate().public();
+        actor.peers.insert(peer, open_peer(queue::MIN_QUEUE_SIZE));
+        let topic: TopicId = [7; 32].into();
+        actor.handle_in_event(
+            InEvent::RecvMessage(peer, join_message(topic, 0)),
+            Instant::now(),
+        );
+        let state = &actor.peers[&peer];
+        assert!(!state.queue.is_empty(), "the disconnect was not queued");
+        assert!(state.queue.is_closing(), "the queue stayed open");
+        Ok(())
     }
 
     /// A failed dial after a disconnect drops the queue it kept.
@@ -2583,7 +2554,7 @@ pub(crate) mod tests {
     /// Its connection still works, so dropping the state would lose the peer.
     #[tokio::test]
     #[traced_test]
-    async fn dial_failure_keeps_active_peer() -> Result {
+    async fn dial_failure_keeps_a_peer_with_a_writer() -> Result {
         let pair = TestPair::new(1).await?;
         let (conn, peer_conn) = pair.connect_back().await?;
         let peer_id = pair.ep2.id();
@@ -2740,7 +2711,7 @@ pub(crate) mod tests {
             "{event:?}"
         );
 
-        tokio::time::sleep(IDLE_GRACE + Duration::from_secs(1)).await;
+        tokio::time::sleep(RETIRE_GRACE + Duration::from_secs(1)).await;
         assert!(
             actor.connection_tasks.try_join_next().is_none(),
             "the connection closed"
@@ -2774,7 +2745,13 @@ pub(crate) mod tests {
         let topic: TopicId = blake3::hash(b"stalled").into();
         // More than the windows of the peer, which reads nothing.
         let queue_lease = queue_payloads(topic, 200, 60_000);
-        let send_loop = SendLoop::new(conn, queue_lease, TEST_FRAME_LIMIT);
+        let send_loop = SendLoop::new(
+            conn,
+            queue_lease,
+            TEST_FRAME_LIMIT,
+            unset_flag(),
+            Vec::new(),
+        );
         let result = timeout(util::WRITE_TIMEOUT * 5, send_loop.run())
             .await
             .std_context("the writer never ended")?;
@@ -2797,7 +2774,7 @@ pub(crate) mod tests {
         // At 64 KiB per 300 ms, the frame takes about 6.5 s, over the write timeout.
         let (count, len) = (1, 1_400_000);
         let queue_lease = queue_payloads(topic, count, len);
-        let send_loop = SendLoop::new(conn, queue_lease, 4 << 20);
+        let send_loop = SendLoop::new(conn, queue_lease, 4 << 20, unset_flag(), Vec::new());
         let send = AbortOnDropHandle::new(spawn(async move { send_loop.run().await }));
 
         let start = Instant::now();
@@ -2838,7 +2815,13 @@ pub(crate) mod tests {
             let topic: TopicId = blake3::hash(&i.to_be_bytes()).into();
             assert!(matches!(queue.push(join_message(topic, 0)), Pushed::Queued));
         }
-        let send_loop = SendLoop::new(conn, queue.lease(), TEST_FRAME_LIMIT);
+        let send_loop = SendLoop::new(
+            conn,
+            queue.lease(),
+            TEST_FRAME_LIMIT,
+            unset_flag(),
+            Vec::new(),
+        );
         let result = timeout(util::OPEN_TIMEOUT * 5, send_loop.run())
             .await
             .std_context("the writer never ended")?;
@@ -2873,10 +2856,10 @@ pub(crate) mod tests {
             conn,
             aborted,
             Some(queue_lease),
+            Vec::new(),
             in_event_tx,
             TEST_FRAME_LIMIT,
-            watch::channel(true).1,
-            close_flag(),
+            unset_flag(),
         )));
 
         join_until_full(&mut actor, peer);
@@ -2907,12 +2890,10 @@ pub(crate) mod tests {
         actor.handle_connection(dialed);
         assert_eq!(actor.peers[&peer].writer, Some(writer));
         assert_eq!(actor.peers[&peer].connections, 2);
-        set_wanted(&actor, peer, true);
 
         // Neither task can drain the queue while this synchronous helper runs.
         join_until_full(&mut actor, peer);
         assert_eq!(actor.metrics.peers_send_queue_full.get(), 1);
-        set_wanted(&actor, peer, true);
 
         // An abort must close both, regardless of their leases or idle retirement.
         closed_with(&peer_accepted, util::CLOSE_QUEUE_FULL).await?;
@@ -2980,10 +2961,12 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// An inbound connection that no topic uses closes, even with a partial header.
+    /// A stream counts from its first byte, so a partial header keeps the connection.
+    ///
+    /// Once the peer resets the stream, the connection closes after the grace.
     #[tokio::test]
     #[traced_test]
-    async fn unwanted_connection_with_partial_header_closes() -> Result {
+    async fn partial_header_keeps_the_connection() -> Result {
         let pair = TestPair::new(1).await?;
         let (conn, peer_conn) = pair.connect_back().await?;
         let mut actor = t_actor().await?;
@@ -2994,16 +2977,332 @@ pub(crate) mod tests {
             .write_all(&[0, 0, 0, 32, 0])
             .await
             .std_context("partial header")?;
+        tokio::time::sleep(RETIRE_GRACE + Duration::from_secs(1)).await;
+        assert!(peer_conn.close_reason().is_none(), "the connection closed");
+
+        stream.reset(0u32.into()).anyerr()?;
         let result = timeout(
-            IDLE_GRACE + Duration::from_secs(3),
+            RETIRE_GRACE + Duration::from_secs(3),
             actor.connection_tasks.join_next(),
         )
         .await
         .std_context("the connection stayed open")?;
         assert!(result.expect("connection task").is_ok());
-        timeout(Duration::from_secs(1), peer_conn.closed())
+        Ok(())
+    }
+
+    /// Waits until `flag` has `value`.
+    async fn flag_becomes(flag: &mut watch::Receiver<bool>, value: bool) -> Result {
+        timeout(Duration::from_secs(5), flag.wait_for(|v| *v == value))
             .await
-            .std_context("the peer did not see the close")?;
+            .std_context("the flag did not change")?
+            .anyerr()?;
+        Ok(())
+    }
+
+    /// The send loop reports a stream from its open until the peer acknowledged its end.
+    #[tokio::test]
+    #[traced_test]
+    async fn send_loop_reports_its_streams() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let (next, next_peer_conn) = pair.connect().await?;
+        let topic: TopicId = blake3::hash(b"send_loop_reports_its_streams").into();
+        let mut queue = SendQueue::new(queue::MIN_QUEUE_SIZE);
+        // Set, as `connection_loop` creates it for a writer.
+        let flag = watch::Sender::new(true);
+        let mut has_streams = flag.subscribe();
+        let _send = AbortOnDropHandle::new(spawn(
+            SendLoop::new(conn, queue.lease(), TEST_FRAME_LIMIT, flag, Vec::new()).run(),
+        ));
+        flag_becomes(&mut has_streams, false).await?;
+
+        assert!(matches!(queue.push(join_message(topic, 0)), Pushed::Queued));
+        let mut stream = peer_conn.accept_uni().await.std_context("accept")?;
+        let mut buffer = BytesMut::new();
+        util::StreamHeader::read(&mut stream, &mut buffer, TEST_FRAME_LIMIT).await?;
+        let message: Option<TopicMessage> =
+            util::read_frame(&mut stream, &mut buffer, TEST_FRAME_LIMIT).await?;
+        assert!(message.is_some(), "the message did not go out");
+        assert!(*has_streams.borrow(), "the open stream is not reported");
+
+        // A new writer opens a stream for each topic of its lease, and the old one ends.
+        let next_flag = unset_flag();
+        let mut next_has_streams = next_flag.subscribe();
+        let _next_send = AbortOnDropHandle::new(spawn(
+            SendLoop::new(
+                next,
+                queue.lease(),
+                TEST_FRAME_LIMIT,
+                next_flag,
+                vec![topic],
+            )
+            .run(),
+        ));
+        let mut next_stream = timeout(Duration::from_secs(5), next_peer_conn.accept_uni())
+            .await
+            .std_context("the stream did not open again")?
+            .std_context("accept")?;
+        let header =
+            util::StreamHeader::read(&mut next_stream, &mut buffer, TEST_FRAME_LIMIT).await?;
+        assert_eq!(header.topic_id, topic);
+        let end: Option<TopicMessage> =
+            util::read_frame(&mut stream, &mut buffer, TEST_FRAME_LIMIT).await?;
+        assert!(end.is_none(), "the old stream did not end");
+        flag_becomes(&mut has_streams, false).await?;
+        assert!(
+            *next_has_streams.borrow(),
+            "the stream that opened again is not reported"
+        );
+
+        // A closed queue finishes the stream. The flag clears once the peer acknowledged it.
+        queue.set_closing(true);
+        let end: Option<TopicMessage> =
+            util::read_frame(&mut next_stream, &mut buffer, TEST_FRAME_LIMIT).await?;
+        assert!(end.is_none(), "the new stream did not end");
+        flag_becomes(&mut next_has_streams, false).await?;
+        Ok(())
+    }
+
+    /// A queued message gets the stream of the peer before the initial topics of the writer.
+    ///
+    /// The peer here allows one stream. A stream of an initial topic would take it,
+    /// and the queued message would wait until the open timeout.
+    #[tokio::test]
+    #[traced_test]
+    async fn queued_message_comes_before_the_initial_topics() -> Result {
+        let lookup = MemoryLookup::new();
+        let ours = direct_endpoint(&lookup, QuicTransportConfig::builder().build()).await?;
+        let one_stream = QuicTransportConfig::builder()
+            .max_concurrent_uni_streams(VarInt::from_u32(1))
+            .build();
+        let theirs = direct_endpoint(&lookup, one_stream).await?;
+        let accept = async {
+            let incoming = theirs.accept().await.std_context("endpoint closed")?;
+            incoming.await.std_context("accept")
+        };
+        let dial = async {
+            ours.connect(theirs.id(), GOSSIP_ALPN)
+                .await
+                .std_context("connect")
+        };
+        let (peer_conn, conn) = (accept, dial).try_join().await?;
+        let (queued, initial): (TopicId, TopicId) = (
+            blake3::hash(b"queued").into(),
+            blake3::hash(b"initial").into(),
+        );
+        let mut queue = SendQueue::new(queue::MIN_QUEUE_SIZE);
+        assert!(matches!(
+            queue.push(join_message(queued, 0)),
+            Pushed::Queued
+        ));
+        let _send = AbortOnDropHandle::new(spawn(
+            SendLoop::new(
+                conn,
+                queue.lease(),
+                TEST_FRAME_LIMIT,
+                unset_flag(),
+                vec![initial],
+            )
+            .run(),
+        ));
+
+        let (topic, _) = timeout(Duration::from_secs(2), read_next_message(&peer_conn))
+            .await
+            .std_context("the queued message waited")??;
+        assert_eq!(topic, queued);
+        Ok(())
+    }
+
+    /// A topic that the writer left with a `Disconnect` gets no initial stream again.
+    #[tokio::test]
+    #[traced_test]
+    async fn left_topic_gets_no_initial_stream() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let topic: TopicId = blake3::hash(b"left_topic_gets_no_initial_stream").into();
+        let mut queue = SendQueue::new(queue::MIN_QUEUE_SIZE);
+        assert!(matches!(
+            queue.push(disconnect_message(topic)),
+            Pushed::Queued
+        ));
+        let _send = AbortOnDropHandle::new(spawn(
+            SendLoop::new(
+                conn,
+                queue.lease(),
+                TEST_FRAME_LIMIT,
+                unset_flag(),
+                vec![topic],
+            )
+            .run(),
+        ));
+
+        let (sent, message) = timeout(Duration::from_secs(5), read_next_message(&peer_conn))
+            .await
+            .std_context("the disconnect did not go out")??;
+        assert_eq!(sent, topic);
+        assert!(message.is_disconnect());
+        assert!(
+            timeout(Duration::from_millis(500), peer_conn.accept_uni())
+                .await
+                .is_err(),
+            "the left topic got a stream again"
+        );
+        Ok(())
+    }
+
+    /// A close by the peer with the retire code counts as a retirement, also over a stream of ours.
+    #[tokio::test]
+    #[traced_test]
+    async fn retirement_by_the_peer_counts() -> Result {
+        let pair = TestPair::new(1).await?;
+        let topic: TopicId = blake3::hash(b"peer_retirement").into();
+        for with_stream in [false, true] {
+            let (conn, peer_conn) = pair.connect().await?;
+            let mut queue = SendQueue::new(queue::MIN_QUEUE_SIZE);
+            let (in_event_tx, _in_event_rx) = mpsc::channel(16);
+            let task = AbortOnDropHandle::new(spawn(connection_loop(
+                pair.ep2.id(),
+                conn,
+                CancellationToken::new(),
+                Some(queue.lease()),
+                Vec::new(),
+                in_event_tx,
+                TEST_FRAME_LIMIT,
+                unset_flag(),
+            )));
+            if with_stream {
+                assert!(matches!(queue.push(join_message(topic, 0)), Pushed::Queued));
+                timeout(Duration::from_secs(5), read_next_message(&peer_conn))
+                    .await
+                    .std_context("the message did not go out")??;
+            }
+            peer_conn.close(util::CLOSE_RETIRED.into(), b"no stream");
+            let retired = timeout(Duration::from_secs(5), task)
+                .await
+                .std_context("the connection loop did not end")?
+                .anyerr()??;
+            assert!(retired, "with a stream of ours: {with_stream}");
+        }
+        Ok(())
+    }
+
+    /// A message to a peer that no topic uses goes out on the waiting writer, with no dial.
+    #[tokio::test]
+    #[traced_test]
+    async fn answers_to_an_unused_peer_need_no_dial() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect_back().await?;
+        let peer_id = pair.ep2.id();
+        let topic: TopicId = blake3::hash(b"answers_need_no_dial").into();
+        let mut actor = t_actor().await?;
+        actor.handle_connection(conn);
+        for _ in 0..2 {
+            let join = InEvent::RecvMessage(peer_id, join_message(topic, 0));
+            actor.handle_in_event(join, Instant::now());
+            assert!(!actor.dialer.is_pending(peer_id), "the answer dialed");
+            let (sent, message) = timeout(Duration::from_secs(5), read_next_message(&peer_conn))
+                .await
+                .std_context("the answer did not go out")??;
+            assert_eq!(sent, topic);
+            assert!(message.is_disconnect());
+        }
+        Ok(())
+    }
+
+    /// A newer stream of a topic waits until the older one ended, as after a `Disconnect`.
+    #[tokio::test]
+    #[traced_test]
+    async fn streams_of_a_topic_keep_their_order() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let (in_event_tx, mut in_event_rx) = mpsc::channel(4);
+        let mut recv_loop = RecvLoop::new(
+            peer_conn.remote_id(),
+            conn,
+            in_event_tx,
+            TEST_FRAME_LIMIT,
+            unset_flag(),
+            unset_flag(),
+        );
+        let _recv = AbortOnDropHandle::new(spawn(async move { recv_loop.run().await }));
+
+        let topic: TopicId = blake3::hash(b"streams_of_a_topic").into();
+        let (first, second) = (join_message(topic, 1), join_message(topic, 2));
+        let mut buffer = Vec::new();
+        let mut older = peer_conn.open_uni().await.std_context("open stream")?;
+        util::StreamHeader::new(topic)
+            .write(&mut older, &mut buffer, TEST_FRAME_LIMIT)
+            .await?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // The newer stream arrives before the last message of the older one.
+        let mut newer = peer_conn.open_uni().await.std_context("open stream")?;
+        util::StreamHeader::new(topic)
+            .write(&mut newer, &mut buffer, TEST_FRAME_LIMIT)
+            .await?;
+        util::write_frame(&mut newer, &second.message, &mut buffer, TEST_FRAME_LIMIT).await?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        util::write_frame(&mut older, &first.message, &mut buffer, TEST_FRAME_LIMIT).await?;
+        older.finish().std_context("finish")?;
+
+        for expected in [first, second] {
+            let event = timeout(Duration::from_secs(5), in_event_rx.recv())
+                .await
+                .std_context("no message")?;
+            assert!(
+                matches!(&event, Some(InEvent::RecvMessage(_, m)) if m.message == expected.message),
+                "{event:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// An older stream whose header comes after a newer one is read at once, not after it.
+    #[tokio::test]
+    #[traced_test]
+    async fn late_header_of_an_older_stream_does_not_wait() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let (in_event_tx, mut in_event_rx) = mpsc::channel(4);
+        let mut recv_loop = RecvLoop::new(
+            peer_conn.remote_id(),
+            conn,
+            in_event_tx,
+            TEST_FRAME_LIMIT,
+            unset_flag(),
+            unset_flag(),
+        );
+        let _recv = AbortOnDropHandle::new(spawn(async move { recv_loop.run().await }));
+
+        let topic: TopicId = blake3::hash(b"late_header").into();
+        let (first, second) = (join_message(topic, 1), join_message(topic, 2));
+        let mut buffer = Vec::new();
+        let mut older = peer_conn.open_uni().await.std_context("open stream")?;
+        older.write_all(&[0]).await.std_context("write")?;
+        let mut newer = peer_conn.open_uni().await.std_context("open stream")?;
+        util::StreamHeader::new(topic)
+            .write(&mut newer, &mut buffer, TEST_FRAME_LIMIT)
+            .await?;
+        util::write_frame(&mut newer, &second.message, &mut buffer, TEST_FRAME_LIMIT).await?;
+        let mut expect = async |expected: ProtoMessage| {
+            let event = timeout(Duration::from_secs(5), in_event_rx.recv())
+                .await
+                .std_context("no message")?;
+            assert!(
+                matches!(&event, Some(InEvent::RecvMessage(_, m)) if m.message == expected.message),
+                "{event:?}"
+            );
+            n0_error::Ok(())
+        };
+        expect(second).await?;
+        // The rest of the older header, then a message. The newer stream stays open.
+        let header = postcard::to_stdvec(&(topic, 1u8)).std_context("encode")?;
+        let len = (header.len() as u32).to_be_bytes();
+        older.write_all(&len[1..]).await.std_context("write")?;
+        older.write_all(&header).await.std_context("write")?;
+        util::write_frame(&mut older, &first.message, &mut buffer, TEST_FRAME_LIMIT).await?;
+        older.finish().std_context("finish")?;
+        expect(first).await?;
         Ok(())
     }
 
@@ -3014,7 +3313,13 @@ pub(crate) mod tests {
         let pair = TestPair::new(1).await?;
         let (conn, peer_conn) = pair.connect().await?;
         let mut queue = SendQueue::new(queue::MIN_QUEUE_SIZE);
-        let send = SendLoop::new(conn, queue.lease(), TEST_FRAME_LIMIT);
+        let send = SendLoop::new(
+            conn,
+            queue.lease(),
+            TEST_FRAME_LIMIT,
+            unset_flag(),
+            Vec::new(),
+        );
         peer_conn.close(0u32.into(), b"done");
         timeout(Duration::from_secs(3), send.run())
             .await
@@ -3030,10 +3335,9 @@ pub(crate) mod tests {
 
     /// An aborted peer loses the connection that took its queue, also once its writer ended.
     ///
-    /// The protocol closed the peer and reopened it before a new dial
-    /// completed. The writer of the old connection sent the queue and ended,
-    /// but the connection still reads from the peer, which must learn of the
-    /// drop.
+    /// The peer opened another connection, which took over the queue. The
+    /// writer of the old connection sent the queue and let go of it, but the
+    /// connection still reads from the peer, which must learn of the drop.
     #[tokio::test]
     #[traced_test]
     async fn aborted_peer_loses_the_connection_that_took_its_queue() -> Result {
@@ -3052,10 +3356,10 @@ pub(crate) mod tests {
             conn,
             state.aborted.clone(),
             Some(queue_lease),
+            Vec::new(),
             in_event_tx,
             TEST_FRAME_LIMIT,
-            watch::channel(true).1,
-            close_flag(),
+            unset_flag(),
         )));
         assert!(matches!(
             state.queue.push(join_message(topic, 0)),
@@ -3065,8 +3369,10 @@ pub(crate) mod tests {
             .await
             .std_context("the queue did not go out")??;
         peers.insert(peer_id, state);
-        peers.get_mut(&peer_id).expect("known peer").close_queue();
-        // The writer lets go of the queue once it ended.
+        let state = peers.get_mut(&peer_id).expect("known peer");
+        state.close_queue();
+        let _next = state.handle_connection(Side::Server, usize::MAX);
+        // The writer lets go of the queue once the next connection revoked it.
         timeout(Duration::from_secs(5), async {
             while peers[&peer_id].queue.try_reader().is_none() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -3074,7 +3380,6 @@ pub(crate) mod tests {
         })
         .await
         .std_context("the writer did not end")?;
-        peers.get_mut(&peer_id).expect("dropped").open_queue();
 
         peers
             .get_mut(&peer_id)
@@ -3466,6 +3771,32 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// A connection that takes over the writer opens a stream for each topic that uses the peer.
+    #[tokio::test]
+    #[traced_test]
+    async fn new_writer_opens_the_streams_of_the_topics() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (old, peer_old) = pair.connect_back().await?;
+        let (new, peer_new) = pair.connect_back().await?;
+        let peer_id = pair.ep2.id();
+        let topic: TopicId = blake3::hash(b"new_writer_opens").into();
+        let mut actor = t_actor().await?;
+        actor.handle_connection(old);
+        let join = InEvent::Command(topic, ProtoCommand::Join(vec![peer_id]));
+        actor.handle_in_event(join, Instant::now());
+        let (sent, _) = timeout(Duration::from_secs(5), read_next_message(&peer_old))
+            .await
+            .std_context("the join did not go out")??;
+        assert_eq!(sent, topic);
+
+        actor.handle_connection(new);
+        let opened = timeout(Duration::from_secs(5), read_next_header(&peer_new))
+            .await
+            .std_context("the new writer opened no stream")??;
+        assert_eq!(opened, topic);
+        Ok(())
+    }
+
     /// A replaced connection keeps the message that it wrote, and new messages go on the new connection.
     #[tokio::test]
     #[traced_test]
@@ -3527,14 +3858,15 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// A replaced connection stays open and delivers while we want the peer.
+    /// A replaced connection stays open and delivers while the peer has a stream on it.
     ///
     /// Two peers that dial each other can each keep a different connection, so
-    /// the peer may send on the one we replaced. Once we close the peer, both
-    /// connections close after the grace, even with the peer's stream open.
+    /// the peer may send on the one we replaced. The other connection carries
+    /// nothing and may close. Once the peer ends its stream, the replaced one
+    /// closes after the grace too.
     #[tokio::test]
     #[traced_test]
-    async fn replaced_connection_stays_while_the_peer_is_wanted() -> Result {
+    async fn replaced_connection_stays_while_the_peer_sends_on_it() -> Result {
         let pair = TestPair::new(1).await?;
         let (first, peer_first) = pair.connect_back().await?;
         let (second, peer_second) = pair.connect_back().await?;
@@ -3543,7 +3875,6 @@ pub(crate) mod tests {
         let mut actor = t_actor().await?;
         actor.handle_connection(first);
         actor.handle_connection(second);
-        set_wanted(&actor, peer_id, true);
 
         show_that_it_handles_a_close(&peer_second, topic).await;
         let mut stream = peer_first.open_uni().await.std_context("open stream")?;
@@ -3556,7 +3887,7 @@ pub(crate) mod tests {
         util::write_frame(&mut stream, &join, &mut buffer, TEST_FRAME_LIMIT)
             .await
             .std_context("write frame")?;
-        tokio::time::sleep(IDLE_GRACE + Duration::from_secs(1)).await;
+        tokio::time::sleep(RETIRE_GRACE + Duration::from_secs(1)).await;
         util::write_frame(&mut stream, &join, &mut buffer, TEST_FRAME_LIMIT)
             .await
             .std_context("write after the grace")?;
@@ -3570,10 +3901,6 @@ pub(crate) mod tests {
             );
         }
         assert!(
-            actor.connection_tasks.try_join_next().is_none(),
-            "a connection closed"
-        );
-        assert!(
             peer_first.close_reason().is_none(),
             "the replaced connection closed"
         );
@@ -3583,62 +3910,18 @@ pub(crate) mod tests {
             .get_mut(&peer_id)
             .expect("known peer")
             .close_queue();
-        set_wanted(&actor, peer_id, false);
-        for _ in 0..2 {
-            let ended = timeout(
-                IDLE_GRACE + Duration::from_secs(3),
-                actor.connection_tasks.join_next(),
-            )
+        stream.finish().std_context("finish")?;
+        timeout(RETIRE_GRACE + Duration::from_secs(3), peer_first.closed())
             .await
-            .std_context("a connection stayed open")?;
-            let (peer, conn, res) = ended.expect("two tasks").expect("no panic");
-            actor.handle_connection_task_finished(peer, conn, res);
-        }
-        timeout(Duration::from_secs(1), peer_first.closed())
-            .await
-            .std_context("the peer did not see the close")?;
-        Ok(())
-    }
-
-    /// A peer we want again keeps the connection that outlived its old state.
-    #[tokio::test]
-    #[traced_test]
-    async fn peer_wanted_again_keeps_its_connection() -> Result {
-        let pair = TestPair::new(1).await?;
-        let (conn, peer_conn) = pair.connect_back().await?;
-        let peer_id = pair.ep2.id();
-        let mut actor = t_actor().await?;
-        actor.handle_connection(conn);
-        set_wanted(&actor, peer_id, true);
-
-        actor
-            .peers
-            .get_mut(&peer_id)
-            .expect("known peer")
-            .close_queue();
-        set_wanted(&actor, peer_id, false);
-        // The grace is running when we want the peer again.
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        actor
-            .peers
-            .entry(peer_id)
-            .or_insert_with(|| pending_with(vec![]));
-        set_wanted(&actor, peer_id, true);
-
-        tokio::time::sleep(IDLE_GRACE + Duration::from_secs(1)).await;
-        assert!(
-            actor.connection_tasks.try_join_next().is_none(),
-            "the connection closed"
-        );
-        assert!(peer_conn.close_reason().is_none(), "the connection closed");
+            .std_context("the replaced connection stayed open")?;
         Ok(())
     }
 
     /// A dial that completes after the peer's state is gone closes.
     ///
     /// The peer's state goes when its other connection closes or the protocol
-    /// drops it. Nothing wants the dialed connection, so it closes after the
-    /// grace, even if the peer opens a stream on it.
+    /// drops it. Nothing uses the dialed connection, so it closes after the
+    /// grace once the peer ended the stream it opened.
     #[tokio::test]
     #[traced_test]
     async fn dial_for_a_peer_without_state_closes() -> Result {
@@ -3649,11 +3932,12 @@ pub(crate) mod tests {
         let mut actor = t_actor().await?;
 
         actor.handle_connection(conn);
-        let _stream = open_stream(&peer_conn, topic, &[join_message(topic, 0).message]).await?;
+        let mut stream = open_stream(&peer_conn, topic, &[join_message(topic, 0).message]).await?;
+        stream.finish().std_context("finish")?;
 
         assert!(is_idle(&actor.peers[&peer_id]), "the dial got a queue");
         let ended = timeout(
-            IDLE_GRACE + Duration::from_secs(3),
+            RETIRE_GRACE + Duration::from_secs(3),
             actor.connection_tasks.join_next(),
         )
         .await
@@ -3690,7 +3974,7 @@ pub(crate) mod tests {
             .expect("known peer")
             .close_queue();
         let ended = timeout(
-            IDLE_GRACE + Duration::from_secs(3),
+            RETIRE_GRACE + Duration::from_secs(3),
             actor.connection_tasks.join_next(),
         )
         .await
@@ -3706,7 +3990,7 @@ pub(crate) mod tests {
         );
 
         let ended = timeout(
-            IDLE_GRACE + Duration::from_secs(3),
+            RETIRE_GRACE + Duration::from_secs(3),
             actor.connection_tasks.join_next(),
         )
         .await
@@ -3745,7 +4029,7 @@ pub(crate) mod tests {
             .expect("known peer")
             .close_queue();
         let ended = timeout(
-            IDLE_GRACE + Duration::from_secs(3),
+            RETIRE_GRACE + Duration::from_secs(3),
             actor.connection_tasks.join_next(),
         )
         .await
@@ -3759,7 +4043,7 @@ pub(crate) mod tests {
 
         actor.handle_connection(dialed);
         let ended = timeout(
-            IDLE_GRACE + Duration::from_secs(3),
+            RETIRE_GRACE + Duration::from_secs(3),
             actor.connection_tasks.join_next(),
         )
         .await
@@ -3797,13 +4081,13 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// A late dial stays open if we want the peer again within the grace.
+    /// A dial on which neither side sends a header stays open.
     ///
-    /// The peer may take the dial as its active connection. Closing it would
-    /// then drop us on the side of the peer.
+    /// Neither side learns that the other handles a close, see
+    /// [`util::StreamHeader::handles_close`].
     #[tokio::test]
     #[traced_test]
-    async fn late_dial_of_a_peer_wanted_again_stays() -> Result {
+    async fn silent_dial_stays() -> Result {
         let pair = TestPair::new(1).await?;
         let (conn, peer_conn) = pair.connect().await?;
         let peer_id = pair.ep2.id();
@@ -3811,9 +4095,8 @@ pub(crate) mod tests {
 
         actor.handle_connection(conn);
         assert!(is_idle(&actor.peers[&peer_id]), "the dial got a queue");
-        set_wanted(&actor, peer_id, true);
 
-        tokio::time::sleep(IDLE_GRACE + Duration::from_secs(1)).await;
+        tokio::time::sleep(RETIRE_GRACE + Duration::from_secs(1)).await;
         assert!(
             actor.connection_tasks.try_join_next().is_none(),
             "the connection closed"
@@ -3825,11 +4108,11 @@ pub(crate) mod tests {
     /// A dial that the peer's connection overtook after a disconnect does not replace it.
     ///
     /// The peer's connection took the queue and is the active one. The dial
-    /// stays while we want the peer, as the peer may send on it, and closes
-    /// once we do not.
+    /// stays while the peer has a stream on it, and closes after the grace once
+    /// the peer ended it.
     #[tokio::test]
     #[traced_test]
-    async fn overtaken_dial_of_a_closed_peer_follows_the_flag() -> Result {
+    async fn overtaken_dial_stays_while_the_peer_sends_on_it() -> Result {
         let pair = TestPair::new(1).await?;
         let (dialed, dialed_theirs) = pair.connect().await?;
         let (inbound, _inbound_theirs) = pair.connect_back().await?;
@@ -3846,8 +4129,8 @@ pub(crate) mod tests {
         let inbound_id = inbound.stable_id();
         actor.handle_connection(inbound);
         actor.handle_connection(dialed);
-        set_wanted(&actor, peer_id, true);
-        let _stream = open_stream(&dialed_theirs, topic, &[join_message(topic, 0).message]).await?;
+        let mut stream =
+            open_stream(&dialed_theirs, topic, &[join_message(topic, 0).message]).await?;
 
         assert!(
             matches!(
@@ -3856,10 +4139,10 @@ pub(crate) mod tests {
             ),
             "the dial replaced the peer's connection"
         );
-        tokio::time::sleep(IDLE_GRACE + Duration::from_secs(1)).await;
+        tokio::time::sleep(RETIRE_GRACE + Duration::from_secs(1)).await;
         assert!(
             dialed_theirs.close_reason().is_none(),
-            "the dial closed while we want the peer"
+            "the dial closed while the peer has a stream on it"
         );
 
         actor
@@ -3867,10 +4150,13 @@ pub(crate) mod tests {
             .get_mut(&peer_id)
             .expect("known peer")
             .close_queue();
-        set_wanted(&actor, peer_id, false);
-        timeout(IDLE_GRACE + Duration::from_secs(3), dialed_theirs.closed())
-            .await
-            .std_context("the dial stayed open")?;
+        stream.finish().std_context("finish")?;
+        timeout(
+            RETIRE_GRACE + Duration::from_secs(3),
+            dialed_theirs.closed(),
+        )
+        .await
+        .std_context("the dial stayed open")?;
         Ok(())
     }
 
@@ -3929,7 +4215,7 @@ pub(crate) mod tests {
         );
 
         let mut peer = peer;
-        let delivered = timeout(IDLE_GRACE * 2 + Duration::from_secs(3), async {
+        let delivered = timeout(RETIRE_GRACE * 2 + Duration::from_secs(3), async {
             loop {
                 tokio::select! {
                     _ = actor.step() => {}
@@ -3965,7 +4251,7 @@ pub(crate) mod tests {
         for message in messages {
             assert!(matches!(queue.push(message), Pushed::Queued));
         }
-        let send_loop = SendLoop::new(conn, queue.lease(), 1024);
+        let send_loop = SendLoop::new(conn, queue.lease(), 1024, unset_flag(), Vec::new());
         drop(queue);
         let _send = AbortOnDropHandle::new(spawn(async move { send_loop.run().await }));
 
@@ -4032,13 +4318,13 @@ pub(crate) mod tests {
         message.expect("a join sends a message")
     }
 
-    /// A stream that the peer stops is dropped, and the connection stays.
+    /// After the peer stopped a stream, the next message of the topic goes out on a new stream.
     ///
     /// The peer stops a stream that it cannot read, for example a frame over its
-    /// size limit. The next message of the topic goes out on a new stream.
+    /// size limit.
     #[tokio::test]
     #[traced_test]
-    async fn stopped_stream_keeps_the_connection() -> Result {
+    async fn next_message_after_a_stop_opens_a_new_stream() -> Result {
         let pair = TestPair::new(1).await?;
         let (conn, peer_conn) = pair.connect().await?;
         let peer_id = pair.ep2.id();
@@ -4074,10 +4360,10 @@ pub(crate) mod tests {
             conn,
             aborted,
             Some(queue_lease),
+            Vec::new(),
             in_event_tx,
             TEST_FRAME_LIMIT,
-            watch::channel(true).1,
-            close_flag(),
+            unset_flag(),
         )));
 
         let (read_topic, read_message, peer_conn) = timeout(Duration::from_secs(5), peer)
@@ -4114,10 +4400,10 @@ pub(crate) mod tests {
                 conn,
                 CancellationToken::new(),
                 Some(queue.lease()),
+                Vec::new(),
                 in_event_tx,
                 TEST_FRAME_LIMIT,
-                watch::channel(true).1,
-                close_flag(),
+                unset_flag(),
             ),
         )
         .await
@@ -4192,7 +4478,7 @@ pub(crate) mod tests {
             .await
             .std_context("frame")?;
 
-        let replied = timeout(IDLE_GRACE * 2 + Duration::from_secs(5), async {
+        let replied = timeout(RETIRE_GRACE * 2 + Duration::from_secs(5), async {
             loop {
                 tokio::select! {
                     _ = actor.step() => {}
@@ -4217,8 +4503,14 @@ pub(crate) mod tests {
         let pair = TestPair::new(1).await?;
         let (conn, peer_conn) = pair.connect().await?;
         let (in_event_tx, mut in_event_rx) = mpsc::channel(4);
-        let mut recv_loop =
-            RecvLoop::new(peer_conn.remote_id(), conn, in_event_tx, 1024, close_flag());
+        let mut recv_loop = RecvLoop::new(
+            peer_conn.remote_id(),
+            conn,
+            in_event_tx,
+            1024,
+            unset_flag(),
+            unset_flag(),
+        );
         let _recv = AbortOnDropHandle::new(spawn(async move { recv_loop.run().await }));
 
         // A complete frame of three bytes, too short for a topic id.
@@ -4252,7 +4544,8 @@ pub(crate) mod tests {
                 conn.clone(),
                 in_event_tx,
                 1024,
-                close_flag(),
+                unset_flag(),
+                unset_flag(),
             );
             // We poll it by hand, so that it sees the rest of the header only after the close.
             let run = recv_loop.run();
@@ -4320,8 +4613,14 @@ pub(crate) mod tests {
         let pair = TestPair::new(1).await?;
         let (conn, peer_conn) = pair.connect().await?;
         let (in_event_tx, mut in_event_rx) = mpsc::channel(4);
-        let mut recv_loop =
-            RecvLoop::new(peer_conn.remote_id(), conn, in_event_tx, 1024, close_flag());
+        let mut recv_loop = RecvLoop::new(
+            peer_conn.remote_id(),
+            conn,
+            in_event_tx,
+            1024,
+            unset_flag(),
+            unset_flag(),
+        );
         let _recv = AbortOnDropHandle::new(spawn(async move { recv_loop.run().await }));
 
         let mut partials = Vec::new();
@@ -4343,8 +4642,9 @@ pub(crate) mod tests {
             .write_all(&[0, 32])
             .await
             .std_context("write header length")?;
+        // Another topic, so that its open stream does not hold back the one above.
         partial
-            .write_all(&[1; 32])
+            .write_all(&[2; 32])
             .await
             .std_context("write topic")?;
         let event = timeout(Duration::from_secs(2), in_event_rx.recv())
@@ -4940,8 +5240,14 @@ pub(crate) mod tests {
         let pair = TestPair::new(1).await?;
         let (conn, peer_conn) = pair.connect().await?;
         let (in_event_tx, mut in_event_rx) = mpsc::channel(4);
-        let mut recv_loop =
-            RecvLoop::new(peer_conn.remote_id(), conn, in_event_tx, 1024, close_flag());
+        let mut recv_loop = RecvLoop::new(
+            peer_conn.remote_id(),
+            conn,
+            in_event_tx,
+            1024,
+            unset_flag(),
+            unset_flag(),
+        );
         let _recv = AbortOnDropHandle::new(spawn(async move { recv_loop.run().await }));
 
         let mut partial = peer_conn.open_uni().await.std_context("open stream")?;
@@ -5377,10 +5683,10 @@ pub(crate) mod tests {
             conn,
             CancellationToken::new(),
             Some(queue.lease()),
+            Vec::new(),
             in_event_tx,
             1024,
-            watch::channel(true).1,
-            close_flag(),
+            unset_flag(),
         )));
 
         assert!(matches!(
