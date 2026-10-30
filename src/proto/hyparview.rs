@@ -1480,10 +1480,7 @@ mod tests {
         assert!(state.pending_neighbor_requests.contains_key(&2));
     }
 
-    /// A peer that answers our neighbor request with "I left" leaves our views at once.
-    ///
-    /// It leaves the passive view, and we ask another passive peer, as after a
-    /// timeout of the request.
+    /// A peer that answers our neighbor request with "I left" goes, and we ask another one.
     #[test]
     fn left_peer_answering_a_request_is_dropped() {
         let mut state = new_state();

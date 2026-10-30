@@ -56,17 +56,11 @@ const TOPIC_EVENT_CAP: usize = 256;
 
 /// How long a connection stays open once neither side has a stream on it.
 ///
-/// A topic that uses the peer keeps a stream open, so the connection usually
-/// stays while a topic needs it.
-///
-/// Each side times the grace on its own. A stream that we open in the moment
-/// the peer retires the connection loses its message, and the topics do not
-/// learn of it. This needs a connection without streams that still has our
-/// writer: one for a peer that no topic uses, or the rare case of a topic that
-/// uses the peer but has no stream on it.
+/// A topic that uses the peer keeps a stream open. Each side times the grace on
+/// its own, so a stream that we open as the peer closes loses its message.
 #[cfg(not(test))]
 const RETIRE_GRACE: Duration = Duration::from_secs(10);
-/// Shorter for the unit tests. The e2e tests build without `cfg(test)`, so they see 10 s.
+/// The e2e tests build without `cfg(test)`, so they see 10 s.
 #[cfg(test)]
 const RETIRE_GRACE: Duration = Duration::from_secs(5);
 
@@ -959,8 +953,8 @@ type ConnId = usize;
 /// What we know of a peer: its queue, and its connections.
 ///
 /// The queue always exists. An open queue waits for messages. A closed queue
-/// goes out, and then its writer finishes its streams and waits on its
-/// connection for the queue to open again. A closed queue needs no dial.
+/// goes out, and then its writer waits on its connection for the queue to open
+/// again.
 ///
 /// The state outlives the last connection by [`PEER_RETENTION`], so that a
 /// peer we want again keeps its `handles_close` flag.
@@ -1014,7 +1008,6 @@ impl PeerState {
     /// Opens the queue, which keeps its messages and its byte limit.
     fn open_queue(&mut self) -> &SendQueue {
         self.forget_at = None;
-        // The writer of a closed queue waits on its connection, and takes it again.
         if self.queue.is_closing() {
             self.queue.set_closing(false);
         }
@@ -1080,9 +1073,9 @@ impl PeerState {
     /// It is when the writer of an open queue ended, even if other connections
     /// remain. The caller must immediately process `PeerDisconnected`, which
     /// discards the queue before invoking the protocol. A closed queue is
-    /// discarded here instead, as no topic uses the peer. A writer
-    /// whose connection `retired` reports no disconnect: an empty queue goes,
-    /// and the caller dials for a queue with messages.
+    /// discarded here instead, as no topic uses the peer. A `retired` writer
+    /// reports no disconnect: an empty queue goes, and the caller dials for the
+    /// rest.
     fn connection_finished(&mut self, id: ConnId, now: Instant, retired: bool) -> bool {
         self.connections = self
             .connections
@@ -1095,8 +1088,7 @@ impl PeerState {
             self.discard_queue(now);
             false
         } else if retired {
-            // The link still works. A message on a stream that the retirement cut
-            // is lost. The caller dials for the rest of the queue.
+            // The link still works.
             if self.queue.is_empty() {
                 self.discard_queue(now);
             } else {
@@ -1211,7 +1203,7 @@ async fn retire(mut ours: watch::Receiver<bool>, mut theirs: watch::Receiver<boo
         tokio::select! {
             // A stream that opens at the deadline keeps the connection.
             biased;
-            // A dropped sender would make `changed` return at once, so wait forever.
+            // A dropped sender would make `changed` return at once.
             res = ours.changed() => if res.is_err() { std::future::pending().await },
             res = theirs.changed() => if res.is_err() { std::future::pending().await },
             () = time::sleep(RETIRE_GRACE), if !ours_open && !theirs_open => return,
@@ -1221,8 +1213,8 @@ async fn retire(mut ours: watch::Receiver<bool>, mut theirs: watch::Receiver<boo
 
 /// Runs the I/O of a connection, and closes it on an abort or once it carries no stream.
 ///
-/// A connection to a node up to 0.101 does not retire. Returns whether either
-/// side retired the connection. Without a lease, the connection only receives.
+/// Returns whether either side retired it. A connection to a node up to 0.101
+/// never retires. Without a lease, the connection only receives.
 /// Every connection observes the peer abort signal, independently of whether
 /// it writes.
 // Each argument is state the loops share. A struct would only wrap them.
@@ -1239,8 +1231,8 @@ async fn connection_loop(
 ) -> Result<bool, ConnectionLoopError> {
     debug!(side = ?conn.side(), "connection established");
     let mut handles_close_rx = handles_close.subscribe();
-    // Here, so that the flags outlive the loops. A new writer counts as having a
-    // stream while it waits for the lock of the queue.
+    // Here, so that the flags outlive the loops. The send flag starts set, as a
+    // new writer can wait for the lock of the queue.
     let our_streams = watch::Sender::new(queue_lease.is_some());
     let their_streams = watch::Sender::new(false);
 
@@ -2295,10 +2287,7 @@ pub(crate) mod tests {
         assert_eq!(reader.current().unwrap().message.message, message.message);
     }
 
-    /// A retired writer with an empty queue does not disconnect the peer.
-    ///
-    /// The link still works, so an empty queue only goes, and retention starts.
-    /// With a queued message, the writer slot frees, and the caller dials.
+    /// A retired writer does not disconnect the peer: an empty queue goes, a queued message dials.
     #[test]
     fn retired_writer_does_not_disconnect() {
         let now = Instant::now();
@@ -2526,8 +2515,6 @@ pub(crate) mod tests {
     }
 
     /// After an answer to a peer that no topic uses, the queue to it closes.
-    ///
-    /// Here the answer is the `Disconnect` to a join for a topic that we are not on.
     #[tokio::test]
     async fn answer_to_an_unused_peer_closes_its_queue() -> Result {
         let mut actor = t_actor().await?;
@@ -3164,10 +3151,7 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// A close by the peer with the retire code counts as a retirement.
-    ///
-    /// It counts also while we have a stream on the connection: its message can
-    /// be lost, but the link still works.
+    /// A close by the peer with the retire code counts as a retirement, also over a stream of ours.
     #[tokio::test]
     #[traced_test]
     async fn retirement_by_the_peer_counts() -> Result {
@@ -3204,9 +3188,6 @@ pub(crate) mod tests {
     }
 
     /// A message to a peer that no topic uses goes out on the waiting writer, with no dial.
-    ///
-    /// Here the peer sends two joins for a topic that we are not on, and gets
-    /// both answers on its connection.
     #[tokio::test]
     #[traced_test]
     async fn answers_to_an_unused_peer_need_no_dial() -> Result {
@@ -3229,10 +3210,7 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// A newer stream of a topic waits until the older one ended.
-    ///
-    /// The sender ends a stream with a `Disconnect`, and the next message of the
-    /// topic opens a new stream. It must not overtake the `Disconnect`.
+    /// A newer stream of a topic waits until the older one ended, as after a `Disconnect`.
     #[tokio::test]
     #[traced_test]
     async fn streams_of_a_topic_keep_their_order() -> Result {

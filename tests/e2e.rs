@@ -480,10 +480,9 @@ async fn restart_while_the_former_instance_runs() -> Result {
 
 /// A peer that restarted on other topics leaves the views of its former neighbor.
 ///
-/// The new instance dials us for another topic, so the close of the former
-/// instance's connection drops no neighbor. The next membership message on
-/// the first topic, here for a third node that joins, gets the answer that the
-/// peer left.
+/// The close of the former instance's connection drops no neighbor, as the new
+/// instance took over the writer. A forward join for a third node gets the
+/// answer that the peer left.
 #[tokio::test(flavor = "multi_thread")]
 #[traced_test]
 async fn restart_on_other_topics_leaves_the_former_neighbor() -> Result {

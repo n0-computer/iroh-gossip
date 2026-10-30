@@ -328,10 +328,8 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
                         handle_out_event(topic, event, &mut self.peer_topics, &mut self.outbox);
                     }
                 } else if let topic::InEvent::RecvMessage(from, message) = &event {
-                    // The sender thinks that we are on the topic: it joins through us, or
-                    // we restarted. Tell it that we left. A Plumtree message needs no
-                    // answer: its sender stops once a HyParView message drops us from
-                    // its views.
+                    // The sender thinks that we are on the topic. Plumtree messages are
+                    // mostly stragglers after we left, so they get no answer.
                     if matches!(message, topic::Message::Swarm(_)) && !message.is_disconnect() {
                         let message = topic::Message::Swarm(hyparview::Message::left());
                         self.outbox

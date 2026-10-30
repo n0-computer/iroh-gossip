@@ -44,9 +44,8 @@ pub(super) const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// The peer raises its limit only once one of our streams ends. With as many
 /// topics as the limit, the wait does not end. The limit is the
-/// `max_concurrent_uni_streams` of the peer's endpoint, 100 by default. For
-/// the stream of an initial topic, a stalled open only ends the opens of the
-/// other initial topics.
+/// `max_concurrent_uni_streams` of the peer's endpoint, 100 by default. A
+/// stalled open of an initial topic only skips the other initial topics.
 #[cfg(not(test))]
 pub(super) const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(test)]
@@ -213,17 +212,15 @@ impl RecvLoop {
         // Each header is read in its own future, so a partial one blocks no other stream.
         let mut header_futures = FuturesUnordered::new();
         let mut read_futures = FuturesUnordered::new();
-        // The topics with a stream that we read, and the newer streams of each topic,
-        // which wait for it to end. The sender opens a new stream of a topic only
-        // after the end of the old one, as after a `Disconnect`. So the messages of
-        // a topic keep their order across streams.
+        // Per topic, the newer streams that wait until the one we read ended. A
+        // sender opens a new stream of a topic only after the old one ended, so
+        // this keeps the order of the topic.
         let mut topics: HashMap<TopicId, VecDeque<RecvStreamState>> = HashMap::new();
         let mut conn_is_closed = false;
         let closed = self.conn.closed();
         tokio::pin!(closed);
         while !conn_is_closed || !header_futures.is_empty() || !read_futures.is_empty() {
-            // A partial header counts too. We write a header at once, so only a broken
-            // peer keeps one partial, and with it the connection.
+            // A partial header counts. Only a broken peer keeps one partial.
             let open = !header_futures.is_empty() || !read_futures.is_empty();
             self.has_streams
                 .send_if_modified(|has| std::mem::replace(has, open) != open);
@@ -281,7 +278,6 @@ impl RecvLoop {
                             topic
                         }
                     };
-                    // The stream ended, so the next one of its topic goes on.
                     match topics.get_mut(&topic).and_then(VecDeque::pop_front) {
                         Some(next) => read_futures.push(next.next()),
                         None => {
@@ -430,8 +426,7 @@ impl SendLoop {
                         // The queue is gone.
                         break;
                     }
-                    // The queue closed. The writer stays on this connection, so that a
-                    // later message to the peer needs no dial.
+                    // Wait on this connection, so that the next message needs no dial.
                     for mut stream in std::mem::take(&mut self.streams).into_values() {
                         stream.finish().ok();
                     }
