@@ -212,10 +212,10 @@ impl RecvLoop {
         // Each header is read in its own future, so a partial one blocks no other stream.
         let mut header_futures = FuturesUnordered::new();
         let mut read_futures = FuturesUnordered::new();
-        // Per topic, the newer streams that wait until the one we read ended. A
-        // sender opens a new stream of a topic only after the old one ended, so
-        // this keeps the order of the topic.
-        let mut topics: HashMap<TopicId, VecDeque<RecvStreamState>> = HashMap::new();
+        // Per topic, the id of the stream we read, and the newer streams that wait
+        // until it ended, in id order. A sender opens a new stream of a topic only
+        // after the old one ended, so a wait keeps the order and always ends.
+        let mut topics: HashMap<TopicId, (StreamId, VecDeque<RecvStreamState>)> = HashMap::new();
         let mut conn_is_closed = false;
         let closed = self.conn.closed();
         tokio::pin!(closed);
@@ -251,16 +251,23 @@ impl RecvLoop {
                     if state.header.handles_close {
                         self.handles_close.send_replace(true);
                     }
+                    let id = state.stream.id();
                     match topics.entry(state.header.topic_id) {
-                        hash_map::Entry::Occupied(mut waiting) => waiting.get_mut().push_back(state),
+                        hash_map::Entry::Occupied(mut entry) if id > entry.get().0 => {
+                            let waiting = &mut entry.get_mut().1;
+                            let pos = waiting.partition_point(|s| s.stream.id() < id);
+                            waiting.insert(pos, state);
+                        }
+                        // An older stream whose header came late. Its order is lost, so read it now.
+                        hash_map::Entry::Occupied(_) => read_futures.push(state.next()),
                         hash_map::Entry::Vacant(entry) => {
-                            entry.insert(VecDeque::new());
+                            entry.insert((id, VecDeque::new()));
                             read_futures.push(state.next());
                         }
                     }
                 }
                 Some(res) = read_futures.next(), if !read_futures.is_empty() => {
-                    let topic = match res {
+                    let (topic, id) = match res {
                         Ok((state, Some(msg))) => {
                             if self.in_event_tx.send(InEvent::RecvMessage(self.remote_endpoint_id, msg)).await.is_err() {
                                 debug!("stop recv loop: actor closed");
@@ -271,17 +278,24 @@ impl RecvLoop {
                         }
                         Ok((state, None)) => {
                             debug!(topic=%state.header.topic_id.fmt_short(), "stream closed");
-                            state.header.topic_id
+                            (state.header.topic_id, state.stream.id())
                         }
-                        Err((topic, err)) => {
+                        Err((topic, id, err)) => {
                             debug!("recv stream closed with error: {err:#}");
-                            topic
+                            (topic, id)
                         }
                     };
-                    match topics.get_mut(&topic).and_then(VecDeque::pop_front) {
-                        Some(next) => read_futures.push(next.next()),
-                        None => {
-                            topics.remove(&topic);
+                    if let hash_map::Entry::Occupied(mut entry) = topics.entry(topic) {
+                        if entry.get().0 == id {
+                            match entry.get_mut().1.pop_front() {
+                                Some(next) => {
+                                    entry.get_mut().0 = next.stream.id();
+                                    read_futures.push(next.next());
+                                }
+                                None => {
+                                    entry.remove();
+                                }
+                            }
                         }
                     }
                 }
@@ -318,10 +332,12 @@ impl RecvStreamState {
     /// ## Cancellation safety
     ///
     /// This function is not cancellation-safe.
-    async fn next(mut self) -> Result<(Self, Option<ProtoMessage>), (TopicId, ReadError)> {
+    async fn next(
+        mut self,
+    ) -> Result<(Self, Option<ProtoMessage>), (TopicId, StreamId, ReadError)> {
         let msg = read_frame(&mut self.stream, &mut self.buffer, self.max_message_size)
             .await
-            .map_err(|err| (self.header.topic_id, err))?;
+            .map_err(|err| (self.header.topic_id, self.stream.id(), err))?;
         let msg = msg.map(|msg| ProtoMessage {
             topic: self.header.topic_id,
             message: msg,
