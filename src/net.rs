@@ -3229,6 +3229,56 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// A newer stream of a topic waits until the older one ended.
+    ///
+    /// The sender ends a stream with a `Disconnect`, and the next message of the
+    /// topic opens a new stream. It must not overtake the `Disconnect`.
+    #[tokio::test]
+    #[traced_test]
+    async fn streams_of_a_topic_keep_their_order() -> Result {
+        let pair = TestPair::new(1).await?;
+        let (conn, peer_conn) = pair.connect().await?;
+        let (in_event_tx, mut in_event_rx) = mpsc::channel(4);
+        let mut recv_loop = RecvLoop::new(
+            peer_conn.remote_id(),
+            conn,
+            in_event_tx,
+            TEST_FRAME_LIMIT,
+            unset_flag(),
+            unset_flag(),
+        );
+        let _recv = AbortOnDropHandle::new(spawn(async move { recv_loop.run().await }));
+
+        let topic: TopicId = blake3::hash(b"streams_of_a_topic").into();
+        let (first, second) = (join_message(topic, 1), join_message(topic, 2));
+        let mut buffer = Vec::new();
+        let mut older = peer_conn.open_uni().await.std_context("open stream")?;
+        util::StreamHeader::new(topic)
+            .write(&mut older, &mut buffer, TEST_FRAME_LIMIT)
+            .await?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // The newer stream arrives before the last message of the older one.
+        let mut newer = peer_conn.open_uni().await.std_context("open stream")?;
+        util::StreamHeader::new(topic)
+            .write(&mut newer, &mut buffer, TEST_FRAME_LIMIT)
+            .await?;
+        util::write_frame(&mut newer, &second.message, &mut buffer, TEST_FRAME_LIMIT).await?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        util::write_frame(&mut older, &first.message, &mut buffer, TEST_FRAME_LIMIT).await?;
+        older.finish().std_context("finish")?;
+
+        for expected in [first, second] {
+            let event = timeout(Duration::from_secs(5), in_event_rx.recv())
+                .await
+                .std_context("no message")?;
+            assert!(
+                matches!(&event, Some(InEvent::RecvMessage(_, m)) if m.message == expected.message),
+                "{event:?}"
+            );
+        }
+        Ok(())
+    }
+
     /// A send loop whose connection closed lets go of the queue, for another connection of the peer.
     #[tokio::test]
     #[traced_test]
@@ -4565,8 +4615,9 @@ pub(crate) mod tests {
             .write_all(&[0, 32])
             .await
             .std_context("write header length")?;
+        // Another topic, so that its open stream does not hold back the one above.
         partial
-            .write_all(&[1; 32])
+            .write_all(&[2; 32])
             .await
             .std_context("write topic")?;
         let event = timeout(Duration::from_secs(2), in_event_rx.recv())

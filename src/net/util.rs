@@ -1,7 +1,7 @@
 //! Utilities for iroh-gossip networking
 
 use std::{
-    collections::{hash_map, HashMap},
+    collections::{hash_map, HashMap, VecDeque},
     io,
     time::Duration,
 };
@@ -211,6 +211,11 @@ impl RecvLoop {
         // Each header is read in its own future, so a partial one blocks no other stream.
         let mut header_futures = FuturesUnordered::new();
         let mut read_futures = FuturesUnordered::new();
+        // The topics with a stream that we read, and the newer streams of each topic,
+        // which wait for it to end. The sender opens a new stream of a topic only
+        // after the end of the old one, as after a `Disconnect`. So the messages of
+        // a topic keep their order across streams.
+        let mut topics: HashMap<TopicId, VecDeque<RecvStreamState>> = HashMap::new();
         let mut conn_is_closed = false;
         let closed = self.conn.closed();
         tokio::pin!(closed);
@@ -247,24 +252,38 @@ impl RecvLoop {
                     if state.header.handles_close {
                         self.handles_close.send_replace(true);
                     }
-                    read_futures.push(state.next());
+                    match topics.entry(state.header.topic_id) {
+                        hash_map::Entry::Occupied(mut waiting) => waiting.get_mut().push_back(state),
+                        hash_map::Entry::Vacant(entry) => {
+                            entry.insert(VecDeque::new());
+                            read_futures.push(state.next());
+                        }
+                    }
                 }
                 Some(res) = read_futures.next(), if !read_futures.is_empty() => {
-                    let (state, msg) = match res {
-                        Ok((state, msg)) => (state, msg),
-                        Err(err) => {
-                            debug!("recv stream closed with error: {err:#}");
-                            continue;
-                        }
-                    };
-                    match msg {
-                        None => debug!(topic=%state.header.topic_id.fmt_short(), "stream closed"),
-                        Some(msg) => {
+                    let topic = match res {
+                        Ok((state, Some(msg))) => {
                             if self.in_event_tx.send(InEvent::RecvMessage(self.remote_endpoint_id, msg)).await.is_err() {
                                 debug!("stop recv loop: actor closed");
                                 break;
                             }
                             read_futures.push(state.next());
+                            continue;
+                        }
+                        Ok((state, None)) => {
+                            debug!(topic=%state.header.topic_id.fmt_short(), "stream closed");
+                            state.header.topic_id
+                        }
+                        Err((topic, err)) => {
+                            debug!("recv stream closed with error: {err:#}");
+                            topic
+                        }
+                    };
+                    // The stream ended, so the next one of its topic goes on.
+                    match topics.get_mut(&topic).and_then(VecDeque::pop_front) {
+                        Some(next) => read_futures.push(next.next()),
+                        None => {
+                            topics.remove(&topic);
                         }
                     }
                 }
@@ -301,8 +320,10 @@ impl RecvStreamState {
     /// ## Cancellation safety
     ///
     /// This function is not cancellation-safe.
-    async fn next(mut self) -> Result<(Self, Option<ProtoMessage>), ReadError> {
-        let msg = read_frame(&mut self.stream, &mut self.buffer, self.max_message_size).await?;
+    async fn next(mut self) -> Result<(Self, Option<ProtoMessage>), (TopicId, ReadError)> {
+        let msg = read_frame(&mut self.stream, &mut self.buffer, self.max_message_size)
+            .await
+            .map_err(|err| (self.header.topic_id, err))?;
         let msg = msg.map(|msg| ProtoMessage {
             topic: self.header.topic_id,
             message: msg,
