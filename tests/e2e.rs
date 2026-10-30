@@ -782,10 +782,9 @@ async fn open_connections_link_neighbors() -> Result {
 
     // A connection we are done with stays open for a grace of a few seconds,
     // and the overlay keeps opening short-lived ones, for example for a
-    // refused neighbor request. A node short of neighbors asks its full
-    // passive peers again every few seconds, so such a pair may always have
-    // one. A leaked connection stays unlinked, so each connection unlinked now
-    // must be linked or closed at some point within `SETTLE`.
+    // refused neighbor request. A leaked connection stays unlinked, so each
+    // connection unlinked now must be linked or closed at some point within
+    // `SETTLE`.
     for sub in subs.iter_mut() {
         sub.drain().await?;
     }
@@ -812,6 +811,9 @@ async fn open_connections_link_neighbors() -> Result {
 
 /// Returns the open connections between nodes where neither holds the other as a neighbor.
 ///
+/// It skips a node short of neighbors. Such a node asks its passive peers again
+/// every few seconds, so its connections to them stay.
+///
 /// An entry holds the indices of the two nodes, the index of the node that
 /// accepted the connection, and its position in `Node::accepted`.
 fn unlinked_connections(nodes: &[Node], subs: &[Sub]) -> BTreeSet<(usize, usize, usize, usize)> {
@@ -820,7 +822,9 @@ fn unlinked_connections(nodes: &[Node], subs: &[Sub]) -> BTreeSet<(usize, usize,
         for (j, b) in nodes.iter().enumerate().skip(i + 1) {
             let linked = subs[i].rx.neighbors().any(|p| p == b.id())
                 || subs[j].rx.neighbors().any(|p| p == a.id());
-            if linked {
+            // Below half of the active view.
+            let short = |sub: &Sub| sub.rx.neighbors().count() < 3;
+            if linked || short(&subs[i]) || short(&subs[j]) {
                 continue;
             }
             for pos in a.open_ids_from(b.id()) {
