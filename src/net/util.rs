@@ -1,7 +1,7 @@
 //! Utilities for iroh-gossip networking
 
 use std::{
-    collections::{hash_map, HashMap, VecDeque},
+    collections::{hash_map, BTreeMap, HashMap},
     io,
     time::Duration,
 };
@@ -212,10 +212,10 @@ impl RecvLoop {
         // Each header is read in its own future, so a partial one blocks no other stream.
         let mut header_futures = FuturesUnordered::new();
         let mut read_futures = FuturesUnordered::new();
-        // Per topic, the id of the stream we read, and the newer streams that wait
-        // until it ended, in id order. A sender opens a new stream of a topic only
-        // after the old one ended, so a wait keeps the order and always ends.
-        let mut topics: HashMap<TopicId, (StreamId, VecDeque<RecvStreamState>)> = HashMap::new();
+        // For each topic, the streams in the order the peer opened them. The peer
+        // only opens a new stream for a topic after the previous one ended. So if
+        // a stream waits for the older ones, the order is kept and the wait ends.
+        let mut streams: BTreeMap<(TopicId, StreamId), Order> = BTreeMap::new();
         let mut conn_is_closed = false;
         let closed = self.conn.closed();
         tokio::pin!(closed);
@@ -251,24 +251,22 @@ impl RecvLoop {
                     if state.header.handles_close {
                         self.handles_close.send_replace(true);
                     }
-                    let id = state.stream.id();
-                    match topics.entry(state.header.topic_id) {
-                        hash_map::Entry::Occupied(mut entry) if id > entry.get().0 => {
-                            let waiting = &mut entry.get_mut().1;
-                            let pos = waiting.partition_point(|s| s.stream.id() < id);
-                            waiting.insert(pos, state);
-                        }
-                        // An older stream whose header came late. Its order is lost, so read it now.
-                        hash_map::Entry::Occupied(_) => read_futures.push(state.next()),
-                        hash_map::Entry::Vacant(entry) => {
-                            entry.insert((id, VecDeque::new()));
-                            read_futures.push(state.next());
-                        }
+                    let (topic, id) = (state.header.topic_id, state.stream.id());
+                    // A stream waits while there is an older stream for the same topic. If
+                    // the header of an older stream arrives late, we read that stream right
+                    // away, and it does not wait for the newer one.
+                    let before = streams.range(..(topic, id)).next_back();
+                    let is_first_for_topic = before.is_none_or(|((t, _), _)| *t != topic);
+                    if is_first_for_topic {
+                        streams.insert((topic, id), Order::Reading);
+                        read_futures.push(state.next());
+                    } else {
+                        streams.insert((topic, id), Order::Waiting(state));
                     }
                 }
-                Some(res) = read_futures.next(), if !read_futures.is_empty() => {
-                    let (topic, id) = match res {
-                        Ok((state, Some(msg))) => {
+                Some((state, res)) = read_futures.next(), if !read_futures.is_empty() => {
+                    match res {
+                        Ok(Some(msg)) => {
                             if self.in_event_tx.send(InEvent::RecvMessage(self.remote_endpoint_id, msg)).await.is_err() {
                                 debug!("stop recv loop: actor closed");
                                 break;
@@ -276,26 +274,19 @@ impl RecvLoop {
                             read_futures.push(state.next());
                             continue;
                         }
-                        Ok((state, None)) => {
+                        Ok(None) => {
                             debug!(topic=%state.header.topic_id.fmt_short(), "stream closed");
-                            (state.header.topic_id, state.stream.id())
                         }
-                        Err((topic, id, err)) => {
-                            debug!("recv stream closed with error: {err:#}");
-                            (topic, id)
-                        }
-                    };
-                    if let hash_map::Entry::Occupied(mut entry) = topics.entry(topic) {
-                        if entry.get().0 == id {
-                            match entry.get_mut().1.pop_front() {
-                                Some(next) => {
-                                    entry.get_mut().0 = next.stream.id();
-                                    read_futures.push(next.next());
-                                }
-                                None => {
-                                    entry.remove();
-                                }
-                            }
+                        Err(err) => debug!("recv stream closed with error: {err:#}"),
+                    }
+                    let (topic, id) = (state.header.topic_id, state.stream.id());
+                    streams.remove(&(topic, id));
+                    // Start reading the next stream for this topic, unless we already do.
+                    let after = streams.range_mut((topic, id)..).next();
+                    let next_for_topic = after.filter(|((t, _), _)| *t == topic);
+                    if let Some((_, order)) = next_for_topic {
+                        if let Order::Waiting(next) = std::mem::replace(order, Order::Reading) {
+                            read_futures.push(next.next());
                         }
                     }
                 }
@@ -303,6 +294,12 @@ impl RecvLoop {
         }
         debug!("recv loop closed");
     }
+}
+
+/// Whether a stream in a [`RecvLoop`] is read now, or waits for an older stream of the same topic.
+enum Order {
+    Reading,
+    Waiting(RecvStreamState),
 }
 
 #[derive(Debug)]
@@ -327,22 +324,17 @@ impl RecvStreamState {
 
     /// Reads the next message from the stream.
     ///
-    /// Returns `self` and the next message, or `None` if the stream ended gracefully.
+    /// Returns `self` together with the result, also when the read failed. The
+    /// message is `None` if the stream ended gracefully.
     ///
     /// ## Cancellation safety
     ///
     /// This function is not cancellation-safe.
-    async fn next(
-        mut self,
-    ) -> Result<(Self, Option<ProtoMessage>), (TopicId, StreamId, ReadError)> {
-        let msg = read_frame(&mut self.stream, &mut self.buffer, self.max_message_size)
-            .await
-            .map_err(|err| (self.header.topic_id, self.stream.id(), err))?;
-        let msg = msg.map(|msg| ProtoMessage {
-            topic: self.header.topic_id,
-            message: msg,
-        });
-        Ok((self, msg))
+    async fn next(mut self) -> (Self, Result<Option<ProtoMessage>, ReadError>) {
+        let msg = read_frame(&mut self.stream, &mut self.buffer, self.max_message_size).await;
+        let topic = self.header.topic_id;
+        let msg = msg.map(|msg| msg.map(|message| ProtoMessage { topic, message }));
+        (self, msg)
     }
 }
 
@@ -400,9 +392,7 @@ impl SendLoop {
             queue = self.queue_lease.lock() => Some(queue),
         };
         if let Some(mut queue) = queue {
-            let mut initial_topics = std::mem::take(&mut self.initial_topics);
-            // Whether the queue closed, and the writer waits for it to open again.
-            let mut parked = false;
+            let mut closing = queue.closing();
             loop {
                 // Every pass of the loop starts here, so the flag clears with the last stream.
                 if self.live_streams.is_empty() {
@@ -424,13 +414,23 @@ impl SendLoop {
                         }
                         continue;
                     }
-                    more = queue.next(!parked) => more,
+                    more = queue.next() => more,
+                    // This comes after the queue, so it only runs when the queue is empty. We
+                    // finish our streams and keep waiting on this connection, so the next
+                    // message does not need a dial. Dropping a stream finishes it.
+                    _ = async { closing.wait_for(|closing| *closing).await.ok(); },
+                        if !self.streams.is_empty() || !self.initial_topics.is_empty() =>
+                    {
+                        self.streams.clear();
+                        self.initial_topics.clear();
+                        continue;
+                    }
                     // After the queue, so that queued messages get the streams of the peer
                     // first. A quiet topic needs a stream to keep the connection.
-                    Some(topic) = async { initial_topics.pop() }, if !initial_topics.is_empty() => {
+                    Some(topic) = async { self.initial_topics.pop() } => {
                         match self.open_stream(topic, &revoked).await {
                             // At the stream limit of the peer, the quiet topics go without.
-                            Err(WriteError::OpenStalled { .. }) => initial_topics.clear(),
+                            Err(WriteError::OpenStalled { .. }) => self.initial_topics.clear(),
                             Err(err) => self.handle_error(topic, err)?,
                             Ok(_) => {}
                         }
@@ -438,19 +438,9 @@ impl SendLoop {
                     }
                 };
                 if !more {
-                    if parked {
-                        // The queue is gone.
-                        break;
-                    }
-                    // Wait on this connection, so that the next message needs no dial.
-                    for mut stream in std::mem::take(&mut self.streams).into_values() {
-                        stream.finish().ok();
-                    }
-                    initial_topics.clear();
-                    parked = true;
-                    continue;
+                    // The actor dropped the queue.
+                    break;
                 }
-                parked = false;
                 let item = queue.current().expect("next returned a message");
                 match self.open_stream(item.message.topic, &revoked).await {
                     Ok(true) => {}
@@ -482,14 +472,13 @@ impl SendLoop {
                 }
                 // A topic that we just left needs no stream.
                 if item.message.message.is_disconnect() {
-                    initial_topics.retain(|topic| *topic != item.message.topic);
+                    self.initial_topics
+                        .retain(|topic| *topic != item.message.topic);
                 }
                 queue.advance();
             }
         }
-        for mut stream in std::mem::take(&mut self.streams).into_values() {
-            stream.finish().ok();
-        }
+        self.streams.clear();
         while self.live_streams.next().await.is_some() {}
         self.has_streams
             .send_if_modified(|has| std::mem::replace(has, false));
@@ -524,8 +513,8 @@ impl SendLoop {
         {
             Ok(()) => {
                 if message.is_disconnect() {
-                    let mut stream = self.streams.remove(topic).expect("the stream is open");
-                    stream.finish().ok();
+                    // Dropping a stream finishes it.
+                    self.streams.remove(topic);
                 }
                 Ok(())
             }

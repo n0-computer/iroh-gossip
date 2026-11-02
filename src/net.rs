@@ -2277,13 +2277,13 @@ pub(crate) mod tests {
         let lease = peer.handle_connection(Side::Server, 1).unwrap();
         peer.close_queue();
         let mut reader = lease.lock().await;
-        assert!(!reader.next(true).await, "the closed queue is empty");
+        assert!(*reader.closing().borrow(), "the queue is closed");
 
         let message = join_message(topic, 0);
         assert!(matches!(peer.send(message.clone()), Pushed::Queued));
         assert!(!lease.revoked().is_cancelled());
         assert!(!peer.needs_dial(), "the waiting writer takes the queue");
-        assert!(reader.next(false).await);
+        assert!(reader.next().await);
         assert_eq!(reader.current().unwrap().message.message, message.message);
     }
 
@@ -2367,10 +2367,10 @@ pub(crate) mod tests {
         assert!(!aborted.is_cancelled());
 
         let mut reader = lease.lock().await;
-        assert!(reader.next(true).await);
+        assert!(reader.next().await);
         assert_eq!(reader.current().unwrap().message.message, message.message);
         reader.advance();
-        assert!(!reader.next(true).await, "the old queue must end");
+        assert!(!reader.next().await, "the old queue must end");
     }
 
     /// A failed dial does not disconnect a peer whose connection still writes a closed queue.
