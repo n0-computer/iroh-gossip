@@ -413,14 +413,19 @@ pub struct Stats {
 /// The grafts we sent for one message.
 #[derive(Debug)]
 struct Grafts<PI> {
-    /// The peers we grafted.
-    peers: Vec<PI>,
-    /// The fewest hops that a grafted peer announced, which its reply takes too.
-    round: Round,
+    /// The peers we grafted, with the hops they announced, which their replies take too.
+    peers: Vec<(PI, Round)>,
     /// The sender of the first copy, and the hops it took, once it came.
     first: Option<(PI, Round)>,
     /// The grafted peer that replaced the sender of the first copy.
     kept: Option<PI>,
+}
+
+impl<PI: PartialEq> Grafts<PI> {
+    /// Returns whether we grafted `peer`.
+    fn contains(&self, peer: &PI) -> bool {
+        self.peers.iter().any(|(grafted, _)| grafted == peer)
+    }
 }
 
 /// The most dropped messages per peer that we keep to announce again.
@@ -691,8 +696,10 @@ impl<PI: PeerIdentity> State<PI> {
                 let (grafted, graft_out) = match self.grafted.get_mut(&message.id) {
                     Some(grafts) => {
                         grafts.first = Some((sender, prev_round));
-                        let out = grafts.round <= prev_round && !grafts.peers.contains(&sender);
-                        (grafts.peers.clone(), out)
+                        let out = grafts.peers.iter().any(|(_, round)| *round <= prev_round)
+                            && !grafts.contains(&sender);
+                        let peers = grafts.peers.iter().map(|(peer, _)| *peer).collect();
+                        (peers, out)
                     }
                     None => (Vec::new(), false),
                 };
@@ -736,7 +743,7 @@ impl<PI: PeerIdentity> State<PI> {
         let Some((first, first_round)) = grafts.first else {
             return false;
         };
-        if !grafts.peers.contains(&sender) {
+        if !grafts.contains(&sender) {
             return false;
         }
         // A retry brings a second reply from a peer that already gave us the message.
@@ -745,7 +752,7 @@ impl<PI: PeerIdentity> State<PI> {
         }
         let no_more_hops = message.round().is_some_and(|round| round <= first_round);
         if !no_more_hops
-            || grafts.peers.contains(&first)
+            || grafts.contains(&first)
             || !self.eager_push_peers.contains(&sender)
             || !self.eager_push_peers.contains(&first)
         {
@@ -853,16 +860,13 @@ impl<PI: PeerIdentity> State<PI> {
         if let Some((peer, round)) = entry {
             self.add_eager(peer);
             match self.grafted.get_mut(&id) {
-                Some(grafts) => {
-                    if !grafts.peers.contains(&peer) {
-                        grafts.peers.push(peer);
-                    }
-                    grafts.round = grafts.round.min(round);
-                }
+                Some(grafts) => match grafts.peers.iter_mut().find(|(p, _)| *p == peer) {
+                    Some((_, known)) => *known = (*known).min(round),
+                    None => grafts.peers.push((peer, round)),
+                },
                 None => {
                     let grafts = Grafts {
-                        peers: vec![peer],
-                        round,
+                        peers: vec![(peer, round)],
                         first: None,
                         kept: None,
                     };
@@ -924,7 +928,7 @@ impl<PI: PeerIdentity> State<PI> {
         self.dropped.remove(&peer);
         // A peer that comes back has lost its state, so it needs our pushes again.
         for grafts in self.grafted.values_mut() {
-            grafts.peers.retain(|grafted| *grafted != peer);
+            grafts.peers.retain(|(grafted, _)| *grafted != peer);
         }
     }
 
@@ -1713,6 +1717,26 @@ mod test {
         let mut state = grafted_state(slow.id, 9, now);
         announce(&mut state, 4, slow.id, 1, now);
         let mut io = VecDeque::new();
+        state.handle(InEvent::RecvMessage(2, Message::Gossip(slow)), now, &mut io);
+        assert!(
+            matches!(sent_to(&io, 4)[..], [Message::Graft(_)]),
+            "no optimization"
+        );
+        assert_eq!(sent_to(&io, 2), vec![Message::Prune]);
+    }
+
+    /// A grafted peer that went down does not hold back the tree optimization.
+    ///
+    /// Its reply cannot come any more, so only the other announcers count.
+    #[test]
+    fn gone_grafted_peer_does_not_stop_the_tree_optimization() {
+        let now = Instant::now();
+        let slow = gossip(b"gone graft", 9);
+        let mut state = grafted_state(slow.id, 1, now);
+        announce(&mut state, 4, slow.id, 2, now);
+        let mut io = VecDeque::new();
+        state.handle(InEvent::NeighborDown(3), now, &mut io);
+        io.clear();
         state.handle(InEvent::RecvMessage(2, Message::Gossip(slow)), now, &mut io);
         assert!(
             matches!(sent_to(&io, 4)[..], [Message::Graft(_)]),
