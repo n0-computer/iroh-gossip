@@ -8,7 +8,7 @@ use std::{
 
 use bytes::{Bytes, BytesMut};
 use iroh::{
-    endpoint::{Connection, RecvStream, SendStream, StreamId},
+    endpoint::{Connection, RecvStream, SendStream, Side, StreamId},
     EndpointId,
 };
 use n0_error::{e, stack_error};
@@ -344,6 +344,10 @@ pub(crate) struct SendLoop {
     ///
     /// It is set before an open, and clears once [`Self::live_streams`] is empty.
     has_streams: watch::Sender<bool>,
+    /// On a connection that we dialed, since when we have had no stream to write on.
+    ///
+    /// See [`RETIRE_GRACE`](super::RETIRE_GRACE).
+    idle_since: Option<watch::Sender<Option<Instant>>>,
 }
 
 impl SendLoop {
@@ -354,7 +358,12 @@ impl SendLoop {
         has_streams: watch::Sender<bool>,
         initial_topics: Vec<TopicId>,
     ) -> Self {
+        let idle_since = (conn.side() == Side::Client).then(|| queue_lease.idle_since());
+        if let Some(idle_since) = &idle_since {
+            idle_since.send_replace(Some(Instant::now()));
+        }
         Self {
+            idle_since,
             conn,
             max_message_size,
             buffer: Default::default(),
@@ -389,6 +398,18 @@ impl SendLoop {
                 // Every pass of the loop starts here, so the flag clears with the last stream.
                 if self.live_streams.is_empty() {
                     set_flag(&self.has_streams, false);
+                }
+                // A stream that ended was finished before this, and the peer reads its
+                // end only after that.
+                if let Some(idle_since) = &self.idle_since {
+                    let idle = self.streams.is_empty();
+                    idle_since.send_if_modified(|since| {
+                        let changed = since.is_some() != idle;
+                        if changed {
+                            *since = idle.then(Instant::now);
+                        }
+                        changed
+                    });
                 }
                 let more = tokio::select! {
                     biased;

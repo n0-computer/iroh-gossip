@@ -345,10 +345,9 @@ impl SendQueue {
         self.writer_idle_since = watch::channel(None).1;
     }
 
-    /// Returns since when the connection of the writer has had no stream.
+    /// Returns since when the writer has had no stream to write on.
     ///
-    /// It is `None` while it has a stream, for an accepted connection, and while
-    /// we do not know whether the peer handles a close.
+    /// It is `None` while it has one, and for a writer on a connection that we accepted.
     pub(super) fn writer_idle_since(&self) -> Option<Instant> {
         *self.writer_idle_since.borrow()
     }
