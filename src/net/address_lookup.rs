@@ -1,7 +1,7 @@
 //! An address lookup service to gather addressing info collected from gossip Join and ForwardJoin messages.
 
 use std::{
-    collections::{btree_map::Entry, BTreeMap},
+    collections::BTreeMap,
     sync::{Arc, RwLock},
     time::Duration,
 };
@@ -14,6 +14,12 @@ use n0_future::{
     task::AbortOnDropHandle,
     time::SystemTime,
 };
+
+/// The most addresses we keep for an endpoint.
+///
+/// Every update adds the addresses that it carries, so without a cap, a peer
+/// whose addresses keep changing grows its entry without limit.
+const MAX_ADDRS: usize = 32;
 
 pub(crate) struct RetentionOpts {
     /// How long to keep received endpoint info records alive before pruning them
@@ -90,24 +96,23 @@ impl GossipAddressLookup {
 
     /// Augments endpoint addressing information for the given endpoint ID.
     ///
-    /// The provided addressing information is combined with the existing info in the in-memory
-    /// lookup.  Any new direct addresses are added to those already present while the
-    /// relay URL is overwritten.
+    /// The provided addresses come first, then the ones already stored, up to
+    /// [`MAX_ADDRS`]. The user data is overwritten.
     pub(crate) fn add(&self, endpoint_info: impl Into<EndpointInfo>) {
         let last_updated = SystemTime::now();
         let EndpointInfo { endpoint_id, data } = endpoint_info.into();
         let mut guard = self.endpoints.write().expect("poisoned");
-        match guard.entry(endpoint_id) {
-            Entry::Occupied(mut entry) => {
-                let existing = entry.get_mut();
-                existing.data.add_addrs(data.addrs().cloned());
-                existing.data.set_user_data(data.user_data().cloned());
-                existing.last_updated = last_updated;
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(StoredEndpointInfo { data, last_updated });
-            }
-        }
+        let stored = guard
+            .entry(endpoint_id)
+            .or_insert_with(|| StoredEndpointInfo {
+                data: EndpointData::default(),
+                last_updated,
+            });
+        // `EndpointData::new` drops the duplicates.
+        let addrs = data.addrs().chain(stored.data.addrs());
+        stored.data = EndpointData::new(addrs.take(MAX_ADDRS).cloned().collect());
+        stored.data.set_user_data(data.user_data().cloned());
+        stored.last_updated = last_updated;
     }
 }
 
@@ -134,13 +139,13 @@ impl AddressLookup for GossipAddressLookup {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{net::SocketAddr, time::Duration};
 
     use iroh::{address_lookup::AddressLookup, EndpointAddr, SecretKey};
     use n0_future::StreamExt;
     use rand::{RngExt, SeedableRng};
 
-    use super::{GossipAddressLookup, RetentionOpts};
+    use super::{GossipAddressLookup, RetentionOpts, MAX_ADDRS};
 
     #[tokio::test]
     async fn test_retention() {
@@ -171,5 +176,22 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(700)).await;
 
         assert!(disco.resolve(k1.public()).is_none());
+    }
+
+    /// A peer whose address keeps changing has its newest addresses kept, up to the cap.
+    #[tokio::test]
+    async fn changing_addresses_stay_capped() {
+        let disco = GossipAddressLookup::new();
+        let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
+        let id = SecretKey::from_bytes(&rng.random()).public();
+        let addr = |port| SocketAddr::from(([10, 0, 0, 1], port));
+        for port in 0..1000 {
+            disco.add(EndpointAddr::new(id).with_ip_addr(addr(port)));
+        }
+
+        let endpoints = disco.endpoints.read().expect("poisoned");
+        let ip_addrs: Vec<_> = endpoints[&id].data.ip_addrs().copied().collect();
+        assert_eq!(ip_addrs.len(), MAX_ADDRS);
+        assert_eq!(ip_addrs[0], addr(999), "the newest address comes first");
     }
 }
