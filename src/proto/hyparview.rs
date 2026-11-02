@@ -449,9 +449,7 @@ where
                 Timer::RetryJoin(peer, id) => {
                     if self.pending_joins.get(&peer) == Some(&id) {
                         self.pending_joins.remove(&peer);
-                        if !self.active_view.contains(&peer) {
-                            self.join(peer, io);
-                        }
+                        self.join(peer, io);
                     }
                 }
             },
@@ -515,6 +513,13 @@ where
                 "{peer:?} marked alive but not passive"
             );
         }
+        // A peer enters the active view only by a `Neighbor` or `Join`, which cancel the retry.
+        for peer in self.pending_joins.keys() {
+            assert!(
+                !self.active_view.contains(peer),
+                "{peer:?} is a neighbor with a Join retry pending"
+            );
+        }
     }
 
     fn handle_message(&mut self, from: PI, message: Message<PI>, io: &mut impl IO<PI>) {
@@ -554,10 +559,16 @@ where
                 self.pending_joins.remove(&evicted);
             }
         }
+        // A neighbor would forward the Join to all its neighbors, which can
+        // rewire the overlay for nothing.
+        if self.active_view.contains(&peer) {
+            debug!(other = ?peer, "join: already a neighbor");
+            return;
+        }
         self.join(peer, io);
         // A Join can get lost when the peer retires the connection at the same
         // moment, and nothing reports it. Retry once even if we have neighbors.
-        if peer != self.me && !self.active_view.contains(&peer) {
+        if peer != self.me {
             let id = self.next_join;
             self.next_join += 1;
             self.pending_joins.insert(peer, id);
@@ -1433,6 +1444,21 @@ mod tests {
             joiner.active_view.contains(&0),
             "the late Disconnect left the views apart"
         );
+    }
+
+    /// A Join to a neighbor sends nothing, as the peer would forward it to all its neighbors.
+    #[test]
+    fn join_to_a_neighbor_sends_nothing() {
+        let mut state = new_state();
+        state.active_view.insert(1);
+        let mut io = Io::new();
+        state.handle(InEvent::RequestJoin(1), &mut io);
+        assert!(joined(&io).is_empty(), "joining a neighbor sent a Join");
+        assert!(
+            state.pending_joins.is_empty(),
+            "joining a neighbor armed a retry"
+        );
+        assert!(state.bootstrap_peers.contains(&1));
     }
 
     fn join_retry_timer(io: &Io) -> Timer<u32> {
