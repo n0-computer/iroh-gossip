@@ -56,8 +56,22 @@ const TOPIC_EVENT_CAP: usize = 256;
 
 /// How long a connection stays open once neither side has a stream on it.
 ///
-/// A topic that uses the peer keeps a stream open. Each side times the grace on
-/// its own, so a stream that we open as the peer closes loses its message.
+/// A topic that uses the peer keeps a stream open. Only the side that accepted
+/// the connection closes it. That side opens its own streams in the same task
+/// as the close, so the close never cuts one of them.
+///
+/// The side that dialed the connection must not open a stream that reaches the
+/// other side after the close. So the dialer opens no new stream on a
+/// connection that has had no stream for half the grace. It dials a new
+/// connection instead, and the old connection retires on its own.
+///
+/// The side that accepted closes, because it always knows whether the dialer
+/// handles a close. A node dials only when it has something to send, and its
+/// stream carries the flag. The dialer learns the flag only from a stream of
+/// the peer. Until then, it keeps using the connection however long it was
+/// idle. A node up to 0.101 never closes a connection, so new connections to
+/// it would pile up. A new peer that has never sent us a stream can thus still
+/// close a connection under our stream.
 #[cfg(not(test))]
 const RETIRE_GRACE: Duration = Duration::from_secs(10);
 /// The e2e tests build without `cfg(test)`, so they see 10 s.
@@ -1010,8 +1024,16 @@ impl PeerState {
     }
 
     /// Opens the queue, which keeps its messages and its byte limit.
+    ///
+    /// A writer on a connection that we dialed, and that has had no stream for
+    /// half of [`RETIRE_GRACE`], gives way to a new dial, see there.
     fn open_queue(&mut self) -> &SendQueue {
         self.forget_at = None;
+        let idle = self.queue.writer_idle_since();
+        if idle.is_some_and(|since| since.elapsed() >= RETIRE_GRACE / 2) {
+            self.queue.revoke();
+            self.writer = None;
+        }
         self.queue.set_closing(false);
         &self.queue
     }
@@ -1052,10 +1074,11 @@ impl PeerState {
     /// over. Connections that only receive close too, so that the peer learns
     /// of the abort on the connection that it writes on.
     ///
-    /// A retirement can also lose a message, but it does not cause this problem.
-    /// The lost message is the last one on its connection, so the peer does not
-    /// act on later messages without it. It also starts a new exchange with the
-    /// peer, and that exchange has its own timeout or retry.
+    /// In a rare case, a retirement can also lose a message, see [`RETIRE_GRACE`].
+    /// That does not cause this problem. The lost message is the last one on its
+    /// connection, so the peer does not act on later messages without it. It
+    /// also starts a new exchange with the peer, and that exchange has its own
+    /// timeout or retry.
     fn abort(&mut self, now: Instant) {
         self.aborted.cancel();
         self.aborted = CancellationToken::new();
@@ -1229,6 +1252,25 @@ async fn retire(mut ours: watch::Receiver<bool>, mut theirs: watch::Receiver<boo
     }
 }
 
+/// Sets `idle_since` to when the connection last had a stream, or to `None` while it has one.
+///
+/// The dialer of a connection runs this in place of [`retire`]. It never returns.
+async fn report_idle(
+    mut ours: watch::Receiver<bool>,
+    mut theirs: watch::Receiver<bool>,
+    idle_since: watch::Sender<Option<Instant>>,
+) {
+    loop {
+        let ours_open = *ours.borrow_and_update();
+        let theirs_open = *theirs.borrow_and_update();
+        idle_since.send_replace((!ours_open && !theirs_open).then(Instant::now));
+        tokio::select! {
+            res = ours.changed() => if res.is_err() { std::future::pending().await },
+            res = theirs.changed() => if res.is_err() { std::future::pending().await },
+        }
+    }
+}
+
 /// Runs the I/O of a connection, and closes it on an abort or once it carries no stream.
 ///
 /// Returns `true` if the end of the connection does not count as a disconnect.
@@ -1257,6 +1299,11 @@ async fn connection_loop(
     let their_streams = watch::Sender::new(false);
 
     let queue_closed = queue_lease.as_ref().map(QueueLease::closing);
+    // The actor reads it to decide whether to reuse a connection that we dialed.
+    let idle_since = match conn.side() {
+        Side::Client => queue_lease.as_ref().map(QueueLease::idle_since),
+        Side::Server => None,
+    };
     let send_loop = queue_lease.map(|lease| {
         let flag = our_streams.clone();
         SendLoop::new(conn.clone(), lease, max_message_size, flag, initial_topics)
@@ -1290,7 +1337,13 @@ async fn connection_loop(
         if handles_close_rx.wait_for(|known| *known).await.is_err() {
             std::future::pending::<()>().await;
         }
-        retire(our_streams.subscribe(), their_streams.subscribe()).await;
+        let (ours, theirs) = (our_streams.subscribe(), their_streams.subscribe());
+        match (conn.side(), idle_since) {
+            (Side::Server, _) => retire(ours, theirs).await,
+            (Side::Client, Some(idle_since)) => report_idle(ours, theirs, idle_since).await,
+            // A dial that only receives has nothing to report.
+            (Side::Client, None) => std::future::pending().await,
+        }
     };
     tokio::select! {
         biased;
@@ -2299,6 +2352,48 @@ pub(crate) mod tests {
         );
     }
 
+    /// The dialer reports since when its connection has had no stream, and a stream ends that.
+    #[tokio::test(start_paused = true)]
+    async fn dialer_reports_its_idle_time() {
+        let ours = unset_flag();
+        let theirs = unset_flag();
+        let idle_since = watch::Sender::new(None);
+        let idle = idle_since.subscribe();
+        let report = report_idle(ours.subscribe(), theirs.subscribe(), idle_since);
+        tokio::pin!(report);
+        timeout(Duration::from_millis(1), &mut report).await.ok();
+        assert!(idle.borrow().is_some(), "the idle time was not reported");
+        theirs.send_replace(true);
+        timeout(Duration::from_millis(1), &mut report).await.ok();
+        assert!(
+            idle.borrow().is_none(),
+            "an open stream did not end the idle time"
+        );
+    }
+
+    /// A writer on a dialed connection that was idle for half the grace gives way to a new dial.
+    #[test]
+    fn idle_dial_gives_way_to_a_new_dial() {
+        let topic = [42; 32].into();
+        let mut peer = open_peer(queue::MIN_QUEUE_SIZE);
+        let lease = peer.handle_connection(Side::Client, 1).unwrap();
+        peer.close_queue();
+        lease.idle_since().send_replace(Some(Instant::now()));
+        assert!(matches!(peer.send(join_message(topic, 0)), Pushed::Queued));
+        assert!(!peer.needs_dial(), "a short idle time made a dial");
+
+        peer.close_queue();
+        lease
+            .idle_since()
+            .send_replace(Some(Instant::now() - RETIRE_GRACE / 2));
+        assert!(matches!(peer.send(join_message(topic, 0)), Pushed::Queued));
+        assert!(
+            lease.revoked().is_cancelled(),
+            "the idle writer kept the queue"
+        );
+        assert!(peer.needs_dial(), "the queue waits without a dial");
+    }
+
     /// A reopened queue goes to the writer that waits on its connection, with no dial.
     #[tokio::test]
     async fn reopened_queue_keeps_the_waiting_writer() {
@@ -2634,6 +2729,17 @@ pub(crate) mod tests {
             .await
             .expect("write header");
         stream.finish().expect("finish");
+    }
+
+    /// Retires `conn` once `stream` ended, as the side that accepted it does.
+    async fn retire_after_the_stream(conn: &Connection, mut stream: iroh::endpoint::RecvStream) {
+        let mut buffer = BytesMut::new();
+        while util::read_frame::<proto::topic::Message<PublicKey>>(&mut stream, &mut buffer, 1024)
+            .await
+            .expect("frame")
+            .is_some()
+        {}
+        conn.close(util::CLOSE_RETIRED.into(), b"no stream");
     }
 
     /// The stream header that nodes from 0.90 to 0.101 write and read.
@@ -3973,11 +4079,10 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// A dial that completes after the peer's state is gone closes.
+    /// A dial that completes after the peer's state is gone takes no queue.
     ///
     /// The peer's state goes when its other connection closes or the protocol
-    /// drops it. Nothing uses the dialed connection, so it closes after the
-    /// grace once the peer ended the stream it opened.
+    /// drops it. Nothing uses the dialed connection, so the peer retires it.
     #[tokio::test]
     #[traced_test]
     async fn dial_for_a_peer_without_state_closes() -> Result {
@@ -3992,17 +4097,13 @@ pub(crate) mod tests {
         stream.finish().std_context("finish")?;
 
         assert!(is_idle(&actor.peers[&peer_id]), "the dial got a queue");
-        let ended = timeout(
-            RETIRE_GRACE + Duration::from_secs(3),
-            actor.connection_tasks.join_next(),
-        )
-        .await
-        .std_context("the connection stayed open")?;
+        peer_conn.close(util::CLOSE_RETIRED.into(), b"no stream");
+        let ended = timeout(Duration::from_secs(3), actor.connection_tasks.join_next())
+            .await
+            .std_context("the connection stayed open")?;
         let (peer, conn, res) = ended.expect("one task").expect("no panic");
         actor.handle_connection_task_finished(peer, conn, res);
-        timeout(Duration::from_secs(1), peer_conn.closed())
-            .await
-            .std_context("the peer did not see the close")?;
+        assert!(is_idle(&actor.peers[&peer_id]), "the end got a queue");
         Ok(())
     }
 
@@ -4017,7 +4118,7 @@ pub(crate) mod tests {
     async fn silent_late_dial_closes() -> Result {
         let pair = TestPair::new(1).await?;
         let (accepted, peer_accepted) = pair.connect_back().await?;
-        let (dialed, peer_dialed) = pair.connect().await?;
+        let (dialed, peer_dialed) = pair.connect_back().await?;
         let peer_id = pair.ep2.id();
         let topic: TopicId = blake3::hash(b"silent_late_dial").into();
         let mut actor = t_actor().await?;
@@ -4072,7 +4173,7 @@ pub(crate) mod tests {
     async fn silent_dial_after_the_last_connection_closes() -> Result {
         let pair = TestPair::new(1).await?;
         let (accepted, peer_accepted) = pair.connect_back().await?;
-        let (dialed, peer_dialed) = pair.connect().await?;
+        let (dialed, peer_dialed) = pair.connect_back().await?;
         let peer_id = pair.ep2.id();
         let topic: TopicId = blake3::hash(b"silent_dial_after_the_last").into();
         let mut actor = t_actor().await?;
@@ -4164,8 +4265,7 @@ pub(crate) mod tests {
     /// A dial that the peer's connection overtook after a disconnect does not replace it.
     ///
     /// The peer's connection took the queue and is the active one. The dial
-    /// stays while the peer has a stream on it, and closes after the grace once
-    /// the peer ended it.
+    /// stays while the peer has a stream on it.
     #[tokio::test]
     #[traced_test]
     async fn overtaken_dial_stays_while_the_peer_sends_on_it() -> Result {
@@ -4200,23 +4300,11 @@ pub(crate) mod tests {
             dialed_theirs.close_reason().is_none(),
             "the dial closed while the peer has a stream on it"
         );
-
-        actor
-            .peers
-            .get_mut(&peer_id)
-            .expect("known peer")
-            .close_queue();
         stream.finish().std_context("finish")?;
-        timeout(
-            RETIRE_GRACE + Duration::from_secs(3),
-            dialed_theirs.closed(),
-        )
-        .await
-        .std_context("the dial stayed open")?;
         Ok(())
     }
 
-    /// A dial for a disconnected peer delivers the queue, then closes.
+    /// A dial for a disconnected peer delivers the queue, then ends its stream.
     #[tokio::test]
     #[traced_test]
     async fn disconnected_pending_dial_flushes_then_closes() -> Result {
@@ -4246,7 +4334,7 @@ pub(crate) mod tests {
                     .await
                     .expect("frame");
             show_that_it_handles_a_close(&conn, header.topic_id).await;
-            conn.closed().await;
+            retire_after_the_stream(&conn, stream).await;
             (header.topic_id, message.is_some())
         });
         let peer = AbortOnDropHandle::new(peer);
@@ -4467,10 +4555,10 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// The connection a shuffle reply opened closes once the origin reads the reply.
+    /// The stream of a shuffle reply ends, so the origin can retire the connection.
     ///
     /// The replying node is usually not a neighbor of the shuffle's origin. The
-    /// origin drops it after it reads the reply. That does not close the
+    /// origin drops it after it reads the reply. That does not retire the
     /// connection while the reply stream is open, so the replying node has to
     /// drop the origin as well.
     #[tokio::test]
@@ -4513,7 +4601,7 @@ pub(crate) mod tests {
                     .await
                     .expect("frame");
             show_that_it_handles_a_close(&conn, header.topic_id).await;
-            conn.closed().await;
+            retire_after_the_stream(&conn, stream).await;
             reply.is_some()
         }));
 

@@ -17,6 +17,7 @@ use std::{
     },
 };
 
+use n0_future::time::Instant;
 use tokio::sync::{mpsc, watch, OwnedMutexGuard};
 use tokio_util::sync::CancellationToken;
 
@@ -244,6 +245,8 @@ pub(super) struct SendQueue {
     reader: SharedReader,
     /// Revokes the lease of the connection that writes the queue now.
     revoke: CancellationToken,
+    /// Since when the connection that writes the queue now has had no stream, see [`QueueLease::idle_since`].
+    writer_idle_since: watch::Receiver<Option<Instant>>,
 }
 
 impl SendQueue {
@@ -265,6 +268,7 @@ impl SendQueue {
             closing: watch::Sender::new(false),
             reader: Arc::new(tokio::sync::Mutex::new(reader)),
             revoke: CancellationToken::new(),
+            writer_idle_since: watch::channel(None).1,
         }
     }
 
@@ -323,13 +327,30 @@ impl SendQueue {
 
     /// Revokes the lease of the connection that writes the queue, and returns one for the next.
     pub(super) fn lease(&mut self) -> QueueLease {
-        self.revoke.cancel();
-        self.revoke = CancellationToken::new();
+        self.revoke();
+        let (idle_since, writer_idle_since) = watch::channel(None);
+        self.writer_idle_since = writer_idle_since;
         QueueLease {
             reader: self.reader.clone(),
             revoked: self.revoke.clone(),
             closing: self.closing.subscribe(),
+            idle_since,
         }
+    }
+
+    /// Revokes the lease of the connection that writes the queue.
+    pub(super) fn revoke(&mut self) {
+        self.revoke.cancel();
+        self.revoke = CancellationToken::new();
+        self.writer_idle_since = watch::channel(None).1;
+    }
+
+    /// Returns since when the connection that writes the queue has had no stream.
+    ///
+    /// It is `None` while that connection has a stream, and for a connection that
+    /// we accepted. It is also `None` until we know that the peer handles a close.
+    pub(super) fn writer_idle_since(&self) -> Option<Instant> {
+        *self.writer_idle_since.borrow()
     }
 
     /// Returns the reader of the queue, if no writer reads it.
@@ -350,6 +371,7 @@ pub(super) struct QueueLease {
     reader: SharedReader,
     revoked: CancellationToken,
     closing: watch::Receiver<bool>,
+    idle_since: watch::Sender<Option<Instant>>,
 }
 
 impl QueueLease {
@@ -368,6 +390,13 @@ impl QueueLease {
     /// Returns a receiver that tells whether the queue is closed. See [`SendQueue::set_closing`].
     pub(super) fn closing(&self) -> watch::Receiver<bool> {
         self.closing.clone()
+    }
+
+    /// Returns the sender through which the connection reports since when it has had no stream.
+    ///
+    /// Only a connection that we dialed reports it, see [`RETIRE_GRACE`](super::RETIRE_GRACE).
+    pub(super) fn idle_since(&self) -> watch::Sender<Option<Instant>> {
+        self.idle_since.clone()
     }
 }
 
