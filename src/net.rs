@@ -733,17 +733,21 @@ impl Actor {
         let error = task_result.err();
         debug!(%reason, ?error, "connection closed");
         let now = Instant::now();
-        let disconnected = self
+        let finished = self
             .peers
             .get_mut(&peer_id)
             .expect("unfinished connection must keep its peer state")
             .connection_finished(conn.stable_id(), now, retired);
-        if disconnected {
-            debug!("active send connection closed, mark peer as disconnected");
-            self.handle_in_event(InEvent::PeerDisconnected(peer_id), now);
-        } else if retired && self.peers[&peer_id].needs_dial() {
-            debug!("retired connection left messages, dial again");
-            self.dialer.queue_dial(peer_id, self.alpn.clone());
+        match finished {
+            Finished::Quiet => {}
+            Finished::Disconnected => {
+                debug!("active send connection closed, mark peer as disconnected");
+                self.handle_in_event(InEvent::PeerDisconnected(peer_id), now);
+            }
+            Finished::Redial => {
+                debug!("retired connection left messages, dial again");
+                self.dialer.queue_dial(peer_id, self.alpn.clone());
+            }
         }
     }
 
@@ -952,8 +956,8 @@ type ConnId = usize;
 
 /// What we know of a peer: its queue, and its connections.
 ///
-/// The queue always exists. An open queue waits for messages. A closed queue
-/// goes out, and then its writer waits on its connection for the queue to open
+/// The queue always exists. When it is closed, the writer sends what is left,
+/// finishes its streams, and waits on its connection until the queue opens
 /// again.
 ///
 /// The state outlives the last connection by [`PEER_RETENTION`], so that a
@@ -1008,9 +1012,7 @@ impl PeerState {
     /// Opens the queue, which keeps its messages and its byte limit.
     fn open_queue(&mut self) -> &SendQueue {
         self.forget_at = None;
-        if self.queue.is_closing() {
-            self.queue.set_closing(false);
-        }
+        self.queue.set_closing(false);
         &self.queue
     }
 
@@ -1023,7 +1025,7 @@ impl PeerState {
         self.open_queue().push(message)
     }
 
-    /// Closes the queue: the writer sends what is left, finishes its streams, and waits.
+    /// Closes the queue, see [`SendQueue::set_closing`].
     fn close_queue(&mut self) {
         self.queue.set_closing(true);
     }
@@ -1068,35 +1070,30 @@ impl PeerState {
         }
     }
 
-    /// Counts a finished connection, and returns whether to report a disconnect.
+    /// Counts a finished connection, and returns what the caller does next.
     ///
-    /// It is when the writer of an open queue ended, even if other connections
-    /// remain. The caller must immediately process `PeerDisconnected`, which
-    /// discards the queue before invoking the protocol. A closed queue is
-    /// discarded here instead, as no topic uses the peer. A `retired` writer
-    /// reports no disconnect: an empty queue goes, and the caller dials for the
-    /// rest.
-    fn connection_finished(&mut self, id: ConnId, now: Instant, retired: bool) -> bool {
+    /// When the writer of an open queue ended, the caller reports a disconnect,
+    /// even if other connections remain. It must process `PeerDisconnected` at
+    /// once, which discards the queue before invoking the protocol. A closed
+    /// queue is discarded here instead, as no topic uses the peer. A `retired`
+    /// writer reports no disconnect, because the link still works: an empty
+    /// queue goes, and the caller dials for the rest.
+    fn connection_finished(&mut self, id: ConnId, now: Instant, retired: bool) -> Finished {
         self.connections = self
             .connections
             .checked_sub(1)
             .expect("finished connection must have been registered");
         if self.writer != Some(id) {
             self.retain_if_idle(now);
-            false
-        } else if self.queue.is_closing() {
+            Finished::Quiet
+        } else if self.queue.is_closing() || (retired && self.queue.is_empty()) {
             self.discard_queue(now);
-            false
+            Finished::Quiet
         } else if retired {
-            // The link still works.
-            if self.queue.is_empty() {
-                self.discard_queue(now);
-            } else {
-                self.writer = None;
-            }
-            false
+            self.writer = None;
+            Finished::Redial
         } else {
-            true
+            Finished::Disconnected
         }
     }
 
@@ -1113,6 +1110,17 @@ impl PeerState {
     fn can_forget(&self, now: Instant) -> bool {
         self.forget_at.is_some_and(|deadline| deadline <= now)
     }
+}
+
+/// What the actor does when a connection of a peer finished.
+#[derive(Debug, PartialEq, Eq)]
+enum Finished {
+    /// Nothing.
+    Quiet,
+    /// Report that the peer disconnected.
+    Disconnected,
+    /// Dial the peer again, for the messages that a retired writer left.
+    Redial,
 }
 
 #[derive(Debug)]
@@ -2106,8 +2114,7 @@ pub(crate) mod tests {
     ) -> Result<iroh::endpoint::SendStream> {
         let mut stream = conn.open_uni().await.std_context("open stream")?;
         let mut buffer = Vec::new();
-        util::StreamHeader::new(topic)
-            .write(&mut stream, &mut buffer, TEST_FRAME_LIMIT)
+        util::StreamHeader::write(topic, &mut stream, &mut buffer, TEST_FRAME_LIMIT)
             .await
             .std_context("write header")?;
         for message in messages {
@@ -2293,10 +2300,7 @@ pub(crate) mod tests {
         let now = Instant::now();
         let mut peer = open_peer(queue::MIN_QUEUE_SIZE);
         let _lease = peer.handle_connection(Side::Server, 1).unwrap();
-        assert!(
-            !peer.connection_finished(1, now, true),
-            "the peer was disconnected"
-        );
+        assert_eq!(peer.connection_finished(1, now, true), Finished::Quiet);
         assert!(is_idle(&peer));
         assert!(
             peer.can_forget(now + PEER_RETENTION),
@@ -2308,10 +2312,7 @@ pub(crate) mod tests {
             peer.send(join_message([3; 32].into(), 0)),
             Pushed::Queued
         ));
-        assert!(
-            !peer.connection_finished(2, now, true),
-            "the peer was disconnected"
-        );
+        assert_eq!(peer.connection_finished(2, now, true), Finished::Redial);
         assert!(peer.needs_dial(), "the queued message waits without a dial");
     }
 
@@ -2327,9 +2328,12 @@ pub(crate) mod tests {
         assert!(late.is_none(), "the dial must not replace the writer");
 
         let now = Instant::now();
-        assert!(!peer.connection_finished(1, now, false));
-        assert!(!peer.connection_finished(3, now, false));
-        assert!(peer.connection_finished(2, now, false));
+        assert_eq!(peer.connection_finished(1, now, false), Finished::Quiet);
+        assert_eq!(peer.connection_finished(3, now, false), Finished::Quiet);
+        assert_eq!(
+            peer.connection_finished(2, now, false),
+            Finished::Disconnected
+        );
         peer.discard_queue(now); // The actor processes PeerDisconnected immediately.
         assert!(is_idle(&peer));
 
@@ -2344,9 +2348,12 @@ pub(crate) mod tests {
             late.is_none(),
             "the dial of a closed peer must only receive"
         );
-        assert!(!peer.connection_finished(1, now, false));
-        assert!(!peer.connection_finished(3, now, false));
-        assert!(peer.connection_finished(2, now, false));
+        assert_eq!(peer.connection_finished(1, now, false), Finished::Quiet);
+        assert_eq!(peer.connection_finished(3, now, false), Finished::Quiet);
+        assert_eq!(
+            peer.connection_finished(2, now, false),
+            Finished::Disconnected
+        );
         peer.discard_queue(now);
         assert!(is_idle(&peer));
         assert!(peer.can_forget(now + PEER_RETENTION));
@@ -2405,11 +2412,14 @@ pub(crate) mod tests {
         let mut peer = open_peer(queue::MIN_QUEUE_SIZE);
         let _writer = peer.handle_connection(Side::Server, 1).unwrap();
         assert!(peer.handle_connection(Side::Client, 2).is_none());
-        assert!(peer.connection_finished(1, now, false));
+        assert_eq!(
+            peer.connection_finished(1, now, false),
+            Finished::Disconnected
+        );
         peer.discard_queue(now);
         assert!(is_idle(&peer));
         assert!(!peer.needs_dial());
-        assert!(!peer.connection_finished(2, now, false));
+        assert_eq!(peer.connection_finished(2, now, false), Finished::Quiet);
         assert!(peer.can_forget(now + PEER_RETENTION));
     }
 
@@ -2421,7 +2431,7 @@ pub(crate) mod tests {
         let _writer = peer.handle_connection(Side::Server, 1).unwrap();
         peer.send(join_message([9; 32].into(), 0));
         peer.close_queue();
-        assert!(!peer.connection_finished(1, now, false));
+        assert_eq!(peer.connection_finished(1, now, false), Finished::Quiet);
         assert!(is_idle(&peer));
         assert!(!peer.needs_dial(), "no dial for a closed peer");
     }
@@ -2474,12 +2484,13 @@ pub(crate) mod tests {
         assert!(*handles_close.borrow());
         assert!(!new_aborted.is_cancelled());
         assert!(!new.revoked().is_cancelled());
-        assert!(
-            !peer.connection_finished(1, now, false),
+        assert_eq!(
+            peer.connection_finished(1, now, false),
+            Finished::Quiet,
             "old completion must leave the new queue intact"
         );
-        assert!(!peer.connection_finished(2, now, false));
-        assert!(!peer.connection_finished(3, now, false));
+        assert_eq!(peer.connection_finished(2, now, false), Finished::Quiet);
+        assert_eq!(peer.connection_finished(3, now, false), Finished::Quiet);
         assert_eq!(peer.writer, Some(4));
         assert!(!new_aborted.is_cancelled());
         assert!(!peer.needs_dial());
@@ -2496,9 +2507,9 @@ pub(crate) mod tests {
             let _second = peer.handle_connection(Side::Server, 2).unwrap();
             peer.handles_close.send_replace(handles_close);
             peer.abort(now);
-            assert!(!peer.connection_finished(1, now, false));
+            assert_eq!(peer.connection_finished(1, now, false), Finished::Quiet);
             assert!(!peer.can_forget(later));
-            assert!(!peer.connection_finished(2, later, false));
+            assert_eq!(peer.connection_finished(2, later, false), Finished::Quiet);
             assert!(!peer.can_forget(later + PEER_RETENTION - Duration::from_nanos(1)));
             assert!(peer.can_forget(later + PEER_RETENTION));
 
@@ -2596,8 +2607,7 @@ pub(crate) mod tests {
     /// The header tells the other side that the peer handles a close.
     async fn show_that_it_handles_a_close(conn: &Connection, topic: TopicId) {
         let mut stream = conn.open_uni().await.expect("open stream");
-        util::StreamHeader::new(topic)
-            .write(&mut stream, &mut Vec::new(), TEST_FRAME_LIMIT)
+        util::StreamHeader::write(topic, &mut stream, &mut Vec::new(), TEST_FRAME_LIMIT)
             .await
             .expect("write header");
         stream.finish().expect("finish");
@@ -2628,8 +2638,7 @@ pub(crate) mod tests {
 
         // We write, an old node reads.
         let mut stream = conn.open_uni().await.std_context("open stream")?;
-        util::StreamHeader::new(topic)
-            .write(&mut stream, &mut buffer, TEST_FRAME_LIMIT)
+        util::StreamHeader::write(topic, &mut stream, &mut buffer, TEST_FRAME_LIMIT)
             .await
             .std_context("write header")?;
         util::write_frame(&mut stream, &join, &mut buffer, TEST_FRAME_LIMIT)
@@ -3231,15 +3240,11 @@ pub(crate) mod tests {
         let (first, second) = (join_message(topic, 1), join_message(topic, 2));
         let mut buffer = Vec::new();
         let mut older = peer_conn.open_uni().await.std_context("open stream")?;
-        util::StreamHeader::new(topic)
-            .write(&mut older, &mut buffer, TEST_FRAME_LIMIT)
-            .await?;
+        util::StreamHeader::write(topic, &mut older, &mut buffer, TEST_FRAME_LIMIT).await?;
         tokio::time::sleep(Duration::from_millis(200)).await;
         // The newer stream arrives before the last message of the older one.
         let mut newer = peer_conn.open_uni().await.std_context("open stream")?;
-        util::StreamHeader::new(topic)
-            .write(&mut newer, &mut buffer, TEST_FRAME_LIMIT)
-            .await?;
+        util::StreamHeader::write(topic, &mut newer, &mut buffer, TEST_FRAME_LIMIT).await?;
         util::write_frame(&mut newer, &second.message, &mut buffer, TEST_FRAME_LIMIT).await?;
         tokio::time::sleep(Duration::from_millis(200)).await;
         util::write_frame(&mut older, &first.message, &mut buffer, TEST_FRAME_LIMIT).await?;
@@ -3280,9 +3285,7 @@ pub(crate) mod tests {
         let mut older = peer_conn.open_uni().await.std_context("open stream")?;
         older.write_all(&[0]).await.std_context("write")?;
         let mut newer = peer_conn.open_uni().await.std_context("open stream")?;
-        util::StreamHeader::new(topic)
-            .write(&mut newer, &mut buffer, TEST_FRAME_LIMIT)
-            .await?;
+        util::StreamHeader::write(topic, &mut newer, &mut buffer, TEST_FRAME_LIMIT).await?;
         util::write_frame(&mut newer, &second.message, &mut buffer, TEST_FRAME_LIMIT).await?;
         let mut expect = async |expected: ProtoMessage| {
             let event = timeout(Duration::from_secs(5), in_event_rx.recv())
@@ -3879,8 +3882,7 @@ pub(crate) mod tests {
         show_that_it_handles_a_close(&peer_second, topic).await;
         let mut stream = peer_first.open_uni().await.std_context("open stream")?;
         let mut buffer = Vec::new();
-        util::StreamHeader::new(topic)
-            .write(&mut stream, &mut buffer, TEST_FRAME_LIMIT)
+        util::StreamHeader::write(topic, &mut stream, &mut buffer, TEST_FRAME_LIMIT)
             .await
             .std_context("write header")?;
         let join = join_message(topic, 0).message;
@@ -4469,8 +4471,7 @@ pub(crate) mod tests {
             .std_context("connect")?;
         let mut stream = conn.open_uni().await.std_context("open_uni")?;
         let mut buf = Vec::new();
-        util::StreamHeader::new(topic)
-            .write(&mut stream, &mut buf, 1024)
+        util::StreamHeader::write(topic, &mut stream, &mut buf, 1024)
             .await
             .std_context("header")?;
         let shuffle = proto::topic::Message::test_shuffle(origin_id, 0);

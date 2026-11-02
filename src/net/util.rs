@@ -129,14 +129,6 @@ pub(crate) struct StreamHeader {
 }
 
 impl StreamHeader {
-    /// Returns the header that we send on a stream for `topic_id`.
-    pub(crate) fn new(topic_id: TopicId) -> Self {
-        Self {
-            topic_id,
-            handles_close: true,
-        }
-    }
-
     pub(crate) async fn read(
         stream: &mut RecvStream,
         buffer: &mut BytesMut,
@@ -161,15 +153,16 @@ impl StreamHeader {
         })
     }
 
+    /// Writes the header that we send on a stream for `topic_id`.
+    ///
+    /// We always set [`Self::handles_close`].
     pub(crate) async fn write(
-        self,
+        topic_id: TopicId,
         stream: &mut SendStream,
         buffer: &mut Vec<u8>,
         max_message_size: usize,
     ) -> Result<(), WriteError> {
-        let flags = if self.handles_close { HANDLES_CLOSE } else { 0 };
-        write_frame(stream, &(self.topic_id, flags), buffer, max_message_size).await?;
-        Ok(())
+        write_frame(stream, &(topic_id, HANDLES_CLOSE), buffer, max_message_size).await
     }
 }
 
@@ -315,7 +308,7 @@ impl RecvStreamState {
         let mut buffer = BytesMut::new();
         let header = StreamHeader::read(&mut stream, &mut buffer, max_message_size).await?;
         Ok(Self {
-            buffer: BytesMut::new(),
+            buffer,
             max_message_size,
             stream,
             header,
@@ -576,9 +569,7 @@ impl SendLoop {
                 open.map_err(|_| e!(WriteError::OpenStalled))??
             }
         };
-        StreamHeader::new(topic)
-            .write(&mut stream, &mut self.buffer, self.max_message_size)
-            .await?;
+        StreamHeader::write(topic, &mut stream, &mut self.buffer, self.max_message_size).await?;
         debug!(topic=%topic.fmt_short(), "stream opened");
         // The QUIC stack of the peer acknowledges data that its app did not read
         // yet, so this needs no timeout.
