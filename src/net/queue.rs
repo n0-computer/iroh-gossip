@@ -303,8 +303,7 @@ impl SendQueue {
     /// connection can retire. When a topic sends to the peer again, the actor
     /// opens the queue.
     pub(super) fn set_closing(&self, closing: bool) {
-        self.closing
-            .send_if_modified(|old| std::mem::replace(old, closing) != closing);
+        super::util::set_flag(&self.closing, closing);
     }
 
     /// Returns whether the queue holds no messages.

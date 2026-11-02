@@ -215,8 +215,7 @@ impl RecvLoop {
         while !conn_is_closed || !header_futures.is_empty() || !read_futures.is_empty() {
             // A partial header counts. Only a broken peer keeps one partial.
             let open = !header_futures.is_empty() || !read_futures.is_empty();
-            self.has_streams
-                .send_if_modified(|has| std::mem::replace(has, open) != open);
+            set_flag(&self.has_streams, open);
             tokio::select! {
                 _ = &mut closed, if !conn_is_closed => {
                     conn_is_closed = true;
@@ -389,8 +388,7 @@ impl SendLoop {
             loop {
                 // Every pass of the loop starts here, so the flag clears with the last stream.
                 if self.live_streams.is_empty() {
-                    self.has_streams
-                        .send_if_modified(|has| std::mem::replace(has, false));
+                    set_flag(&self.has_streams, false);
                 }
                 let more = tokio::select! {
                     biased;
@@ -473,8 +471,7 @@ impl SendLoop {
         }
         self.streams.clear();
         while self.live_streams.next().await.is_some() {}
-        self.has_streams
-            .send_if_modified(|has| std::mem::replace(has, false));
+        set_flag(&self.has_streams, false);
         debug!("send loop closed");
         Ok(())
     }
@@ -559,8 +556,7 @@ impl SendLoop {
             return Ok(true);
         };
         // Before the open, which can wait at the stream limit of the peer.
-        self.has_streams
-            .send_if_modified(|has| !std::mem::replace(has, true));
+        set_flag(&self.has_streams, true);
         let mut stream = tokio::select! {
             biased;
             // Before the open, so that a revoked lease starts no header.
@@ -684,6 +680,11 @@ async fn write_sized_frame<T: Serialize>(
             .map_err(io::Error::other)?;
     }
     Ok(())
+}
+
+/// Sets `flag` to `value`, and wakes its receivers only if the value changed.
+pub(super) fn set_flag(flag: &watch::Sender<bool>, value: bool) {
+    flag.send_if_modified(|old| std::mem::replace(old, value) != value);
 }
 
 /// A [`TimerMap`] with an async method to wait for the next timer expiration.

@@ -1043,9 +1043,19 @@ impl PeerState {
 
     /// Discards the queue, and closes every connection of the peer.
     ///
-    /// The topics cannot work with a peer that misses a control message. So no
-    /// writer sends the queue with the gap, also not one that a handover replaced.
-    /// Receive-only connections close too, so the remote writer learns of the abort.
+    /// The caller aborts a peer when a control message does not fit into its
+    /// queue. If we dropped only that message and sent the ones after it, the
+    /// peer would act on the later messages without the dropped one. Its view
+    /// of us would then differ from our view of it, and neither side would
+    /// notice. So no writer may send the rest of the queue, not even a writer
+    /// that a handover replaced. Instead, both sides see a disconnect and start
+    /// over. Connections that only receive close too, so that the peer learns
+    /// of the abort on the connection that it writes on.
+    ///
+    /// A retirement can also lose a message, but it does not cause this problem.
+    /// The lost message is the last one on its connection, so the peer does not
+    /// act on later messages without it. It also starts a new exchange with the
+    /// peer, and that exchange has its own timeout or retry.
     fn abort(&mut self, now: Instant) {
         self.aborted.cancel();
         self.aborted = CancellationToken::new();
