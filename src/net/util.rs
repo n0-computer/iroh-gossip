@@ -384,7 +384,7 @@ impl SendLoop {
             queue = self.queue_lease.lock() => Some(queue),
         };
         if let Some(mut queue) = queue {
-            let mut closing = queue.closing();
+            let mut closing = self.queue_lease.closing();
             loop {
                 // Every pass of the loop starts here, so the flag clears with the last stream.
                 if self.live_streams.is_empty() {

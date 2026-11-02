@@ -255,16 +255,14 @@ impl SendQueue {
             data: Limit::new(size / 4 * 3),
             announcements: Limit::new(size / 8),
         });
-        let (closing, closing_rx) = watch::channel(false);
         let reader = QueueReader {
             rx,
             unfinished: None,
-            closing: closing_rx,
         };
         Self {
             tx,
             capacity,
-            closing,
+            closing: watch::Sender::new(false),
             reader: Arc::new(tokio::sync::Mutex::new(reader)),
             revoke: CancellationToken::new(),
         }
@@ -330,6 +328,7 @@ impl SendQueue {
         QueueLease {
             reader: self.reader.clone(),
             revoked: self.revoke.clone(),
+            closing: self.closing.subscribe(),
         }
     }
 
@@ -350,6 +349,7 @@ impl SendQueue {
 pub(super) struct QueueLease {
     reader: SharedReader,
     revoked: CancellationToken,
+    closing: watch::Receiver<bool>,
 }
 
 impl QueueLease {
@@ -363,6 +363,11 @@ impl QueueLease {
     /// Returns the token that ends the lease at a handover.
     pub(super) fn revoked(&self) -> &CancellationToken {
         &self.revoked
+    }
+
+    /// Returns a receiver that tells whether the queue is closed. See [`SendQueue::set_closing`].
+    pub(super) fn closing(&self) -> watch::Receiver<bool> {
+        self.closing.clone()
     }
 }
 
@@ -396,7 +401,6 @@ type SharedReader = Arc<tokio::sync::Mutex<QueueReader>>;
 pub(super) struct QueueReader {
     rx: mpsc::UnboundedReceiver<QueuedMessage>,
     unfinished: Option<QueuedMessage>,
-    closing: watch::Receiver<bool>,
 }
 
 impl QueueReader {
@@ -411,11 +415,6 @@ impl QueueReader {
             self.unfinished = self.rx.recv().await;
         }
         self.unfinished.is_some()
-    }
-
-    /// Returns a receiver that tells whether the queue is closed. See [`SendQueue::set_closing`].
-    pub(super) fn closing(&self) -> watch::Receiver<bool> {
-        self.closing.clone()
     }
 
     /// Returns the message that [`Self::next`] waited for.
@@ -553,11 +552,11 @@ mod tests {
     /// Messages are still returned when the queue is closed, and the reader sees it close and open.
     #[tokio::test]
     async fn closed_queue_gives_its_messages() {
-        let queue = SendQueue::new(MIN_QUEUE_SIZE);
+        let mut queue = SendQueue::new(MIN_QUEUE_SIZE);
         assert!(matches!(queue.push(disconnect()), Pushed::Queued));
         queue.set_closing(true);
+        let closing = queue.lease().closing();
         let mut reader = queue.try_reader().unwrap();
-        let closing = reader.closing();
         assert!(*closing.borrow(), "the reader did not see the close");
         assert!(reader.next().await, "the queued message went");
         reader.advance();

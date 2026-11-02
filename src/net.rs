@@ -1231,8 +1231,10 @@ async fn retire(mut ours: watch::Receiver<bool>, mut theirs: watch::Receiver<boo
 
 /// Runs the I/O of a connection, and closes it on an abort or once it carries no stream.
 ///
-/// Returns whether either side retired it. A connection to a node up to 0.101
-/// never retires. Without a lease, the connection only receives.
+/// Returns `true` if the end of the connection does not count as a disconnect.
+/// That is the case when either side retired the connection, or when no topic
+/// used the peer at the moment the connection ended. A connection to a node up
+/// to 0.101 never retires. Without a lease, the connection only receives.
 /// Every connection observes the peer abort signal, independently of whether
 /// it writes.
 // Each argument is state the loops share. A struct would only wrap them.
@@ -1254,6 +1256,7 @@ async fn connection_loop(
     let our_streams = watch::Sender::new(queue_lease.is_some());
     let their_streams = watch::Sender::new(false);
 
+    let queue_closed = queue_lease.as_ref().map(QueueLease::closing);
     let send_loop = queue_lease.map(|lease| {
         let flag = our_streams.clone();
         SendLoop::new(conn.clone(), lease, max_message_size, flag, initial_topics)
@@ -1300,12 +1303,22 @@ async fn connection_loop(
             conn.close(util::CLOSE_QUEUE_FULL.into(), b"send queue full");
             Ok(false)
         }
-        // A retirement by the peer counts also when it cut one of our writes.
-        res = io => match conn.close_reason() {
-            Some(ConnectionError::ApplicationClosed(close))
-                if close.error_code == util::CLOSE_RETIRED.into() => Ok(true),
-            _ => res.map(|()| false),
-        },
+        res = io => {
+            // A retirement by the peer counts also when it cut one of our writes.
+            let retired_by_peer = matches!(
+                conn.close_reason(),
+                Some(ConnectionError::ApplicationClosed(close))
+                    if close.error_code == util::CLOSE_RETIRED.into()
+            );
+            // Read now, as a topic may open the queue before the actor sees the end.
+            // A message from then on needs a new dial, not a disconnect.
+            let queue_was_closed = queue_closed.is_some_and(|closed| *closed.borrow());
+            if retired_by_peer || queue_was_closed {
+                Ok(true)
+            } else {
+                res.map(|()| false)
+            }
+        }
         _ = retirement => {
             debug!("no stream for a while, close");
             conn.close(util::CLOSE_RETIRED.into(), b"no stream");
@@ -2294,7 +2307,7 @@ pub(crate) mod tests {
         let lease = peer.handle_connection(Side::Server, 1).unwrap();
         peer.close_queue();
         let mut reader = lease.lock().await;
-        assert!(*reader.closing().borrow(), "the queue is closed");
+        assert!(*lease.closing().borrow(), "the queue is closed");
 
         let message = join_message(topic, 0);
         assert!(matches!(peer.send(message.clone()), Pushed::Queued));
@@ -3202,6 +3215,37 @@ pub(crate) mod tests {
                 .std_context("the connection loop did not end")?
                 .anyerr()??;
             assert!(retired, "with a stream of ours: {with_stream}");
+        }
+        Ok(())
+    }
+
+    /// A connection that the peer closes while no topic uses it counts as retired.
+    #[tokio::test]
+    #[traced_test]
+    async fn close_of_a_closed_queue_counts_as_retired() -> Result {
+        let pair = TestPair::new(1).await?;
+        for closed in [false, true] {
+            let (conn, peer_conn) = pair.connect().await?;
+            let mut queue = SendQueue::new(queue::MIN_QUEUE_SIZE);
+            queue.set_closing(closed);
+            let (in_event_tx, _in_event_rx) = mpsc::channel(16);
+            let task = AbortOnDropHandle::new(spawn(connection_loop(
+                pair.ep2.id(),
+                conn,
+                CancellationToken::new(),
+                Some(queue.lease()),
+                Vec::new(),
+                in_event_tx,
+                TEST_FRAME_LIMIT,
+                unset_flag(),
+            )));
+            // As a node up to 0.101 closes a connection when it disconnects us.
+            peer_conn.close(0u32.into(), b"close from disconnect");
+            let retired = timeout(Duration::from_secs(5), task)
+                .await
+                .std_context("the connection loop did not end")?
+                .anyerr()??;
+            assert_eq!(retired, closed);
         }
         Ok(())
     }
