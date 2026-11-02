@@ -34,6 +34,11 @@ const INITIAL_SHUFFLE_INTERVAL: Duration = Duration::from_secs(1);
 /// it calls "random promotion", every 5s.
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Delay before the one retry of a Join requested by the caller.
+///
+/// Allow time for a first dial and the reply, including over a relay.
+const JOIN_RETRY_DELAY: Duration = Duration::from_secs(10);
+
 /// Maximum number of maintenance passes between two rejoins, or between two refills.
 ///
 /// A node without any peer rejoins in its 1st, 2nd, 4th, and 8th pass alone,
@@ -117,7 +122,7 @@ pub enum Timer<PI> {
     ///
     /// The id tells it from the timer of an earlier `Neighbor` to the same peer.
     PendingNeighborRequest(PI, u64),
-    /// The single retry of an unanswered application join, with its request id.
+    /// The one retry of an unanswered Join, with its request id.
     RetryJoin(PI, u64),
 }
 
@@ -302,10 +307,9 @@ pub struct Config {
     /// falls back on its passive view when its neighbors fail.
     pub shuffle_interval: Duration,
     /// Timeout after which a neighbor request is considered failed.
-    /// Also the delay before retrying an unanswered application join once.
     ///
     /// It runs from when we send the request, so it covers a dial to the peer
-    /// on a slow network. A dial that fails ends a neighbor request earlier.
+    /// on a slow network. A dial that fails ends the request earlier.
     pub neighbor_request_timeout: Duration,
 }
 impl Default for Config {
@@ -383,8 +387,7 @@ pub struct State<PI, RG = ThreadRng> {
     pending_neighbor_requests: HashMap<PI, u64>,
     /// The id of the next neighbor request
     next_neighbor_request: u64,
-    /// Application joins awaiting their one retry, capped by the bootstrap contacts.
-    /// Separate from Neighbor requests, which determine handshake reply semantics.
+    /// Joins awaiting their one retry, limited to the retained bootstrap peers.
     pending_joins: HashMap<PI, u64>,
     next_join: u64,
     /// The opaque user peer data we received for other peers
@@ -552,14 +555,14 @@ where
             }
         }
         self.join(peer, io);
-        // A retirement can lose the Join without reporting a disconnect. Retry
-        // even when other neighbors keep us out of isolated-node maintenance.
+        // A Join can get lost when the peer retires the connection at the same
+        // moment, and nothing reports it. Retry once even if we have neighbors.
         if peer != self.me && !self.active_view.contains(&peer) {
             let id = self.next_join;
             self.next_join += 1;
             self.pending_joins.insert(peer, id);
             io.push(OutEvent::ScheduleTimer(
-                self.config.neighbor_request_timeout,
+                JOIN_RETRY_DELAY,
                 Timer::RetryJoin(peer, id),
             ));
         }
@@ -624,7 +627,6 @@ where
     }
 
     fn handle_quit(&mut self, io: &mut impl IO<PI>) {
-        self.pending_joins.clear();
         for peer in self.active_view.clone().into_iter() {
             self.active_view.remove(&peer);
             self.send_disconnect(peer, false, io);
@@ -654,7 +656,6 @@ where
     }
 
     fn on_join(&mut self, peer: PI, data: Option<PeerData>, io: &mut impl IO<PI>) {
-        self.pending_joins.remove(&peer);
         // Drop a neighbor request we may still have pending to this peer. The peer
         // is joining, usually after a restart, so it has no memory of a request we
         // sent it before and will not answer it. While that request is pending,
@@ -734,7 +735,6 @@ where
     }
 
     fn on_neighbor(&mut self, from: PI, details: Neighbor, io: &mut impl IO<PI>) {
-        self.pending_joins.remove(&from);
         // A `Neighbor` is a reply if we have a request out to the peer, and a
         // request otherwise. See `send_neighbor` for the full picture.
         let is_reply = self.pending_neighbor_requests.remove(&from).is_some();
@@ -1448,13 +1448,14 @@ mod tests {
     fn join_retry_recovers_a_lost_join_with_existing_neighbors_once() {
         let mut joiner = new_state();
         joiner.active_view.insert(2);
+        joiner.config.neighbor_request_timeout = Duration::from_millis(1);
         let mut contact = State::new(1, None, Config::default(), StdRng::seed_from_u64(2));
         let mut io = Io::new();
         joiner.handle(InEvent::RequestJoin(1), &mut io);
         let timer = join_retry_timer(&io);
         assert!(io.iter().any(|event| matches!(event,
             TopicOut::ScheduleTimer(delay, topic::Timer::Swarm(Timer::RetryJoin(..)))
-                if *delay == joiner.config.neighbor_request_timeout
+                if *delay == Duration::from_secs(10)
         )));
         io.clear(); // Lose the first Join without reporting a transport failure.
         joiner.handle(InEvent::TimerExpired(timer.clone()), &mut io);
@@ -1479,37 +1480,32 @@ mod tests {
         joiner.handle(InEvent::RequestJoin(1), &mut io);
         let timer = join_retry_timer(&io);
         assert_eq!(ferry(&mut joiner, &mut contact, &mut io), 3);
-        assert!(joiner.pending_joins.is_empty());
         joiner.handle(InEvent::TimerExpired(timer), &mut io);
         assert!(joined(&io).is_empty());
     }
 
     #[test]
-    fn join_retry_is_cancelled_by_disconnect_crossed_join_or_quit() {
+    fn join_retry_stops_after_a_disconnect_or_crossed_join() {
         for response in [
-            Some(Message::Disconnect(Disconnect {
+            Message::Disconnect(Disconnect {
                 alive: false,
                 _respond: false,
-            })),
-            Some(Message::Disconnect(Disconnect {
+            }),
+            Message::Disconnect(Disconnect {
                 alive: true,
                 _respond: false,
-            })),
-            Some(Message::Join(None)),
-            None,
+            }),
+            Message::Join(None),
         ] {
             let mut state = new_state();
             let mut io = Io::new();
             state.handle(InEvent::RequestJoin(1), &mut io);
             let timer = join_retry_timer(&io);
-            match response {
-                Some(message) => state.handle(InEvent::RecvMessage(1, message), &mut io),
-                None => state.handle(InEvent::Quit, &mut io),
-            }
-            assert!(state.pending_joins.is_empty());
+            state.handle(InEvent::RecvMessage(1, response), &mut io);
             io.clear();
             state.handle(InEvent::TimerExpired(timer), &mut io);
             assert!(joined(&io).is_empty());
+            assert!(state.pending_joins.is_empty());
         }
     }
 
@@ -1520,6 +1516,16 @@ mod tests {
         state.handle(InEvent::RequestJoin(1), &mut io);
         let old = join_retry_timer(&io);
         io.clear();
+        state.handle(
+            InEvent::RecvMessage(
+                1,
+                Message::Disconnect(Disconnect {
+                    alive: false,
+                    _respond: false,
+                }),
+            ),
+            &mut io,
+        );
         state.handle(InEvent::RequestJoin(1), &mut io);
         let current = join_retry_timer(&io);
         io.clear();
