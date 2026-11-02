@@ -1050,15 +1050,13 @@ fn plumtree_recovers_from_massive_failure() {
 /// overlay and a target maximum recovery latency" (p. 8). An `IHave` can arrive
 /// over a short lazy path while the eager copy still travels over several
 /// links. A timeout below the rest of that eager path grafts the lazy peer, and
-/// its copy comes after the eager one. In the paper, that duplicate prunes the
-/// lazy peer again, and the pair repeats every round. Here the node keeps the
+/// its copy comes after the eager one. With the paper's rules, that duplicate
+/// prunes the lazy peer again, and the pair repeats every round. Here the node keeps the
 /// grafted peer if its copy took no more hops, and prunes the peer of the eager
 /// copy instead, so the next round takes the faster path.
 ///
-/// On links of 50ms each way, the depth gaps that the tree optimizer leaves
-/// alone reach seven hops, 350ms, so 80ms falls short of them and 400ms clears
-/// them. On links of 10 to 100ms, a faster path can take more hops. The node
-/// does not keep such a peer, so a little redundancy stays.
+/// On links of 10 to 100ms, a faster path can take more hops. The node does
+/// not keep such a peer, so a little redundancy stays.
 #[test]
 fn plumtree_graft_timeout_below_the_eager_path_leaves_little_redundancy() {
     // Measured over 50 seeds, at 80ms and 400ms: at most 0.007 and 0.003 on
