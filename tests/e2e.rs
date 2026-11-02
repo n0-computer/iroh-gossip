@@ -37,12 +37,11 @@ const PROMPT: Duration = Duration::from_secs(10);
 /// The idle timeout of the test transport: a silent peer is gone after this.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// A wait longer than a node keeps a connection that it no longer uses.
+/// A wait longer than a node keeps a connection without streams.
 ///
-/// That is the wait for our finished streams to be acknowledged, then the idle
-/// grace, five seconds each, and a margin. A send that blocks can hold a
-/// connection up to 20 s, but no test here blocks one.
-const SETTLE: Duration = Duration::from_secs(12);
+/// That is the wait for our finished streams to be acknowledged, then the
+/// grace of 10 s, and a margin.
+const SETTLE: Duration = Duration::from_secs(16);
 
 /// Decides whether a node takes a connection, before gossip sees it.
 type AcceptFilter = Arc<dyn Fn(&Connection) -> bool + Send + Sync>;
@@ -479,6 +478,31 @@ async fn restart_while_the_former_instance_runs() -> Result {
     exchange(&mut sa, &mut sb, b"02").await
 }
 
+/// A peer that restarted on other topics leaves the views of its former neighbor.
+///
+/// The close of the former instance's connection drops no neighbor, as the new
+/// instance took over the writer. A forward join for a third node gets the
+/// answer that the peer left.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn restart_on_other_topics_leaves_the_former_neighbor() -> Result {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (Node::spawn(&lookup).await?, Node::spawn(&lookup).await?);
+    let (t, other) = (topic("restart_left"), topic("restart_other"));
+    let mut sa = Sub::new(&a, t, vec![]).await?;
+    let _sa_other = Sub::new(&a, other, vec![]).await?;
+    let _sb_former = Sub::join(&b, t, vec![a.id()]).await?;
+    sa.neighbor_up(b.id()).await?;
+
+    let b_new = Node::spawn_with(&lookup, b.secret.clone()).await?;
+    let _sb = Sub::join(&b_new, other, vec![a.id()]).await?;
+    let b_id = b.id();
+    b.crash().await;
+    let c = Node::spawn(&lookup).await?;
+    let _sc = Sub::join(&c, t, vec![a.id()]).await?;
+    sa.neighbor_down(b_id).await
+}
+
 /// A node that vanishes and restarts again and again keeps working, with no pile-up.
 #[tokio::test(flavor = "multi_thread")]
 #[traced_test]
@@ -695,8 +719,6 @@ async fn neighbor_request_over_a_slow_dial_connects() -> Result {
 }
 
 /// A join to a node that is not on the topic leaves no connection once we leave.
-///
-/// The node never answers, so only our side can drop the other.
 #[tokio::test(flavor = "multi_thread")]
 #[traced_test]
 async fn join_to_a_node_off_the_topic_leaves_no_connection() -> Result {
@@ -760,10 +782,9 @@ async fn open_connections_link_neighbors() -> Result {
 
     // A connection we are done with stays open for a grace of a few seconds,
     // and the overlay keeps opening short-lived ones, for example for a
-    // refused neighbor request. A node short of neighbors asks its full
-    // passive peers again every few seconds, so such a pair may always have
-    // one. A leaked connection stays unlinked, so each connection unlinked now
-    // must be linked or closed at some point within `SETTLE`.
+    // refused neighbor request. A leaked connection stays unlinked, so each
+    // connection unlinked now must be linked or closed at some point within
+    // `SETTLE`.
     for sub in subs.iter_mut() {
         sub.drain().await?;
     }
@@ -790,6 +811,9 @@ async fn open_connections_link_neighbors() -> Result {
 
 /// Returns the open connections between nodes where neither holds the other as a neighbor.
 ///
+/// It skips a node short of neighbors. Such a node asks its passive peers again
+/// every few seconds, so its connections to them stay.
+///
 /// An entry holds the indices of the two nodes, the index of the node that
 /// accepted the connection, and its position in `Node::accepted`.
 fn unlinked_connections(nodes: &[Node], subs: &[Sub]) -> BTreeSet<(usize, usize, usize, usize)> {
@@ -798,7 +822,9 @@ fn unlinked_connections(nodes: &[Node], subs: &[Sub]) -> BTreeSet<(usize, usize,
         for (j, b) in nodes.iter().enumerate().skip(i + 1) {
             let linked = subs[i].rx.neighbors().any(|p| p == b.id())
                 || subs[j].rx.neighbors().any(|p| p == a.id());
-            if linked {
+            // Below half of the active view.
+            let short = |sub: &Sub| sub.rx.neighbors().count() < 3;
+            if linked || short(&subs[i]) || short(&subs[j]) {
                 continue;
             }
             for pos in a.open_ids_from(b.id()) {
