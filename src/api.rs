@@ -294,7 +294,11 @@ impl GossipSender {
         Ok(())
     }
 
-    /// Joins a set of peers.
+    /// Joins the topic through `peers`.
+    ///
+    /// A peer that is already a neighbor gets no join, as it would forward the
+    /// join to all its neighbors. A join without an answer goes out once more
+    /// after 10 seconds.
     pub async fn join_peers(&self, peers: Vec<EndpointId>) -> Result<(), ApiError> {
         self.send(Command::JoinPeers(peers)).await?;
         Ok(())
