@@ -737,10 +737,12 @@ impl<PI: PeerIdentity> State<PI> {
     fn on_ihave(&mut self, sender: PI, ihaves: Vec<IHave>, io: &mut impl IO<PI>) {
         for ihave in ihaves {
             if !self.received_messages.contains_key(&ihave.id) {
-                self.missing_messages
-                    .entry(ihave.id)
-                    .or_default()
-                    .push_back((sender, ihave.round));
+                // We keep each announcer once per message. Else a peer that repeats an
+                // id grows the list without limit, and we graft that peer for each copy.
+                let announcers = self.missing_messages.entry(ihave.id).or_default();
+                if !announcers.iter().any(|(peer, _round)| *peer == sender) {
+                    announcers.push_back((sender, ihave.round));
+                }
 
                 if !self.graft_timer_scheduled.contains(&ihave.id) {
                     self.graft_timer_scheduled.insert(ihave.id);
@@ -1576,6 +1578,32 @@ mod test {
         state.handle(InEvent::TimerExpired(Timer::SendGraft(id)), now, &mut io);
 
         assert!(state.missing_messages.is_empty());
+    }
+
+    /// A peer that announces a message many times is kept once as its announcer.
+    #[test]
+    fn repeated_ihave_keeps_one_announcer() {
+        let mut io = VecDeque::new();
+        let mut state = State::new(1u32, Config::default(), 1024);
+        let now = Instant::now();
+        state.handle(InEvent::NeighborUp(2), now, &mut io);
+        state.handle(InEvent::NeighborUp(3), now, &mut io);
+        let id = MessageId::from_content(b"hi");
+        let ihave = IHave {
+            id,
+            round: Round(1),
+        };
+        let repeated = Message::IHave(vec![ihave.clone(); 100]);
+        let once = Message::IHave(vec![ihave]);
+        state.handle(InEvent::RecvMessage(2, repeated.clone()), now, &mut io);
+        state.handle(InEvent::RecvMessage(2, repeated), now, &mut io);
+        state.handle(InEvent::RecvMessage(3, once), now, &mut io);
+
+        let announcers: Vec<_> = state.missing_messages[&id]
+            .iter()
+            .map(|(peer, _round)| *peer)
+            .collect();
+        assert_eq!(announcers, vec![2, 3]);
     }
 
     /// A batch of announcements fits the size limit, also when its length takes 3 bytes.
