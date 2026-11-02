@@ -117,6 +117,8 @@ pub enum Timer<PI> {
     ///
     /// The id tells it from the timer of an earlier `Neighbor` to the same peer.
     PendingNeighborRequest(PI, u64),
+    /// The single retry of an unanswered application join, with its request id.
+    RetryJoin(PI, u64),
 }
 
 /// Messages that we can send and receive from peers within the topic.
@@ -300,9 +302,10 @@ pub struct Config {
     /// falls back on its passive view when its neighbors fail.
     pub shuffle_interval: Duration,
     /// Timeout after which a neighbor request is considered failed.
+    /// Also the delay before retrying an unanswered application join once.
     ///
     /// It runs from when we send the request, so it covers a dial to the peer
-    /// on a slow network. A dial that fails ends the request earlier.
+    /// on a slow network. A dial that fails ends a neighbor request earlier.
     pub neighbor_request_timeout: Duration,
 }
 impl Default for Config {
@@ -380,6 +383,10 @@ pub struct State<PI, RG = ThreadRng> {
     pending_neighbor_requests: HashMap<PI, u64>,
     /// The id of the next neighbor request
     next_neighbor_request: u64,
+    /// Application joins awaiting their one retry, capped by the bootstrap contacts.
+    /// Separate from Neighbor requests, which determine handshake reply semantics.
+    pending_joins: HashMap<PI, u64>,
+    next_join: u64,
     /// The opaque user peer data we received for other peers
     peer_data: HashMap<PI, PeerData>,
     /// List of peers that are disconnecting, but which we want to keep in the passive set once the connection closes
@@ -418,6 +425,8 @@ where
             stats: Stats::default(),
             pending_neighbor_requests: Default::default(),
             next_neighbor_request: 0,
+            pending_joins: Default::default(),
+            next_join: 0,
             peer_data: Default::default(),
             alive_disconnect_peers: Default::default(),
             refused: Default::default(),
@@ -433,6 +442,14 @@ where
                 Timer::DoMaintenance => self.handle_maintenance_timer(io),
                 Timer::PendingNeighborRequest(peer, id) => {
                     self.handle_pending_neighbor_timer(peer, id, io)
+                }
+                Timer::RetryJoin(peer, id) => {
+                    if self.pending_joins.get(&peer) == Some(&id) {
+                        self.pending_joins.remove(&peer);
+                        if !self.active_view.contains(&peer) {
+                            self.join(peer, io);
+                        }
+                    }
                 }
             },
             InEvent::PeerDisconnected(peer) => self.handle_connection_closed(peer, io),
@@ -530,9 +547,22 @@ where
         self.bootstrap_peers.retain(|known| *known != peer);
         self.bootstrap_peers.push_back(peer);
         if self.bootstrap_peers.len() > MAX_BOOTSTRAP_PEERS {
-            self.bootstrap_peers.pop_front();
+            if let Some(evicted) = self.bootstrap_peers.pop_front() {
+                self.pending_joins.remove(&evicted);
+            }
         }
         self.join(peer, io);
+        // A retirement can lose the Join without reporting a disconnect. Retry
+        // even when other neighbors keep us out of isolated-node maintenance.
+        if peer != self.me && !self.active_view.contains(&peer) {
+            let id = self.next_join;
+            self.next_join += 1;
+            self.pending_joins.insert(peer, id);
+            io.push(OutEvent::ScheduleTimer(
+                self.config.neighbor_request_timeout,
+                Timer::RetryJoin(peer, id),
+            ));
+        }
     }
 
     /// Sends a join to `peer`.
@@ -545,6 +575,7 @@ where
 
     /// We received a disconnect message.
     fn on_disconnect(&mut self, peer: PI, details: Disconnect, io: &mut impl IO<PI>) {
+        self.pending_joins.remove(&peer);
         if !details.alive {
             // The peer left the topic, a rejoin through it would fail.
             self.recent_neighbors.retain(|known| *known != peer);
@@ -593,6 +624,7 @@ where
     }
 
     fn handle_quit(&mut self, io: &mut impl IO<PI>) {
+        self.pending_joins.clear();
         for peer in self.active_view.clone().into_iter() {
             self.active_view.remove(&peer);
             self.send_disconnect(peer, false, io);
@@ -622,6 +654,7 @@ where
     }
 
     fn on_join(&mut self, peer: PI, data: Option<PeerData>, io: &mut impl IO<PI>) {
+        self.pending_joins.remove(&peer);
         // Drop a neighbor request we may still have pending to this peer. The peer
         // is joining, usually after a restart, so it has no memory of a request we
         // sent it before and will not answer it. While that request is pending,
@@ -701,6 +734,7 @@ where
     }
 
     fn on_neighbor(&mut self, from: PI, details: Neighbor, io: &mut impl IO<PI>) {
+        self.pending_joins.remove(&from);
         // A `Neighbor` is a reply if we have a request out to the peer, and a
         // request otherwise. See `send_neighbor` for the full picture.
         let is_reply = self.pending_neighbor_requests.remove(&from).is_some();
@@ -1397,6 +1431,133 @@ mod tests {
             joiner.active_view.contains(&0),
             "the late Disconnect left the views apart"
         );
+    }
+
+    fn join_retry_timer(io: &Io) -> Timer<u32> {
+        io.iter()
+            .find_map(|event| match event {
+                TopicOut::ScheduleTimer(_, topic::Timer::Swarm(timer @ Timer::RetryJoin(..))) => {
+                    Some(timer.clone())
+                }
+                _ => None,
+            })
+            .expect("join scheduled its retry")
+    }
+
+    #[test]
+    fn join_retry_recovers_a_lost_join_with_existing_neighbors_once() {
+        let mut joiner = new_state();
+        joiner.active_view.insert(2);
+        let mut contact = State::new(1, None, Config::default(), StdRng::seed_from_u64(2));
+        let mut io = Io::new();
+        joiner.handle(InEvent::RequestJoin(1), &mut io);
+        let timer = join_retry_timer(&io);
+        assert!(io.iter().any(|event| matches!(event,
+            TopicOut::ScheduleTimer(delay, topic::Timer::Swarm(Timer::RetryJoin(..)))
+                if *delay == joiner.config.neighbor_request_timeout
+        )));
+        io.clear(); // Lose the first Join without reporting a transport failure.
+        joiner.handle(InEvent::TimerExpired(timer.clone()), &mut io);
+        assert_eq!(joined(&io), vec![1]);
+        assert!(!io
+            .iter()
+            .any(|event| matches!(event, TopicOut::ScheduleTimer(..))));
+        ferry(&mut joiner, &mut contact, &mut io);
+        assert!(joiner.active_view.contains(&1));
+        assert!(joiner.active_view.contains(&2));
+        assert!(contact.active_view.contains(&0));
+        joiner.handle(InEvent::TimerExpired(timer), &mut io);
+        assert!(joined(&io).is_empty());
+        assert!(joiner.pending_joins.is_empty());
+    }
+
+    #[test]
+    fn join_retry_is_cancelled_by_a_successful_handshake() {
+        let mut joiner = new_state();
+        let mut contact = State::new(1, None, Config::default(), StdRng::seed_from_u64(2));
+        let mut io = Io::new();
+        joiner.handle(InEvent::RequestJoin(1), &mut io);
+        let timer = join_retry_timer(&io);
+        assert_eq!(ferry(&mut joiner, &mut contact, &mut io), 3);
+        assert!(joiner.pending_joins.is_empty());
+        joiner.handle(InEvent::TimerExpired(timer), &mut io);
+        assert!(joined(&io).is_empty());
+    }
+
+    #[test]
+    fn join_retry_is_cancelled_by_disconnect_crossed_join_or_quit() {
+        for response in [
+            Some(Message::Disconnect(Disconnect {
+                alive: false,
+                _respond: false,
+            })),
+            Some(Message::Disconnect(Disconnect {
+                alive: true,
+                _respond: false,
+            })),
+            Some(Message::Join(None)),
+            None,
+        ] {
+            let mut state = new_state();
+            let mut io = Io::new();
+            state.handle(InEvent::RequestJoin(1), &mut io);
+            let timer = join_retry_timer(&io);
+            match response {
+                Some(message) => state.handle(InEvent::RecvMessage(1, message), &mut io),
+                None => state.handle(InEvent::Quit, &mut io),
+            }
+            assert!(state.pending_joins.is_empty());
+            io.clear();
+            state.handle(InEvent::TimerExpired(timer), &mut io);
+            assert!(joined(&io).is_empty());
+        }
+    }
+
+    #[test]
+    fn join_retry_ignores_superseded_and_evicted_requests() {
+        let mut state = new_state();
+        let mut io = Io::new();
+        state.handle(InEvent::RequestJoin(1), &mut io);
+        let old = join_retry_timer(&io);
+        io.clear();
+        state.handle(InEvent::RequestJoin(1), &mut io);
+        let current = join_retry_timer(&io);
+        io.clear();
+        state.handle(InEvent::TimerExpired(old), &mut io);
+        assert!(joined(&io).is_empty());
+        state.handle(InEvent::TimerExpired(current.clone()), &mut io);
+        assert_eq!(joined(&io), vec![1]);
+
+        let mut evicted_io = Io::new();
+        state.handle(InEvent::RequestJoin(1), &mut evicted_io);
+        let evicted = join_retry_timer(&evicted_io);
+        for peer in 2..=MAX_BOOTSTRAP_PEERS as u32 + 1 {
+            state.handle(InEvent::RequestJoin(peer), &mut Io::new());
+        }
+        assert_eq!(state.pending_joins.len(), MAX_BOOTSTRAP_PEERS);
+        assert!(!state.pending_joins.contains_key(&1));
+        io.clear();
+        state.handle(InEvent::TimerExpired(evicted), &mut io);
+        assert!(joined(&io).is_empty());
+    }
+
+    #[test]
+    fn join_retry_settles_when_the_first_reply_is_delayed() {
+        let mut joiner = new_state();
+        let mut contact = State::new(1, None, Config::default(), StdRng::seed_from_u64(2));
+        let mut io = Io::new();
+        joiner.handle(InEvent::RequestJoin(1), &mut io);
+        let timer = join_retry_timer(&io);
+        io.clear();
+        contact.handle(InEvent::RecvMessage(0, Message::Join(None)), &mut io);
+        let delayed: Vec<_> = io.drain(..).collect();
+        joiner.handle(InEvent::TimerExpired(timer), &mut io);
+        ferry(&mut joiner, &mut contact, &mut io);
+        io.extend(delayed);
+        ferry(&mut joiner, &mut contact, &mut io);
+        assert!(joiner.active_view.contains(&1));
+        assert!(contact.active_view.contains(&0));
+        assert!(joiner.pending_joins.is_empty());
     }
 
     /// A join handshake ends with both sides neighbors after three messages.
