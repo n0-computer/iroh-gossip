@@ -656,6 +656,7 @@ where
     }
 
     fn on_join(&mut self, peer: PI, data: Option<PeerData>, io: &mut impl IO<PI>) {
+        self.pending_joins.remove(&peer);
         // Drop a neighbor request we may still have pending to this peer. The peer
         // is joining, usually after a restart, so it has no memory of a request we
         // sent it before and will not answer it. While that request is pending,
@@ -735,6 +736,7 @@ where
     }
 
     fn on_neighbor(&mut self, from: PI, details: Neighbor, io: &mut impl IO<PI>) {
+        self.pending_joins.remove(&from);
         // A `Neighbor` is a reply if we have a request out to the peer, and a
         // request otherwise. See `send_neighbor` for the full picture.
         let is_reply = self.pending_neighbor_requests.remove(&from).is_some();
@@ -1448,14 +1450,13 @@ mod tests {
     fn join_retry_recovers_a_lost_join_with_existing_neighbors_once() {
         let mut joiner = new_state();
         joiner.active_view.insert(2);
-        joiner.config.neighbor_request_timeout = Duration::from_millis(1);
         let mut contact = State::new(1, None, Config::default(), StdRng::seed_from_u64(2));
         let mut io = Io::new();
         joiner.handle(InEvent::RequestJoin(1), &mut io);
         let timer = join_retry_timer(&io);
         assert!(io.iter().any(|event| matches!(event,
             TopicOut::ScheduleTimer(delay, topic::Timer::Swarm(Timer::RetryJoin(..)))
-                if *delay == Duration::from_secs(10)
+                if *delay == JOIN_RETRY_DELAY
         )));
         io.clear(); // Lose the first Join without reporting a transport failure.
         joiner.handle(InEvent::TimerExpired(timer.clone()), &mut io);
@@ -1473,13 +1474,17 @@ mod tests {
     }
 
     #[test]
-    fn join_retry_is_cancelled_by_a_successful_handshake() {
+    fn join_retry_stays_cancelled_after_a_successful_handshake_and_eviction() {
         let mut joiner = new_state();
         let mut contact = State::new(1, None, Config::default(), StdRng::seed_from_u64(2));
         let mut io = Io::new();
         joiner.handle(InEvent::RequestJoin(1), &mut io);
         let timer = join_retry_timer(&io);
         assert_eq!(ferry(&mut joiner, &mut contact, &mut io), 3);
+        assert!(joiner.pending_joins.is_empty());
+        // A later local eviction must not revive a Join that already worked.
+        joiner.remove_active(&1, RemovalReason::Random, &mut io);
+        io.clear();
         joiner.handle(InEvent::TimerExpired(timer), &mut io);
         assert!(joined(&io).is_empty());
     }
@@ -1502,6 +1507,9 @@ mod tests {
             state.handle(InEvent::RequestJoin(1), &mut io);
             let timer = join_retry_timer(&io);
             state.handle(InEvent::RecvMessage(1, response), &mut io);
+            assert!(state.pending_joins.is_empty());
+            // This also covers a crossed Join followed by local eviction.
+            state.remove_active(&1, RemovalReason::Random, &mut io);
             io.clear();
             state.handle(InEvent::TimerExpired(timer), &mut io);
             assert!(joined(&io).is_empty());
