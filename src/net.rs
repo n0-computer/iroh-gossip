@@ -54,29 +54,30 @@ const IN_EVENT_CAP: usize = 1024;
 /// Channel capacity for broadcast subscriber event queue (one per topic)
 const TOPIC_EVENT_CAP: usize = 256;
 
-/// How long a connection stays open once neither side has a stream on it.
+/// How long a dialer keeps opening streams on a connection that has none.
 ///
 /// A topic that uses the peer keeps a stream open. Only the side that accepted
-/// the connection closes it. That side opens its own streams in the same task
-/// as the close, so the close never cuts one of them.
+/// a connection closes it, after the grace plus [`RETIRE_MARGIN`]. Its streams
+/// and its close share a task, so the close never cuts one. After the grace,
+/// the dialer dials anew instead of opening a stream that could arrive after
+/// the close.
 ///
-/// The side that dialed the connection must not open a stream that reaches the
-/// other side after the close. So the dialer opens no new stream on a
-/// connection that has had no stream for half the grace. It dials a new
-/// connection instead, and the old connection retires on its own.
-///
-/// The side that accepted closes, because it always knows whether the dialer
-/// handles a close. A node dials only when it has something to send, and its
-/// stream carries the flag. The dialer learns the flag only from a stream of
-/// the peer. Until then, it keeps using the connection however long it was
-/// idle. A node up to 0.101 never closes a connection, so new connections to
-/// it would pile up. A new peer that has never sent us a stream can thus still
-/// close a connection under our stream.
+/// The side that accepted closes, as it always knows whether the dialer
+/// handles a close. A node dials only to send, and its stream carries the flag.
+/// A dialer that does not know the flag of the peer reuses the connection
+/// however long it was idle. A node up to 0.101 never closes it. So a new peer
+/// that never sent us a stream can still close a connection under ours.
 #[cfg(not(test))]
 const RETIRE_GRACE: Duration = Duration::from_secs(10);
 /// The e2e tests build without `cfg(test)`, so they see 10 s.
 #[cfg(test)]
 const RETIRE_GRACE: Duration = Duration::from_secs(5);
+
+/// How long the accepting side waits beyond [`RETIRE_GRACE`], at least.
+///
+/// It waits four round trips if that is longer. They cover a stream that the
+/// dialer opens at the end of the grace, also with a resend.
+const RETIRE_MARGIN: Duration = Duration::from_secs(1);
 
 /// How long we keep the state of an idle peer.
 ///
@@ -1025,12 +1026,12 @@ impl PeerState {
 
     /// Opens the queue, which keeps its messages and its byte limit.
     ///
-    /// A writer on a connection that we dialed, and that has had no stream for
-    /// half of [`RETIRE_GRACE`], gives way to a new dial, see there.
+    /// A writer on a dialed connection without a stream for [`RETIRE_GRACE`]
+    /// gives way to a new dial.
     fn open_queue(&mut self) -> &SendQueue {
         self.forget_at = None;
         let idle = self.queue.writer_idle_since();
-        if idle.is_some_and(|since| since.elapsed() >= RETIRE_GRACE / 2) {
+        if idle.is_some_and(|since| since.elapsed() >= RETIRE_GRACE) {
             self.queue.revoke();
             self.writer = None;
         }
@@ -1074,10 +1075,9 @@ impl PeerState {
     /// over. Connections that only receive close too, so that the peer learns
     /// of the abort on the connection that it writes on.
     ///
-    /// In a rare case, a retirement can also lose a message, see [`RETIRE_GRACE`].
-    /// That does not cause this problem. The lost message is the last one on its
-    /// connection, so the peer does not act on later messages without it. It
-    /// also starts a new exchange with the peer, and that exchange has its own
+    /// A retirement can also lose a message in a rare case, see [`RETIRE_GRACE`].
+    /// That message is the last one on its connection, so the peer does not act
+    /// on later messages without it. It starts a new exchange, which has its own
     /// timeout or retry.
     fn abort(&mut self, now: Instant) {
         self.aborted.cancel();
@@ -1236,8 +1236,12 @@ fn task_output<T>(res: Result<T, task::JoinError>) -> Option<T> {
     }
 }
 
-/// Returns once the connection had no stream in either direction for [`RETIRE_GRACE`].
-async fn retire(mut ours: watch::Receiver<bool>, mut theirs: watch::Receiver<bool>) {
+/// Returns once the connection had no stream in either direction for `wait()`.
+async fn retire(
+    mut ours: watch::Receiver<bool>,
+    mut theirs: watch::Receiver<bool>,
+    wait: impl Fn() -> Duration,
+) {
     loop {
         let ours_open = *ours.borrow_and_update();
         let theirs_open = *theirs.borrow_and_update();
@@ -1247,14 +1251,14 @@ async fn retire(mut ours: watch::Receiver<bool>, mut theirs: watch::Receiver<boo
             // A dropped sender would make `changed` return at once.
             res = ours.changed() => if res.is_err() { std::future::pending().await },
             res = theirs.changed() => if res.is_err() { std::future::pending().await },
-            () = time::sleep(RETIRE_GRACE), if !ours_open && !theirs_open => return,
+            () = time::sleep(wait()), if !ours_open && !theirs_open => return,
         }
     }
 }
 
 /// Sets `idle_since` to when the connection last had a stream, or to `None` while it has one.
 ///
-/// The dialer of a connection runs this in place of [`retire`]. It never returns.
+/// The dialer runs this instead of [`retire`].
 async fn report_idle(
     mut ours: watch::Receiver<bool>,
     mut theirs: watch::Receiver<bool>,
@@ -1299,7 +1303,7 @@ async fn connection_loop(
     let their_streams = watch::Sender::new(false);
 
     let queue_closed = queue_lease.as_ref().map(QueueLease::closing);
-    // The actor reads it to decide whether to reuse a connection that we dialed.
+    // Tells the actor whether to reuse a connection that we dialed.
     let idle_since = match conn.side() {
         Side::Client => queue_lease.as_ref().map(QueueLease::idle_since),
         Side::Server => None,
@@ -1339,7 +1343,11 @@ async fn connection_loop(
         }
         let (ours, theirs) = (our_streams.subscribe(), their_streams.subscribe());
         match (conn.side(), idle_since) {
-            (Side::Server, _) => retire(ours, theirs).await,
+            (Side::Server, _) => {
+                let rtt = || conn.paths().iter().map(|path| path.rtt()).max();
+                let margin = || (rtt().unwrap_or_default() * 4).max(RETIRE_MARGIN);
+                retire(ours, theirs, || RETIRE_GRACE + margin()).await
+            }
             (Side::Client, Some(idle_since)) => report_idle(ours, theirs, idle_since).await,
             // A dial that only receives has nothing to report.
             (Side::Client, None) => std::future::pending().await,
@@ -2302,7 +2310,9 @@ pub(crate) mod tests {
         let ours = unset_flag();
         let theirs = unset_flag();
         let start = Instant::now();
-        let mut retire = std::pin::pin!(retire(ours.subscribe(), theirs.subscribe()));
+        let mut retire = std::pin::pin!(retire(ours.subscribe(), theirs.subscribe(), || {
+            RETIRE_GRACE
+        }));
         for (at, step) in steps {
             let at = start + Duration::from_secs(*at);
             tokio::select! {
@@ -2371,7 +2381,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// A writer on a dialed connection that was idle for half the grace gives way to a new dial.
+    /// A writer on a dialed connection that was idle for the grace gives way to a new dial.
     #[test]
     fn idle_dial_gives_way_to_a_new_dial() {
         let topic = [42; 32].into();
@@ -2385,7 +2395,7 @@ pub(crate) mod tests {
         peer.close_queue();
         lease
             .idle_since()
-            .send_replace(Some(Instant::now() - RETIRE_GRACE / 2));
+            .send_replace(Some(Instant::now() - RETIRE_GRACE));
         assert!(matches!(peer.send(join_message(topic, 0)), Pushed::Queued));
         assert!(
             lease.revoked().is_cancelled(),

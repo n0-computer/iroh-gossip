@@ -245,7 +245,7 @@ pub(super) struct SendQueue {
     reader: SharedReader,
     /// Revokes the lease of the connection that writes the queue now.
     revoke: CancellationToken,
-    /// Since when the connection that writes the queue now has had no stream, see [`QueueLease::idle_since`].
+    /// See [`Self::writer_idle_since`].
     writer_idle_since: watch::Receiver<Option<Instant>>,
 }
 
@@ -345,10 +345,10 @@ impl SendQueue {
         self.writer_idle_since = watch::channel(None).1;
     }
 
-    /// Returns since when the connection that writes the queue has had no stream.
+    /// Returns since when the connection of the writer has had no stream.
     ///
-    /// It is `None` while that connection has a stream, and for a connection that
-    /// we accepted. It is also `None` until we know that the peer handles a close.
+    /// It is `None` while it has a stream, for an accepted connection, and while
+    /// we do not know whether the peer handles a close.
     pub(super) fn writer_idle_since(&self) -> Option<Instant> {
         *self.writer_idle_since.borrow()
     }
@@ -392,9 +392,7 @@ impl QueueLease {
         self.closing.clone()
     }
 
-    /// Returns the sender through which the connection reports since when it has had no stream.
-    ///
-    /// Only a connection that we dialed reports it, see [`RETIRE_GRACE`](super::RETIRE_GRACE).
+    /// Returns the sender for [`SendQueue::writer_idle_since`], which only a dialed connection uses.
     pub(super) fn idle_since(&self) -> watch::Sender<Option<Instant>> {
         self.idle_since.clone()
     }
