@@ -106,6 +106,11 @@ type ProtoMessage = proto::Message<PublicKey>;
 /// gossip actor through [Self::handle_connection].
 ///
 /// The gossip actor will, however, initiate new connections to other peers by itself.
+/// It closes a connection ten seconds after neither side has a stream on it. This includes
+/// connections that you passed to [`Self::handle_connection`], so do not use them for other traffic.
+///
+/// The actor stops when you drop the last clone of [`Gossip`]. Keep a clone for as long as you
+/// need the topics. Call [`Self::shutdown`] to leave the topics cleanly first.
 #[derive(Debug, Clone)]
 pub struct Gossip {
     pub(crate) inner: Arc<Inner>,
@@ -191,12 +196,20 @@ impl Builder {
     }
 
     /// Set the membership configuration.
+    ///
+    /// The defaults suit most apps. Use the same values on every node of a swarm.
+    /// We have not tested how a swarm behaves with different values, so test your setup
+    /// first if you mix them.
     pub fn membership_config(mut self, config: HyparviewConfig) -> Self {
         self.config.membership = config;
         self
     }
 
     /// Set the broadcast configuration.
+    ///
+    /// The defaults suit most apps. Use the same values on every node of a swarm.
+    /// We have not tested how a swarm behaves with different values, so test your setup
+    /// first if you mix them.
     pub fn broadcast_config(mut self, config: PlumtreeConfig) -> Self {
         self.config.broadcast = config;
         self
@@ -221,6 +234,9 @@ impl Builder {
     }
 
     /// Spawn a gossip actor and get a handle for it
+    ///
+    /// This has to run inside a tokio runtime. The actor stops when you drop the last clone of
+    /// the returned [`Gossip`].
     pub fn spawn(self, endpoint: Endpoint) -> Gossip {
         let metrics = Arc::new(Metrics::default());
         let address_lookup = GossipAddressLookup::default();
@@ -336,6 +352,11 @@ impl Gossip {
     }
 
     /// Get the maximum message size configured for this gossip actor.
+    ///
+    /// This is the size of the encoded message. For the largest content that you can broadcast,
+    /// see [`GossipSender::max_content_size`].
+    ///
+    /// [`GossipSender::max_content_size`]: crate::api::GossipSender::max_content_size
     pub fn max_message_size(&self) -> usize {
         self.inner.max_message_size
     }
@@ -344,6 +365,9 @@ impl Gossip {
     ///
     /// The connection should be an accepted, server-side connection.
     /// Make sure to check the ALPN protocol yourself before passing the connection.
+    ///
+    /// Gossip owns the connection from now on. It closes the connection when neither side has
+    /// had a stream on it for ten seconds. Returns an error if the gossip actor stopped.
     pub async fn handle_connection(&self, conn: Connection) -> Result<(), Error> {
         self.inner
             .local_tx
