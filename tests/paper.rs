@@ -38,7 +38,7 @@
 //! size, for example `PAPER_PEERS=10000` for the papers' own.
 
 use std::{
-    collections::{hash_map::Entry, BTreeMap, BTreeSet, HashMap, VecDeque},
+    collections::{hash_map::Entry, BTreeMap, BTreeSet, VecDeque},
     time::Duration,
 };
 
@@ -47,6 +47,7 @@ use iroh_gossip::proto::{
     Config, TopicId,
 };
 use rand::seq::IteratorRandom;
+use rustc_hash::FxHashMap;
 
 /// The topic [`Simulator`] runs all its peers on.
 const TOPIC: TopicId = TopicId::from_bytes([0u8; 32]);
@@ -1431,10 +1432,10 @@ fn active_view_sizes(sim: &Simulator) -> Vec<usize> {
 /// message along its fastest path. This finds those paths by link latency, and
 /// among equally fast ones takes the one with the fewest hops. Each peer maps to
 /// its hops and the peer it got the first copy from.
-fn flooding_paths(sim: &Simulator, sender: u64) -> HashMap<u64, (usize, Option<u64>)> {
+fn flooding_paths(sim: &Simulator, sender: u64) -> FxHashMap<u64, (usize, Option<u64>)> {
     let adjacency = adjacency(sim);
-    let mut best: HashMap<u64, (Duration, usize, Option<u64>)> =
-        HashMap::from([(sender, (Duration::ZERO, 0, None))]);
+    let mut best: FxHashMap<u64, (Duration, usize, Option<u64>)> =
+        FxHashMap::from_iter([(sender, (Duration::ZERO, 0, None))]);
     let mut queue = BTreeSet::from([(Duration::ZERO, 0usize, sender)]);
     while let Some((time, hops, peer)) = queue.pop_first() {
         if best.get(&peer).map(|(t, h, _)| (*t, *h)) != Some((time, hops)) {
@@ -1592,7 +1593,7 @@ fn average_shortest_path(sim: &Simulator) -> f64 {
     let mut total = 0usize;
     let mut pairs = 0usize;
     for &start in adjacency.keys() {
-        let mut distance = HashMap::from([(start, 0usize)]);
+        let mut distance = FxHashMap::from_iter([(start, 0usize)]);
         let mut queue = VecDeque::from([start]);
         while let Some(peer) = queue.pop_front() {
             let hops = distance[&peer];

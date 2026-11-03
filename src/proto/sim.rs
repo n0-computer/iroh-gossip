@@ -1,7 +1,7 @@
 //! Simulation framework for testing the protocol implementation
 
 use std::{
-    collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque},
     fmt,
     str::FromStr,
 };
@@ -9,6 +9,7 @@ use std::{
 use bytes::Bytes;
 use n0_future::time::{Duration, Instant};
 use rand::{rngs::ChaCha12Rng, seq::IteratorRandom, Rng, RngExt, SeedableRng};
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, debug_span, info, info_span, trace, warn};
 
@@ -114,9 +115,9 @@ pub struct Network<PI, R> {
     conns: BTreeSet<ConnId<PI>>,
     /// When each closed connection was closed, to tell messages sent over it
     /// apart from messages that open a new one.
-    closed_at: BTreeMap<ConnId<PI>, Instant>,
+    closed_at: FxHashMap<ConnId<PI>, Instant>,
     events: VecDeque<(PI, TopicId, Event<PI>)>,
-    latencies: HashMap<ConnId<PI>, Duration>,
+    latencies: FxHashMap<ConnId<PI>, Duration>,
     rng: R,
     config: NetworkConfig,
     queue: TimedEventQueue<PI>,
@@ -142,7 +143,7 @@ impl<PI, R> Network<PI, R> {
             conns: Default::default(),
             closed_at: Default::default(),
             events: Default::default(),
-            latencies: HashMap::new(),
+            latencies: Default::default(),
             rng,
         }
     }
@@ -619,7 +620,7 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
 
 fn latency_between<PI: PeerIdentity + Ord + PartialOrd, R: Rng>(
     latency_config: &LatencyConfig,
-    latencies: &mut HashMap<ConnId<PI>, Duration>,
+    latencies: &mut FxHashMap<ConnId<PI>, Duration>,
     a: &PI,
     b: &PI,
     rng: &mut R,

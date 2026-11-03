@@ -55,6 +55,7 @@ postcard = { version = "1", default-features = false, features = [
     "experimental-derive",
 ] }
 rand = { version = "0.10.1", features = ["std_rng"] }
+rustc-hash = "2.1"
 serde = { version = "1.0.164", features = ["derive"] }
 
 # net dependencies (optional)
