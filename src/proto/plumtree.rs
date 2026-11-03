@@ -16,6 +16,7 @@ use derive_more::{Add, From, Sub};
 use indexmap::IndexMap;
 use n0_future::time::{Duration, Instant};
 use postcard::experimental::max_size::MaxSize;
+use rustc_hash::FxBuildHasher;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -457,21 +458,25 @@ pub struct State<PI> {
     ///
     /// They go out with [`Timer::AnnounceDropped`], not at once. A graft reply that
     /// the full queue drops again would otherwise loop at the speed of a round trip.
-    dropped: BTreeMap<PI, IndexMap<MessageId, Round>>,
+    // Only IDs present in `cache` enter this index, so Fx hashing is sufficient.
+    dropped: BTreeMap<PI, IndexMap<MessageId, Round, FxBuildHasher>>,
 
     /// Messages for which a [`MessageId`] has been seen via a [`Message::IHave`] but we have not
     /// yet received the full payload. For each, we store the peers that have claimed to have this
     /// message.
     missing_messages: HashMap<MessageId, VecDeque<(PI, Round)>>,
     /// Messages for which the full payload has been seen.
-    received_messages: TimeBoundCache<MessageId, ()>,
+    // Only locally computed or validated BLAKE3 IDs enter these two caches.
+    // Keep randomized hashing for the unverified IDs in `missing_messages`,
+    // `grafted`, and `graft_timer_scheduled`.
+    received_messages: TimeBoundCache<MessageId, (), FxBuildHasher>,
     /// The grafts we sent for a message, see [`Self::on_late_graft_reply`].
     ///
     /// Entries expire `message_cache_retention` after the first graft. A later
     /// reply is a plain duplicate.
     grafted: TimeBoundCache<MessageId, Grafts<PI>>,
     /// Payloads of received messages.
-    cache: TimeBoundCache<MessageId, Gossip>,
+    cache: TimeBoundCache<MessageId, Gossip, FxBuildHasher>,
 
     /// Message ids for which a [`Timer::SendGraft`] has been scheduled.
     graft_timer_scheduled: HashSet<MessageId>,
@@ -500,12 +505,12 @@ impl<PI: PeerIdentity> State<PI> {
             dropped: Default::default(),
             config,
             missing_messages: Default::default(),
-            received_messages: Default::default(),
+            received_messages: TimeBoundCache::with_hasher(FxBuildHasher),
             grafted: Default::default(),
             graft_timer_scheduled: Default::default(),
             dispatch_timer_scheduled: false,
             announce_dropped_scheduled: false,
-            cache: Default::default(),
+            cache: TimeBoundCache::with_hasher(FxBuildHasher),
             init: false,
             stats: Default::default(),
             max_message_size,

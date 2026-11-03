@@ -1628,6 +1628,7 @@ dependencies = [
  "postcard",
  "rand",
  "rayon",
+ "rustc-hash",
  "serde",
  "serde-byte-array",
  "serde_json",

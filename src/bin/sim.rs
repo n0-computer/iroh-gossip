@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use comfy_table::{presets::NOTHING, Cell, CellAlignment, Table};
@@ -11,6 +8,7 @@ use iroh_gossip::proto::sim::{
 };
 use n0_error::{Result, StackResultExt, StdResultExt};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use tracing::{error_span, info, warn};
 
@@ -193,7 +191,7 @@ fn run_and_save_simulation(
 struct SimulationResults {
     scenario: ScenarioDescription,
     /// Maps seeds to results
-    results: HashMap<u64, RoundStatsAvg>,
+    results: FxHashMap<u64, RoundStatsAvg>,
     average: Option<RoundStatsAvg>,
 }
 
@@ -207,7 +205,7 @@ impl SimulationResults {
 }
 
 fn run_simulation(seeds: &[u64], scenario: ScenarioDescription) -> SimulationResults {
-    let mut results = HashMap::new();
+    let mut results = FxHashMap::default();
     let network_config = scenario.config.clone().unwrap_or_default();
     for &seed in seeds {
         let span = error_span!("sim", name=%scenario.label(), %seed);

@@ -1,8 +1,9 @@
 //! Utilities used in the protocol implementation
 
 use std::{
-    collections::{hash_map, BinaryHeap, HashMap},
-    hash::Hash,
+    collections::{hash_map, hash_map::RandomState, BinaryHeap, HashMap},
+    fmt,
+    hash::{BuildHasher, Hash},
 };
 
 use n0_future::time::Instant;
@@ -313,22 +314,40 @@ impl<T> Ord for TimerMapEntry<T> {
 }
 
 /// A hash map where entries expire after a time
-#[derive(Debug)]
-pub struct TimeBoundCache<K, V> {
-    map: HashMap<K, (Instant, V)>,
+///
+/// Uses randomized hashing by default. [`Self::with_hasher`] accepts a different
+/// hash builder for keys whose distribution is already guaranteed by the caller.
+pub struct TimeBoundCache<K, V, S = RandomState> {
+    map: HashMap<K, (Instant, V), S>,
     expiry: TimerMap<K>,
+}
+
+impl<K: fmt::Debug, V: fmt::Debug, S> fmt::Debug for TimeBoundCache<K, V, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TimeBoundCache")
+            .field("map", &self.map)
+            .field("expiry", &self.expiry)
+            .finish()
+    }
 }
 
 impl<K, V> Default for TimeBoundCache<K, V> {
     fn default() -> Self {
+        Self::with_hasher(RandomState::new())
+    }
+}
+
+impl<K, V, S> TimeBoundCache<K, V, S> {
+    /// Create an empty cache using the supplied hash builder.
+    pub fn with_hasher(hash_builder: S) -> Self {
         Self {
-            map: Default::default(),
+            map: HashMap::with_hasher(hash_builder),
             expiry: Default::default(),
         }
     }
 }
 
-impl<K: Hash + Eq + Clone, V> TimeBoundCache<K, V> {
+impl<K: Hash + Eq + Clone, V, S: BuildHasher> TimeBoundCache<K, V, S> {
     /// Insert an item into the cache, marked with an expiration time.
     pub fn insert(&mut self, key: K, value: V, expires: Instant) {
         self.map.insert(key.clone(), (expires, value));
@@ -511,8 +530,11 @@ mod test {
 
     #[test]
     fn time_bound_cache() {
-        let mut cache = TimeBoundCache::default();
+        check_time_bound_cache(TimeBoundCache::default());
+        check_time_bound_cache(TimeBoundCache::with_hasher(rustc_hash::FxBuildHasher));
+    }
 
+    fn check_time_bound_cache(mut cache: TimeBoundCache<i32, i32, impl std::hash::BuildHasher>) {
         let t0 = Instant::now();
         let t1 = t0 + Duration::from_secs(1);
         let t2 = t0 + Duration::from_secs(2);
