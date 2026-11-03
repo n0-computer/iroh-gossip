@@ -117,7 +117,6 @@ pub struct Network<PI, R> {
     /// apart from messages that open a new one.
     closed_at: FxHashMap<ConnId<PI>, Instant>,
     events: VecDeque<(PI, TopicId, Event<PI>)>,
-    // Lookup-only maps over simulator-controlled keys; iteration order is unused.
     latencies: FxHashMap<ConnId<PI>, Duration>,
     rng: R,
     config: NetworkConfig,

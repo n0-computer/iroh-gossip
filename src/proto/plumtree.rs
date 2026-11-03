@@ -458,7 +458,6 @@ pub struct State<PI> {
     ///
     /// They go out with [`Timer::AnnounceDropped`], not at once. A graft reply that
     /// the full queue drops again would otherwise loop at the speed of a round trip.
-    // Only IDs present in `cache` enter this index, so Fx hashing is sufficient.
     dropped: BTreeMap<PI, IndexMap<MessageId, Round, FxBuildHasher>>,
 
     /// Messages for which a [`MessageId`] has been seen via a [`Message::IHave`] but we have not
@@ -466,9 +465,6 @@ pub struct State<PI> {
     /// message.
     missing_messages: HashMap<MessageId, VecDeque<(PI, Round)>>,
     /// Messages for which the full payload has been seen.
-    // Only locally computed or validated BLAKE3 IDs enter these two caches.
-    // Keep randomized hashing for the unverified IDs in `missing_messages`,
-    // `grafted`, and `graft_timer_scheduled`.
     received_messages: TimeBoundCache<MessageId, (), FxBuildHasher>,
     /// The grafts we sent for a message, see [`Self::on_late_graft_reply`].
     ///
