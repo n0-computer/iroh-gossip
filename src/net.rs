@@ -434,6 +434,10 @@ struct Actor {
     send_queue_size: usize,
     /// Events that the handling of an event caused, handled after it.
     follow_ups: VecDeque<InEvent>,
+    /// Scratch buffer for use in [`Self::handle_proto_event`].
+    scratch_touched_peers: Vec<EndpointId>,
+    /// Scratch buffer for use in [`Self::handle_proto_event`].
+    scratch_aborted_peers: Vec<EndpointId>,
 }
 
 impl Actor {
@@ -484,6 +488,8 @@ impl Actor {
             address_lookup,
             send_queue_size,
             follow_ups: Default::default(),
+            scratch_touched_peers: Vec::new(),
+            scratch_aborted_peers: Vec::new(),
         };
 
         (actor, rpc_tx, local_tx)
@@ -863,10 +869,12 @@ impl Actor {
             }
         }
         // The peers whose use by a topic may change in this batch.
-        let mut touched = Vec::new();
+        let touched = &mut self.scratch_touched_peers;
+        touched.clear();
         // Peers that overflowed in this batch. The follow-up disconnect drops what
         // we would queue for them, so we neither reopen their queue nor dial them.
-        let mut aborted = Vec::new();
+        let aborted = &mut self.scratch_aborted_peers;
+        aborted.clear();
         if let InEvent::RecvMessage(peer, _) | InEvent::PeerDisconnected(peer) = &event {
             touched.push(*peer);
         }
@@ -960,7 +968,7 @@ impl Actor {
                 },
             }
         }
-        for peer in touched {
+        for peer in touched.drain(..) {
             if let Some(state) = self.peers.get_mut(&peer) {
                 if !self.state.uses_peer(&peer) {
                     state.close_queue();
@@ -2703,7 +2711,7 @@ pub(crate) mod tests {
             .await
             .std_context("old node reads frame")?
             .expect("a frame");
-        assert_eq!(&frame[..], &encoded_join[..], "the frame after the header");
+        assert_eq!(frame, encoded_join.as_slice(), "the frame after the header");
 
         // An old node writes, we read.
         let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
@@ -2730,8 +2738,8 @@ pub(crate) mod tests {
             .std_context("read frame")?
             .expect("a frame");
         assert_eq!(
-            &frame[..],
-            &encoded_join[..],
+            frame,
+            encoded_join.as_slice(),
             "the frame after the old header"
         );
         Ok(())
