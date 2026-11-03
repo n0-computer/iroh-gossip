@@ -2,7 +2,6 @@
 
 use std::{
     collections::{hash_map, hash_map::RandomState, BinaryHeap, HashMap},
-    fmt,
     hash::{BuildHasher, Hash},
 };
 
@@ -317,18 +316,10 @@ impl<T> Ord for TimerMapEntry<T> {
 ///
 /// Uses randomized hashing by default. [`Self::with_hasher`] accepts a different
 /// hash builder for keys whose distribution is already guaranteed by the caller.
+#[derive(derive_more::Debug)]
 pub struct TimeBoundCache<K, V, S = RandomState> {
     map: HashMap<K, (Instant, V), S>,
     expiry: TimerMap<K>,
-}
-
-impl<K: fmt::Debug, V: fmt::Debug, S> fmt::Debug for TimeBoundCache<K, V, S> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TimeBoundCache")
-            .field("map", &self.map)
-            .field("expiry", &self.expiry)
-            .finish()
-    }
 }
 
 impl<K, V> Default for TimeBoundCache<K, V> {
