@@ -536,7 +536,7 @@
 <a href=#536 id=536 data-nosnippet>536</a><span class="doccomment">/// Command for a gossip topic.
 <a href=#537 id=537 data-nosnippet>537</a></span><span class="attr">#[derive(Serialize, Deserialize, derive_more::Debug, Clone)]
 <a href=#538 id=538 data-nosnippet>538</a>#[non_exhaustive]
-<a href=#539 id=539 data-nosnippet>539</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">enum </span>Command {
+<a href=#539 id=539 data-nosnippet>539</a></span><span class="kw">pub enum </span>Command {
 <a href=#540 id=540 data-nosnippet>540</a>    <span class="doccomment">/// Broadcasts a message to all endpoints in the swarm.
 <a href=#541 id=541 data-nosnippet>541</a>    </span>Broadcast(<span class="attr">#[debug(<span class="string">"Bytes({})"</span>, _0.len())] </span>Bytes),
 <a href=#542 id=542 data-nosnippet>542</a>    <span class="doccomment">/// Broadcasts a message to all direct neighbors.
@@ -547,200 +547,199 @@
 <a href=#547 id=547 data-nosnippet>547</a>
 <a href=#548 id=548 data-nosnippet>548</a><span class="kw">impl </span>Command {
 <a href=#549 id=549 data-nosnippet>549</a>    <span class="doccomment">/// Returns whether this command publishes a message.
-<a href=#550 id=550 data-nosnippet>550</a>    </span><span class="attr">#[cfg(feature = <span class="string">"net"</span>)]
-<a href=#551 id=551 data-nosnippet>551</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>is_broadcast(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
-<a href=#552 id=552 data-nosnippet>552</a>        <span class="macro">matches!</span>(<span class="self">self</span>, <span class="self">Self</span>::Broadcast(<span class="kw">_</span>) | <span class="self">Self</span>::BroadcastNeighbors(<span class="kw">_</span>))
-<a href=#553 id=553 data-nosnippet>553</a>    }
-<a href=#554 id=554 data-nosnippet>554</a>}
-<a href=#555 id=555 data-nosnippet>555</a>
-<a href=#556 id=556 data-nosnippet>556</a><span class="doccomment">/// Options for joining a gossip topic.
-<a href=#557 id=557 data-nosnippet>557</a></span><span class="attr">#[derive(Serialize, Deserialize, Debug)]
-<a href=#558 id=558 data-nosnippet>558</a></span><span class="kw">pub struct </span>JoinOptions {
-<a href=#559 id=559 data-nosnippet>559</a>    <span class="doccomment">/// The initial bootstrap endpoints.
-<a href=#560 id=560 data-nosnippet>560</a>    </span><span class="kw">pub </span>bootstrap: BTreeSet&lt;EndpointId&gt;,
-<a href=#561 id=561 data-nosnippet>561</a>    <span class="doccomment">/// The number of events that a subscription buffers for a reader that falls behind.
-<a href=#562 id=562 data-nosnippet>562</a>    ///
-<a href=#563 id=563 data-nosnippet>563</a>    /// A slow reader never blocks the gossip actor. When the buffer is full, the node drops
-<a href=#564 id=564 data-nosnippet>564</a>    /// the oldest events and the reader receives a [`Event::Lagged`]. The
-<a href=#565 id=565 data-nosnippet>565</a>    /// subscription stays open.
-<a href=#566 id=566 data-nosnippet>566</a>    ///
-<a href=#567 id=567 data-nosnippet>567</a>    /// After a `Lagged`, the neighbors that [`GossipReceiver::neighbors`] reports can be wrong.
-<a href=#568 id=568 data-nosnippet>568</a>    /// If you need the exact state, subscribe again.
-<a href=#569 id=569 data-nosnippet>569</a>    </span><span class="kw">pub </span>subscription_capacity: usize,
-<a href=#570 id=570 data-nosnippet>570</a>}
-<a href=#571 id=571 data-nosnippet>571</a>
-<a href=#572 id=572 data-nosnippet>572</a><span class="kw">impl </span>JoinOptions {
-<a href=#573 id=573 data-nosnippet>573</a>    <span class="doccomment">/// Creates [`JoinOptions`] with the provided bootstrap endpoints and the default subscription
-<a href=#574 id=574 data-nosnippet>574</a>    /// capacity.
-<a href=#575 id=575 data-nosnippet>575</a>    </span><span class="kw">pub fn </span>with_bootstrap(endpoints: <span class="kw">impl </span>IntoIterator&lt;Item = EndpointId&gt;) -&gt; <span class="self">Self </span>{
-<a href=#576 id=576 data-nosnippet>576</a>        <span class="self">Self </span>{
-<a href=#577 id=577 data-nosnippet>577</a>            bootstrap: endpoints.into_iter().collect(),
-<a href=#578 id=578 data-nosnippet>578</a>            subscription_capacity: TOPIC_EVENTS_DEFAULT_CAP,
-<a href=#579 id=579 data-nosnippet>579</a>        }
-<a href=#580 id=580 data-nosnippet>580</a>    }
-<a href=#581 id=581 data-nosnippet>581</a>}
-<a href=#582 id=582 data-nosnippet>582</a>
-<a href=#583 id=583 data-nosnippet>583</a><span class="attr">#[cfg(test)]
-<a href=#584 id=584 data-nosnippet>584</a></span><span class="kw">mod </span>tests {
-<a href=#585 id=585 data-nosnippet>585</a>    <span class="kw">use </span><span class="kw">crate</span>::api::GossipTopic;
-<a href=#586 id=586 data-nosnippet>586</a>
-<a href=#587 id=587 data-nosnippet>587</a>    <span class="attr">#[cfg(all(feature = <span class="string">"rpc"</span>, feature = <span class="string">"net"</span>))]
-<a href=#588 id=588 data-nosnippet>588</a>    #[tokio::test]
-<a href=#589 id=589 data-nosnippet>589</a>    #[n0_tracing_test::traced_test]
-<a href=#590 id=590 data-nosnippet>590</a>    </span><span class="kw">async fn </span>test_rpc() -&gt; n0_error::Result&lt;()&gt; {
-<a href=#591 id=591 data-nosnippet>591</a>        <span class="kw">use </span>iroh::{address_lookup::memory::MemoryLookup, protocol::Router, RelayMap};
-<a href=#592 id=592 data-nosnippet>592</a>        <span class="kw">use </span>n0_error::{AnyError, <span class="prelude-ty">Result</span>, StackResultExt, StdResultExt};
-<a href=#593 id=593 data-nosnippet>593</a>        <span class="kw">use </span>n0_future::{time::Duration, StreamExt};
-<a href=#594 id=594 data-nosnippet>594</a>        <span class="kw">use </span>rand::SeedableRng;
-<a href=#595 id=595 data-nosnippet>595</a>
-<a href=#596 id=596 data-nosnippet>596</a>        <span class="kw">use crate</span>::{
-<a href=#597 id=597 data-nosnippet>597</a>            api::{Event, GossipApi},
-<a href=#598 id=598 data-nosnippet>598</a>            net::{tests::create_endpoint, Gossip},
-<a href=#599 id=599 data-nosnippet>599</a>            proto::TopicId,
-<a href=#600 id=600 data-nosnippet>600</a>            ALPN,
-<a href=#601 id=601 data-nosnippet>601</a>        };
-<a href=#602 id=602 data-nosnippet>602</a>
-<a href=#603 id=603 data-nosnippet>603</a>        <span class="kw">let </span><span class="kw-2">mut </span>rng = rand::rngs::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
-<a href=#604 id=604 data-nosnippet>604</a>        <span class="kw">let </span>(relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().<span class="kw">await</span>.unwrap();
-<a href=#605 id=605 data-nosnippet>605</a>
-<a href=#606 id=606 data-nosnippet>606</a>        <span class="kw">async fn </span>create_gossip_endpoint(
-<a href=#607 id=607 data-nosnippet>607</a>            rng: <span class="kw-2">&amp;mut </span>rand::rngs::ChaCha12Rng,
-<a href=#608 id=608 data-nosnippet>608</a>            relay_map: RelayMap,
-<a href=#609 id=609 data-nosnippet>609</a>        ) -&gt; <span class="prelude-ty">Result</span>&lt;(Router, Gossip)&gt; {
-<a href=#610 id=610 data-nosnippet>610</a>            <span class="kw">let </span>endpoint = create_endpoint(rng, relay_map, <span class="prelude-val">None</span>).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#611 id=611 data-nosnippet>611</a>            <span class="kw">let </span>gossip = Gossip::builder().spawn(endpoint.clone());
-<a href=#612 id=612 data-nosnippet>612</a>            <span class="kw">let </span>router = Router::builder(endpoint)
-<a href=#613 id=613 data-nosnippet>613</a>                .accept(ALPN, gossip.clone())
-<a href=#614 id=614 data-nosnippet>614</a>                .spawn();
-<a href=#615 id=615 data-nosnippet>615</a>            <span class="prelude-val">Ok</span>((router, gossip))
-<a href=#616 id=616 data-nosnippet>616</a>        }
-<a href=#617 id=617 data-nosnippet>617</a>
-<a href=#618 id=618 data-nosnippet>618</a>        <span class="kw">let </span>topic_id = TopicId::from_bytes([<span class="number">0u8</span>; <span class="number">32</span>]);
-<a href=#619 id=619 data-nosnippet>619</a>
-<a href=#620 id=620 data-nosnippet>620</a>        <span class="comment">// create our gossip endpoint
-<a href=#621 id=621 data-nosnippet>621</a>        </span><span class="kw">let </span>(router, gossip) = create_gossip_endpoint(<span class="kw-2">&amp;mut </span>rng, relay_map.clone()).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#622 id=622 data-nosnippet>622</a>
-<a href=#623 id=623 data-nosnippet>623</a>        <span class="comment">// create a second endpoint so that we can test actually joining
-<a href=#624 id=624 data-nosnippet>624</a>        </span><span class="kw">let </span>(endpoint2_id, endpoint2_addr, endpoint2_task) = {
-<a href=#625 id=625 data-nosnippet>625</a>            <span class="kw">let </span>(router, gossip) = create_gossip_endpoint(<span class="kw-2">&amp;mut </span>rng, relay_map.clone()).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#626 id=626 data-nosnippet>626</a>            <span class="kw">let </span>endpoint_addr = router.endpoint().addr();
-<a href=#627 id=627 data-nosnippet>627</a>            <span class="kw">let </span>endpoint_id = router.endpoint().id();
-<a href=#628 id=628 data-nosnippet>628</a>            <span class="kw">let </span>task = tokio::task::spawn(<span class="kw">async move </span>{
-<a href=#629 id=629 data-nosnippet>629</a>                <span class="kw">let </span><span class="kw-2">mut </span>topic = gossip.subscribe_and_join(topic_id, <span class="macro">vec!</span>[]).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#630 id=630 data-nosnippet>630</a>                topic.broadcast(<span class="string">b"hello"</span>.to_vec().into()).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#631 id=631 data-nosnippet>631</a>                <span class="prelude-val">Ok</span>::&lt;<span class="kw">_</span>, AnyError&gt;(router)
-<a href=#632 id=632 data-nosnippet>632</a>            });
-<a href=#633 id=633 data-nosnippet>633</a>            (endpoint_id, endpoint_addr, task)
-<a href=#634 id=634 data-nosnippet>634</a>        };
-<a href=#635 id=635 data-nosnippet>635</a>
-<a href=#636 id=636 data-nosnippet>636</a>        <span class="comment">// create a memory lookup service to add endpoint addr manually
-<a href=#637 id=637 data-nosnippet>637</a>        </span><span class="kw">let </span>memory_lookup = MemoryLookup::new();
-<a href=#638 id=638 data-nosnippet>638</a>        memory_lookup.add_endpoint_info(endpoint2_addr);
-<a href=#639 id=639 data-nosnippet>639</a>
-<a href=#640 id=640 data-nosnippet>640</a>        router.endpoint().address_lookup()<span class="question-mark">?</span>.add(memory_lookup);
-<a href=#641 id=641 data-nosnippet>641</a>
-<a href=#642 id=642 data-nosnippet>642</a>        <span class="comment">// The size limit of the server, which an RPC client asks for.
-<a href=#643 id=643 data-nosnippet>643</a>        </span><span class="kw">let </span>max_content = <span class="kw">crate</span>::proto::topic::max_content_size(gossip.max_message_size());
-<a href=#644 id=644 data-nosnippet>644</a>
-<a href=#645 id=645 data-nosnippet>645</a>        <span class="comment">// expose the gossip endpoint over RPC
-<a href=#646 id=646 data-nosnippet>646</a>        </span><span class="kw">let </span>(rpc_server_endpoint, rpc_server_cert) =
-<a href=#647 id=647 data-nosnippet>647</a>            irpc::util::make_server_endpoint(<span class="string">"127.0.0.1:0"</span>.parse().unwrap())
-<a href=#648 id=648 data-nosnippet>648</a>                .context(<span class="string">"make server endpoint"</span>)<span class="question-mark">?</span>;
-<a href=#649 id=649 data-nosnippet>649</a>        <span class="kw">let </span>rpc_server_addr = rpc_server_endpoint
-<a href=#650 id=650 data-nosnippet>650</a>            .local_addr()
-<a href=#651 id=651 data-nosnippet>651</a>            .std_context(<span class="string">"resolve server addr"</span>)<span class="question-mark">?</span>;
-<a href=#652 id=652 data-nosnippet>652</a>        <span class="kw">let </span>rpc_server_task = tokio::task::spawn(<span class="kw">async move </span>{
-<a href=#653 id=653 data-nosnippet>653</a>            gossip.listen(rpc_server_endpoint).<span class="kw">await</span>;
-<a href=#654 id=654 data-nosnippet>654</a>        });
-<a href=#655 id=655 data-nosnippet>655</a>
-<a href=#656 id=656 data-nosnippet>656</a>        <span class="comment">// connect to the RPC endpoint with a new client
-<a href=#657 id=657 data-nosnippet>657</a>        </span><span class="kw">let </span>rpc_client_endpoint =
-<a href=#658 id=658 data-nosnippet>658</a>            irpc::util::make_client_endpoint(<span class="string">"127.0.0.1:0"</span>.parse().unwrap(), <span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>rpc_server_cert])
-<a href=#659 id=659 data-nosnippet>659</a>                .context(<span class="string">"make client endpoint"</span>)<span class="question-mark">?</span>;
-<a href=#660 id=660 data-nosnippet>660</a>        <span class="kw">let </span>rpc_client = GossipApi::connect(rpc_client_endpoint, rpc_server_addr);
-<a href=#661 id=661 data-nosnippet>661</a>
-<a href=#662 id=662 data-nosnippet>662</a>        <span class="comment">// join via RPC
-<a href=#663 id=663 data-nosnippet>663</a>        </span><span class="kw">let </span>recv = <span class="kw">async move </span>{
-<a href=#664 id=664 data-nosnippet>664</a>            <span class="kw">let </span><span class="kw-2">mut </span>topic = rpc_client
-<a href=#665 id=665 data-nosnippet>665</a>                .subscribe_and_join(topic_id, <span class="macro">vec!</span>[endpoint2_id])
-<a href=#666 id=666 data-nosnippet>666</a>                .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#667 id=667 data-nosnippet>667</a>            <span class="comment">// The client refuses an oversized message itself, as a local one does.
-<a href=#668 id=668 data-nosnippet>668</a>            </span><span class="macro">assert_eq!</span>(topic.max_content_size(), max_content);
-<a href=#669 id=669 data-nosnippet>669</a>            <span class="kw">let </span>refused = topic.broadcast(<span class="macro">vec!</span>[<span class="number">0</span>; max_content + <span class="number">1</span>].into()).<span class="kw">await</span>;
-<a href=#670 id=670 data-nosnippet>670</a>            <span class="macro">assert!</span>(
-<a href=#671 id=671 data-nosnippet>671</a>                <span class="macro">matches!</span>(refused, <span class="prelude-val">Err</span>(<span class="kw">super</span>::ApiError::TooLarge { .. })),
-<a href=#672 id=672 data-nosnippet>672</a>                <span class="string">"{refused:?}"
-<a href=#673 id=673 data-nosnippet>673</a>            </span>);
-<a href=#674 id=674 data-nosnippet>674</a>            <span class="comment">// wait for a message
-<a href=#675 id=675 data-nosnippet>675</a>            </span><span class="kw">while let </span><span class="prelude-val">Some</span>(event) = topic.try_next().<span class="kw">await</span><span class="question-mark">? </span>{
-<a href=#676 id=676 data-nosnippet>676</a>                <span class="kw">match </span>event {
-<a href=#677 id=677 data-nosnippet>677</a>                    Event::Received(message) =&gt; {
-<a href=#678 id=678 data-nosnippet>678</a>                        <span class="macro">assert_eq!</span>(<span class="kw-2">&amp;</span>message.content[..], <span class="string">b"hello"</span>);
-<a href=#679 id=679 data-nosnippet>679</a>                        <span class="kw">break</span>;
-<a href=#680 id=680 data-nosnippet>680</a>                    }
-<a href=#681 id=681 data-nosnippet>681</a>                    Event::Lagged =&gt; <span class="macro">panic!</span>(<span class="string">"unexpected lagged event"</span>),
-<a href=#682 id=682 data-nosnippet>682</a>                    <span class="kw">_ </span>=&gt; {}
-<a href=#683 id=683 data-nosnippet>683</a>                }
-<a href=#684 id=684 data-nosnippet>684</a>            }
-<a href=#685 id=685 data-nosnippet>685</a>            <span class="prelude-val">Ok</span>::&lt;<span class="kw">_</span>, AnyError&gt;(())
-<a href=#686 id=686 data-nosnippet>686</a>        };
-<a href=#687 id=687 data-nosnippet>687</a>
-<a href=#688 id=688 data-nosnippet>688</a>        <span class="comment">// timeout to not hang in case of failure
-<a href=#689 id=689 data-nosnippet>689</a>        </span>tokio::time::timeout(Duration::from_secs(<span class="number">10</span>), recv)
-<a href=#690 id=690 data-nosnippet>690</a>            .<span class="kw">await
-<a href=#691 id=691 data-nosnippet>691</a>            </span>.std_context(<span class="string">"rpc recv timeout"</span>)<span class="question-mark">??</span>;
-<a href=#692 id=692 data-nosnippet>692</a>
-<a href=#693 id=693 data-nosnippet>693</a>        <span class="comment">// shutdown
-<a href=#694 id=694 data-nosnippet>694</a>        </span>rpc_server_task.abort();
-<a href=#695 id=695 data-nosnippet>695</a>        router.shutdown().<span class="kw">await</span>.std_context(<span class="string">"shutdown router"</span>)<span class="question-mark">?</span>;
-<a href=#696 id=696 data-nosnippet>696</a>        <span class="kw">let </span>router2 = endpoint2_task.<span class="kw">await</span>.std_context(<span class="string">"join endpoint task"</span>)<span class="question-mark">??</span>;
-<a href=#697 id=697 data-nosnippet>697</a>        router2
-<a href=#698 id=698 data-nosnippet>698</a>            .shutdown()
-<a href=#699 id=699 data-nosnippet>699</a>            .<span class="kw">await
-<a href=#700 id=700 data-nosnippet>700</a>            </span>.std_context(<span class="string">"shutdown second router"</span>)<span class="question-mark">?</span>;
-<a href=#701 id=701 data-nosnippet>701</a>        <span class="prelude-val">Ok</span>(())
-<a href=#702 id=702 data-nosnippet>702</a>    }
-<a href=#703 id=703 data-nosnippet>703</a>
-<a href=#704 id=704 data-nosnippet>704</a>    <span class="doccomment">/// A server that does not answer the size request is asked once, and its client keeps `usize::MAX`.
-<a href=#705 id=705 data-nosnippet>705</a>    ///
-<a href=#706 id=706 data-nosnippet>706</a>    /// A server older than 0.102.0 stops serving the connection on that request,
-<a href=#707 id=707 data-nosnippet>707</a>    /// so a second request would cut off the topics on it.
-<a href=#708 id=708 data-nosnippet>708</a>    </span><span class="attr">#[cfg(feature = <span class="string">"net"</span>)]
-<a href=#709 id=709 data-nosnippet>709</a>    #[tokio::test]
-<a href=#710 id=710 data-nosnippet>710</a>    </span><span class="kw">async fn </span>unanswered_size_request_is_asked_once() {
-<a href=#711 id=711 data-nosnippet>711</a>        <span class="kw">let </span>(tx, <span class="kw-2">mut </span>rx) = tokio::sync::mpsc::channel::&lt;<span class="kw">super</span>::RpcMessage&gt;(<span class="number">4</span>);
-<a href=#712 id=712 data-nosnippet>712</a>        <span class="kw">let </span>api = <span class="kw">super</span>::GossipApi {
-<a href=#713 id=713 data-nosnippet>713</a>            client: irpc::LocalSender::&lt;<span class="kw">super</span>::Request&gt;::from(tx).into(),
-<a href=#714 id=714 data-nosnippet>714</a>            max_content: Default::default(),
-<a href=#715 id=715 data-nosnippet>715</a>        };
-<a href=#716 id=716 data-nosnippet>716</a>        <span class="comment">// Drops each request unanswered.
-<a href=#717 id=717 data-nosnippet>717</a>        </span><span class="kw">let </span>asked = tokio::spawn(<span class="kw">async move </span>{
-<a href=#718 id=718 data-nosnippet>718</a>            <span class="kw">let </span><span class="kw-2">mut </span>asked = <span class="number">0</span>;
-<a href=#719 id=719 data-nosnippet>719</a>            <span class="kw">while let </span><span class="prelude-val">Some</span>(message) = rx.recv().<span class="kw">await </span>{
-<a href=#720 id=720 data-nosnippet>720</a>                <span class="kw">if </span><span class="macro">matches!</span>(message, <span class="kw">super</span>::RpcMessage::MaxContentSize(<span class="kw">_</span>)) {
-<a href=#721 id=721 data-nosnippet>721</a>                    asked += <span class="number">1</span>;
-<a href=#722 id=722 data-nosnippet>722</a>                }
-<a href=#723 id=723 data-nosnippet>723</a>            }
-<a href=#724 id=724 data-nosnippet>724</a>            asked
-<a href=#725 id=725 data-nosnippet>725</a>        });
-<a href=#726 id=726 data-nosnippet>726</a>
+<a href=#550 id=550 data-nosnippet>550</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>is_broadcast(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
+<a href=#551 id=551 data-nosnippet>551</a>        <span class="macro">matches!</span>(<span class="self">self</span>, <span class="self">Self</span>::Broadcast(<span class="kw">_</span>) | <span class="self">Self</span>::BroadcastNeighbors(<span class="kw">_</span>))
+<a href=#552 id=552 data-nosnippet>552</a>    }
+<a href=#553 id=553 data-nosnippet>553</a>}
+<a href=#554 id=554 data-nosnippet>554</a>
+<a href=#555 id=555 data-nosnippet>555</a><span class="doccomment">/// Options for joining a gossip topic.
+<a href=#556 id=556 data-nosnippet>556</a></span><span class="attr">#[derive(Serialize, Deserialize, Debug)]
+<a href=#557 id=557 data-nosnippet>557</a></span><span class="kw">pub struct </span>JoinOptions {
+<a href=#558 id=558 data-nosnippet>558</a>    <span class="doccomment">/// The initial bootstrap endpoints.
+<a href=#559 id=559 data-nosnippet>559</a>    </span><span class="kw">pub </span>bootstrap: BTreeSet&lt;EndpointId&gt;,
+<a href=#560 id=560 data-nosnippet>560</a>    <span class="doccomment">/// The number of events that a subscription buffers for a reader that falls behind.
+<a href=#561 id=561 data-nosnippet>561</a>    ///
+<a href=#562 id=562 data-nosnippet>562</a>    /// A slow reader never blocks the gossip actor. When the buffer is full, the node drops
+<a href=#563 id=563 data-nosnippet>563</a>    /// the oldest events and the reader receives a [`Event::Lagged`]. The
+<a href=#564 id=564 data-nosnippet>564</a>    /// subscription stays open.
+<a href=#565 id=565 data-nosnippet>565</a>    ///
+<a href=#566 id=566 data-nosnippet>566</a>    /// After a `Lagged`, the neighbors that [`GossipReceiver::neighbors`] reports can be wrong.
+<a href=#567 id=567 data-nosnippet>567</a>    /// If you need the exact state, subscribe again.
+<a href=#568 id=568 data-nosnippet>568</a>    </span><span class="kw">pub </span>subscription_capacity: usize,
+<a href=#569 id=569 data-nosnippet>569</a>}
+<a href=#570 id=570 data-nosnippet>570</a>
+<a href=#571 id=571 data-nosnippet>571</a><span class="kw">impl </span>JoinOptions {
+<a href=#572 id=572 data-nosnippet>572</a>    <span class="doccomment">/// Creates [`JoinOptions`] with the provided bootstrap endpoints and the default subscription
+<a href=#573 id=573 data-nosnippet>573</a>    /// capacity.
+<a href=#574 id=574 data-nosnippet>574</a>    </span><span class="kw">pub fn </span>with_bootstrap(endpoints: <span class="kw">impl </span>IntoIterator&lt;Item = EndpointId&gt;) -&gt; <span class="self">Self </span>{
+<a href=#575 id=575 data-nosnippet>575</a>        <span class="self">Self </span>{
+<a href=#576 id=576 data-nosnippet>576</a>            bootstrap: endpoints.into_iter().collect(),
+<a href=#577 id=577 data-nosnippet>577</a>            subscription_capacity: TOPIC_EVENTS_DEFAULT_CAP,
+<a href=#578 id=578 data-nosnippet>578</a>        }
+<a href=#579 id=579 data-nosnippet>579</a>    }
+<a href=#580 id=580 data-nosnippet>580</a>}
+<a href=#581 id=581 data-nosnippet>581</a>
+<a href=#582 id=582 data-nosnippet>582</a><span class="attr">#[cfg(test)]
+<a href=#583 id=583 data-nosnippet>583</a></span><span class="kw">mod </span>tests {
+<a href=#584 id=584 data-nosnippet>584</a>    <span class="kw">use </span><span class="kw">crate</span>::api::GossipTopic;
+<a href=#585 id=585 data-nosnippet>585</a>
+<a href=#586 id=586 data-nosnippet>586</a>    <span class="attr">#[cfg(all(feature = <span class="string">"rpc"</span>, feature = <span class="string">"net"</span>))]
+<a href=#587 id=587 data-nosnippet>587</a>    #[tokio::test]
+<a href=#588 id=588 data-nosnippet>588</a>    #[n0_tracing_test::traced_test]
+<a href=#589 id=589 data-nosnippet>589</a>    </span><span class="kw">async fn </span>test_rpc() -&gt; n0_error::Result&lt;()&gt; {
+<a href=#590 id=590 data-nosnippet>590</a>        <span class="kw">use </span>iroh::{address_lookup::memory::MemoryLookup, protocol::Router, RelayMap};
+<a href=#591 id=591 data-nosnippet>591</a>        <span class="kw">use </span>n0_error::{AnyError, <span class="prelude-ty">Result</span>, StackResultExt, StdResultExt};
+<a href=#592 id=592 data-nosnippet>592</a>        <span class="kw">use </span>n0_future::{time::Duration, StreamExt};
+<a href=#593 id=593 data-nosnippet>593</a>        <span class="kw">use </span>rand::SeedableRng;
+<a href=#594 id=594 data-nosnippet>594</a>
+<a href=#595 id=595 data-nosnippet>595</a>        <span class="kw">use crate</span>::{
+<a href=#596 id=596 data-nosnippet>596</a>            api::{Event, GossipApi},
+<a href=#597 id=597 data-nosnippet>597</a>            net::{tests::create_endpoint, Gossip},
+<a href=#598 id=598 data-nosnippet>598</a>            proto::TopicId,
+<a href=#599 id=599 data-nosnippet>599</a>            ALPN,
+<a href=#600 id=600 data-nosnippet>600</a>        };
+<a href=#601 id=601 data-nosnippet>601</a>
+<a href=#602 id=602 data-nosnippet>602</a>        <span class="kw">let </span><span class="kw-2">mut </span>rng = rand::rngs::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
+<a href=#603 id=603 data-nosnippet>603</a>        <span class="kw">let </span>(relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().<span class="kw">await</span>.unwrap();
+<a href=#604 id=604 data-nosnippet>604</a>
+<a href=#605 id=605 data-nosnippet>605</a>        <span class="kw">async fn </span>create_gossip_endpoint(
+<a href=#606 id=606 data-nosnippet>606</a>            rng: <span class="kw-2">&amp;mut </span>rand::rngs::ChaCha12Rng,
+<a href=#607 id=607 data-nosnippet>607</a>            relay_map: RelayMap,
+<a href=#608 id=608 data-nosnippet>608</a>        ) -&gt; <span class="prelude-ty">Result</span>&lt;(Router, Gossip)&gt; {
+<a href=#609 id=609 data-nosnippet>609</a>            <span class="kw">let </span>endpoint = create_endpoint(rng, relay_map, <span class="prelude-val">None</span>).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#610 id=610 data-nosnippet>610</a>            <span class="kw">let </span>gossip = Gossip::builder().spawn(endpoint.clone());
+<a href=#611 id=611 data-nosnippet>611</a>            <span class="kw">let </span>router = Router::builder(endpoint)
+<a href=#612 id=612 data-nosnippet>612</a>                .accept(ALPN, gossip.clone())
+<a href=#613 id=613 data-nosnippet>613</a>                .spawn();
+<a href=#614 id=614 data-nosnippet>614</a>            <span class="prelude-val">Ok</span>((router, gossip))
+<a href=#615 id=615 data-nosnippet>615</a>        }
+<a href=#616 id=616 data-nosnippet>616</a>
+<a href=#617 id=617 data-nosnippet>617</a>        <span class="kw">let </span>topic_id = TopicId::from_bytes([<span class="number">0u8</span>; <span class="number">32</span>]);
+<a href=#618 id=618 data-nosnippet>618</a>
+<a href=#619 id=619 data-nosnippet>619</a>        <span class="comment">// create our gossip endpoint
+<a href=#620 id=620 data-nosnippet>620</a>        </span><span class="kw">let </span>(router, gossip) = create_gossip_endpoint(<span class="kw-2">&amp;mut </span>rng, relay_map.clone()).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#621 id=621 data-nosnippet>621</a>
+<a href=#622 id=622 data-nosnippet>622</a>        <span class="comment">// create a second endpoint so that we can test actually joining
+<a href=#623 id=623 data-nosnippet>623</a>        </span><span class="kw">let </span>(endpoint2_id, endpoint2_addr, endpoint2_task) = {
+<a href=#624 id=624 data-nosnippet>624</a>            <span class="kw">let </span>(router, gossip) = create_gossip_endpoint(<span class="kw-2">&amp;mut </span>rng, relay_map.clone()).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#625 id=625 data-nosnippet>625</a>            <span class="kw">let </span>endpoint_addr = router.endpoint().addr();
+<a href=#626 id=626 data-nosnippet>626</a>            <span class="kw">let </span>endpoint_id = router.endpoint().id();
+<a href=#627 id=627 data-nosnippet>627</a>            <span class="kw">let </span>task = tokio::task::spawn(<span class="kw">async move </span>{
+<a href=#628 id=628 data-nosnippet>628</a>                <span class="kw">let </span><span class="kw-2">mut </span>topic = gossip.subscribe_and_join(topic_id, <span class="macro">vec!</span>[]).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#629 id=629 data-nosnippet>629</a>                topic.broadcast(<span class="string">b"hello"</span>.to_vec().into()).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#630 id=630 data-nosnippet>630</a>                <span class="prelude-val">Ok</span>::&lt;<span class="kw">_</span>, AnyError&gt;(router)
+<a href=#631 id=631 data-nosnippet>631</a>            });
+<a href=#632 id=632 data-nosnippet>632</a>            (endpoint_id, endpoint_addr, task)
+<a href=#633 id=633 data-nosnippet>633</a>        };
+<a href=#634 id=634 data-nosnippet>634</a>
+<a href=#635 id=635 data-nosnippet>635</a>        <span class="comment">// create a memory lookup service to add endpoint addr manually
+<a href=#636 id=636 data-nosnippet>636</a>        </span><span class="kw">let </span>memory_lookup = MemoryLookup::new();
+<a href=#637 id=637 data-nosnippet>637</a>        memory_lookup.add_endpoint_info(endpoint2_addr);
+<a href=#638 id=638 data-nosnippet>638</a>
+<a href=#639 id=639 data-nosnippet>639</a>        router.endpoint().address_lookup()<span class="question-mark">?</span>.add(memory_lookup);
+<a href=#640 id=640 data-nosnippet>640</a>
+<a href=#641 id=641 data-nosnippet>641</a>        <span class="comment">// The size limit of the server, which an RPC client asks for.
+<a href=#642 id=642 data-nosnippet>642</a>        </span><span class="kw">let </span>max_content = <span class="kw">crate</span>::proto::topic::max_content_size(gossip.max_message_size());
+<a href=#643 id=643 data-nosnippet>643</a>
+<a href=#644 id=644 data-nosnippet>644</a>        <span class="comment">// expose the gossip endpoint over RPC
+<a href=#645 id=645 data-nosnippet>645</a>        </span><span class="kw">let </span>(rpc_server_endpoint, rpc_server_cert) =
+<a href=#646 id=646 data-nosnippet>646</a>            irpc::util::make_server_endpoint(<span class="string">"127.0.0.1:0"</span>.parse().unwrap())
+<a href=#647 id=647 data-nosnippet>647</a>                .context(<span class="string">"make server endpoint"</span>)<span class="question-mark">?</span>;
+<a href=#648 id=648 data-nosnippet>648</a>        <span class="kw">let </span>rpc_server_addr = rpc_server_endpoint
+<a href=#649 id=649 data-nosnippet>649</a>            .local_addr()
+<a href=#650 id=650 data-nosnippet>650</a>            .std_context(<span class="string">"resolve server addr"</span>)<span class="question-mark">?</span>;
+<a href=#651 id=651 data-nosnippet>651</a>        <span class="kw">let </span>rpc_server_task = tokio::task::spawn(<span class="kw">async move </span>{
+<a href=#652 id=652 data-nosnippet>652</a>            gossip.listen(rpc_server_endpoint).<span class="kw">await</span>;
+<a href=#653 id=653 data-nosnippet>653</a>        });
+<a href=#654 id=654 data-nosnippet>654</a>
+<a href=#655 id=655 data-nosnippet>655</a>        <span class="comment">// connect to the RPC endpoint with a new client
+<a href=#656 id=656 data-nosnippet>656</a>        </span><span class="kw">let </span>rpc_client_endpoint =
+<a href=#657 id=657 data-nosnippet>657</a>            irpc::util::make_client_endpoint(<span class="string">"127.0.0.1:0"</span>.parse().unwrap(), <span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>rpc_server_cert])
+<a href=#658 id=658 data-nosnippet>658</a>                .context(<span class="string">"make client endpoint"</span>)<span class="question-mark">?</span>;
+<a href=#659 id=659 data-nosnippet>659</a>        <span class="kw">let </span>rpc_client = GossipApi::connect(rpc_client_endpoint, rpc_server_addr);
+<a href=#660 id=660 data-nosnippet>660</a>
+<a href=#661 id=661 data-nosnippet>661</a>        <span class="comment">// join via RPC
+<a href=#662 id=662 data-nosnippet>662</a>        </span><span class="kw">let </span>recv = <span class="kw">async move </span>{
+<a href=#663 id=663 data-nosnippet>663</a>            <span class="kw">let </span><span class="kw-2">mut </span>topic = rpc_client
+<a href=#664 id=664 data-nosnippet>664</a>                .subscribe_and_join(topic_id, <span class="macro">vec!</span>[endpoint2_id])
+<a href=#665 id=665 data-nosnippet>665</a>                .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#666 id=666 data-nosnippet>666</a>            <span class="comment">// The client refuses an oversized message itself, as a local one does.
+<a href=#667 id=667 data-nosnippet>667</a>            </span><span class="macro">assert_eq!</span>(topic.max_content_size(), max_content);
+<a href=#668 id=668 data-nosnippet>668</a>            <span class="kw">let </span>refused = topic.broadcast(<span class="macro">vec!</span>[<span class="number">0</span>; max_content + <span class="number">1</span>].into()).<span class="kw">await</span>;
+<a href=#669 id=669 data-nosnippet>669</a>            <span class="macro">assert!</span>(
+<a href=#670 id=670 data-nosnippet>670</a>                <span class="macro">matches!</span>(refused, <span class="prelude-val">Err</span>(<span class="kw">super</span>::ApiError::TooLarge { .. })),
+<a href=#671 id=671 data-nosnippet>671</a>                <span class="string">"{refused:?}"
+<a href=#672 id=672 data-nosnippet>672</a>            </span>);
+<a href=#673 id=673 data-nosnippet>673</a>            <span class="comment">// wait for a message
+<a href=#674 id=674 data-nosnippet>674</a>            </span><span class="kw">while let </span><span class="prelude-val">Some</span>(event) = topic.try_next().<span class="kw">await</span><span class="question-mark">? </span>{
+<a href=#675 id=675 data-nosnippet>675</a>                <span class="kw">match </span>event {
+<a href=#676 id=676 data-nosnippet>676</a>                    Event::Received(message) =&gt; {
+<a href=#677 id=677 data-nosnippet>677</a>                        <span class="macro">assert_eq!</span>(<span class="kw-2">&amp;</span>message.content[..], <span class="string">b"hello"</span>);
+<a href=#678 id=678 data-nosnippet>678</a>                        <span class="kw">break</span>;
+<a href=#679 id=679 data-nosnippet>679</a>                    }
+<a href=#680 id=680 data-nosnippet>680</a>                    Event::Lagged =&gt; <span class="macro">panic!</span>(<span class="string">"unexpected lagged event"</span>),
+<a href=#681 id=681 data-nosnippet>681</a>                    <span class="kw">_ </span>=&gt; {}
+<a href=#682 id=682 data-nosnippet>682</a>                }
+<a href=#683 id=683 data-nosnippet>683</a>            }
+<a href=#684 id=684 data-nosnippet>684</a>            <span class="prelude-val">Ok</span>::&lt;<span class="kw">_</span>, AnyError&gt;(())
+<a href=#685 id=685 data-nosnippet>685</a>        };
+<a href=#686 id=686 data-nosnippet>686</a>
+<a href=#687 id=687 data-nosnippet>687</a>        <span class="comment">// timeout to not hang in case of failure
+<a href=#688 id=688 data-nosnippet>688</a>        </span>tokio::time::timeout(Duration::from_secs(<span class="number">10</span>), recv)
+<a href=#689 id=689 data-nosnippet>689</a>            .<span class="kw">await
+<a href=#690 id=690 data-nosnippet>690</a>            </span>.std_context(<span class="string">"rpc recv timeout"</span>)<span class="question-mark">??</span>;
+<a href=#691 id=691 data-nosnippet>691</a>
+<a href=#692 id=692 data-nosnippet>692</a>        <span class="comment">// shutdown
+<a href=#693 id=693 data-nosnippet>693</a>        </span>rpc_server_task.abort();
+<a href=#694 id=694 data-nosnippet>694</a>        router.shutdown().<span class="kw">await</span>.std_context(<span class="string">"shutdown router"</span>)<span class="question-mark">?</span>;
+<a href=#695 id=695 data-nosnippet>695</a>        <span class="kw">let </span>router2 = endpoint2_task.<span class="kw">await</span>.std_context(<span class="string">"join endpoint task"</span>)<span class="question-mark">??</span>;
+<a href=#696 id=696 data-nosnippet>696</a>        router2
+<a href=#697 id=697 data-nosnippet>697</a>            .shutdown()
+<a href=#698 id=698 data-nosnippet>698</a>            .<span class="kw">await
+<a href=#699 id=699 data-nosnippet>699</a>            </span>.std_context(<span class="string">"shutdown second router"</span>)<span class="question-mark">?</span>;
+<a href=#700 id=700 data-nosnippet>700</a>        <span class="prelude-val">Ok</span>(())
+<a href=#701 id=701 data-nosnippet>701</a>    }
+<a href=#702 id=702 data-nosnippet>702</a>
+<a href=#703 id=703 data-nosnippet>703</a>    <span class="doccomment">/// A server that does not answer the size request is asked once, and its client keeps `usize::MAX`.
+<a href=#704 id=704 data-nosnippet>704</a>    ///
+<a href=#705 id=705 data-nosnippet>705</a>    /// A server older than 0.102.0 stops serving the connection on that request,
+<a href=#706 id=706 data-nosnippet>706</a>    /// so a second request would cut off the topics on it.
+<a href=#707 id=707 data-nosnippet>707</a>    </span><span class="attr">#[cfg(feature = <span class="string">"net"</span>)]
+<a href=#708 id=708 data-nosnippet>708</a>    #[tokio::test]
+<a href=#709 id=709 data-nosnippet>709</a>    </span><span class="kw">async fn </span>unanswered_size_request_is_asked_once() {
+<a href=#710 id=710 data-nosnippet>710</a>        <span class="kw">let </span>(tx, <span class="kw-2">mut </span>rx) = tokio::sync::mpsc::channel::&lt;<span class="kw">super</span>::RpcMessage&gt;(<span class="number">4</span>);
+<a href=#711 id=711 data-nosnippet>711</a>        <span class="kw">let </span>api = <span class="kw">super</span>::GossipApi {
+<a href=#712 id=712 data-nosnippet>712</a>            client: irpc::LocalSender::&lt;<span class="kw">super</span>::Request&gt;::from(tx).into(),
+<a href=#713 id=713 data-nosnippet>713</a>            max_content: Default::default(),
+<a href=#714 id=714 data-nosnippet>714</a>        };
+<a href=#715 id=715 data-nosnippet>715</a>        <span class="comment">// Drops each request unanswered.
+<a href=#716 id=716 data-nosnippet>716</a>        </span><span class="kw">let </span>asked = tokio::spawn(<span class="kw">async move </span>{
+<a href=#717 id=717 data-nosnippet>717</a>            <span class="kw">let </span><span class="kw-2">mut </span>asked = <span class="number">0</span>;
+<a href=#718 id=718 data-nosnippet>718</a>            <span class="kw">while let </span><span class="prelude-val">Some</span>(message) = rx.recv().<span class="kw">await </span>{
+<a href=#719 id=719 data-nosnippet>719</a>                <span class="kw">if </span><span class="macro">matches!</span>(message, <span class="kw">super</span>::RpcMessage::MaxContentSize(<span class="kw">_</span>)) {
+<a href=#720 id=720 data-nosnippet>720</a>                    asked += <span class="number">1</span>;
+<a href=#721 id=721 data-nosnippet>721</a>                }
+<a href=#722 id=722 data-nosnippet>722</a>            }
+<a href=#723 id=723 data-nosnippet>723</a>            asked
+<a href=#724 id=724 data-nosnippet>724</a>        });
+<a href=#725 id=725 data-nosnippet>725</a>
+<a href=#726 id=726 data-nosnippet>726</a>        <span class="macro">assert_eq!</span>(api.max_content_size().<span class="kw">await</span>, usize::MAX);
 <a href=#727 id=727 data-nosnippet>727</a>        <span class="macro">assert_eq!</span>(api.max_content_size().<span class="kw">await</span>, usize::MAX);
-<a href=#728 id=728 data-nosnippet>728</a>        <span class="macro">assert_eq!</span>(api.max_content_size().<span class="kw">await</span>, usize::MAX);
-<a href=#729 id=729 data-nosnippet>729</a>        drop(api);
-<a href=#730 id=730 data-nosnippet>730</a>        <span class="macro">assert_eq!</span>(asked.<span class="kw">await</span>.expect(<span class="string">"server task"</span>), <span class="number">1</span>);
-<a href=#731 id=731 data-nosnippet>731</a>    }
-<a href=#732 id=732 data-nosnippet>732</a>
-<a href=#733 id=733 data-nosnippet>733</a>    <span class="attr">#[test]
-<a href=#734 id=734 data-nosnippet>734</a>    </span><span class="kw">fn </span>ensure_gossip_topic_is_sync() {
-<a href=#735 id=735 data-nosnippet>735</a>        <span class="attr">#[allow(unused)]
-<a href=#736 id=736 data-nosnippet>736</a>        </span><span class="kw">fn </span>get() -&gt; GossipTopic {
-<a href=#737 id=737 data-nosnippet>737</a>            <span class="macro">unimplemented!</span>()
-<a href=#738 id=738 data-nosnippet>738</a>        }
-<a href=#739 id=739 data-nosnippet>739</a>        <span class="attr">#[allow(unused)]
-<a href=#740 id=740 data-nosnippet>740</a>        </span><span class="kw">fn </span>check(_t: <span class="kw">impl </span>Sync) {}
-<a href=#741 id=741 data-nosnippet>741</a>        <span class="attr">#[allow(unused)]
-<a href=#742 id=742 data-nosnippet>742</a>        </span><span class="kw">fn </span>foo() {
-<a href=#743 id=743 data-nosnippet>743</a>            check(get());
-<a href=#744 id=744 data-nosnippet>744</a>        }
-<a href=#745 id=745 data-nosnippet>745</a>    }
-<a href=#746 id=746 data-nosnippet>746</a>}</code></pre></div></section></main></body></html>
+<a href=#728 id=728 data-nosnippet>728</a>        drop(api);
+<a href=#729 id=729 data-nosnippet>729</a>        <span class="macro">assert_eq!</span>(asked.<span class="kw">await</span>.expect(<span class="string">"server task"</span>), <span class="number">1</span>);
+<a href=#730 id=730 data-nosnippet>730</a>    }
+<a href=#731 id=731 data-nosnippet>731</a>
+<a href=#732 id=732 data-nosnippet>732</a>    <span class="attr">#[test]
+<a href=#733 id=733 data-nosnippet>733</a>    </span><span class="kw">fn </span>ensure_gossip_topic_is_sync() {
+<a href=#734 id=734 data-nosnippet>734</a>        <span class="attr">#[allow(unused)]
+<a href=#735 id=735 data-nosnippet>735</a>        </span><span class="kw">fn </span>get() -&gt; GossipTopic {
+<a href=#736 id=736 data-nosnippet>736</a>            <span class="macro">unimplemented!</span>()
+<a href=#737 id=737 data-nosnippet>737</a>        }
+<a href=#738 id=738 data-nosnippet>738</a>        <span class="attr">#[allow(unused)]
+<a href=#739 id=739 data-nosnippet>739</a>        </span><span class="kw">fn </span>check(_t: <span class="kw">impl </span>Sync) {}
+<a href=#740 id=740 data-nosnippet>740</a>        <span class="attr">#[allow(unused)]
+<a href=#741 id=741 data-nosnippet>741</a>        </span><span class="kw">fn </span>foo() {
+<a href=#742 id=742 data-nosnippet>742</a>            check(get());
+<a href=#743 id=743 data-nosnippet>743</a>        }
+<a href=#744 id=744 data-nosnippet>744</a>    }
+<a href=#745 id=745 data-nosnippet>745</a>}</code></pre></div></section></main></body></html>
