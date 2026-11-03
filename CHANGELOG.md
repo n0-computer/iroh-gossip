@@ -2,6 +2,58 @@
 
 All notable changes to iroh-gossip will be documented in this file.
 
+## [0.102.0](https://github.com/n0-computer/iroh-gossip/compare/v0.101.0..0.102.0) - 2026-11-03
+
+### ⛰️  Features
+
+- *(net)* A proper send queue where a slow peer doesn't block the actor anymore ([#185](https://github.com/n0-computer/iroh-gossip/issues/185)) - ([dee7a26](https://github.com/n0-computer/iroh-gossip/commit/dee7a261d1772d19a213a6889620461f17630ad3))
+- *(proto)* Also rejoin through a recent neighbor ([#192](https://github.com/n0-computer/iroh-gossip/issues/192)) - ([cf85954](https://github.com/n0-computer/iroh-gossip/commit/cf859543942b017d9e7034ecfa4aa61bfcf291e7))
+
+### 🐛 Bug Fixes
+
+- *(hyparview)* Retry a lost Join once, and skip a Join to a neighbor ([#217](https://github.com/n0-computer/iroh-gossip/issues/217)) - ([5cf0350](https://github.com/n0-computer/iroh-gossip/commit/5cf0350fa0951eea4cca9d4f660320565ac1f84f))
+- *(net)* Don't close connection to buggy peers ([#189](https://github.com/n0-computer/iroh-gossip/issues/189)) - ([cd73d93](https://github.com/n0-computer/iroh-gossip/commit/cd73d93168207690e133caed3e20c5e26ebdddbc))
+- *(net)* Close a connection on which neither peer sends ([#195](https://github.com/n0-computer/iroh-gossip/issues/195)) - ([5592b47](https://github.com/n0-computer/iroh-gossip/commit/5592b477236a0b3e7f9b956a03e905db1e79a38d))
+- *(net)* Stop a busy publisher or a slow stream header from stalling the actor ([#186](https://github.com/n0-computer/iroh-gossip/issues/186)) - ([4348660](https://github.com/n0-computer/iroh-gossip/commit/4348660c226eb2321d728f2a9a8012c3c792e68e))
+- *(net)* Keep a connection while streams are open ([#206](https://github.com/n0-computer/iroh-gossip/issues/206)) - ([c156ecb](https://github.com/n0-computer/iroh-gossip/commit/c156ecbf9bba9e8367df69e60e22c5bbaac3a905))
+- *(net)* Cap the addresses that we keep per peer ([#215](https://github.com/n0-computer/iroh-gossip/issues/215)) - ([6d15773](https://github.com/n0-computer/iroh-gossip/commit/6d15773ab407cf619581cbf25721fb08c9a14999))
+- *(proto)* Rejoin when alone, shuffle early, and test the paper claims ([#191](https://github.com/n0-computer/iroh-gossip/issues/191)) - ([dfeec14](https://github.com/n0-computer/iroh-gossip/commit/dfeec141b9041d2928b118a6e8d3afddc14a21f6))
+- *(proto)* Log a duplicate message with its short hash ([#201](https://github.com/n0-computer/iroh-gossip/issues/201)) - ([44d1767](https://github.com/n0-computer/iroh-gossip/commit/44d17672baece0a1d840f771518f661b34ebb2c5))
+- *(proto)* Keep a newly grafted peer more stable ([#207](https://github.com/n0-computer/iroh-gossip/issues/207)) - ([325cb1e](https://github.com/n0-computer/iroh-gossip/commit/325cb1e4ad861f10dc76d9dfd33b0636487524f7))
+- *(proto)* Back off and limit refills of a short active view ([#196](https://github.com/n0-computer/iroh-gossip/issues/196)) - ([f2b1f29](https://github.com/n0-computer/iroh-gossip/commit/f2b1f29c48c36cfa853168c8e8b0c84ac9201da0))
+- Stop the actor without a panic when the runtime shuts down ([#183](https://github.com/n0-computer/iroh-gossip/issues/183)) - ([b89fa98](https://github.com/n0-computer/iroh-gossip/commit/b89fa9816ece4f2fcd9b02a179f40c41509d4ada))
+- Fix bugs in peer lifecycle management ([#161](https://github.com/n0-computer/iroh-gossip/issues/161)) - ([fcd81ae](https://github.com/n0-computer/iroh-gossip/commit/fcd81ae80b2cb0d64242b0b938304ca591d17b81))
+- Connection lifecycle fixes ([#178](https://github.com/n0-computer/iroh-gossip/issues/178)) - ([f02f79e](https://github.com/n0-computer/iroh-gossip/commit/f02f79e857ab6b7cb697c4bbc08b9ad3c5ea6e11))
+- Reject oversized messages at the API level ([#187](https://github.com/n0-computer/iroh-gossip/issues/187)) - ([6bb9fe0](https://github.com/n0-computer/iroh-gossip/commit/6bb9fe078396b9c96d029d6d63ab633318303354))
+
+### 🚜 Refactor
+
+- *(net)* Keep pending dials as a set ([#203](https://github.com/n0-computer/iroh-gossip/issues/203)) - ([7fd7494](https://github.com/n0-computer/iroh-gossip/commit/7fd74941507a701ceec1115bb7dbdba3fc4535cf))
+- [**breaking**] Mark event and command enums and Metrics as non-exhaustive ([#198](https://github.com/n0-computer/iroh-gossip/issues/198)) - ([c5f44db](https://github.com/n0-computer/iroh-gossip/commit/c5f44db74ccc232d4e81523117b7e95e36d4c5c5))
+- Don't maintain neighbor list twice ([#204](https://github.com/n0-computer/iroh-gossip/issues/204)) - ([056840d](https://github.com/n0-computer/iroh-gossip/commit/056840dd9de87051452966366af0f9e4b8fbf86b))
+- Mark unreachable pub items as pub(crate) ([#222](https://github.com/n0-computer/iroh-gossip/issues/222)) - ([b4f40e1](https://github.com/n0-computer/iroh-gossip/commit/b4f40e112193aa659a06393597ced1cd76bc2834))
+
+### 📚 Documentation
+
+- *(examples)* Add nonce in chat example and fix nickname handling ([#200](https://github.com/n0-computer/iroh-gossip/issues/200)) - ([15af798](https://github.com/n0-computer/iroh-gossip/commit/15af798e5b3c1816b6f575640b9e8108978b35bf))
+- Improve docs of public items ([#219](https://github.com/n0-computer/iroh-gossip/issues/219)) - ([1fe8899](https://github.com/n0-computer/iroh-gossip/commit/1fe8899454e48e804928f77625a13bbcc61cc02c))
+
+### ⚡ Performance
+
+- Use `FxHashMap` for some maps ([#220](https://github.com/n0-computer/iroh-gossip/issues/220)) - ([6e397a9](https://github.com/n0-computer/iroh-gossip/commit/6e397a932c96825871e1a397b8c730fa001e2a74))
+- Reduce allocations ([#221](https://github.com/n0-computer/iroh-gossip/issues/221)) - ([0e06623](https://github.com/n0-computer/iroh-gossip/commit/0e066230f709d36e0705f44e4537a0c17b1be917))
+
+### ⚙️ Miscellaneous Tasks
+
+- *(secruity)* Hardening + lock files + dependabot cooldown ([#164](https://github.com/n0-computer/iroh-gossip/issues/164)) - ([282715a](https://github.com/n0-computer/iroh-gossip/commit/282715ade80dd0e74738a4be57ef735a7fc790bf))
+- Run scheduled CI jobs earlier ([#153](https://github.com/n0-computer/iroh-gossip/issues/153)) - ([f128b98](https://github.com/n0-computer/iroh-gossip/commit/f128b98705f5ad3a28a92f1d2b483686348b6ae8))
+- Bump all dependencies in lockfile ([#212](https://github.com/n0-computer/iroh-gossip/issues/212)) - ([32a6065](https://github.com/n0-computer/iroh-gossip/commit/32a60652671223ee01f312c7673a6bf37f54a801))
+
+### Deps
+
+- Bump deps ([#171](https://github.com/n0-computer/iroh-gossip/issues/171)) - ([2885dd9](https://github.com/n0-computer/iroh-gossip/commit/2885dd9f1120e46aca5acbcd7f212e4c64e278b9))
+- Update rustls in lockfile ([#194](https://github.com/n0-computer/iroh-gossip/issues/194)) - ([6cbbafa](https://github.com/n0-computer/iroh-gossip/commit/6cbbafa865c1b60c813dd8f12f78a54a45c1ecb1))
+
 ## [0.101.0](https://github.com/n0-computer/iroh-gossip/compare/v0.100.0..0.101.0) - 2026-06-15
 
 ### ⛰️  Features
