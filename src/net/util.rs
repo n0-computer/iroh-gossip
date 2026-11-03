@@ -602,7 +602,7 @@ pub(crate) enum ReadError {
 }
 
 /// Read a length-prefixed frame and decode with postcard.
-pub async fn read_frame<T: DeserializeOwned>(
+pub(crate) async fn read_frame<T: DeserializeOwned>(
     reader: &mut RecvStream,
     buffer: &mut BytesMut,
     max_message_size: usize,
@@ -617,7 +617,7 @@ pub async fn read_frame<T: DeserializeOwned>(
 ///
 /// Borrows the frame from `buffer`, keeping its storage for the next read.
 /// Returns `None` if the stream ends before the frame length starts.
-pub async fn read_lp<'a>(
+pub(crate) async fn read_lp<'a>(
     reader: &mut RecvStream,
     buffer: &'a mut BytesMut,
     max_message_size: usize,
@@ -640,7 +640,7 @@ pub async fn read_lp<'a>(
 }
 
 /// Writes a length-prefixed frame.
-pub async fn write_frame<T: Serialize>(
+pub(crate) async fn write_frame<T: Serialize>(
     stream: &mut SendStream,
     message: &T,
     buffer: &mut Vec<u8>,
@@ -686,7 +686,7 @@ pub(super) fn set_flag(flag: &watch::Sender<bool>, value: bool) {
 
 /// A [`TimerMap`] with an async method to wait for the next timer expiration.
 #[derive(Debug)]
-pub struct Timers<T> {
+pub(crate) struct Timers<T> {
     map: TimerMap<T>,
 }
 
@@ -700,17 +700,17 @@ impl<T> Default for Timers<T> {
 
 impl<T> Timers<T> {
     /// Creates a new timer map.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Inserts a new entry at the specified instant
-    pub fn insert(&mut self, instant: Instant, item: T) {
+    pub(crate) fn insert(&mut self, instant: Instant, item: T) {
         self.map.insert(instant, item);
     }
 
     /// Waits for the next timer to elapse.
-    pub async fn wait_next(&mut self) -> Instant {
+    pub(crate) async fn wait_next(&mut self) -> Instant {
         match self.map.first() {
             None => std::future::pending::<Instant>().await,
             Some(instant) => {
@@ -721,7 +721,7 @@ impl<T> Timers<T> {
     }
 
     /// Pops the earliest timer that expires at or before `now`.
-    pub fn pop_before(&mut self, now: Instant) -> Option<(Instant, T)> {
+    pub(crate) fn pop_before(&mut self, now: Instant) -> Option<(Instant, T)> {
         self.map.pop_before(now)
     }
 }

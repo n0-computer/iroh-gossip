@@ -495,7 +495,7 @@ impl Actor {
         (actor, rpc_tx, local_tx)
     }
 
-    pub async fn run(mut self) {
+    pub(crate) async fn run(mut self) {
         let mut addr_update_stream = self.setup();
 
         let mut i = 0;
