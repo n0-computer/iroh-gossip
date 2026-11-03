@@ -595,10 +595,11 @@ where
             self.recent_neighbors.retain(|known| *known != peer);
         }
         let requested = self.pending_neighbor_requests.remove(&peer).is_some();
-        if requested && details.alive && !self.active_view.contains(&peer) {
+        let is_active = self.active_view.contains(&peer);
+        if requested && details.alive && !is_active {
             self.refused.insert(peer);
         }
-        if self.active_view.contains(&peer) {
+        if is_active {
             self.remove_active(
                 &peer,
                 RemovalReason::DisconnectReceived {
@@ -724,9 +725,7 @@ where
             // "iv) If, at this point, n has not been inserted
             // in p’s active view, p will forward the request to a random node in its active view
             // (different from the one from which the request was received)."
-            if !self.active_view.contains(&peer_id)
-                && !self.pending_neighbor_requests.contains_key(&peer_id)
-            {
+            if !self.pending_neighbor_requests.contains_key(&peer_id) {
                 match self
                     .active_view
                     .pick_random_without(&[&sender], &mut self.rng)
@@ -774,9 +773,10 @@ where
             return;
         }
         if let Some(data) = peer_info.data {
-            let old = self.peer_data.remove(&peer_info.id);
-            let same = matches!(old, Some(old) if old == data);
-            if !same && !data.0.is_empty() {
+            if self.peer_data.get(&peer_info.id) == Some(&data) {
+                return;
+            }
+            if !data.0.is_empty() {
                 io.push(OutEvent::PeerData(peer_info.id, data.clone()));
             }
             self.peer_data.insert(peer_info.id, data);
@@ -989,7 +989,7 @@ where
     /// Returns whether the peer was added to the passive view.
     fn add_passive(&mut self, peer: PI, data: Option<PeerData>, io: &mut impl IO<PI>) -> bool {
         self.insert_peer_info((peer, data).into(), io);
-        if self.active_view.contains(&peer) || self.passive_view.contains(&peer) || peer == self.me
+        if peer == self.me || self.active_view.contains(&peer) || self.passive_view.contains(&peer)
         {
             return false;
         }

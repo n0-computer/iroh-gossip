@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use iroh::{
     endpoint::{Connection, RecvStream, SendStream, StreamId},
     EndpointId,
@@ -142,7 +142,7 @@ impl StreamHeader {
                     "stream ended before header",
                 ))
             })?;
-        Self::decode(&frame)
+        Self::decode(frame)
     }
 
     fn decode(frame: &[u8]) -> Result<Self, ReadError> {
@@ -607,24 +607,21 @@ pub async fn read_frame<T: DeserializeOwned>(
     buffer: &mut BytesMut,
     max_message_size: usize,
 ) -> Result<Option<T>, ReadError> {
-    match read_lp(reader, buffer, max_message_size).await? {
-        None => Ok(None),
-        Some(data) => {
-            let message = postcard::from_bytes(&data)?;
-            Ok(Some(message))
-        }
-    }
+    let Some(data) = read_lp(reader, buffer, max_message_size).await? else {
+        return Ok(None);
+    };
+    Ok(Some(postcard::from_bytes(data)?))
 }
 
 /// Reads a length prefixed buffer.
 ///
-/// Returns the frame as raw bytes.  If the end of the stream is reached before
-/// the frame length starts, `None` is returned.
-pub async fn read_lp(
+/// Borrows the frame from `buffer`, keeping its storage for the next read.
+/// Returns `None` if the stream ends before the frame length starts.
+pub async fn read_lp<'a>(
     reader: &mut RecvStream,
-    buffer: &mut BytesMut,
+    buffer: &'a mut BytesMut,
     max_message_size: usize,
-) -> Result<Option<Bytes>, ReadError> {
+) -> Result<Option<&'a [u8]>, ReadError> {
     let size = match reader.read_u32().await {
         Ok(size) => size,
         Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
@@ -639,7 +636,7 @@ pub async fn read_lp(
         .read_exact(&mut buffer[..])
         .await
         .map_err(io::Error::other)?;
-    Ok(Some(buffer.split_to(size).freeze()))
+    Ok(Some(&buffer[..]))
 }
 
 /// Writes a length-prefixed frame.

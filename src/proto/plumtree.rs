@@ -597,6 +597,14 @@ impl<PI: PeerIdentity> State<PI> {
             - 5;
         let chunk_len = chunk_size / IHave::POSTCARD_MAX_SIZE;
         while let Some((peer, list)) = self.lazy_push_queue.pop_first() {
+            if list.is_empty() {
+                continue;
+            }
+            // A batch that fits one frame can hand its allocation to the outgoing message.
+            if list.len() <= chunk_len {
+                io.push(OutEvent::SendMessage(peer, Message::IHave(list)));
+                continue;
+            }
             for chunk in list.chunks(chunk_len) {
                 io.push(OutEvent::SendMessage(peer, Message::IHave(chunk.to_vec())));
             }
@@ -631,10 +639,10 @@ impl<PI: PeerIdentity> State<PI> {
                 message.clone(),
                 now + self.config.message_cache_retention,
             );
-            self.lazy_push(message.clone(), &me, io);
+            self.lazy_push(&message, &me, io);
         }
 
-        self.eager_push(message.clone(), &me, &[], io);
+        self.eager_push(&message, &me, &[], io);
     }
 
     /// Handle receiving a [`Message::Gossip`].
@@ -704,8 +712,8 @@ impl<PI: PeerIdentity> State<PI> {
                     }
                     None => (Vec::new(), false),
                 };
-                self.eager_push(message.clone(), &sender, &grafted, io);
-                self.lazy_push(message.clone(), &sender, io);
+                self.eager_push(&message, &sender, &grafted, io);
+                self.lazy_push(&message, &sender, io);
                 // cleanup places where we track missing messages
                 self.graft_timer_scheduled.remove(&message.id);
                 let previous_ihaves = self.missing_messages.remove(&message.id);
@@ -1026,7 +1034,7 @@ impl<PI: PeerIdentity> State<PI> {
     }
 
     /// Immediately sends message to eager peers.
-    fn eager_push(&self, gossip: Gossip, sender: &PI, skip: &[PI], io: &mut impl IO<PI>) {
+    fn eager_push(&self, gossip: &Gossip, sender: &PI, skip: &[PI], io: &mut impl IO<PI>) {
         for peer in self
             .eager_push_peers
             .iter()
@@ -1041,7 +1049,7 @@ impl<PI: PeerIdentity> State<PI> {
 
     /// Queue lazy message announcements into the queue that will be sent out as batched
     /// [`Message::IHave`] messages once the [`Timer::DispatchLazyPush`] timer is triggered.
-    fn lazy_push(&mut self, gossip: Gossip, sender: &PI, io: &mut impl IO<PI>) {
+    fn lazy_push(&mut self, gossip: &Gossip, sender: &PI, io: &mut impl IO<PI>) {
         let Some(round) = gossip.round() else {
             return;
         };
