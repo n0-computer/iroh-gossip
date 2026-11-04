@@ -50,6 +50,7 @@ use std::{fmt, hash::Hash};
 use bytes::Bytes;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
+pub mod filter;
 pub(crate) mod hyparview;
 pub(crate) mod plumtree;
 pub mod state;
@@ -59,8 +60,9 @@ pub mod util;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod sim;
 
+pub use filter::{FilterContext, Verdict};
 pub use hyparview::{Config as HyparviewConfig, Ttl};
-pub use plumtree::{Config as PlumtreeConfig, DeliveryScope, Round, Scope, TreeId};
+pub use plumtree::{Config as PlumtreeConfig, DeliveryScope, MessageId, Round, Scope, TreeId};
 pub use state::{InEvent, Message, State, Timer, TopicId, IO};
 pub use topic::{Command, Config, Event};
 
