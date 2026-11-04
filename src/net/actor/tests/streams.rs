@@ -237,7 +237,7 @@ async fn queued_message_comes_before_the_initial_topics() -> Result {
     Ok(())
 }
 
-/// A topic that the writer left with a `Disconnect` gets no initial stream again.
+/// A topic that the writer left with a `Close` gets no initial stream again.
 #[tokio::test]
 #[traced_test]
 async fn left_topic_gets_no_initial_stream() -> Result {
@@ -274,7 +274,7 @@ async fn left_topic_gets_no_initial_stream() -> Result {
     Ok(())
 }
 
-/// A newer stream of a topic waits until the older one ended, as after a `Disconnect`.
+/// A newer stream of a topic waits until the older one ended, as after a `Close`.
 #[tokio::test]
 #[traced_test]
 async fn streams_of_a_topic_keep_their_order() -> Result {
@@ -417,7 +417,7 @@ async fn new_writer_opens_the_streams_of_the_topics() -> Result {
     Ok(())
 }
 
-/// A `Disconnect` ends its stream, and a rejoin goes on a new stream.
+/// A `Close` ends its stream, and a rejoin goes on a new stream.
 ///
 /// The ended stream frees a stream for the peer's limit on open streams.
 #[tokio::test]

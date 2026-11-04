@@ -129,9 +129,9 @@ pub enum Message<PI> {
 
 #[cfg(all(test, feature = "net"))]
 impl<PI> Message<PI> {
-    /// Returns a `Disconnect`, for the network tests.
-    pub(crate) fn test_disconnect() -> Self {
-        Message::Swarm(hyparview::Message::test_disconnect())
+    /// Returns a `Close`, for the network tests.
+    pub(crate) fn test_close() -> Self {
+        Message::Swarm(hyparview::Message::test_close())
     }
 
     /// Returns a payload of `len` bytes, as an eager push sends it, for the network tests.
@@ -174,7 +174,7 @@ impl<PI> Message<PI> {
 
     /// Returns `true` if this is a disconnect message (which is the last message sent to a peer per topic).
     pub fn is_disconnect(&self) -> bool {
-        matches!(self, Message::Swarm(hyparview::Message::Disconnect(_)))
+        matches!(self, Message::Swarm(hyparview::Message::Close(_)))
     }
 
     /// Returns `true` if this announces messages, which the peer can still request.
