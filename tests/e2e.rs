@@ -24,7 +24,7 @@ use iroh::{
 use iroh_gossip::{
     api::{Event, GossipReceiver, GossipSender, JoinOptions},
     net::{Builder, Gossip, Verdict, GOSSIP_ALPN},
-    proto::TopicId,
+    proto::{HyparviewConfig, TopicId},
 };
 use n0_error::{bail_any, Result, StdResultExt};
 use n0_future::{task::AbortOnDropHandle, StreamExt};
@@ -1593,6 +1593,121 @@ async fn retire_loses_no_unread_data() -> Result {
         }
     }
     Ok(())
+}
+
+/// A list of `n` ids that no node has an address for, so a dial to them fails.
+fn unreachable_ids(n: usize) -> Vec<EndpointId> {
+    (0..n).map(|_| SecretKey::generate().public()).collect()
+}
+
+/// Adds the indexes of `subs` that saw `joiner` come up as a neighbor to `contacts`.
+async fn record_contacts(
+    subs: &mut [Sub],
+    joiner: EndpointId,
+    contacts: &mut BTreeSet<usize>,
+) -> Result {
+    for (i, sub) in subs.iter_mut().enumerate() {
+        while let Ok(event) = timeout(Duration::from_millis(50), sub.rx.try_next()).await {
+            match event.std_context("receive")? {
+                Some(Event::NeighborUp(peer)) if peer == joiner => {
+                    contacts.insert(i);
+                }
+                Some(_) => {}
+                None => bail_any!("the topic closed"),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A join with 20 bootstrap peers, of which few answer, sends `Join`s to two and retires the rest.
+///
+/// After the join, the views of the joiner and its contacts are full, and the other
+/// live nodes know no peer. So no node asks for a neighbor, and each live neighbor of the
+/// joiner got a `Join`. No refill opens an unused connection again.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn join_with_many_bootstrap_peers_joins_two() -> Result {
+    let lookup = MemoryLookup::new();
+    let with_capacity = |active_view_capacity| {
+        let mut config = HyparviewConfig::default();
+        config.active_view_capacity = active_view_capacity;
+        Gossip::builder().membership_config(config)
+    };
+    let builder = with_capacity(2).retire_after(Duration::from_millis(100));
+    let joiner = Node::spawn_custom(&lookup, SecretKey::generate(), builder, None).await?;
+    let t = topic("connect_first");
+    let mut live = Vec::new();
+    for _ in 0..4 {
+        let builder = with_capacity(1);
+        live.push(Node::spawn_custom(&lookup, SecretKey::generate(), builder, None).await?);
+    }
+    let mut subs = Vec::new();
+    for node in &live {
+        subs.push(Sub::new(node, t, vec![]).await?);
+    }
+    // The first wave of five holds all live nodes and one that fails at once.
+    let mut bootstrap = vec![live[0].id()];
+    bootstrap.extend(unreachable_ids(1));
+    bootstrap.extend(live[1..].iter().map(Node::id));
+    bootstrap.extend(unreachable_ids(15));
+    assert_eq!(bootstrap.len(), 20);
+
+    let _sj = Sub::join(&joiner, t, bootstrap).await?;
+    let mut contacts = BTreeSet::new();
+    timeout(PROMPT, async {
+        while contacts.len() < 2 {
+            record_contacts(&mut subs, joiner.id(), &mut contacts).await?;
+        }
+        n0_error::Ok(())
+    })
+    .await
+    .std_context("the joiner found no two contacts")??;
+
+    // The two peers that got no `Join` lose their idle connection. The contacts keep theirs.
+    for (i, node) in live.iter().enumerate() {
+        if !contacts.contains(&i) {
+            let closed = || open_between(&joiner, node) == 0;
+            eventually(PROMPT, "an unused connection stayed open", closed).await?;
+        }
+    }
+    record_contacts(&mut subs, joiner.id(), &mut contacts).await?;
+    assert_eq!(contacts.len(), 2, "the Joins went to {contacts:?}");
+    for i in contacts {
+        assert!(
+            open_between(&joiner, &live[i]) > 0,
+            "a contact lost its connection"
+        );
+    }
+    Ok(())
+}
+
+/// A join that reaches no bootstrap peer fails with an error, and with an event.
+///
+/// A join fails no earlier than 10 s after it started.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn join_without_a_reachable_peer_fails() -> Result {
+    const JOIN_DEADLINE: Duration = Duration::from_secs(10);
+    let lookup = MemoryLookup::new();
+    let node = Node::spawn(&lookup).await?;
+    let t = topic("join_fails");
+
+    let res = timeout(
+        JOIN_DEADLINE + PROMPT,
+        node.gossip.subscribe_and_join(t, unreachable_ids(20)),
+    )
+    .await
+    .std_context("the join neither succeeded nor failed")?;
+    assert!(
+        matches!(res, Err(iroh_gossip::Error::JoinFailed { .. })),
+        "{res:?}"
+    );
+
+    // The same join as an event, with the topic still open.
+    let mut sub = Sub::new(&node, t, unreachable_ids(3)).await?;
+    sub.wait(JOIN_DEADLINE + PROMPT, |e| matches!(e, Event::JoinFailed))
+        .await
 }
 
 /// A `subscription_capacity` of 0 counts as 1, and does not panic.

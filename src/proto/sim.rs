@@ -680,6 +680,12 @@ impl<PI: PeerIdentity + Ord, R: Rng> IO<PI> for SimIO<'_, PI, R> {
     }
 
     fn peer_data(&mut self, _peer: PI, _data: PeerData) {}
+
+    fn connect(&mut self, to: PI) {
+        let latency = latency_between(self.latency, self.latencies, &self.peer, &to, self.rng);
+        let event = InEvent::PeerConnected(to);
+        self.queue.insert(self.time + latency, self.peer, event);
+    }
 }
 
 fn latency_between<PI: PeerIdentity + Ord + PartialOrd, R: Rng>(

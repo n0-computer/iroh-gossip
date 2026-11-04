@@ -38,6 +38,8 @@ pub enum InEvent<PI> {
     /// The topic drops the peer as it does for [`Self::PeerDisconnected`], and emits
     /// [`Event::Refused`].
     PeerRefused(PI),
+    /// A connection to the peer exists, see [`IO::connect`].
+    PeerConnected(PI),
     /// Update the opaque peer data about yourself.
     UpdatePeerData(PeerData),
 }
@@ -56,6 +58,8 @@ pub enum OutEvent<PI> {
     ScheduleTimer(Duration, Timer<PI>),
     /// Emitted when new [`PeerData`] was received for a peer.
     PeerData(PI, PeerData),
+    /// Connect to a peer without a message, see [`IO::connect`].
+    Connect(PI),
 }
 
 /// The receiver of the actions of the topic state.
@@ -77,6 +81,13 @@ pub trait IO<PI> {
 
     /// Reports new [`PeerData`] of `peer`.
     fn peer_data(&mut self, peer: PI, data: PeerData);
+
+    /// Connects to `peer` without a message.
+    ///
+    /// The runtime answers with [`InEvent::PeerConnected`] once a connection exists, so that a
+    /// message goes out at once, or with [`InEvent::PeerDisconnected`] if it fails. The topic
+    /// wants the connection until it drops the peer or the peer is connected.
+    fn connect(&mut self, peer: PI);
 }
 
 #[cfg(test)]
@@ -96,6 +107,10 @@ impl<PI> IO<PI> for VecDeque<OutEvent<PI>> {
 
     fn peer_data(&mut self, peer: PI, data: PeerData) {
         self.push_back(OutEvent::PeerData(peer, data));
+    }
+
+    fn connect(&mut self, peer: PI) {
+        self.push_back(OutEvent::Connect(peer));
     }
 }
 
@@ -202,6 +217,13 @@ pub enum Event<PI> {
     Received(GossipEvent<PI>),
     /// The peer refused us for this topic, for example for a bad auth token.
     Refused(PI),
+    /// A join got no neighbor from its bootstrap peers.
+    ///
+    /// Every peer of the join failed: its dial failed, or it closed, refused, or did not
+    /// answer us in time. The node keeps trying to rejoin through the peers in the background,
+    /// so a neighbor can still come up later. The event comes no earlier than 10 seconds
+    /// after the join.
+    JoinFailed,
 }
 
 /// A timer to be registered for a particular topic.
@@ -317,8 +339,9 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
         match event {
             InEvent::Command(command) => match command {
                 Command::Join(peers) => {
-                    for peer in peers {
-                        swarm.handle(SwarmIn::RequestJoin(peer), &mut io);
+                    // Without peers, the node waits for a join.
+                    if !peers.is_empty() {
+                        swarm.handle(SwarmIn::RequestJoin(peers), &mut io);
                     }
                 }
                 Command::Broadcast(data, scope) => {
@@ -350,6 +373,7 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
                 swarm.handle(SwarmIn::PeerDisconnected(peer), &mut io);
                 io.gossip.on_neighbor_down(peer);
             }
+            InEvent::PeerConnected(peer) => swarm.handle(SwarmIn::PeerConnected(peer), &mut io),
             InEvent::PeerRefused(peer) => {
                 swarm.handle(SwarmIn::PeerRefused(peer), &mut io);
                 io.gossip.on_neighbor_down(peer);
@@ -424,6 +448,10 @@ impl<PI: PeerIdentity, E: IO<PI>> IO<PI> for SwarmIO<'_, PI, E> {
 
     fn peer_data(&mut self, peer: PI, data: PeerData) {
         self.io.peer_data(peer, data);
+    }
+
+    fn connect(&mut self, peer: PI) {
+        self.io.connect(peer);
     }
 }
 

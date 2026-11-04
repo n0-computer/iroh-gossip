@@ -112,6 +112,8 @@ async fn full_control_queue_aborts_the_peer_without_waiting() -> Result {
     let (conn, peer_conn) = pair.connect_back().await?;
     let peer = pair.ep2.id();
     let mut actor = t_actor().await?;
+    // Each join sends `PeerConnected` to every topic. A small queue fills after fewer joins.
+    actor.state.peers.queue_size = queue::MIN_QUEUE_SIZE;
     actor.add_connection(conn);
     let _control = control_open(&peer_conn).await?;
 
@@ -247,11 +249,15 @@ async fn peer_wanted_again_during_the_dial_keeps_its_queue() -> Result {
 }
 
 /// Joins new topics with `peer` until its queue had no room for a control message.
+///
+/// A join sends its `Join` only after `PeerConnected`, so each join gets one.
+/// The actor itself may still dial.
 fn join_until_full(actor: &mut Actor, peer: EndpointId) {
     for i in 0..10_000u32 {
         let topic: TopicId = blake3::hash(&i.to_be_bytes()).into();
         let join = InEvent::Command(topic, ProtoCommand::Join(vec![peer]));
         actor.handle_in_event(join, Instant::now());
+        actor.handle_in_event(InEvent::PeerConnected(peer), Instant::now());
         if actor.state.metrics.peers_send_queue_full.get() > 0 {
             return;
         }
