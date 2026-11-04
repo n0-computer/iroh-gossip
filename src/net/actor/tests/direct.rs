@@ -40,7 +40,7 @@ fn small_windows(window: u32) -> QuicTransportConfig {
 /// Waits until `receiver` reports `peer` as a neighbor.
 async fn neighbor_up(receiver: &mut GossipReceiver, peer: EndpointId) -> Result {
     timeout(PROMPT, async {
-        while let Some(event) = receiver.try_next().await? {
+        while let Some(event) = receiver.next().await {
             if matches!(event, api::Event::NeighborUp(up) if up == peer) {
                 return Ok(());
             }
@@ -54,7 +54,7 @@ async fn neighbor_up(receiver: &mut GossipReceiver, peer: EndpointId) -> Result 
 /// Waits until `receiver` got a message with `content`, and returns the contents it got.
 async fn receive_until(receiver: &mut GossipReceiver, content: &[u8]) -> Result<Vec<Bytes>> {
     let mut received = Vec::new();
-    while let Some(event) = receiver.try_next().await? {
+    while let Some(event) = receiver.next().await {
         if let api::Event::Received(message) = event {
             let done = message.content == content;
             received.push(message.content);
@@ -168,7 +168,7 @@ async fn blocked_peer_does_not_stall_the_others() -> Result {
 
     timeout(Duration::from_secs(5), a.gossip.shutdown())
         .await
-        .std_context("B blocked the shutdown")??;
+        .std_context("B blocked the shutdown")?;
     conn.close(0u32.into(), b"done");
     Ok(())
 }
@@ -207,7 +207,7 @@ async fn slow_peer_gets_the_dropped_messages() -> Result {
         }
     }));
     timeout(PROMPT, async {
-        while let Some(event) = a_rx.try_next().await? {
+        while let Some(event) = a_rx.next().await {
             if matches!(event, api::Event::NeighborUp(peer) if peer == c.id()) {
                 return Ok(());
             }
@@ -221,7 +221,7 @@ async fn slow_peer_gets_the_dropped_messages() -> Result {
     // holds more than all bursts.
     let (got_tx, mut got_rx) = mpsc::channel(8192);
     let _receive = AbortOnDropHandle::new(spawn(async move {
-        while let Ok(Some(event)) = b_rx.try_next().await {
+        while let Some(event) = b_rx.next().await {
             if let api::Event::Received(message) = event {
                 got_tx.send(message.content).await.ok();
             }

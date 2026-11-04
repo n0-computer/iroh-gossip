@@ -293,27 +293,8 @@ impl Default for Config {
 /// The topic state maintains the swarm membership and broadcast tree for a particular topic.
 #[derive(Debug)]
 pub struct State<PI, R> {
-    me: PI,
     pub(crate) swarm: hyparview::State<PI, R>,
     pub(crate) gossip: plumtree::State<PI>,
-}
-
-impl<PI: PeerIdentity> State<PI, rand::rngs::ThreadRng> {
-    /// Initialize the local state with the default random number generator.
-    ///
-    /// ## Panics
-    ///
-    /// Panics if [`Config::max_message_size`] is below [`MIN_MAX_MESSAGE_SIZE`].
-    pub fn new(me: PI, me_data: Option<PeerData>, config: Config) -> Self {
-        Self::with_rng(me, me_data, config, rand::rng())
-    }
-}
-
-impl<PI, R> State<PI, R> {
-    /// The address of your local endpoint.
-    pub fn endpoint(&self) -> &PI {
-        &self.me
-    }
 }
 
 impl<PI: PeerIdentity, R: Rng> State<PI, R> {
@@ -330,7 +311,6 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
         Self {
             swarm: hyparview::State::new(me, me_data, config.membership, rng),
             gossip: plumtree::State::new(me, config.broadcast, config.max_message_size),
-            me,
         }
     }
 
@@ -407,15 +387,9 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
     }
 
     /// Reset all statistics.
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn reset_stats(&mut self) {
         self.gossip.stats = Default::default();
-    }
-
-    /// Get statistics for the gossip broadcast state
-    ///
-    /// TODO: Remove/replace with metrics?
-    pub fn gossip_stats(&self) -> &plumtree::Stats {
-        self.gossip.stats()
     }
 
     /// Returns whether the topic wants a connection to `peer`, see [`hyparview::State::wants`].

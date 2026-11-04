@@ -121,7 +121,9 @@ pub enum InEvent<PI> {
     PeerRejected(TopicId, PI),
     /// The peer refused us for one topic, and the connection stays usable.
     ///
-    /// Only that topic drops the peer. It emits [`topic::Event::Refused`].
+    /// Only that topic drops the peer. It emits [`Event::Refused`].
+    ///
+    /// [`Event::Refused`]: super::Event::Refused
     PeerRefused(TopicId, PI),
     /// A connection to the peer exists, see [`IO::connect`].
     PeerConnected(PI),
@@ -265,9 +267,8 @@ impl<PI> From<InEvent<PI>> for InEventMapped<PI> {
 /// The implementation works as an IO-less state machine. The implementer injects events through
 /// [`Self::handle`], which writes the actions of the state into an [`IO`].
 ///
-/// This struct contains a map of [`topic::State`] for each topic that was joined. It mostly acts as
-/// a forwarder of [`InEvent`]s to matching topic state. Each topic's state is completely
-/// independent; thus the actual protocol logic lives with [`topic::State`].
+/// It keeps a separate state for each joined topic, and forwards each [`InEvent`] to the
+/// state of its topic. The topics do not share state.
 #[derive(Debug)]
 pub struct State<PI, R> {
     me: PI,
@@ -312,13 +313,14 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
         &self.me
     }
 
-    /// Get a reference to the protocol state for a topic.
-    pub fn state(&self, topic: &TopicId) -> Option<&topic::State<PI, R>> {
+    /// Returns the protocol state of `topic`.
+    pub(crate) fn state(&self, topic: &TopicId) -> Option<&topic::State<PI, R>> {
         self.states.get(topic)
     }
 
     /// Resets the tracked stats for a topic.
-    pub fn reset_stats(&mut self, topic: &TopicId) {
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn reset_stats(&mut self, topic: &TopicId) {
         if let Some(state) = self.states.get_mut(topic) {
             state.reset_stats();
         }
@@ -329,8 +331,9 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
         self.states.keys()
     }
 
-    /// Get an iterator for the states of all joined topics.
-    pub fn states(&self) -> impl Iterator<Item = (&TopicId, &topic::State<PI, R>)> {
+    /// Returns the states of all joined topics.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn states(&self) -> impl Iterator<Item = (&TopicId, &topic::State<PI, R>)> {
         self.states.iter()
     }
 

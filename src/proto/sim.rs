@@ -1402,7 +1402,8 @@ impl Simulator {
         max
     }
 
-    fn total_payload_messages(&self) -> u64 {
+    /// Returns the payloads that all peers received since the last [`Self::gossip_round`] began.
+    pub fn total_payload_messages(&self) -> u64 {
         let mut sum = 0;
         for state in self.network.peers.values() {
             let state = state.state(&TOPIC).unwrap();

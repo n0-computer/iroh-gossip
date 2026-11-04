@@ -130,7 +130,7 @@ async fn gossip_net_smoke() {
     let sub2 = spawn(async move {
         let mut recv = vec![];
         loop {
-            let ev = sub2.next().await.unwrap().unwrap();
+            let ev = sub2.next().await.unwrap();
             info!("go2 event: {ev:?}");
             if let Event::Received(msg) = ev {
                 recv.push(msg.content);
@@ -145,7 +145,7 @@ async fn gossip_net_smoke() {
     let sub3 = spawn(async move {
         let mut recv = vec![];
         loop {
-            let ev = sub3.next().await.unwrap().unwrap();
+            let ev = sub3.next().await.unwrap();
             info!("go3 event: {ev:?}");
             if let Event::Received(msg) = ev {
                 recv.push(msg.content);
@@ -236,7 +236,7 @@ async fn subscription_cleanup() -> Result {
         let (_pub_tx, mut sub_rx) = go2.subscribe_and_join(topic, vec![]).await?.split();
 
         let subscribe_fut = async {
-            while let Some(ev) = sub_rx.try_next().await? {
+            while let Some(ev) = sub_rx.next().await {
                 match ev {
                     Event::Lagged => tracing::debug!("missed some messages :("),
                     Event::Received(_) => unreachable!("test does not send messages"),
@@ -469,9 +469,9 @@ async fn can_reconnect() -> Result {
 
     // we should receive a Neighbor down event
     let conn_timeout = Duration::from_millis(500);
-    let ev = timeout(conn_timeout, sub.try_next())
+    let ev = timeout(conn_timeout, sub.next())
         .await
-        .std_context("wait neighbor down")??;
+        .std_context("wait neighbor down")?;
     assert_eq!(ev, Some(Event::NeighborDown(endpoint_id2)));
     tracing::info!("endpoint 2 left");
 
@@ -479,9 +479,9 @@ async fn can_reconnect() -> Result {
     tx.send(()).await.std_context("signal resubscribe")?;
 
     let conn_timeout = Duration::from_millis(500);
-    let ev = timeout(conn_timeout, sub.try_next())
+    let ev = timeout(conn_timeout, sub.next())
         .await
-        .std_context("wait neighbor up")??;
+        .std_context("wait neighbor up")?;
     assert_eq!(ev, Some(Event::NeighborUp(endpoint_id2)));
     tracing::info!("endpoint 2 rejoined!");
 
@@ -554,7 +554,7 @@ async fn can_die_and_reconnect() -> Result {
         let memory_lookup = MemoryLookup::new();
         memory_lookup.add_endpoint_info(bootstrap_addr);
         router.endpoint().address_lookup()?.add(memory_lookup);
-        let mut topic = gossip.subscribe_and_join(topic_id, bootstrap).await?;
+        let topic = gossip.subscribe_and_join(topic_id, bootstrap).await?;
         topic.broadcast(message.as_bytes().to_vec().into()).await?;
         std::future::pending::<()>().await;
         Ok(())
@@ -582,7 +582,7 @@ async fn can_die_and_reconnect() -> Result {
             info!(endpoint_id = %addr.id.fmt_short(), "recv endpoint spawned");
             addr_tx.send(addr).unwrap();
             let mut topic = gossip.subscribe_and_join(topic_id, vec![]).await?;
-            while let Some(event) = topic.try_next().await.unwrap() {
+            while let Some(event) = topic.next().await {
                 if let Event::Received(message) = event {
                     let message = std::str::from_utf8(&message.content)
                         .std_context("decode broadcast message")?
@@ -742,23 +742,23 @@ async fn gossip_rely_on_gossip_address_lookup() -> n0_error::Result<()> {
     let ev = timeout(Duration::from_secs(3), rx3.next())
         .await
         .std_context("wait rx3 first neighbor")?;
-    assert!(matches!(ev, Some(Ok(Event::NeighborUp(_)))));
+    assert!(matches!(ev, Some(Event::NeighborUp(_))));
     let ev = timeout(Duration::from_secs(3), rx3.next())
         .await
         .std_context("wait rx3 second neighbor")?;
-    assert!(matches!(ev, Some(Ok(Event::NeighborUp(_)))));
+    assert!(matches!(ev, Some(Event::NeighborUp(_))));
 
     assert_eq!(sorted(rx3.neighbors()), sorted([n1, n2]));
 
     let ev = timeout(Duration::from_secs(3), rx2.next())
         .await
         .std_context("wait rx2 neighbor")?;
-    assert!(matches!(ev, Some(Ok(Event::NeighborUp(n))) if n == n3));
+    assert!(matches!(ev, Some(Event::NeighborUp(n)) if n == n3));
 
     let ev = timeout(Duration::from_secs(3), rx1.next())
         .await
         .std_context("wait rx1 neighbor")?;
-    assert!(matches!(ev, Some(Ok(Event::NeighborUp(n))) if n == n3));
+    assert!(matches!(ev, Some(Event::NeighborUp(n)) if n == n3));
 
     tokio::try_join!(r1.shutdown(), r2.shutdown(), r3.shutdown())
         .std_context("shutdown routers")?;
@@ -824,7 +824,7 @@ async fn topic_stays_alive_after_sender_drop() -> n0_error::Result<()> {
         .std_context("wait for message on rx1")?;
 
     match event {
-        Some(Ok(Event::Received(msg))) => {
+        Some(Event::Received(msg)) => {
             assert_eq!(&msg.content[..], b"hello from node2");
         }
         other => panic!("expected Received event, got {:?}", other),

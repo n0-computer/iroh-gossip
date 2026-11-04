@@ -163,7 +163,7 @@ impl Node {
 
     /// Leaves all topics, telling the neighbors, then closes the endpoint.
     async fn shutdown(self) -> Result<SecretKey> {
-        self.gossip.shutdown().await.std_context("shutdown")?;
+        self.gossip.shutdown().await;
         self.endpoint.close().await;
         Ok(self.secret)
     }
@@ -208,7 +208,7 @@ impl Sub {
     async fn wait(&mut self, within: Duration, mut accept: impl FnMut(&Event) -> bool) -> Result {
         timeout(within, async {
             loop {
-                match self.rx.try_next().await.std_context("receive")? {
+                match self.rx.next().await {
                     Some(event) if accept(&event) => return Ok(()),
                     Some(_) => {}
                     None => bail_any!("the topic closed"),
@@ -252,7 +252,7 @@ impl Sub {
     /// Fails when `peer` goes down, or when the topic closes or fails.
     async fn fail_on_down(&mut self, peer: EndpointId) -> Result {
         loop {
-            match self.rx.try_next().await.std_context("receive")? {
+            match self.rx.next().await {
                 Some(Event::NeighborDown(p)) if p == peer => bail_any!("the neighbor went down"),
                 Some(_) => {}
                 None => bail_any!("the topic closed"),
@@ -262,8 +262,8 @@ impl Sub {
 
     /// Takes the events that wait, so that `neighbors()` is current.
     async fn drain(&mut self) -> Result {
-        while let Ok(event) = timeout(Duration::from_millis(50), self.rx.try_next()).await {
-            if event.std_context("receive")?.is_none() {
+        while let Ok(event) = timeout(Duration::from_millis(50), self.rx.next()).await {
+            if event.is_none() {
                 bail_any!("the topic closed");
             }
         }
@@ -528,20 +528,20 @@ async fn repeated_vanish_and_restart() -> Result {
     Ok(())
 }
 
-/// Shutting down twice, or twice at once, succeeds.
+/// Shutting down twice, or twice at once, returns.
 #[tokio::test(flavor = "multi_thread")]
 #[traced_test]
-async fn repeated_shutdown_succeeds() -> Result {
+async fn repeated_shutdown_returns() -> Result {
     let lookup = MemoryLookup::new();
     let a = Node::spawn(&lookup).await?;
     let _sa = Sub::new(&a, topic("shutdown_twice"), vec![]).await?;
 
-    let (first, second) = tokio::join!(a.gossip.shutdown(), a.gossip.shutdown());
-    let third = a.gossip.shutdown().await;
-
-    first.std_context("first shutdown")?;
-    second.std_context("concurrent shutdown")?;
-    third.std_context("shutdown after the actor stopped")?;
+    timeout(PROMPT, async {
+        tokio::join!(a.gossip.shutdown(), a.gossip.shutdown());
+        a.gossip.shutdown().await;
+    })
+    .await
+    .std_context("a repeated shutdown did not return")?;
     Ok(())
 }
 
@@ -986,7 +986,7 @@ async fn shutdown_tells_the_neighbors() -> Result {
     let _sb = Sub::new(&b, t, vec![]).await?;
     let mut sa = Sub::join(&a, t, vec![b.id()]).await?;
 
-    b.gossip.shutdown().await.std_context("shutdown")?;
+    b.gossip.shutdown().await;
 
     sa.wait(
         Duration::from_secs(2),
@@ -1153,7 +1153,7 @@ async fn slow_peer_does_not_block_shutdown() -> Result {
     let result = timeout(Duration::from_secs(2), a.gossip.shutdown()).await;
     conn.close(0u32.into(), b"test finished");
     sender.abort();
-    result.std_context("a flow-controlled peer blocked gossip shutdown")??;
+    result.std_context("a flow-controlled peer blocked gossip shutdown")?;
     Ok(())
 }
 
@@ -1517,8 +1517,8 @@ async fn crossed_dials_keep_order_two_topics() -> Result {
         timeout(PROMPT, async {
             while seen.len() < COUNT {
                 match sb.rx.next().await {
-                    Some(Ok(Event::Received(message))) => seen.push(message.content),
-                    Some(Ok(_)) => {}
+                    Some(Event::Received(message)) => seen.push(message.content),
+                    Some(_) => {}
                     other => bail_any!("the subscription ended: {other:?}"),
                 }
             }
@@ -1639,8 +1639,8 @@ async fn retire_loses_no_unread_data() -> Result {
             timeout(PROMPT, async {
                 while seen.len() < COUNT {
                     match sub.rx.next().await {
-                        Some(Ok(Event::Received(m))) => seen.push(m.content),
-                        Some(Ok(_)) => {}
+                        Some(Event::Received(m)) => seen.push(m.content),
+                        Some(_) => {}
                         other => bail_any!("the subscription ended: {other:?}"),
                     }
                 }
@@ -1669,8 +1669,8 @@ async fn record_contacts(
     contacts: &mut BTreeSet<usize>,
 ) -> Result {
     for (i, sub) in subs.iter_mut().enumerate() {
-        while let Ok(event) = timeout(Duration::from_millis(50), sub.rx.try_next()).await {
-            match event.std_context("receive")? {
+        while let Ok(event) = timeout(Duration::from_millis(50), sub.rx.next()).await {
+            match event {
                 Some(Event::NeighborUp(peer)) if peer == joiner => {
                     contacts.insert(i);
                 }
