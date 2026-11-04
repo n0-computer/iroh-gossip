@@ -20,15 +20,10 @@ const TOPIC_EVENTS_DEFAULT_CAP: usize = 2048;
 
 /// Sender for a gossip topic.
 ///
-/// Each broadcast is checked before the protocol processes it. When the data
-/// sections of all eager-peer send queues are half full, it waits for pressure
-/// to ease, up to 100 ms. Commands behind it in the same subscription keep their
-/// order and wait with it, including joins and the leave when its last handle drops.
-/// Other subscriptions continue independently.
+/// A broadcast does not wait for room in the send queues. When the queue to a peer is
+/// full, the protocol drops the message to that peer, and announces it later.
 ///
 /// Sending a command waits for space in the subscription's command channel.
-/// The 100 ms limit bounds one broadcast's admission wait, not this API call,
-/// commands queued ahead of it, or delivery to a peer.
 ///
 /// See [`QueueOptions`] for what this means for your app.
 ///
@@ -337,13 +332,6 @@ pub(crate) enum Command {
     BroadcastNeighbors(#[debug("Bytes({})", _0.len())] Bytes),
     /// Connects to a set of peers.
     JoinPeers(Vec<EndpointId>),
-}
-
-impl Command {
-    /// Returns whether this command publishes a message.
-    pub(crate) fn is_broadcast(&self) -> bool {
-        matches!(self, Self::Broadcast(_) | Self::BroadcastNeighbors(_))
-    }
 }
 
 /// Options for joining a gossip topic.

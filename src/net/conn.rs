@@ -1,92 +1,166 @@
-//! The tasks of a connection: the send and receive loops, and the connection loop around them.
+//! The send and receive loops of a connection, around its control stream.
+//!
+//! The dialer opens the control stream and writes its header. The acceptor
+//! answers with its own. After that the stream carries only `GOAWAY`, with the
+//! number of topic streams its sender opened. Either writer sends it when the
+//! connection is idle, or when it got the `GOAWAY` of the peer. A side finishes
+//! its half of the stream once it read all streams that the peer counted, and
+//! closes the connection once the peer finished its half too.
 
 use std::{
-    collections::{hash_map, BTreeMap, HashMap},
+    collections::{hash_map::Entry, HashMap, VecDeque},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
 use iroh::{
-    endpoint::{Connection, ConnectionError, RecvStream, SendStream, StreamId},
-    EndpointId, PublicKey,
+    endpoint::{Connection, ConnectionError, RecvStream, SendStream, StreamId, VarInt},
+    EndpointId,
 };
-use n0_error::{e, stack_error};
-use n0_future::{boxed::BoxFuture, task, time, FuturesUnordered, StreamExt as _};
-use tokio::sync::{mpsc, watch};
+use n0_error::StdResultExt as _;
+use n0_future::{
+    boxed::BoxFuture,
+    time::{self, Instant},
+    FuturesUnordered, StreamExt as _,
+};
+use tokio::sync::{mpsc, oneshot, watch, Notify};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error_span, warn, Instrument};
 
 use super::{
-    queue::{set_if_changed, QueueLease, QueuedMessage},
+    peers::{ConnEnd, ConnId},
+    queue::{set_if_changed, QueueReader, QueuedMessage},
     wire::{
-        may_skip_over_limit, read_message, write_sized_message, ReadError, StreamHeader,
-        WriteError, OPEN_TIMEOUT,
+        may_skip_over_limit, read_message, write_all, write_sized_message, CloseCode,
+        ControlMessage, ReadError, Session, StreamHeader, WriteError, HEADER_TIMEOUT, OPEN_TIMEOUT,
     },
-    InEvent, ProtoMessage,
+    ProtoMessage,
 };
 use crate::proto::TopicId;
 
-/// How long a connection stays open once neither side has a stream on it.
+/// How long a retire may take, from the time the writer stops writing.
+const RETIRE_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 3 } else { 120 });
+
+/// An event from a connection task to the actor.
 ///
-/// A topic that uses the peer keeps a stream open. Each side times the grace on
-/// its own, so a stream that we open as the peer closes loses its message.
-#[cfg(not(test))]
-const RETIRE_GRACE: Duration = Duration::from_secs(10);
-/// The e2e tests build without `cfg(test)`, so they see 10 s.
-#[cfg(test)]
-pub(super) const RETIRE_GRACE: Duration = Duration::from_secs(5);
-
-/// How long a replaced connection may write its current message before it hands it over.
-///
-/// The new connection of the peer waits for it, so that we write the messages
-/// in order. A stream header that started is written in full first. Only
-/// the write timeout bounds it, which counts the time without progress.
-#[cfg(not(test))]
-const HANDOVER_LIMIT: Duration = Duration::from_secs(5);
-#[cfg(test)]
-pub(super) const HANDOVER_LIMIT: Duration = Duration::from_secs(1);
-
-/// The code of a close for a peer whose send queue had no room for a control message.
-pub(super) const CLOSE_QUEUE_FULL: u32 = 2;
-
-/// The code of a close for a write or a stream open that made no progress in time.
-pub(super) const CLOSE_STALLED: u32 = 3;
-
-/// The code of a close for a connection without streams, see [`RETIRE_GRACE`](super::RETIRE_GRACE).
-pub(super) const CLOSE_RETIRED: u32 = 4;
-
-/// The maximum number of stream headers that a [`RecvLoop`] reads at the same time.
-///
-/// At this limit, the loop accepts no new stream until a header is complete or
-/// late. A peer that keeps many partial headers thus delays only its own streams.
-pub(super) const MAX_PENDING_HEADERS: usize = 16;
-
-#[allow(missing_docs)]
-#[stack_error(derive, add_meta, from_sources, std_sources)]
-#[non_exhaustive]
-pub(super) enum ConnectionLoopError {
-    #[error(transparent)]
-    Write {
-        source: WriteError,
-    },
-    #[error(transparent)]
-    Connection {
-        #[error(std_err)]
-        source: iroh::endpoint::ConnectionError,
-    },
-    ActorDropped {},
+/// The actor drops the events of a connection that it does not know.
+#[derive(Debug)]
+pub(super) struct ConnEvent {
+    pub(super) peer: EndpointId,
+    pub(super) conn: ConnId,
+    pub(super) kind: ConnEventKind,
 }
 
-impl<T> From<mpsc::error::SendError<T>> for ConnectionLoopError {
-    fn from(_value: mpsc::error::SendError<T>) -> Self {
-        e!(ConnectionLoopError::ActorDropped)
+#[derive(Debug)]
+pub(super) enum ConnEventKind {
+    /// A message of the peer, in the order that the peer wrote it.
+    Message(ProtoMessage),
+    /// The session in the control header of the peer.
+    Header(Session),
+    /// The writer sent `GOAWAY`, and writes nothing more.
+    Retiring,
+}
+
+/// The command that gives the writer of a connection the queue of the peer.
+///
+/// It replaces the queue that the writer has, which the actor discarded.
+#[derive(Debug)]
+pub(super) struct TakeQueue {
+    pub(super) reader: QueueReader,
+    /// The topics that get a stream at once.
+    pub(super) topics: Vec<TopicId>,
+}
+
+/// A slot for one value, which a later value replaces.
+///
+/// No code keeps the lock across an await.
+#[derive(Debug)]
+pub(super) struct Mailbox<T> {
+    value: Mutex<Option<T>>,
+    notify: Notify,
+}
+
+impl<T> Default for Mailbox<T> {
+    fn default() -> Self {
+        Self {
+            value: Mutex::new(None),
+            notify: Notify::new(),
+        }
     }
+}
+
+impl<T> Mailbox<T> {
+    /// Puts `value` in the slot, and drops the value that nobody took.
+    pub(super) fn put(&self, value: T) {
+        let old = self.value.lock().expect("poisoned").replace(value);
+        drop(old);
+        self.notify.notify_one();
+    }
+
+    /// Takes the value, if the slot has one.
+    pub(super) fn try_take(&self) -> Option<T> {
+        self.value.lock().expect("poisoned").take()
+    }
+
+    /// Waits for a value and takes it.
+    ///
+    /// It is cancellation-safe: a value that arrives stays in the slot.
+    async fn take(&self) -> T {
+        loop {
+            if let Some(value) = self.try_take() {
+                return value;
+            }
+            // A put after the check above leaves a permit, so this does not miss it.
+            self.notify.notified().await;
+        }
+    }
+}
+
+/// Everything a connection task needs.
+pub(super) struct ConnArgs {
+    pub(super) id: ConnId,
+    pub(super) conn: Connection,
+    /// A token that the actor cancels when it aborts the peer.
+    ///
+    /// The connection then closes with [`CloseCode::Blocked`].
+    pub(super) aborted: CancellationToken,
+    /// A token that the actor cancels when the connection lost a crossed dial.
+    ///
+    /// The connection then retires as if it were idle.
+    pub(super) retire: CancellationToken,
+    /// Gives the writer the queue of the peer.
+    pub(super) take_queue: Arc<Mailbox<TakeQueue>>,
+    pub(super) shared: ConnShared,
+}
+
+/// How a connection task ended.
+#[derive(Debug)]
+pub(super) struct ConnExit {
+    pub(super) end: ConnEnd,
+    /// The reader that the writer still had when the connection ended.
+    pub(super) reader: Option<QueueReader>,
+}
+
+/// The inputs that every connection task shares.
+#[derive(Clone)]
+pub(super) struct ConnShared {
+    pub(super) events: mpsc::Sender<ConnEvent>,
+    pub(super) max_message_size: usize,
+    /// The session that we send in the control header.
+    pub(super) session: Session,
+    /// How long an idle connection waits before it retires.
+    pub(super) retire_after: Duration,
+    /// A token that the actor cancels when the node shuts down.
+    ///
+    /// The writer then finishes its streams once the queue is empty.
+    pub(super) shutdown: CancellationToken,
 }
 
 /// Returns a finished task's output, or `None` if the runtime cancelled the task.
 ///
 /// A task cancelled at runtime shutdown is not a bug, so it must not panic the actor (#140).
 /// A panic in the task panics the caller with the same payload.
-pub(super) fn task_output<T>(res: Result<T, task::JoinError>) -> Option<T> {
+pub(super) fn task_output<T>(res: Result<T, n0_future::task::JoinError>) -> Option<T> {
     match res {
         Ok(output) => Some(output),
         Err(err) if err.is_cancelled() => None,
@@ -97,248 +171,350 @@ pub(super) fn task_output<T>(res: Result<T, task::JoinError>) -> Option<T> {
     }
 }
 
-/// Returns once the connection had no stream in either direction for [`RETIRE_GRACE`].
-pub(super) async fn retire(mut ours: watch::Receiver<bool>, mut theirs: watch::Receiver<bool>) {
-    loop {
-        let ours_open = *ours.borrow_and_update();
-        let theirs_open = *theirs.borrow_and_update();
-        tokio::select! {
-            // A stream that opens at the deadline keeps the connection.
-            biased;
-            // A dropped sender would make `changed` return at once.
-            res = ours.changed() => if res.is_err() { std::future::pending().await },
-            res = theirs.changed() => if res.is_err() { std::future::pending().await },
-            () = time::sleep(RETIRE_GRACE), if !ours_open && !theirs_open => return,
+/// The reason why a connection fails, and the code that it closes with.
+#[derive(Debug)]
+struct Failure {
+    code: CloseCode,
+    reason: String,
+}
+
+impl Failure {
+    fn new(code: CloseCode, reason: impl Into<String>) -> Self {
+        Self {
+            code,
+            reason: reason.into(),
         }
+    }
+
+    fn protocol(reason: impl Into<String>) -> Self {
+        Self::new(CloseCode::Protocol, reason)
+    }
+
+    /// The actor stopped. The peer must not read a quiet close, which keeps us as a neighbor.
+    fn actor_gone() -> Self {
+        Self::new(CloseCode::Shutdown, "dropped by the actor")
     }
 }
 
-/// Runs the I/O of a connection, and closes it on an abort or once it carries no stream.
-///
-/// Returns `true` if the end of the connection does not count as a disconnect.
-/// That is the case when either side retired the connection, or when no topic
-/// wanted the peer at the moment the connection ended. A connection to a node up
-/// to 0.101 never retires. Without a lease, the connection only receives.
-/// Every connection observes the peer abort signal, independently of whether
-/// it writes.
-// Each argument is state the loops share. A struct would only wrap them.
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn connection_loop(
-    from: PublicKey,
-    conn: Connection,
-    aborted: CancellationToken,
-    queue_lease: Option<QueueLease>,
-    initial_topics: Vec<TopicId>,
-    in_event_tx: mpsc::Sender<InEvent>,
-    max_message_size: usize,
-    handles_close: watch::Sender<bool>,
-) -> Result<bool, ConnectionLoopError> {
-    debug!(side = ?conn.side(), "connection established");
-    let mut handles_close_rx = handles_close.subscribe();
-    // Here, so that the flags outlive the loops. The send flag starts set, as a
-    // new writer can wait for the lock of the queue.
-    let our_streams = watch::Sender::new(queue_lease.is_some());
-    let their_streams = watch::Sender::new(false);
-
-    let queue_closed = queue_lease.as_ref().map(QueueLease::closing);
-    let send_loop = queue_lease.map(|lease| {
-        let flag = our_streams.clone();
-        SendLoop::new(conn.clone(), lease, max_message_size, flag, initial_topics)
-    });
-    let mut recv_loop = RecvLoop::new(
-        from,
-        conn.clone(),
-        in_event_tx,
-        max_message_size,
-        handles_close,
-        their_streams.clone(),
-    );
-
-    let io = async {
-        let recv_fut = recv_loop.run().instrument(error_span!("recv"));
-        tokio::pin!(recv_fut);
-        if let Some(send_loop) = send_loop {
-            tokio::select! {
-                res = send_loop.run().instrument(error_span!("send")) => res?,
-                _ = &mut recv_fut => return Ok(()),
-            }
-        }
-        // We are done sending. The peer may still send on this connection, as two
-        // peers that dialed each other can each use a different one.
-        recv_fut.await;
-        Ok(())
-    };
-    let retirement = async {
-        // Waits until the peer opened a stream.
-        if handles_close_rx.wait_for(|known| *known).await.is_err() {
-            std::future::pending::<()>().await;
-        }
-        retire(our_streams.subscribe(), their_streams.subscribe()).await;
-    };
-    tokio::select! {
-        biased;
-        // All connections close, including receive-only ones, so the peer
-        // learns it on the connection that it uses. A
-        // node up to 0.101 may then lose its later messages to us (#155). It
-        // missed a control message, so its views differ from ours anyway.
-        _ = aborted.cancelled() => {
-            warn!("the peer is aborted, close the connection");
-            conn.close(CLOSE_QUEUE_FULL.into(), b"send queue full");
-            Ok(false)
-        }
-        res = io => {
-            // A retirement by the peer counts also when it cut one of our writes.
-            let retired_by_peer = matches!(
-                conn.close_reason(),
-                Some(ConnectionError::ApplicationClosed(close))
-                    if close.error_code == CLOSE_RETIRED.into()
-            );
-            // Read now, as a topic may open the queue before the actor sees the end.
-            // A message from then on needs a new dial, not a disconnect.
-            let queue_was_closed = queue_closed.is_some_and(|closed| *closed.borrow());
-            if retired_by_peer || queue_was_closed {
-                Ok(true)
-            } else {
-                res.map(|()| false)
-            }
-        }
-        _ = retirement => {
-            debug!("no stream for a while, close");
-            conn.close(CLOSE_RETIRED.into(), b"no stream");
-            Ok(true)
-        }
+impl From<WriteError> for Failure {
+    fn from(err: WriteError) -> Self {
+        let code = match err {
+            WriteError::Stalled { .. } | WriteError::OpenStalled { .. } => CloseCode::Blocked,
+            _ => CloseCode::SendFailed,
+        };
+        Self::new(code, err.to_string())
     }
 }
 
-pub(super) struct RecvLoop {
-    remote_endpoint_id: EndpointId,
-    conn: Connection,
-    max_message_size: usize,
-    in_event_tx: mpsc::Sender<InEvent>,
-    /// Whether the peer opened a stream, which shows that it handles a close.
+/// The signals between the send loop and the receive loop of a connection.
+#[derive(Default)]
+struct Signals {
+    /// Whether the peer has a stream open. The writer does not retire while it has one.
+    peer_streams_open: watch::Sender<bool>,
+    /// The receive loop notifies it once the peer sent `GOAWAY` and the loop read all its streams.
     ///
-    /// The actor shares it between all connections to the peer.
-    handles_close: watch::Sender<bool>,
-    /// Whether the peer has a stream open to us, from its first byte on.
-    has_streams: watch::Sender<bool>,
+    /// The writer then answers, and finishes the control stream.
+    recv_drained: Notify,
+}
+
+/// Sends the events of a loop to the actor.
+#[derive(Clone)]
+struct EventSink {
+    tx: mpsc::Sender<ConnEvent>,
+    peer: EndpointId,
+    id: ConnId,
+}
+
+impl EventSink {
+    async fn send(&self, kind: ConnEventKind) -> Result<(), Failure> {
+        let event = ConnEvent {
+            peer: self.peer,
+            conn: self.id,
+            kind,
+        };
+        self.tx.send(event).await.map_err(|_| Failure::actor_gone())
+    }
+}
+
+/// Runs the I/O of a connection until it ends, and returns how.
+///
+/// The connection ends when a loop fails, when the peer state aborts it, or
+/// after a finished retire. The task closes it with the code of the failure.
+/// It also returns the reader of the queue, if the writer still had it.
+pub(super) async fn connection_loop(args: ConnArgs) -> ConnExit {
+    let conn = args.conn.clone();
+    debug!(side = ?conn.side(), "connection established");
+    let aborted = args.aborted.clone();
+    // Outside the loops, so that the reader stays when a loop fails.
+    let mut reader = None;
+    let result = tokio::select! {
+        biased;
+        _ = aborted.cancelled() => Err(Failure::new(CloseCode::Blocked, "send queue full")),
+        res = run_loops(args, &mut reader) => res,
+    };
+    let end = match result {
+        Ok(end) => end,
+        Err(failure) => match conn.close_reason() {
+            Some(reason) => end_of(Some(reason)),
+            None => {
+                debug!(code = ?failure.code, "close the connection: {}", failure.reason);
+                conn.close(failure.code.code(), failure.reason.as_bytes());
+                ConnEnd::Failed
+            }
+        },
+    };
+    ConnExit { end, reader }
+}
+
+/// Returns how a connection ended, from its close reason.
+fn end_of(reason: Option<ConnectionError>) -> ConnEnd {
+    match reason {
+        Some(ConnectionError::ApplicationClosed(close)) => {
+            match CloseCode::from_code(close.error_code) {
+                Some(CloseCode::Retired) => ConnEnd::Retired,
+                Some(CloseCode::Stale) => ConnEnd::Quiet,
+                _ => ConnEnd::Failed,
+            }
+        }
+        _ => ConnEnd::Failed,
+    }
+}
+
+/// Runs the control handshake and both loops, until both end.
+///
+/// The send loop keeps the reader of the queue in `reader` while it writes.
+async fn run_loops(args: ConnArgs, reader: &mut Option<QueueReader>) -> Result<ConnEnd, Failure> {
+    let ConnArgs {
+        id,
+        conn,
+        retire,
+        take_queue,
+        shared,
+        ..
+    } = args;
+    let ConnShared {
+        events,
+        max_message_size,
+        session,
+        retire_after,
+        shutdown,
+    } = shared;
+    let dialer = conn.side().is_client();
+    let events = EventSink {
+        tx: events,
+        peer: conn.remote_id(),
+        id,
+    };
+    let (mut ctl_tx, ctl_rx) = if dialer {
+        // A peer that grants no bidirectional stream keeps the open pending.
+        time::timeout(HEADER_TIMEOUT, conn.open_bi())
+            .await
+            .map_err(|_| Failure::protocol("cannot open the control stream in time"))?
+            .map_err(|err| Failure::protocol(format!("cannot open the control stream: {err:#}")))?
+    } else {
+        time::timeout(HEADER_TIMEOUT, conn.accept_bi())
+            .await
+            .map_err(|_| Failure::protocol("no control stream"))?
+            .map_err(|err| Failure::protocol(format!("no control stream: {err:#}")))?
+    };
+    write_all(&mut ctl_tx, &session.to_frame()).await?;
+    let signals = Arc::new(Signals::default());
+    let recv_loop = RecvLoop {
+        conn: conn.clone(),
+        events: events.clone(),
+        max_message_size,
+        signals: signals.clone(),
+    };
+    let send_loop = SendLoop {
+        conn: conn.clone(),
+        events,
+        signals,
+        ctl: ctl_tx,
+        retire,
+        take_queue,
+        shutdown,
+        retire_after,
+        max_message_size,
+        streams: Default::default(),
+        stream_ends: Default::default(),
+        buffer: Default::default(),
+        topics_to_open: Default::default(),
+        opened_count: 0,
+        retiring_until: None,
+    };
+    let send = async { send_loop.run(reader).await.map_err(Failure::from) }
+        .instrument(error_span!("send"));
+    let recv = async {
+        let mut ctl_rx = ctl_rx;
+        recv_loop.read_header(&mut ctl_rx).await?;
+        recv_loop.run(ctl_rx).await
+    }
+    .instrument(error_span!("recv"));
+    tokio::try_join!(send, recv).map(|(_, end)| end)
+}
+
+/// Reads the streams that the peer opens on a connection.
+struct RecvLoop {
+    conn: Connection,
+    events: EventSink,
+    max_message_size: usize,
+    signals: Arc<Signals>,
 }
 
 /// The result of a stream read: the stream, and its next message or its end.
 type ReadResult = (TopicReader, Result<Option<ProtoMessage>, ReadError>);
 
 impl RecvLoop {
-    pub(super) fn new(
-        remote_endpoint_id: EndpointId,
-        conn: Connection,
-        in_event_tx: mpsc::Sender<InEvent>,
-        max_message_size: usize,
-        handles_close: watch::Sender<bool>,
-        has_streams: watch::Sender<bool>,
-    ) -> Self {
-        Self {
-            remote_endpoint_id,
-            conn,
-            max_message_size,
-            in_event_tx,
-            handles_close,
-            has_streams,
-        }
+    /// Reads the control header of the peer, and tells the actor its session.
+    async fn read_header(&self, ctl: &mut RecvStream) -> Result<(), Failure> {
+        let session = Session::read(ctl, &mut Vec::new())
+            .await
+            .map_err(|err| Failure::protocol(format!("control header: {err:#}")))?;
+        self.events.send(ConnEventKind::Header(session)).await?;
+        Ok(())
     }
 
-    /// Reads the streams of the connection until it closes or the actor stops.
+    /// Reads the streams of the connection until it closes, or until a retire finished.
     ///
-    /// A bad stream loses only itself, so this never fails.
-    pub(super) async fn run(&mut self) {
-        // Each header is read in its own future, so a partial one blocks no other stream.
-        let mut header_futures = FuturesUnordered::new();
-        let mut read_futures = FuturesUnordered::new();
-        // For each topic, the streams in the order the peer opened them. The peer
-        // only opens a new stream for a topic after the previous one ended. So if
-        // a stream waits for the older ones, the order is kept and the wait ends.
-        let mut streams: BTreeMap<(TopicId, StreamId), Order> = BTreeMap::new();
-        let mut conn_is_closed = false;
-        let closed = self.conn.closed();
+    /// The loop reads one header at a time, so streams decode in the order of
+    /// their ids. A newer stream of a topic waits until the older one ended. So
+    /// the actor sees the messages of a topic in the order the peer wrote them.
+    /// A late header, a bad header, a bad frame, or a reset stream fails the
+    /// connection.
+    async fn run(self, mut ctl: RecvStream) -> Result<ConnEnd, Failure> {
+        // The header of the stream that we accepted last, while we read it.
+        let mut header: Option<BoxFuture<Result<TopicReader, ReadError>>> = None;
+        // The next message of each stream that we read.
+        let mut reads: FuturesUnordered<BoxFuture<ReadResult>> = FuturesUnordered::new();
+        // The topics with a stream that the loop reads, and the streams that wait for them.
+        let mut waiting: HashMap<TopicId, VecDeque<TopicReader>> = HashMap::new();
+        // The streams of the peer that we accepted and that ended, and how many it
+        // opened, once it said so. A count below the accepted streams is a protocol error.
+        let mut accepted = 0u64;
+        let mut ended = 0u64;
+        let mut peer_opened = None::<u64>;
+
+        // Reads the `GOAWAY`, then ends when the peer finished the stream: it read all of ours.
+        // This future owns `ctl` while the loop uses `self`, so `ctl` is not a field of `self`.
+        let (goaway_tx, mut goaway_rx) = oneshot::channel();
+        let max_message_size = self.max_message_size;
+        let mut control = Box::pin(async move {
+            let ControlMessage::Goaway(n) =
+                ControlMessage::read(&mut ctl, &mut Vec::new(), max_message_size)
+                    .await
+                    .anyerr()?;
+            debug!(n, "GOAWAY received");
+            goaway_tx.send(n).ok();
+            ctl.read_to_end(0).await.anyerr().map(drop)
+        });
+        let mut control_finished = false;
+
+        let conn = self.conn.clone();
+        let closed = conn.closed();
         tokio::pin!(closed);
-        while !conn_is_closed || !header_futures.is_empty() || !read_futures.is_empty() {
+        let mut conn_closed = false;
+
+        // After a close, the loop waits for the header and the reads that are under way.
+        while !conn_closed || header.is_some() || !reads.is_empty() {
             // A header that the loop still reads counts as an open stream. It times out
             // after `HEADER_TIMEOUT`.
-            let open = !header_futures.is_empty() || !read_futures.is_empty();
-            set_if_changed(&self.has_streams, open);
+            let streams_open = header.is_some() || !waiting.is_empty();
+            set_if_changed(&self.signals.peer_streams_open, streams_open);
+
             tokio::select! {
-                _ = &mut closed, if !conn_is_closed => {
-                    conn_is_closed = true;
-                }
-                stream = self.conn.accept_uni(), if !conn_is_closed && header_futures.len() < MAX_PENDING_HEADERS => {
-                    let stream = match stream {
-                        Ok(stream) => stream,
-                        Err(_) => {
-                            conn_is_closed = true;
-                            continue;
+                _ = &mut closed, if !conn_closed => conn_closed = true,
+
+                // A new stream of the peer. We accept the next one after its header.
+                stream = self.conn.accept_uni(), if !conn_closed && header.is_none() => match stream {
+                    Ok(stream) => {
+                        accepted += 1;
+                        if peer_opened.is_some_and(|opened| accepted > opened) {
+                            return Err(Failure::protocol("a stream over the count of the GOAWAY"));
                         }
-                    };
-                    header_futures.push(TopicReader::accept(stream, self.max_message_size));
-                }
-                Some(state) = header_futures.next(), if !header_futures.is_empty() => {
-                    // A bad header loses only its stream, as a bad frame does.
-                    let state = match state {
-                        Ok(state) => state,
-                        Err(err) => {
-                            debug!("stream header failed: {err:#}");
-                            continue;
-                        }
-                    };
-                    debug!(topic=%state.header.topic.fmt_short(), "stream opened");
-                    // Every peer on this ALPN handles a close.
-                    self.handles_close.send_replace(true);
-                    let (topic, id) = (state.header.topic, state.stream.id());
-                    // A stream waits while there is an older stream for the same topic. If
-                    // the header of an older stream arrives late, we read that stream right
-                    // away, and it does not wait for the newer one.
-                    let before = streams.range(..(topic, id)).next_back();
-                    let is_first_for_topic = before.is_none_or(|((t, _), _)| *t != topic);
-                    if is_first_for_topic {
-                        streams.insert((topic, id), Order::Reading);
-                        read_futures.push(state.read_next());
+                        header = Some(Box::pin(TopicReader::accept(stream, self.max_message_size)));
+                    }
+                    Err(_) => conn_closed = true,
+                },
+
+                // The header of a new stream: verify it, then read the stream, or let it wait.
+                reader = async { header.as_mut().expect("guarded").await }, if header.is_some() => {
+                    header = None;
+                    let reader = reader.map_err(|err| Failure::protocol(format!("stream header: {err:#}")))?;
+                    let topic = reader.header.topic;
+                    debug!(topic=%topic.fmt_short(), "stream opened");
+                    if let Some(queue) = waiting.get_mut(&topic) {
+                        queue.push_back(reader);
                     } else {
-                        streams.insert((topic, id), Order::Waiting(state));
+                        waiting.insert(topic, VecDeque::new());
+                        reads.push(Box::pin(reader.read_next()));
                     }
                 }
-                Some((state, res)) = read_futures.next(), if !read_futures.is_empty() => {
+
+                // A message of a stream, or its end.
+                Some((reader, res)) = reads.next(), if !reads.is_empty() => {
+                    let topic = reader.header.topic;
                     match res {
                         Ok(Some(msg)) => {
-                            if self.in_event_tx.send(InEvent::RecvMessage(self.remote_endpoint_id, msg)).await.is_err() {
-                                debug!("stop recv loop: actor closed");
-                                break;
-                            }
-                            read_futures.push(state.read_next());
+                            self.events.send(ConnEventKind::Message(msg)).await?;
+                            reads.push(Box::pin(reader.read_next()));
                             continue;
                         }
-                        Ok(None) => {
-                            debug!(topic=%state.header.topic.fmt_short(), "stream closed");
+                        Ok(None) => debug!(topic=%topic.fmt_short(), "stream closed"),
+                        Err(err) => {
+                            // A close fails each read. Its code decides how the connection ended.
+                            if self.conn.close_reason().is_some() {
+                                conn_closed = true;
+                                continue;
+                            }
+                            return Err(Failure::protocol(format!("topic stream: {err:#}")));
                         }
-                        Err(err) => debug!("recv stream closed with error: {err:#}"),
                     }
-                    let (topic, id) = (state.header.topic, state.stream.id());
-                    streams.remove(&(topic, id));
-                    // Start reading the next stream for this topic, unless we already do.
-                    let after = streams.range_mut((topic, id)..).next();
-                    let next_for_topic = after.filter(|((t, _), _)| *t == topic);
-                    if let Some((_, order)) = next_for_topic {
-                        if let Order::Waiting(next) = std::mem::replace(order, Order::Reading) {
-                            read_futures.push(next.read_next());
+                    // The stream ended. The loop now reads the next stream of its topic, if any.
+                    ended += 1;
+                    match waiting.get_mut(&topic).and_then(VecDeque::pop_front) {
+                        Some(next) => reads.push(Box::pin(next.read_next())),
+                        None => {
+                            waiting.remove(&topic);
                         }
                     }
                 }
+
+                Ok(n) = &mut goaway_rx, if !goaway_rx.is_terminated() => {
+                    if n < accepted {
+                        return Err(Failure::protocol("GOAWAY counts fewer streams than accepted"));
+                    }
+                    peer_opened = Some(n);
+                }
+
+                res = &mut control, if !control_finished => match res {
+                    Ok(()) => control_finished = true,
+                    // A close ends the stream, and its close code decides how the connection ended.
+                    Err(_) if self.conn.close_reason().is_some() => control_finished = true,
+                    Err(err) => return Err(Failure::protocol(format!("control stream: {err:#}"))),
+                },
+            }
+
+            // The peer retires, and we read all the streams that it counted: the writer answers.
+            // With the checks on the count, `ended` reaches it only once all streams ended.
+            let drained = peer_opened.is_some_and(|opened| ended >= opened);
+            if drained {
+                self.signals.recv_drained.notify_one();
+            }
+            // We read all the peer wrote, and the peer read all we wrote: close.
+            if drained && control_finished {
+                return Ok(match self.conn.close_reason() {
+                    None => {
+                        self.conn.close(CloseCode::Retired.code(), b"retired");
+                        ConnEnd::Retired
+                    }
+                    reason => end_of(reason),
+                });
             }
         }
-        debug!("recv loop closed");
-    }
-}
 
-/// Whether a stream in a [`RecvLoop`] is read now, or waits for an older stream of the same topic.
-enum Order {
-    Reading,
-    Waiting(TopicReader),
+        debug!("recv loop closed");
+        Ok(end_of(self.conn.close_reason()))
+    }
 }
 
 /// A topic stream that we read: its header, and the buffer for its frames.
@@ -354,7 +530,7 @@ impl TopicReader {
     /// Reads the header of a new stream.
     async fn accept(mut stream: RecvStream, max_message_size: usize) -> Result<Self, ReadError> {
         let mut buffer = Vec::new();
-        let header = StreamHeader::read(&mut stream, &mut buffer, max_message_size).await?;
+        let header = StreamHeader::read(&mut stream, &mut buffer).await?;
         Ok(Self {
             buffer,
             max_message_size,
@@ -374,162 +550,234 @@ impl TopicReader {
     }
 }
 
-pub(super) struct SendLoop {
+/// Writes the queue of the peer on a connection, and retires the connection when it is idle.
+struct SendLoop {
     conn: Connection,
+    events: EventSink,
+    signals: Arc<Signals>,
+    /// The send half of the control stream, for the `GOAWAY`.
+    ctl: SendStream,
+    retire: CancellationToken,
+    take_queue: Arc<Mailbox<TakeQueue>>,
+    shutdown: CancellationToken,
+    retire_after: Duration,
+    max_message_size: usize,
     streams: HashMap<TopicId, SendStream>,
     buffer: Vec<u8>,
-    max_message_size: usize,
     /// A future per stream, which resolves once the peer stopped it or acknowledged all of it.
-    live_streams: FuturesUnordered<BoxFuture<(TopicId, StreamId)>>,
-    queue_lease: QueueLease,
-    /// The topics that wanted the peer when the writer started, for which it opens streams.
-    initial_topics: Vec<TopicId>,
-    /// Whether we have a stream to the peer.
+    stream_ends: FuturesUnordered<BoxFuture<(TopicId, StreamId, Option<VarInt>)>>,
+    /// The topics for which the writer opens a stream when it has the queue.
+    topics_to_open: Vec<TopicId>,
+    /// How many topic streams the writer opened on this connection.
+    opened_count: u64,
+    /// The time at which a retire fails the connection.
     ///
-    /// It is set before an open, and clears once [`Self::live_streams`] is empty.
-    has_streams: watch::Sender<bool>,
+    /// The writer sets it to [`RETIRE_TIMEOUT`] from now when it stops writing. It then
+    /// writes nothing more.
+    retiring_until: Option<Instant>,
 }
 
 impl SendLoop {
-    pub(super) fn new(
-        conn: Connection,
-        queue_lease: QueueLease,
-        max_message_size: usize,
-        has_streams: watch::Sender<bool>,
-        initial_topics: Vec<TopicId>,
-    ) -> Self {
-        Self {
-            conn,
-            max_message_size,
-            buffer: Default::default(),
-            streams: Default::default(),
-            live_streams: Default::default(),
-            queue_lease,
-            initial_topics,
-            has_streams,
-        }
-    }
-
-    /// Writes the queue until it ends, the lease is revoked, or the connection closes.
+    /// Writes the queue that the actor gives it, and retires the connection when it is idle.
     ///
-    /// Once no queued message waits, it also opens a stream for each initial
-    /// topic. After the queue closed, it waits for the queue to open again.
-    /// Takes `self`, so that the lease drops once it returns.
-    pub(super) async fn run(mut self) -> Result<(), WriteError> {
+    /// Either writer retires when no stream was open in either direction and
+    /// the queue was empty for `retire_after`. It finishes its streams, and
+    /// sends `GOAWAY` with the number of streams it opened. It does the same
+    /// when the receive loop read all streams that the peer counted in its
+    /// `GOAWAY`. It then also finishes the control stream, and leaves its
+    /// queue for the next connection.
+    ///
+    /// After the `GOAWAY` the writer writes nothing. It tells the actor, which
+    /// dials for a later message.
+    ///
+    /// After the queue closed, the writer finishes its streams and waits for
+    /// the queue to open again. It never leaves a message unfinished, except
+    /// when it fails.
+    ///
+    /// The writer keeps the reader in `queue`, which outlives this future. The
+    /// reader goes back with the end of the connection, also after a retire.
+    /// So the next writer starts once the peer read all that this one wrote.
+    async fn run(mut self, queue: &mut Option<QueueReader>) -> Result<(), WriteError> {
         let conn = self.conn.clone();
         let closed = conn.closed();
         tokio::pin!(closed);
-        let revoked = self.queue_lease.revoked().clone();
-        // A replaced connection of the peer may still write its current message.
-        let queue = tokio::select! {
-            biased;
-            _ = &mut closed => None,
-            _ = revoked.cancelled() => None,
-            queue = self.queue_lease.lock() => Some(queue),
-        };
-        if let Some(mut queue) = queue {
-            let mut closing = self.queue_lease.closing();
-            loop {
-                // Every pass of the loop starts here, so the flag clears with the last stream.
-                if self.live_streams.is_empty() {
-                    set_if_changed(&self.has_streams, false);
+        let mut peer_streams_open = self.signals.peer_streams_open.subscribe();
+        let mut queue_closed: Option<watch::Receiver<bool>> = None;
+        let mut quiet_since: Option<Instant> = None;
+
+        loop {
+            let retiring = self.retiring_until.is_some();
+            let writing = queue.is_some() && !retiring;
+            // A close of the queue finishes our streams, if we have any.
+            let wants_close =
+                writing && (!self.streams.is_empty() || !self.topics_to_open.is_empty());
+            // Nothing is open or queued in either direction: the idle time runs.
+            let quiet = !retiring
+                && self.streams.is_empty()
+                && self.stream_ends.is_empty()
+                && self.topics_to_open.is_empty()
+                && queue.as_ref().is_none_or(|queue| queue.is_empty())
+                && !*peer_streams_open.borrow_and_update();
+            let retire_at =
+                quiet.then(|| *quiet_since.get_or_insert_with(Instant::now) + self.retire_after);
+            if !quiet {
+                quiet_since = None;
+            }
+
+            tokio::select! {
+                biased;
+
+                _ = &mut closed => break,
+
+                // The connection lost a crossed dial: the same retire as for an idle one.
+                _ = self.retire.cancelled(), if !retiring => self.retire().await?,
+
+                TakeQueue { reader, topics } = self.take_queue.take() => {
+                    // The new queue replaces the old one. The old streams end first.
+                    self.streams.clear();
+                    queue_closed = Some(reader.closed.clone());
+                    *queue = Some(reader);
+                    // A writer that retires keeps the reader, and writes nothing.
+                    if !retiring {
+                        self.topics_to_open = topics;
+                    }
                 }
-                let more = tokio::select! {
-                    biased;
-                    _ = &mut closed => break,
-                    // The next connection takes the rest of the queue.
-                    _ = revoked.cancelled() => break,
-                    // Before the queue: the queue of a busy peer is always ready, and
-                    // would keep ended streams from being collected.
-                    Some((topic, id)) = self.live_streams.next(), if !self.live_streams.is_empty() => {
-                        // The peer stopped the stream, as on a frame over its size limit.
-                        // The next message of the topic opens a new one.
-                        if self.streams.get(&topic).is_some_and(|s| s.id() == id) {
-                            self.streams.remove(&topic);
-                        }
-                        continue;
+
+                // The peer retires and we read all it sent: answer, and finish the stream, so
+                // that the peer may close. This arm comes before the queue, so that a busy queue
+                // does not delay a retire.
+                _ = self.signals.recv_drained.notified() => {
+                    self.retire().await?;
+                    self.ctl.finish().ok();
+                }
+
+                // This arm comes before the queue. The queue of a busy peer is always ready,
+                // and would keep the loop from collecting ended streams.
+                Some((topic, id, stop)) = self.stream_ends.next(), if !self.stream_ends.is_empty() => {
+                    // A peer does not stop our streams. A stop fails the connection.
+                    if let Some(code) = stop {
+                        return Err(n0_error::e!(WriteError::Stopped { code: code.into_inner() }));
                     }
-                    more = queue.wait_next() => more,
-                    // This comes after the queue, so it only runs when the queue is empty. We
-                    // finish our streams and keep waiting on this connection, so the next
-                    // message does not need a dial. Dropping a stream finishes it.
-                    _ = async { closing.wait_for(|closing| *closing).await.ok(); },
-                        if !self.streams.is_empty() || !self.initial_topics.is_empty() =>
-                    {
-                        self.streams.clear();
-                        self.initial_topics.clear();
-                        continue;
+                    // The next message of the topic opens a new stream.
+                    if self.streams.get(&topic).is_some_and(|stream| stream.id() == id) {
+                        self.streams.remove(&topic);
                     }
-                    // After the queue, so that queued messages get the streams of the peer
-                    // first. A quiet topic needs a stream to keep the connection.
-                    Some(topic) = async { self.initial_topics.pop() } => {
-                        match self.open_stream(topic, &revoked).await {
-                            // At the stream limit of the peer, the quiet topics go without.
-                            Err(WriteError::OpenStalled { .. }) => self.initial_topics.clear(),
-                            Err(err) => self.handle_error(topic, err)?,
-                            Ok(_) => {}
-                        }
-                        continue;
+                }
+
+                // The next message of the queue, or the end of the queue.
+                more = async {
+                    match (&mut *queue, writing) {
+                        (Some(queue), true) => queue.wait_next().await,
+                        _ => std::future::pending().await,
                     }
-                };
-                if !more {
+                } => if more {
+                    let queue = queue.as_mut().expect("a message came from the queue");
+                    self.write_current(queue).await?;
+                } else {
                     // The actor dropped the queue.
+                    self.streams.clear();
+                    *queue = None;
+                },
+
+                // These come after the queue, so they only run when the queue is empty.
+                _ = self.shutdown.cancelled() => {
+                    self.stop_writing();
                     break;
                 }
-                let item = queue.current().expect("next returned a message");
-                match self.open_stream(item.message.topic, &revoked).await {
-                    Ok(true) => {}
-                    // The lease ended before the stream opened. The message stays
-                    // in the queue for the next connection.
-                    Ok(false) => break,
-                    Err(err) => {
-                        self.handle_error(item.message.topic, err)?;
-                        queue.advance();
-                        continue;
+
+                // We finish our streams and keep waiting on this connection, so the next
+                // message does not need a dial. Dropping a stream finishes it.
+                _ = async {
+                    match &mut queue_closed {
+                        Some(queue_closed) if wants_close => {
+                            queue_closed.wait_for(|closed| *closed).await.ok();
+                        }
+                        _ => std::future::pending().await,
                     }
+                } => {
+                    self.drop_streams();
                 }
-                // A stuck write would keep the queue from the connection that replaced
-                // this one. A message that we stop in the middle stays in the queue,
-                // and the next connection writes it first. Its stream stays, and ends
-                // with the others: the peer reads the messages before it, and drops
-                // the part of this one.
-                let handover = async {
-                    revoked.cancelled().await;
-                    n0_future::time::sleep(HANDOVER_LIMIT).await;
-                };
-                tokio::select! {
-                    biased;
-                    res = self.send(item) => res?,
-                    _ = handover => {
-                        warn!("the replaced connection did not finish its message in time, hand it over");
-                        break;
-                    }
-                }
-                // A topic that we just left needs no stream.
-                if item.message.message.is_disconnect() {
-                    self.initial_topics
-                        .retain(|topic| *topic != item.message.topic);
-                }
-                queue.advance();
+
+                // After the queue, so that queued messages get the streams of the peer
+                // first. A quiet topic needs a stream to keep the connection.
+                Some(topic) = async {
+                    if writing { self.topics_to_open.pop() } else { None }
+                } => match self.open_stream(topic).await {
+                    // At the stream limit of the peer, the quiet topics get no stream.
+                    Err(WriteError::OpenStalled { .. }) => self.topics_to_open.clear(),
+                    res => res?,
+                },
+
+                // The connection was idle for `retire_after`.
+                () = time::sleep_until(retire_at.unwrap_or_else(Instant::now)), if retire_at.is_some() => self.retire().await?,
+
+                // The retire did not finish in time.
+                () = time::sleep_until(self.retiring_until.unwrap_or_else(Instant::now)), if retiring => return Err(n0_error::e!(WriteError::Stalled)),
+
+                // The peer opened or ended a stream, which restarts the idle time.
+                _ = peer_streams_open.changed() => {}
             }
         }
+
+        // Finish the streams, and wait until the peer acknowledged or stopped each one.
         self.streams.clear();
-        while self.live_streams.next().await.is_some() {}
-        set_if_changed(&self.has_streams, false);
+        while self.stream_ends.next().await.is_some() {}
+        // The writer ended without a close: the node shuts down. If the peer closed the
+        // connection, its close code stays.
+        if conn.close_reason().is_none() {
+            conn.close(CloseCode::Shutdown.code(), b"shutdown");
+        }
         debug!("send loop closed");
+        Ok(())
+    }
+
+    /// Stops writing and sends `GOAWAY`, only on the first call.
+    async fn retire(&mut self) -> Result<(), WriteError> {
+        if self.retiring_until.is_some() {
+            return Ok(());
+        }
+        self.stop_writing();
+        debug!(opened = self.opened_count, "send GOAWAY");
+        write_all(
+            &mut self.ctl,
+            &ControlMessage::Goaway(self.opened_count).to_frame(),
+        )
+        .await?;
+        // The actor never waits for a send loop, so this does not deadlock.
+        self.events.send(ConnEventKind::Retiring).await.ok();
+        Ok(())
+    }
+
+    /// Finishes the streams, and opens none of the pending ones.
+    fn drop_streams(&mut self) {
+        self.streams.clear();
+        self.topics_to_open.clear();
+    }
+
+    /// Finishes the streams, and writes nothing more.
+    fn stop_writing(&mut self) {
+        self.drop_streams();
+        self.retiring_until = Some(Instant::now() + RETIRE_TIMEOUT);
+    }
+
+    /// Writes the message that the queue has ready.
+    async fn write_current(&mut self, queue: &mut QueueReader) -> Result<(), WriteError> {
+        let item = queue.current().expect("wait_next returned a message");
+        let topic = item.message.topic;
+        self.open_stream(topic).await?;
+        self.send(item).await?;
+        // A topic that we just left needs no stream.
+        if item.message.message.is_disconnect() {
+            self.topics_to_open.retain(|t| *t != topic);
+        }
+        queue.advance();
         Ok(())
     }
 
     /// Writes a message on the stream of its topic, and finishes the stream after a `Close`.
     ///
-    /// If the write fails because the peer stopped the stream, the message is lost. A
-    /// message over the size limit is lost too, if [`may_skip_over_limit`] allows it.
-    /// Returns the error if the connection is gone, if the write made no progress in time,
-    /// which closes the connection, or for another message over the size limit.
-    ///
-    /// ## Cancellation safety
-    ///
-    /// This function is not cancellation-safe.
+    /// A message over the size limit is lost, if [`may_skip_over_limit`] allows it.
+    /// Returns the error if the write failed otherwise, which fails the connection.
     async fn send(&mut self, item: &QueuedMessage) -> Result<(), WriteError> {
         let ProtoMessage { topic, message } = &item.message;
         let stream = self
@@ -566,68 +814,54 @@ impl SendLoop {
                     Err(err)
                 }
             }
-            Err(err) => {
-                self.handle_error(*topic, err)?;
-                self.streams.remove(topic);
-                Ok(())
-            }
-        }
-    }
-
-    /// Returns the error if the connection is gone or stalled.
-    ///
-    /// Otherwise only one stream failed, and the loop goes on.
-    fn handle_error(&self, topic: TopicId, err: WriteError) -> Result<(), WriteError> {
-        if matches!(
-            err,
-            WriteError::Stalled { .. } | WriteError::OpenStalled { .. }
-        ) {
-            // A peer that reads nothing blocks every stream, so a new stream would not help.
-            warn!("{err}, close the connection");
-            self.conn.close(CLOSE_STALLED.into(), b"write stalled");
-            Err(err)
-        } else if self.conn.close_reason().is_some() {
-            Err(err)
-        } else {
-            warn!(topic = %topic.fmt_short(), "write failed: {err:#}");
-            Ok(())
+            Err(err) => Err(err),
         }
     }
 
     /// Opens the stream of `topic` and writes its header, unless it is open.
     ///
-    /// Returns `false` if `revoked` ends the lease before the stream opened. A
-    /// header that started is written in full, as a node up to 0.101 drops the
-    /// whole connection on a partial one. An abort of the peer closes the
-    /// connection anyway, and cuts the header.
-    async fn open_stream(
-        &mut self,
-        topic: TopicId,
-        revoked: &CancellationToken,
-    ) -> Result<bool, WriteError> {
-        let hash_map::Entry::Vacant(entry) = self.streams.entry(topic) else {
-            return Ok(true);
+    /// The header goes out in full once the stream opened. If the actor aborts the
+    /// peer, the connection closes anyway and cuts the header.
+    async fn open_stream(&mut self, topic: TopicId) -> Result<(), WriteError> {
+        let Entry::Vacant(entry) = self.streams.entry(topic) else {
+            return Ok(());
         };
-        // Before the open, which can wait at the stream limit of the peer.
-        set_if_changed(&self.has_streams, true);
-        let mut stream = tokio::select! {
-            biased;
-            // Before the open, so that a revoked lease starts no header.
-            _ = revoked.cancelled() => return Ok(false),
-            open = n0_future::time::timeout(OPEN_TIMEOUT, self.conn.open_uni()) => {
-                open.map_err(|_| e!(WriteError::OpenStalled))??
-            }
-        };
-        StreamHeader::write(topic, &mut stream, &mut self.buffer, self.max_message_size).await?;
+        let mut stream = time::timeout(OPEN_TIMEOUT, self.conn.open_uni())
+            .await
+            .map_err(|_| n0_error::e!(WriteError::OpenStalled))??;
+        // The stream counts for the `GOAWAY` once it opened, also if the peer stops it
+        // before the header write returns: the peer accepted it then. A header write
+        // that fails otherwise fails the connection.
+        self.opened_count += 1;
+        StreamHeader::write(topic, &mut stream, &mut self.buffer).await?;
         debug!(topic=%topic.fmt_short(), "stream opened");
         // The QUIC stack of the peer acknowledges data that its app did not read
         // yet, so this needs no timeout.
         let (id, stopped) = (stream.id(), stream.stopped());
-        self.live_streams.push(Box::pin(async move {
-            stopped.await.ok();
-            (topic, id)
+        self.stream_ends.push(Box::pin(async move {
+            let stop = stopped.await.ok().flatten();
+            (topic, id, stop)
         }));
         entry.insert(stream);
-        Ok(true)
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A put replaces the value that nobody took, and a take that waits gets the next put.
+    #[tokio::test]
+    async fn mailbox_keeps_the_latest_value() {
+        let mailbox = Mailbox::default();
+        mailbox.put(1);
+        mailbox.put(2);
+        assert_eq!(mailbox.take().await, 2);
+        assert_eq!(mailbox.try_take(), None);
+        let mut take = std::pin::pin!(mailbox.take());
+        assert!(n0_future::future::poll_once(&mut take).await.is_none());
+        mailbox.put(3);
+        assert_eq!(take.await, 3);
     }
 }

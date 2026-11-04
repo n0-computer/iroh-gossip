@@ -6,25 +6,32 @@ use std::{
 };
 
 use bytes::Bytes;
-use iroh::{endpoint::Connection, Endpoint, EndpointAddr, EndpointId, PublicKey, Watcher};
+use iroh::{
+    endpoint::{Connection, Side},
+    Endpoint, EndpointAddr, EndpointId, PublicKey, Watcher,
+};
 use n0_future::{
+    boxed::BoxFuture,
     task::JoinSet,
-    time::{self, Duration, Instant, Interval, MissedTickBehavior},
-    Stream, StreamExt as _,
+    time::{self, Duration, Instant},
+    FuturesUnordered, Stream, StreamExt as _,
 };
 use rand::{rngs::StdRng, SeedableRng};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error_span, trace, warn, Instrument};
 
 use super::{
     address_lookup::{decode_peer_data, encode_peer_data, GossipAddressLookup},
-    conn::{connection_loop, task_output, ConnectionLoopError},
-    dialer::Dialer,
-    peers::{Finished, PeerState, PEER_RETENTION},
-    queue::{self, Pushed},
-    subscriptions::{
-        all_eager_peers_busy, topic_subscriber_loop, SubscriptionCommands, TopicHandles,
+    conn::{
+        connection_loop, task_output, ConnArgs, ConnEvent, ConnEventKind, ConnExit, ConnShared,
+        Mailbox, TakeQueue,
     },
+    dialer::Dialer,
+    peers::{Action, ConnId, PeerState, Peers},
+    queue::{self, Pushed},
+    subscriptions::{topic_subscriber_loop, TopicHandles},
+    wire::{CloseCode, Session},
     InEvent, Join, ProtoCommand, ProtoEvent, ProtoMessage, QueueOptions, Timer, ToActor,
     GOSSIP_ALPN,
 };
@@ -37,12 +44,17 @@ use crate::{
 #[cfg(test)]
 mod tests;
 
+/// How long an idle connection waits before it retires, by default.
+const DEFAULT_RETIRE_AFTER: Duration = Duration::from_secs(10);
+
 /// The settings that the [`Builder`](super::Builder) passes to the actor.
 #[derive(Debug, Clone)]
 pub(super) struct ActorConfig {
     pub(super) proto: proto::Config,
     pub(super) alpn: Bytes,
     pub(super) send_queue: QueueOptions,
+    /// How long an idle connection waits before it retires.
+    pub(super) retire_after: Duration,
 }
 
 impl Default for ActorConfig {
@@ -51,14 +63,41 @@ impl Default for ActorConfig {
             proto: Default::default(),
             alpn: GOSSIP_ALPN.to_vec().into(),
             send_queue: Default::default(),
+            retire_after: DEFAULT_RETIRE_AFTER,
         }
     }
+}
+
+/// How long a shutdown waits for the connections to send what is queued and to close.
+///
+/// A peer that reads nothing must not hold up the shutdown (#47).
+const SHUTDOWN_DRAIN: Duration = Duration::from_secs(1);
+
+/// The next command of a subscription, with the receiver for the commands after it.
+type CommandFuture = BoxFuture<(TopicId, mpsc::Receiver<Command>, Option<Command>)>;
+
+/// Waits for the next command of a subscription.
+fn next_command(topic: TopicId, mut commands: mpsc::Receiver<Command>) -> CommandFuture {
+    Box::pin(async move {
+        let command = commands.recv().await;
+        (topic, commands, command)
+    })
+}
+
+/// The actor side of a connection task.
+#[derive(Debug)]
+struct ConnHandle {
+    conn: Connection,
+    /// Retires the connection after it lost a crossed dial.
+    retire: CancellationToken,
+    /// Gives the writer of the connection the queue of the peer.
+    take_queue: Arc<Mailbox<TakeQueue>>,
 }
 
 /// The capacity of the channel from the [`Gossip`](super::Gossip) handle to the actor.
 const TO_ACTOR_CAP: usize = 64;
 /// The capacity of the channel from the connection tasks to the actor.
-const IN_EVENT_CAP: usize = 1024;
+const CONN_EVENT_CAP: usize = 1024;
 
 /// The actor that owns the protocol state and the peers, and runs the connection tasks.
 pub(super) struct Actor {
@@ -69,26 +108,26 @@ pub(super) struct Actor {
     endpoint: Endpoint,
     /// Messages from the [`Gossip`](super::Gossip) handle.
     to_actor_rx: mpsc::Receiver<ToActor>,
-    /// Sender for the state input (cloned into the connection loops)
-    in_event_tx: mpsc::Sender<InEvent>,
-    /// Input events to the state (emitted from the connection loops)
-    in_event_rx: mpsc::Receiver<InEvent>,
-    /// Sweeps idle peers after their retention period.
-    peer_cleanup: Interval,
-    /// Receives subscription commands and applies broadcast backpressure.
-    command_rx: SubscriptionCommands,
+    /// The inputs that every connection task shares.
+    conn_shared: ConnShared,
+    /// Events of the connection tasks.
+    conn_events_rx: mpsc::Receiver<ConnEvent>,
+    /// The actor side of each running connection task.
+    conns: HashMap<ConnId, ConnHandle>,
+    /// The id of the next connection.
+    next_conn: ConnId,
+    /// The next command of each subscription.
+    command_rx: FuturesUnordered<CommandFuture>,
     /// Tasks for the connection loops, to keep track of panics.
-    connection_tasks: JoinSet<(EndpointId, Connection, Result<bool, ConnectionLoopError>)>,
+    connection_tasks: JoinSet<(EndpointId, ConnId, ConnExit)>,
     topic_event_forwarders: JoinSet<TopicId>,
     metrics: Arc<Metrics>,
 }
 
 /// The state of the actor that the protocol reads and changes through [`ActorIO`].
 struct ActorState {
-    /// Map of peers to their state.
-    peers: HashMap<EndpointId, PeerState>,
-    /// The size of the queue to each peer, see [`QueueOptions::size`].
-    send_queue_size: usize,
+    /// The state of each peer.
+    peers: Peers,
     /// Dial machine to connect to peers.
     dialer: Dialer,
     /// Map of topics to their state.
@@ -116,23 +155,27 @@ impl Actor {
             proto: proto_config,
             alpn,
             send_queue,
+            retire_after,
         } = config;
-        let peer_id = endpoint.id();
+        let me = endpoint.id();
         let proto = proto::State::new(
-            peer_id,
+            me,
             Default::default(),
             proto_config,
             rand::rngs::StdRng::from_rng(&mut rand::rng()),
         );
-        let send_queue_size = queue::queue_size(send_queue.size, proto.max_message_size());
+        let max_message_size = proto.max_message_size();
         let (to_actor_tx, to_actor_rx) = mpsc::channel(TO_ACTOR_CAP);
-        let (in_event_tx, in_event_rx) = mpsc::channel(IN_EVENT_CAP);
-        let mut peer_cleanup = time::interval(PEER_RETENTION);
-        peer_cleanup.set_missed_tick_behavior(MissedTickBehavior::Delay);
-
+        let (conn_events_tx, conn_events_rx) = mpsc::channel(CONN_EVENT_CAP);
+        let conn_shared = ConnShared {
+            events: conn_events_tx,
+            max_message_size,
+            session: Session::random(),
+            retire_after,
+            shutdown: CancellationToken::new(),
+        };
         let state = ActorState {
-            peers: Default::default(),
-            send_queue_size,
+            peers: Peers::new(me, queue::queue_size(send_queue.size, max_message_size)),
             dialer: Dialer::new(endpoint.clone(), alpn),
             topics: Default::default(),
             quit_queue: Default::default(),
@@ -148,10 +191,11 @@ impl Actor {
             state,
             endpoint,
             to_actor_rx,
-            in_event_rx,
-            in_event_tx,
-            command_rx: SubscriptionCommands::default(),
-            peer_cleanup,
+            conn_shared,
+            conn_events_rx,
+            conns: Default::default(),
+            next_conn: 0,
+            command_rx: Default::default(),
             connection_tasks: Default::default(),
             topic_event_forwarders: Default::default(),
             metrics,
@@ -167,7 +211,7 @@ impl Actor {
     }
 
     /// Handles a message from the [`Gossip`](super::Gossip) handle, and returns `false` to stop the actor.
-    fn on_message(&mut self, msg: Option<ToActor>) -> bool {
+    async fn on_message(&mut self, msg: Option<ToActor>) -> bool {
         if msg.is_some() {
             self.metrics.actor_tick_rx.inc();
         }
@@ -182,10 +226,7 @@ impl Actor {
             }
             Some(ToActor::Shutdown { reply }) => {
                 debug!("received shutdown message, quit all topics");
-                self.state
-                    .quit_queue
-                    .extend(self.state.topics.keys().copied());
-                self.process_quit_queue();
+                self.shutdown().await;
                 debug!("all topics quit, stop gossip actor");
                 reply.send(()).ok();
                 false
@@ -194,6 +235,36 @@ impl Actor {
                 debug!("all gossip handles dropped, stop gossip actor");
                 false
             }
+        }
+    }
+
+    /// Leaves all topics, and gives the writers time to send what is left.
+    ///
+    /// Each writer finishes its streams once its queue is empty, and its
+    /// connection closes with [`CloseCode::Shutdown`], which the peers see as a
+    /// failure. The drain takes at most [`SHUTDOWN_DRAIN`]. Then the actor closes the rest.
+    async fn shutdown(&mut self) {
+        self.state
+            .quit_queue
+            .extend(self.state.topics.keys().copied());
+        self.process_quit_queue();
+        self.conn_shared.shutdown.cancel();
+        let drain = async {
+            // A task ends only after it sent its events, so the drain drops the events meanwhile.
+            while !self.connection_tasks.is_empty() {
+                tokio::select! {
+                    _ = self.conn_events_rx.recv() => {}
+                    res = self.connection_tasks.join_next() => {
+                        task_output(res.expect("not empty"));
+                    }
+                }
+            }
+        };
+        if time::timeout(SHUTDOWN_DRAIN, drain).await.is_err() {
+            warn!("the connections did not drain, close them");
+        }
+        for handle in self.conns.values() {
+            handle.conn.close(CloseCode::Shutdown.code(), b"shutdown");
         }
     }
 
@@ -220,25 +291,23 @@ impl Actor {
         // handle queued before it. Each tick still runs the select below, so these
         // messages starve no other branch.
         if let Ok(msg) = self.to_actor_rx.try_recv() {
-            if !self.on_message(Some(msg)) {
+            if !self.on_message(Some(msg)).await {
                 return false;
             }
         }
+        // No await in a select branch. A shutdown waits up to [`SHUTDOWN_DRAIN`].
+        let mut message = None;
         // Not biased: a publisher that always has a command ready would starve the
         // branches after it, such as received messages, timers and closed connections.
         tokio::select! {
             msg = self.to_actor_rx.recv() => {
-                if !self.on_message(msg) {
-                    return false;
-                }
+                message = Some(msg);
             }
-            Some((topic, command)) = self.command_rx.next(|topic| {
-                all_eager_peers_busy(&self.proto, &self.state.peers, topic)
-            }), if !self.command_rx.is_empty() => {
+            Some((topic, commands, command)) = self.command_rx.next(), if !self.command_rx.is_empty() => {
+                if command.is_some() {
+                    self.command_rx.push(next_command(topic, commands));
+                }
                 self.on_command(topic, command);
-            },
-            _ = self.peer_cleanup.tick(), if !self.state.peers.is_empty() => {
-                self.forget_peers(Instant::now());
             },
             Some(new_address) = addr_updates.next() => {
                 self.metrics.actor_tick_endpoint.inc();
@@ -259,10 +328,10 @@ impl Actor {
                     }
                 }
             }
-            event = self.in_event_rx.recv() => {
+            event = self.conn_events_rx.recv() => {
                 self.metrics.actor_tick_in_event_rx.inc();
-                let event = event.expect("unreachable: in_event_tx is never dropped before receiver");
-                self.handle_in_event(event, Instant::now());
+                let event = event.expect("unreachable: conn_shared.events is never dropped before receiver");
+                self.on_conn_event(event, Instant::now());
             }
             _ = async {
                 match self.state.timers.first() {
@@ -277,11 +346,11 @@ impl Actor {
                 }
             }
             Some(res) = self.connection_tasks.join_next(), if !self.connection_tasks.is_empty() => {
-                let Some((peer_id, conn, result)) = task_output(res) else {
+                let Some((peer_id, id, exit)) = task_output(res) else {
                     debug!("connection task cancelled, the runtime shuts down");
                     return false;
                 };
-                self.on_conn_task_finished(peer_id, conn, result);
+                self.on_conn_task_finished(peer_id, id, exit);
             }
             Some(res) = self.topic_event_forwarders.join_next(), if !self.topic_event_forwarders.is_empty() => {
                 let Some(topic_id) = task_output(res) else {
@@ -297,7 +366,10 @@ impl Actor {
             }
         }
 
-        true
+        match message {
+            Some(msg) => self.on_message(msg).await,
+            None => true,
+        }
     }
 
     fn on_addr_update(&mut self, endpoint_addr: EndpointAddr) {
@@ -338,105 +410,141 @@ impl Actor {
     fn add_connection(&mut self, conn: Connection) {
         let peer_id = conn.remote_id();
         let side = conn.side();
-        let size = self.state.send_queue_size;
-        let peer = self
-            .state
-            .peers
-            .entry(peer_id)
-            .or_insert_with(|| PeerState::new(size));
-        let queue_lease = peer.handle_connection(side, conn.stable_id());
-        let initial_topics = match queue_lease {
-            Some(_) => self.proto.topics_wanting(&peer_id).collect(),
-            None => Vec::new(),
-        };
-
-        let aborted = peer.aborted.clone();
-        let handles_close = peer.handles_close.clone();
-        let max_message_size = self.proto.max_message_size();
-        let in_event_tx = self.in_event_tx.clone();
-
-        // Spawn a task for this connection
-        self.connection_tasks.spawn(
-            async move {
-                let res = connection_loop(
-                    peer_id,
-                    conn.clone(),
-                    aborted,
-                    queue_lease,
-                    initial_topics,
-                    in_event_tx,
-                    max_message_size,
-                    handles_close,
-                )
-                .await;
-                // Closed here, so that a busy actor does not delay the close.
-                if conn.close_reason().is_none() {
-                    conn.close(0u32.into(), b"close from disconnect");
-                }
-                (peer_id, conn, res)
+        let id = self.next_conn;
+        self.next_conn += 1;
+        let peer = self.state.peers.get_or_insert(peer_id);
+        let mut actions = Vec::new();
+        if side == Side::Server {
+            peer.make_room(&mut actions);
+            if !actions.is_empty() {
+                debug!(peer = %peer_id.fmt_short(), "too many connections, close an older one");
+                self.state.metrics.conns_evicted.inc();
             }
-            .instrument(error_span!("conn", peer = %peer_id.fmt_short())),
+        }
+        peer.add_conn(id, side, &mut actions);
+
+        let handle = ConnHandle {
+            conn: conn.clone(),
+            retire: CancellationToken::new(),
+            take_queue: Default::default(),
+        };
+        let args = ConnArgs {
+            id,
+            conn,
+            aborted: peer.aborted.clone(),
+            retire: handle.retire.clone(),
+            take_queue: handle.take_queue.clone(),
+            shared: self.conn_shared.clone(),
+        };
+        self.conns.insert(id, handle);
+        self.connection_tasks.spawn(
+            async move { (peer_id, id, connection_loop(args).await) }
+                .instrument(error_span!("conn", peer = %peer_id.fmt_short())),
         );
+        self.perform_peer_actions(peer_id, actions, Instant::now());
+    }
+
+    /// Performs the actions that the state of a peer returned.
+    fn perform_peer_actions(&mut self, peer_id: EndpointId, actions: Vec<Action>, now: Instant) {
+        for action in actions {
+            match action {
+                Action::Close(id, code) => {
+                    if let Some(handle) = self.conns.get(&id) {
+                        debug!(?code, "close a connection");
+                        handle.conn.close(code.code(), b"closed by the node");
+                    }
+                }
+                Action::Retire(id) => {
+                    if let Some(handle) = self.conns.get(&id) {
+                        handle.retire.cancel();
+                    }
+                }
+                Action::TakeQueue(id) => {
+                    let Some(handle) = self.conns.get(&id) else {
+                        continue;
+                    };
+                    let peer = self.state.peers.get_mut(&peer_id);
+                    let Some(reader) = peer.and_then(|peer| peer.reader_for(id)) else {
+                        continue;
+                    };
+                    let topics = self.proto.topics_wanting(&peer_id).collect();
+                    handle.take_queue.put(TakeQueue { reader, topics });
+                }
+                Action::Disconnect => {
+                    debug!(peer=%peer_id.fmt_short(), "report the peer as disconnected");
+                    self.handle_in_event(InEvent::PeerDisconnected(peer_id), now);
+                }
+                Action::Dial => {
+                    debug!(peer=%peer_id.fmt_short(), "dial for the queued messages");
+                    self.state.dialer.queue_dial(peer_id);
+                }
+            }
+        }
     }
 
     fn on_dial_failed(&mut self, peer_id: EndpointId) {
-        // A connection writes the queue, so the failed dial loses nothing.
-        if !self
-            .state
-            .peers
-            .get(&peer_id)
-            .is_some_and(|peer| peer.writer.is_some())
-        {
-            self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now());
+        let mut actions = Vec::new();
+        match self.state.peers.get_mut(&peer_id) {
+            Some(peer) => peer.on_dial_failed(&mut actions),
+            None => actions.push(Action::Disconnect),
         }
+        self.perform_peer_actions(peer_id, actions, Instant::now());
+        self.state.forget_if_idle(&peer_id);
     }
 
-    /// Removes the peers whose retention ended.
-    fn forget_peers(&mut self, now: Instant) {
-        // A pending dial may still need the capability learned on an earlier connection.
-        self.state
+    /// Handles an event of a connection task, unless the connection is gone.
+    fn on_conn_event(&mut self, event: ConnEvent, now: Instant) {
+        let ConnEvent { peer, conn, kind } = event;
+        let Some(peer_state) = self
+            .state
             .peers
-            .retain(|id, peer| self.state.dialer.is_dialing(*id) || !peer.can_forget(now));
+            .get_mut(&peer)
+            .filter(|peer_state| peer_state.has_conn(conn))
+        else {
+            return;
+        };
+        match kind {
+            ConnEventKind::Message(message) => {
+                self.handle_in_event(InEvent::RecvMessage(peer, message), now)
+            }
+            ConnEventKind::Header(session) => {
+                let mut actions = Vec::new();
+                peer_state.on_header(conn, session, &mut actions);
+                self.perform_peer_actions(peer, actions, now);
+            }
+            ConnEventKind::Retiring => {
+                let mut actions = Vec::new();
+                peer_state.on_retiring(conn, &mut actions);
+                self.perform_peer_actions(peer, actions, now);
+            }
+        }
     }
 
     #[tracing::instrument(name = "conn", skip_all, fields(peer = %peer_id.fmt_short()))]
-    fn on_conn_task_finished(
-        &mut self,
-        peer_id: EndpointId,
-        conn: Connection,
-        task_result: Result<bool, ConnectionLoopError>,
-    ) {
+    fn on_conn_task_finished(&mut self, peer_id: EndpointId, id: ConnId, exit: ConnExit) {
         // The receive loop sends its messages before its task ends. Handle the ones
         // still queued first, so that a message never comes after its own close.
         // Only those: other connections can refill the queue while we handle it.
-        for _ in 0..self.in_event_rx.len() {
-            let Ok(event) = self.in_event_rx.try_recv() else {
+        for _ in 0..self.conn_events_rx.len() {
+            let Ok(event) = self.conn_events_rx.try_recv() else {
                 break;
             };
-            self.handle_in_event(event, Instant::now());
+            self.on_conn_event(event, Instant::now());
         }
-        let reason = conn.close_reason().expect("closed by its task");
-        let retired = matches!(task_result, Ok(true));
-        let error = task_result.err();
-        debug!(%reason, ?error, "connection closed");
-        let now = Instant::now();
-        let finished = self
-            .state
-            .peers
-            .get_mut(&peer_id)
-            .expect("unfinished connection must keep its peer state")
-            .connection_finished(conn.stable_id(), now, retired);
-        match finished {
-            Finished::Quiet => {}
-            Finished::Disconnected => {
-                debug!("active send connection closed, mark peer as disconnected");
-                self.handle_in_event(InEvent::PeerDisconnected(peer_id), now);
-            }
-            Finished::Redial => {
-                debug!("retired connection left messages, dial again");
-                self.state.dialer.queue_dial(peer_id);
-            }
+        let ConnExit { end, reader } = exit;
+        debug!(?end, "connection closed");
+        // A reader that the writer did not take is newer than the one it had.
+        let untaken = self
+            .conns
+            .remove(&id)
+            .and_then(|handle| handle.take_queue.try_take());
+        let reader = untaken.map(|take| take.reader).or(reader);
+        let mut actions = Vec::new();
+        if let Some(peer) = self.state.peers.get_mut(&peer_id) {
+            peer.on_closed(id, end, reader, &mut actions);
         }
+        self.perform_peer_actions(peer_id, actions, Instant::now());
+        self.state.forget_if_idle(&peer_id);
     }
 
     /// Registers the topic of a join, and starts the join.
@@ -463,7 +571,7 @@ impl Actor {
         };
         self.topic_event_forwarders
             .spawn(forwarder.instrument(tracing::Span::current()));
-        self.command_rx.insert(topic_id, commands_rx);
+        self.command_rx.push(next_command(topic_id, commands_rx));
         *command_receivers += 1;
 
         self.handle_in_event(
@@ -503,12 +611,6 @@ impl Actor {
 
     /// Handles one event of the protocol, and queues the events it causes in [`ActorState::follow_ups`].
     fn run_proto(&mut self, event: InEvent, now: Instant) {
-        // Drop the queue first, so that a message the event causes dials anew.
-        if let InEvent::PeerDisconnected(peer) = &event {
-            if let Some(peer) = self.state.peers.get_mut(peer) {
-                peer.discard_queue(now);
-            }
-        }
         // The follow-up disconnect drops what we would queue for the peers that
         // overflowed, so we neither reopen their queue nor dial them.
         self.state.overflowed_peers.clear();
@@ -555,6 +657,16 @@ fn track_message(kind: MessageKind, len: Option<usize>, sent: bool, metrics: &Me
     size.inc_by(len);
 }
 
+impl ActorState {
+    /// Removes the state of a peer that holds nothing, unless a dial is pending.
+    fn forget_if_idle(&mut self, peer_id: &EndpointId) {
+        let idle = self.peers.get(peer_id).is_some_and(PeerState::is_idle);
+        if idle && !self.dialer.is_dialing(*peer_id) {
+            self.peers.remove(peer_id);
+        }
+    }
+}
+
 /// The [`IO`] of the protocol state for one call of [`proto::State::handle`].
 ///
 /// It sends to the peers and the topics, and sets the timers.
@@ -572,11 +684,7 @@ impl IO<PublicKey> for ActorIO<'_> {
         if state.overflowed_peers.contains(&peer_id) {
             return None;
         }
-        let size = state.send_queue_size;
-        let peer = state
-            .peers
-            .entry(peer_id)
-            .or_insert_with(|| PeerState::new(size));
+        let peer = state.peers.get_or_insert(peer_id);
         self.opened_queue |= peer.queue.is_closed();
         let len = super::wire::message_len(&message.message).ok();
         let kind = message.kind();
@@ -592,7 +700,7 @@ impl IO<PublicKey> for ActorIO<'_> {
             }
             Pushed::Overflow => {
                 warn!(peer = %peer_id.fmt_short(), "send queue full with a control message, abort the peer");
-                peer.abort(self.now);
+                peer.abort();
                 state.overflowed_peers.push(peer_id);
                 state
                     .follow_ups
@@ -605,12 +713,13 @@ impl IO<PublicKey> for ActorIO<'_> {
         if peer.needs_dial() && !state.dialer.is_dialing(peer_id) {
             debug!(peer = %peer_id.fmt_short(), "start to dial");
             state.dialer.queue_dial(peer_id);
+            peer.on_dial();
         }
-        // An open queue without a writer relies on the dial: it either
-        // supplies the writer, or its failure disconnects the peer.
+        // An open queue without a connection relies on the dial: it either
+        // supplies the connection, or its failure disconnects the peer.
         debug_assert!(
-            peer.writer.is_some() || peer.queue.is_closed() || state.dialer.is_dialing(peer_id),
-            "open queue without a writer or a dial"
+            peer.conn_count() > 0 || peer.queue.is_closed() || state.dialer.is_dialing(peer_id),
+            "open queue without a connection or a dial"
         );
         dropped
     }

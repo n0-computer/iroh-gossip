@@ -1,114 +1,35 @@
 use super::*;
 
-/// Accepts the peer's next stream and reads only its header.
-async fn read_next_header(conn: &Connection) -> Result<TopicId> {
-    let mut stream = conn.accept_uni().await.std_context("accept stream")?;
-    let header = wire::StreamHeader::read(&mut stream, &mut Vec::new(), TEST_FRAME_LIMIT)
-        .await
-        .std_context("read header")?;
-    Ok(header.topic)
+/// Returns a `Close` for `topic`.
+fn disconnect_message(topic: TopicId) -> ProtoMessage {
+    ProtoMessage {
+        topic,
+        message: TopicMessage::test_close(),
+    }
 }
 
-/// A stream counts from its first byte, so a partial header keeps the connection.
+/// A topic stream whose header stays partial fails the connection after the header timeout.
 ///
-/// Once the peer resets the stream, the connection closes after the grace.
+/// The streams after it wait for its header, so the node cannot go on without it.
 #[tokio::test]
 #[traced_test]
-async fn partial_header_keeps_the_connection() -> Result {
+async fn partial_topic_header_fails_the_connection() -> Result {
     let pair = TestPair::new(1).await?;
     let (conn, peer_conn) = pair.connect_back().await?;
-    let mut actor = t_actor().await?;
+    let mut actor = ManualActorLoop::new(t_actor().await?).await;
     actor.add_connection(conn);
-    show_that_it_handles_a_close(&peer_conn, [0; 32].into()).await;
+    let _control = RawControl::open(&peer_conn).await?;
     let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
     stream
         .write_all(&[0x23, 0x01, 0x00])
         .await
         .std_context("partial header")?;
-    tokio::time::sleep(RETIRE_GRACE + Duration::from_secs(1)).await;
-    assert!(peer_conn.close_reason().is_none(), "the connection closed");
-
-    stream.reset(0u32.into()).anyerr()?;
-    let result = timeout(
-        RETIRE_GRACE + Duration::from_secs(3),
-        actor.connection_tasks.join_next(),
-    )
+    pump_until(&mut actor, "the connection to end", |actor| {
+        actor.connection_tasks.is_empty()
+    })
     .await
-    .std_context("the connection stayed open")?;
-    assert!(result.expect("connection task").is_ok());
-    Ok(())
-}
-
-/// Waits until `flag` has `value`.
-async fn flag_becomes(flag: &mut watch::Receiver<bool>, value: bool) -> Result {
-    timeout(Duration::from_secs(5), flag.wait_for(|v| *v == value))
-        .await
-        .std_context("the flag did not change")?
-        .anyerr()?;
-    Ok(())
-}
-
-/// The send loop reports a stream from its open until the peer acknowledged its end.
-#[tokio::test]
-#[traced_test]
-async fn send_loop_reports_its_streams() -> Result {
-    let pair = TestPair::new(1).await?;
-    let (conn, peer_conn) = pair.connect().await?;
-    let (next, next_peer_conn) = pair.connect().await?;
-    let topic: TopicId = blake3::hash(b"send_loop_reports_its_streams").into();
-    let mut queue = SendQueue::new(queue::MIN_QUEUE_SIZE);
-    // Set, as `connection_loop` creates it for a writer.
-    let flag = watch::Sender::new(true);
-    let mut has_streams = flag.subscribe();
-    let _send = AbortOnDropHandle::new(spawn(
-        SendLoop::new(conn, queue.lease(), TEST_FRAME_LIMIT, flag, Vec::new()).run(),
-    ));
-    flag_becomes(&mut has_streams, false).await?;
-
-    assert!(matches!(queue.send(join_message(topic, 0)), Pushed::Queued));
-    let mut stream = peer_conn.accept_uni().await.std_context("accept")?;
-    let mut buffer = Vec::new();
-    wire::StreamHeader::read(&mut stream, &mut buffer, TEST_FRAME_LIMIT).await?;
-    let message: Option<TopicMessage> =
-        wire::read_message(&mut stream, &mut buffer, TEST_FRAME_LIMIT).await?;
-    assert!(message.is_some(), "the message did not go out");
-    assert!(*has_streams.borrow(), "the open stream is not reported");
-
-    // A new writer opens a stream for each topic of its lease, and the old one ends.
-    let next_flag = unset_flag();
-    let mut next_has_streams = next_flag.subscribe();
-    let _next_send = AbortOnDropHandle::new(spawn(
-        SendLoop::new(
-            next,
-            queue.lease(),
-            TEST_FRAME_LIMIT,
-            next_flag,
-            vec![topic],
-        )
-        .run(),
-    ));
-    let mut next_stream = timeout(Duration::from_secs(5), next_peer_conn.accept_uni())
-        .await
-        .std_context("the stream did not open again")?
-        .std_context("accept")?;
-    let header = wire::StreamHeader::read(&mut next_stream, &mut buffer, TEST_FRAME_LIMIT).await?;
-    assert_eq!(header.topic, topic);
-    let end: Option<TopicMessage> =
-        wire::read_message(&mut stream, &mut buffer, TEST_FRAME_LIMIT).await?;
-    assert!(end.is_none(), "the old stream did not end");
-    flag_becomes(&mut has_streams, false).await?;
-    assert!(
-        *next_has_streams.borrow(),
-        "the stream that opened again is not reported"
-    );
-
-    // A closed queue finishes the stream. The flag clears once the peer acknowledged it.
-    queue.close();
-    let end: Option<TopicMessage> =
-        wire::read_message(&mut next_stream, &mut buffer, TEST_FRAME_LIMIT).await?;
-    assert!(end.is_none(), "the new stream did not end");
-    flag_becomes(&mut next_has_streams, false).await?;
-    Ok(())
+    .ok();
+    closed_with(&peer_conn, CloseCode::Protocol).await
 }
 
 /// A queued message gets the stream of the peer before the initial topics of the writer.
@@ -138,21 +59,12 @@ async fn queued_message_comes_before_the_initial_topics() -> Result {
         blake3::hash(b"queued").into(),
         blake3::hash(b"initial").into(),
     );
-    let mut queue = SendQueue::new(queue::MIN_QUEUE_SIZE);
+    let (queue, reader) = SendQueue::new(queue::MIN_QUEUE_SIZE);
     assert!(matches!(
         queue.send(join_message(queued, 0)),
         Pushed::Queued
     ));
-    let _send = AbortOnDropHandle::new(spawn(
-        SendLoop::new(
-            conn,
-            queue.lease(),
-            TEST_FRAME_LIMIT,
-            unset_flag(),
-            vec![initial],
-        )
-        .run(),
-    ));
+    let _writer = start_writer(conn, &peer_conn, reader, TEST_FRAME_LIMIT, vec![initial]).await?;
 
     let (topic, _) = timeout(Duration::from_secs(2), read_next_message(&peer_conn))
         .await
@@ -168,21 +80,12 @@ async fn left_topic_gets_no_initial_stream() -> Result {
     let pair = TestPair::new(1).await?;
     let (conn, peer_conn) = pair.connect().await?;
     let topic: TopicId = blake3::hash(b"left_topic_gets_no_initial_stream").into();
-    let mut queue = SendQueue::new(queue::MIN_QUEUE_SIZE);
+    let (queue, reader) = SendQueue::new(queue::MIN_QUEUE_SIZE);
     assert!(matches!(
         queue.send(disconnect_message(topic)),
         Pushed::Queued
     ));
-    let _send = AbortOnDropHandle::new(spawn(
-        SendLoop::new(
-            conn,
-            queue.lease(),
-            TEST_FRAME_LIMIT,
-            unset_flag(),
-            vec![topic],
-        )
-        .run(),
-    ));
+    let _writer = start_writer(conn, &peer_conn, reader, TEST_FRAME_LIMIT, vec![topic]).await?;
 
     let (sent, message) = timeout(Duration::from_secs(5), read_next_message(&peer_conn))
         .await
@@ -204,144 +107,45 @@ async fn left_topic_gets_no_initial_stream() -> Result {
 async fn streams_of_a_topic_keep_their_order() -> Result {
     let pair = TestPair::new(1).await?;
     let (conn, peer_conn) = pair.connect().await?;
-    let (in_event_tx, mut in_event_rx) = mpsc::channel(4);
-    let mut recv_loop = RecvLoop::new(
-        peer_conn.remote_id(),
-        conn,
-        in_event_tx,
-        TEST_FRAME_LIMIT,
-        unset_flag(),
-        unset_flag(),
-    );
-    let _recv = AbortOnDropHandle::new(spawn(async move { recv_loop.run().await }));
+    let (mut reader, _control) = start_conn_peered(conn, &peer_conn, TEST_FRAME_LIMIT).await?;
 
     let topic: TopicId = blake3::hash(b"streams_of_a_topic").into();
     let (first, second) = (join_message(topic, 1), join_message(topic, 2));
     let mut buffer = Vec::new();
     let mut older = peer_conn.open_uni().await.std_context("open stream")?;
-    wire::StreamHeader::write(topic, &mut older, &mut buffer, TEST_FRAME_LIMIT).await?;
+    wire::StreamHeader::write(topic, &mut older, &mut buffer).await?;
     tokio::time::sleep(Duration::from_millis(200)).await;
     // The newer stream arrives before the last message of the older one.
     let mut newer = peer_conn.open_uni().await.std_context("open stream")?;
-    wire::StreamHeader::write(topic, &mut newer, &mut buffer, TEST_FRAME_LIMIT).await?;
+    wire::StreamHeader::write(topic, &mut newer, &mut buffer).await?;
     wire::write_message(&mut newer, &second.message, &mut buffer, TEST_FRAME_LIMIT).await?;
     tokio::time::sleep(Duration::from_millis(200)).await;
     wire::write_message(&mut older, &first.message, &mut buffer, TEST_FRAME_LIMIT).await?;
     older.finish().std_context("finish")?;
 
     for expected in [first, second] {
-        let event = timeout(Duration::from_secs(5), in_event_rx.recv())
-            .await
-            .std_context("no message")?;
-        assert!(
-            matches!(&event, Some(InEvent::RecvMessage(_, m)) if m.message == expected.message),
-            "{event:?}"
-        );
+        assert_eq!(reader.next().await?.message, expected.message);
     }
     Ok(())
 }
 
-/// An older stream whose header comes after a newer one is read at once, not after it.
+/// A send loop whose connection closed returns the reader, for another connection of the peer.
 #[tokio::test]
 #[traced_test]
-async fn late_header_of_an_older_stream_does_not_wait() -> Result {
+async fn closed_send_loop_returns_the_reader() -> Result {
     let pair = TestPair::new(1).await?;
     let (conn, peer_conn) = pair.connect().await?;
-    let (in_event_tx, mut in_event_rx) = mpsc::channel(4);
-    let mut recv_loop = RecvLoop::new(
-        peer_conn.remote_id(),
-        conn,
-        in_event_tx,
-        TEST_FRAME_LIMIT,
-        unset_flag(),
-        unset_flag(),
-    );
-    let _recv = AbortOnDropHandle::new(spawn(async move { recv_loop.run().await }));
-
-    let topic: TopicId = blake3::hash(b"late_header").into();
-    let (first, second) = (join_message(topic, 1), join_message(topic, 2));
-    let mut buffer = Vec::new();
-    let mut older = peer_conn.open_uni().await.std_context("open stream")?;
-    older.write_all(&[0x23]).await.std_context("write")?;
-    let mut newer = peer_conn.open_uni().await.std_context("open stream")?;
-    wire::StreamHeader::write(topic, &mut newer, &mut buffer, TEST_FRAME_LIMIT).await?;
-    wire::write_message(&mut newer, &second.message, &mut buffer, TEST_FRAME_LIMIT).await?;
-    let mut expect = async |expected: ProtoMessage| {
-        let event = timeout(Duration::from_secs(5), in_event_rx.recv())
-            .await
-            .std_context("no message")?;
-        assert!(
-            matches!(&event, Some(InEvent::RecvMessage(_, m)) if m.message == expected.message),
-            "{event:?}"
-        );
-        n0_error::Ok(())
-    };
-    expect(second).await?;
-    // The rest of the older header, then a message. The newer stream stays open.
-    older
-        .write_all(&[0x01, 0x00, 0x20])
-        .await
-        .std_context("write")?;
-    older
-        .write_all(topic.as_bytes())
-        .await
-        .std_context("write")?;
-    wire::write_message(&mut older, &first.message, &mut buffer, TEST_FRAME_LIMIT).await?;
-    older.finish().std_context("finish")?;
-    expect(first).await?;
-    Ok(())
-}
-
-/// A send loop whose connection closed lets go of the queue, for another connection of the peer.
-#[tokio::test]
-#[traced_test]
-async fn closed_send_loop_lets_go_of_the_queue() -> Result {
-    let pair = TestPair::new(1).await?;
-    let (conn, peer_conn) = pair.connect().await?;
-    let mut queue = SendQueue::new(queue::MIN_QUEUE_SIZE);
-    let send = SendLoop::new(
-        conn,
-        queue.lease(),
-        TEST_FRAME_LIMIT,
-        unset_flag(),
-        Vec::new(),
-    );
+    let (queue, reader) = SendQueue::new(queue::MIN_QUEUE_SIZE);
+    let writer = start_writer(conn, &peer_conn, reader, TEST_FRAME_LIMIT, Vec::new()).await?;
+    // Once the writer has the queue, the peer closes.
+    tokio::time::sleep(Duration::from_millis(100)).await;
     peer_conn.close(0u32.into(), b"done");
-    timeout(Duration::from_secs(3), send.run())
-        .await
-        .std_context("the send loop did not end")??;
+    let exit = exited(writer.test.task, Duration::from_secs(3)).await?;
     let message = join_message(TopicId::from_bytes([0; 32]), 0);
     assert!(matches!(queue.send(message), Pushed::Queued));
-    let reader = queue
-        .try_reader()
-        .std_context("the queue is still locked")?;
+    let reader = exit.reader.std_context("the reader did not come back")?;
+    assert!(reader.reads(&queue));
     assert!(!reader.is_empty(), "the message did not stay queued");
-    Ok(())
-}
-
-/// A connection that takes over the writer opens a stream for each topic that uses the peer.
-#[tokio::test]
-#[traced_test]
-async fn new_writer_opens_the_streams_of_the_topics() -> Result {
-    let pair = TestPair::new(1).await?;
-    let (old, peer_old) = pair.connect_back().await?;
-    let (new, peer_new) = pair.connect_back().await?;
-    let peer_id = pair.ep2.id();
-    let topic: TopicId = blake3::hash(b"new_writer_opens").into();
-    let mut actor = t_actor().await?;
-    actor.add_connection(old);
-    let join = InEvent::Command(topic, ProtoCommand::Join(vec![peer_id]));
-    actor.handle_in_event(join, Instant::now());
-    let (sent, _) = timeout(Duration::from_secs(5), read_next_message(&peer_old))
-        .await
-        .std_context("the join did not go out")??;
-    assert_eq!(sent, topic);
-
-    actor.add_connection(new);
-    let opened = timeout(Duration::from_secs(5), read_next_header(&peer_new))
-        .await
-        .std_context("the new writer opened no stream")??;
-    assert_eq!(opened, topic);
     Ok(())
 }
 
@@ -359,13 +163,12 @@ async fn disconnect_ends_its_stream() -> Result {
         disconnect_message(topic),
         join_message(topic, 0),
     ];
-    let mut queue = SendQueue::new(queue::MIN_QUEUE_SIZE);
+    let (queue, reader) = SendQueue::new(queue::MIN_QUEUE_SIZE);
     for message in messages {
         assert!(matches!(queue.send(message), Pushed::Queued));
     }
-    let send_loop = SendLoop::new(conn, queue.lease(), 1024, unset_flag(), Vec::new());
-    drop(queue);
-    let _send = AbortOnDropHandle::new(spawn(async move { send_loop.run().await }));
+    queue.close();
+    let _writer = start_writer(conn, &peer_conn, reader, 1024, Vec::new()).await?;
 
     let (_, first) = timeout(Duration::from_secs(5), read_next_stream(&peer_conn))
         .await
@@ -381,68 +184,36 @@ async fn disconnect_ends_its_stream() -> Result {
     Ok(())
 }
 
-/// After the peer stopped a stream, the next message of the topic goes out on a new stream.
-///
-/// The peer stops a stream that it cannot read, for example a frame over its
-/// size limit.
+/// A stream that the peer stopped fails the connection.
 #[tokio::test]
 #[traced_test]
-async fn next_message_after_a_stop_opens_a_new_stream() -> Result {
+async fn stopped_stream_fails_the_connection() -> Result {
     let pair = TestPair::new(1).await?;
     let (conn, peer_conn) = pair.connect().await?;
-    let peer_id = pair.ep2.id();
     let topic: TopicId = blake3::hash(b"stopped_stream").into();
-
-    // The peer stops the first stream we open, and reads the next one.
-    let peer = AbortOnDropHandle::new(spawn(async move {
-        let mut first = peer_conn.accept_uni().await.expect("accept_uni");
-        first.stop(0u32.into()).expect("stop");
-        let mut next = peer_conn.accept_uni().await.expect("accept_uni");
-        let mut buffer = Vec::new();
-        let header = wire::StreamHeader::read(&mut next, &mut buffer, TEST_FRAME_LIMIT)
-            .await
-            .expect("read header");
-        let message: Option<TopicMessage> =
-            wire::read_message(&mut next, &mut buffer, TEST_FRAME_LIMIT)
-                .await
-                .expect("read frame");
-        (header.topic, message.is_some(), peer_conn)
-    }));
-    let mut queue = SendQueue::new(queue::MIN_QUEUE_SIZE);
-    let queue_lease = queue.lease();
-    let aborted = CancellationToken::new();
-    let _feed = AbortOnDropHandle::new(spawn(async move {
+    let (queue, reader) = SendQueue::new(queue::MIN_QUEUE_SIZE);
+    let _writer = start_writer(conn, &peer_conn, reader, TEST_FRAME_LIMIT, Vec::new()).await?;
+    let feed = async {
         loop {
             queue.send(join_message(topic, 0));
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-    }));
-    let (in_event_tx, _in_event_rx) = mpsc::channel(16);
-    let _conn_loop = AbortOnDropHandle::new(spawn(connection_loop(
-        peer_id,
-        conn,
-        aborted,
-        Some(queue_lease),
-        Vec::new(),
-        in_event_tx,
-        TEST_FRAME_LIMIT,
-        unset_flag(),
-    )));
-
-    let (read_topic, read_message, peer_conn) = timeout(Duration::from_secs(5), peer)
-        .await
-        .std_context("no message on a new stream")?
-        .std_context("peer task")?;
-    assert_eq!(read_topic, topic);
-    assert!(read_message, "the new stream had no message");
-    assert!(peer_conn.close_reason().is_none(), "the connection closed");
-    Ok(())
+    };
+    let peer = async {
+        let mut first = peer_conn.accept_uni().await.std_context("accept_uni")?;
+        first.stop(0u32.into()).anyerr()?;
+        closed_with(&peer_conn, CloseCode::SendFailed).await
+    };
+    tokio::select! {
+        _ = feed => unreachable!(),
+        res = peer => res,
+    }
 }
 
 /// A receive loop that ended ends the connection loop despite a live send loop.
 ///
-/// The receive loop ends once the actor takes no more messages. A bad
-/// stream header does not end it: it drops only its stream.
+/// The receive loop ends once the actor takes no more messages. The peer reads a
+/// shutdown, so that it drops us as a neighbor.
 #[tokio::test]
 #[traced_test]
 async fn ended_receive_loop_ends_connection_loop() -> Result {
@@ -450,60 +221,34 @@ async fn ended_receive_loop_ends_connection_loop() -> Result {
     let (conn, peer_conn) = pair.connect().await?;
     let topic: TopicId = blake3::hash(b"ended_receive_loop").into();
     let join = join_message(topic, 0).message;
+    let test_conn = start_conn(conn, TEST_FRAME_LIMIT, Duration::from_secs(60));
+    let _control = RawControl::accept(&peer_conn).await?;
+    // Nobody takes the events: the connection must end by itself.
+    drop(test_conn.events);
     let _stream = open_stream(&peer_conn, topic, &[join]).await?;
-
-    // The queue stays alive, so only the receive loop can end the connection.
-    let mut queue = SendQueue::new(queue::MIN_QUEUE_SIZE);
-    let (in_event_tx, in_event_rx) = mpsc::channel(16);
-    drop(in_event_rx);
-    timeout(
-        Duration::from_secs(5),
-        connection_loop(
-            pair.ep2.id(),
-            conn,
-            CancellationToken::new(),
-            Some(queue.lease()),
-            Vec::new(),
-            in_event_tx,
-            TEST_FRAME_LIMIT,
-            unset_flag(),
-        ),
-    )
-    .await
-    .std_context("connection loop still runs after the receive loop ended")??;
-    Ok(())
+    timeout(Duration::from_secs(5), test_conn.task)
+        .await
+        .std_context("connection loop still runs after the actor ended")?
+        .std_context("connection task")?;
+    closed_with(&peer_conn, CloseCode::Shutdown).await
 }
 
-/// A stream with a header that does not decode does not end the other streams.
+/// A stream with a header that does not decode fails the connection.
 #[tokio::test]
 #[traced_test]
-async fn bad_header_drops_only_its_stream() -> Result {
+async fn bad_stream_header_fails_the_connection() -> Result {
     let pair = TestPair::new(1).await?;
     let (conn, peer_conn) = pair.connect().await?;
-    let (in_event_tx, mut in_event_rx) = mpsc::channel(4);
-    let mut recv_loop = RecvLoop::new(
-        peer_conn.remote_id(),
-        conn,
-        in_event_tx,
-        1024,
-        unset_flag(),
-        unset_flag(),
-    );
-    let _recv = AbortOnDropHandle::new(spawn(async move { recv_loop.run().await }));
+    let (reader, _control) = start_conn_peered(conn, &peer_conn, 1024).await?;
 
     // A complete frame of three bytes, too short for a topic id.
     let mut bad = peer_conn.open_uni().await.std_context("open stream")?;
-    bad.write_all(&[0, 0, 0, 3, 1, 2, 3])
+    bad.write_all(&[3, 1, 2, 3])
         .await
         .std_context("write bad header")?;
     bad.finish().std_context("finish")?;
-    let topic: TopicId = [1; 32].into();
-    let _stream = open_stream(&peer_conn, topic, &[join_message(topic, 0).message]).await?;
-
-    let event = timeout(Duration::from_secs(2), in_event_rx.recv())
-        .await
-        .std_context("the bad header ended the receive loop")?;
-    assert!(matches!(event, Some(InEvent::RecvMessage(..))), "{event:?}");
+    closed_with(&peer_conn, CloseCode::Protocol).await?;
+    assert_eq!(ended(reader.task, SECS_10).await?, ConnEnd::Failed);
     Ok(())
 }
 
@@ -516,18 +261,7 @@ async fn pending_header_is_read_after_a_close() -> Result {
     for round in 0..4 {
         let pair = TestPair::new(1).await?;
         let (conn, peer_conn) = pair.connect().await?;
-        let (in_event_tx, mut in_event_rx) = mpsc::channel(2);
-        let mut recv_loop = RecvLoop::new(
-            peer_conn.remote_id(),
-            conn.clone(),
-            in_event_tx,
-            1024,
-            unset_flag(),
-            unset_flag(),
-        );
-        // We poll it by hand, so that it sees the rest of the header only after the close.
-        let run = recv_loop.run();
-        tokio::pin!(run);
+        let (mut reader, _control) = start_conn_peered(conn.clone(), &peer_conn, 1024).await?;
 
         let topic: TopicId = [1; 32].into();
         let mut partial = peer_conn.open_uni().await.std_context("open stream")?;
@@ -535,32 +269,23 @@ async fn pending_header_is_read_after_a_close() -> Result {
             .write_all(&[0x23, 0x01])
             .await
             .std_context("write partial header")?;
-        // The loop accepts streams in order, so this message means it has the partial one.
         let mut stream = open_stream(&peer_conn, topic, &[join_message(topic, 0).message]).await?;
         stream.finish().std_context("finish")?;
-        tokio::select! {
-            res = &mut run => panic!("the recv loop ended: {res:?}"),
-            event = in_event_rx.recv() => {
-                assert!(matches!(event, Some(InEvent::RecvMessage(..))), "{event:?}");
-            }
-        }
-        // Let the loop see the end of the full stream, so that only the header remains.
-        stream.stopped().await.std_context("stopped")?;
-        let res = n0_future::future::poll_once(&mut run).await;
-        assert!(res.is_none(), "the recv loop ended: {res:?}");
+        // The loop holds the full stream until the partial header is complete.
+        assert!(!reader.gets_message_within(Duration::from_millis(200)).await);
 
         partial
             .write_all(&[0x00, 0x20])
             .await
             .std_context("write header length")?;
         partial
-            .write_all(&[1; 32])
+            .write_all(&[2; 32])
             .await
             .std_context("write topic")?;
         let mut buffer = Vec::new();
         wire::write_message(
             &mut partial,
-            &join_message(topic, 0).message,
+            &join_message([2; 32].into(), 0).message,
             &mut buffer,
             1024,
         )
@@ -571,95 +296,39 @@ async fn pending_header_is_read_after_a_close() -> Result {
         peer_conn.close(0u32.into(), b"done");
         conn.closed().await;
 
-        timeout(Duration::from_secs(2), &mut run)
-            .await
-            .std_context("the recv loop did not end")?;
-        let event = in_event_rx.try_recv();
-        assert!(
-            matches!(event, Ok(InEvent::RecvMessage(..))),
-            "round {round}: {event:?}"
-        );
+        let mut got = 0;
+        while got < 2 {
+            reader
+                .next()
+                .await
+                .with_std_context(|_| format!("round {round}: message {got} is missing"))?;
+            got += 1;
+        }
+        ended(reader.task, Duration::from_secs(2)).await?;
     }
     Ok(())
 }
 
-/// A peer with too many partial headers waits until one of them is complete.
+/// A peer that opens streams and sends no header fails the connection after the header deadline.
+///
+/// The streams after a silent one wait for its header. Letting them pass
+/// would break the order of the messages, so the connection ends.
 #[tokio::test]
 #[traced_test]
-async fn partial_headers_are_limited() -> Result {
+async fn silent_header_fails_the_connection() -> Result {
     let pair = TestPair::new(1).await?;
     let (conn, peer_conn) = pair.connect().await?;
-    let (in_event_tx, mut in_event_rx) = mpsc::channel(4);
-    let mut recv_loop = RecvLoop::new(
-        peer_conn.remote_id(),
-        conn,
-        in_event_tx,
-        1024,
-        unset_flag(),
-        unset_flag(),
-    );
-    let _recv = AbortOnDropHandle::new(spawn(async move { recv_loop.run().await }));
+    let (mut reader, _control) = start_conn_peered(conn, &peer_conn, 1024).await?;
 
-    let mut partials = Vec::new();
-    for _ in 0..conn::MAX_PENDING_HEADERS {
-        let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
-        stream
-            .write_all(&[0x23, 0x01])
-            .await
-            .std_context("write partial header")?;
-        partials.push(stream);
-    }
+    let mut silent = peer_conn.open_uni().await.std_context("open stream")?;
+    // The node accepts a stream of the peer only after the peer sends a byte.
+    silent.write_all(&[0x23]).await.std_context("write")?;
     let topic: TopicId = [1; 32].into();
     let _stream = open_stream(&peer_conn, topic, &[join_message(topic, 0).message]).await?;
-    let event = timeout(Duration::from_millis(500), in_event_rx.recv()).await;
-    assert!(event.is_err(), "the loop read more headers than its limit");
-
-    let partial = &mut partials[0];
-    partial
-        .write_all(&[0x00, 0x20])
-        .await
-        .std_context("write header length")?;
-    // Another topic, so that its open stream does not hold back the one above.
-    partial
-        .write_all(&[2; 32])
-        .await
-        .std_context("write topic")?;
-    let event = timeout(Duration::from_secs(2), in_event_rx.recv())
-        .await
-        .std_context("a complete header did not free its place")?;
-    assert!(matches!(event, Some(InEvent::RecvMessage(..))), "{event:?}");
-    Ok(())
-}
-
-/// A stream with an incomplete header does not block the other streams.
-#[tokio::test]
-#[traced_test]
-async fn partial_header_does_not_block_other_streams() -> Result {
-    let pair = TestPair::new(1).await?;
-    let (conn, peer_conn) = pair.connect().await?;
-    let (in_event_tx, mut in_event_rx) = mpsc::channel(4);
-    let mut recv_loop = RecvLoop::new(
-        peer_conn.remote_id(),
-        conn,
-        in_event_tx,
-        1024,
-        unset_flag(),
-        unset_flag(),
-    );
-    let _recv = AbortOnDropHandle::new(spawn(async move { recv_loop.run().await }));
-
-    let mut partial = peer_conn.open_uni().await.std_context("open stream")?;
-    partial
-        .write_all(&[0, 0, 0, 32, 0])
-        .await
-        .std_context("write partial header")?;
-    let topic: TopicId = [1; 32].into();
-    let _stream = open_stream(&peer_conn, topic, &[join_message(topic, 0).message]).await?;
-
-    let event = timeout(Duration::from_secs(2), in_event_rx.recv())
-        .await
-        .std_context("the partial header blocked the other stream")?;
-    assert!(matches!(event, Some(InEvent::RecvMessage(..))), "{event:?}");
+    assert!(!reader.gets_message_within(Duration::from_millis(500)).await);
+    let code = close_code(&peer_conn, wire::HEADER_TIMEOUT + Duration::from_secs(3)).await?;
+    assert_eq!(code, Some(CloseCode::Protocol));
+    assert_eq!(ended(reader.task, SECS_10).await?, ConnEnd::Failed);
     Ok(())
 }
 
@@ -735,20 +404,9 @@ async fn frame_of_the_size_limit_goes_through() -> Result {
 async fn oversized_message_is_dropped() -> Result {
     let pair = TestPair::new(1).await?;
     let (conn, peer_conn) = pair.connect().await?;
-    let peer_id = pair.ep2.id();
     let topic: TopicId = blake3::hash(b"oversized_message").into();
-    let mut queue = SendQueue::new(queue::MIN_QUEUE_SIZE);
-    let (in_event_tx, _in_event_rx) = mpsc::channel(16);
-    let task = AbortOnDropHandle::new(spawn(connection_loop(
-        peer_id,
-        conn,
-        CancellationToken::new(),
-        Some(queue.lease()),
-        Vec::new(),
-        in_event_tx,
-        1024,
-        unset_flag(),
-    )));
+    let (queue, reader) = SendQueue::new(queue::MIN_QUEUE_SIZE);
+    let writer = start_writer(conn, &peer_conn, reader, 1024, Vec::new()).await?;
 
     let payload = ProtoMessage {
         topic,
@@ -771,7 +429,7 @@ async fn oversized_message_is_dropped() -> Result {
         .std_context("nothing arrived after the oversized message")??;
     let size = wire::message_len(&message).std_context("size")?;
     assert!(size < 1024, "the oversized message went out");
-    assert!(!task.is_finished(), "the connection ended");
+    assert!(!writer.test.task.is_finished(), "the writer ended");
     Ok(())
 }
 
@@ -782,29 +440,15 @@ async fn oversized_message_is_dropped() -> Result {
 #[traced_test]
 async fn oversized_control_message_fails_the_connection() -> Result {
     let pair = TestPair::new(1).await?;
-    let (conn, _peer_conn) = pair.connect().await?;
-    let peer_id = pair.ep2.id();
+    let (conn, peer_conn) = pair.connect().await?;
     let topic: TopicId = blake3::hash(b"oversized_control").into();
-    let mut queue = SendQueue::new(queue::MIN_QUEUE_SIZE);
-    let (in_event_tx, _in_event_rx) = mpsc::channel(16);
+    let (queue, reader) = SendQueue::new(queue::MIN_QUEUE_SIZE);
     assert!(matches!(
         queue.send(join_message(topic, 4096)),
         Pushed::Queued
     ));
-    let task = AbortOnDropHandle::new(spawn(connection_loop(
-        peer_id,
-        conn,
-        CancellationToken::new(),
-        Some(queue.lease()),
-        Vec::new(),
-        in_event_tx,
-        1024,
-        unset_flag(),
-    )));
-    let res = timeout(Duration::from_secs(5), task)
-        .await
-        .std_context("the connection stayed")?
-        .std_context("connection task")?;
-    assert!(res.is_err(), "{res:?}");
-    Ok(())
+    let writer = start_writer(conn, &peer_conn, reader, 1024, Vec::new()).await?;
+    let end = ended(writer.test.task, Duration::from_secs(5)).await?;
+    assert_eq!(end, ConnEnd::Failed);
+    closed_with(&peer_conn, CloseCode::SendFailed).await
 }

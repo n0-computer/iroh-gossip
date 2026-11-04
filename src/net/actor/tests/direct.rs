@@ -106,146 +106,6 @@ async fn topics_over_the_stream_limit_keep_their_neighbors() -> Result {
     Ok(())
 }
 
-/// A publisher whose every eager peer has a full queue waits, loses nothing, and goes on later.
-///
-/// The only neighbor, an eager peer, reads nothing, as when our own uplink
-/// is the limit for all peers. Without the wait, the queue drops the
-/// broadcasts. Once the peer reads again, the gate opens.
-#[tokio::test(flavor = "multi_thread")]
-#[traced_test]
-async fn publisher_waits_while_all_neighbors_are_full() -> Result {
-    let lookup = MemoryLookup::new();
-    let a = DirectNode::spawn(&lookup, Gossip::builder(), small_windows(16 * 1024)).await?;
-    let topic: TopicId = blake3::hash(b"all full").into();
-    let (a_tx, mut a_rx) = a.gossip.subscribe(topic, vec![]).await?.split();
-
-    // B joins on its own connection, and then reads nothing.
-    let b = direct_endpoint(&lookup, small_windows(16 * 1024)).await?;
-    let conn = b.connect(a.id(), GOSSIP_ALPN).await?;
-    let _join = open_stream(&conn, topic, &[join_message(topic, 0).message]).await?;
-    neighbor_up(&mut a_rx, b.id()).await?;
-
-    // The gate never opens while B reads nothing, so a waiting broadcast
-    // takes the whole limit.
-    let mut waited = false;
-    for i in 0..2000u32 {
-        let mut message = vec![7u8; 3000];
-        message[..4].copy_from_slice(&i.to_be_bytes());
-        let start = Instant::now();
-        timeout(PROMPT, a_tx.broadcast(message.into()))
-            .await
-            .std_context("the publisher waited past the limit")??;
-        if start.elapsed() >= BROADCAST_WAIT_LIMIT {
-            waited = true;
-            break;
-        }
-    }
-    assert!(waited, "the publisher never waited");
-
-    // B reads again, so the gate opens, and the publisher goes on.
-    const LAST: &[u8] = b"after 99";
-    let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
-    let reader = conn.clone();
-    let _read = AbortOnDropHandle::new(spawn(async move {
-        let mut stream = reader.accept_uni().await.expect("the topic stream");
-        // The end of the previous chunk, as the marker may span two.
-        let mut seen = Vec::new();
-        while let Ok(Some(chunk)) = stream.read_chunk(usize::MAX).await {
-            seen.drain(..seen.len().saturating_sub(LAST.len()));
-            seen.extend_from_slice(&chunk);
-            if seen.windows(LAST.len()).any(|w| w == LAST) {
-                seen_tx.send(()).ok();
-                break;
-            }
-        }
-    }));
-    // Far less than a limit per broadcast, so the gate opened rather than timed out.
-    timeout(BROADCAST_WAIT_LIMIT * 20, async {
-        for i in 0..100u32 {
-            a_tx.broadcast(Bytes::from(format!("after {i}"))).await?;
-        }
-        Ok::<_, AnyError>(())
-    })
-    .await
-    .std_context("the publisher still waits after B read again")??;
-    timeout(Duration::from_secs(10), seen_rx)
-        .await
-        .std_context("B did not get the last broadcast")?
-        .std_context("B stopped reading")?;
-    assert!(conn.close_reason().is_none(), "the connection closed");
-    assert_eq!(a.gossip.metrics().msgs_dropped.get(), 0, "messages dropped");
-    conn.close(0u32.into(), b"done");
-    Ok(())
-}
-
-/// A publisher gets its broadcasts out while relayed traffic keeps its neighbors full.
-///
-/// B reads slowly, and is the only eager peer of A on `t1`. C floods `t2`,
-/// and A relays it to B, so the queue to B stays over half full. Relays
-/// never wait, so the gate alone stays closed for as long as C sends.
-#[tokio::test(flavor = "multi_thread")]
-#[traced_test]
-async fn relayed_traffic_does_not_starve_the_publisher() -> Result {
-    let lookup = MemoryLookup::new();
-    let default = || QuicTransportConfig::builder().build();
-    let a = DirectNode::spawn(&lookup, Gossip::builder(), default()).await?;
-    let c = DirectNode::spawn(&lookup, Gossip::builder(), default()).await?;
-    let (t1, t2): (TopicId, TopicId) = (
-        blake3::hash(b"starved").into(),
-        blake3::hash(b"flood").into(),
-    );
-    let (a1, mut a1_rx) = a.gossip.subscribe(t1, vec![]).await?.split();
-    let (_a2, _a2_rx) = a.gossip.subscribe(t2, vec![]).await?.split();
-
-    // B joins both topics on its own connection, and reads slowly.
-    let b = direct_endpoint(&lookup, small_windows(16 * 1024)).await?;
-    let conn = b.connect(a.id(), GOSSIP_ALPN).await?;
-    let _join1 = open_stream(&conn, t1, &[join_message(t1, 0).message]).await?;
-    let _join2 = open_stream(&conn, t2, &[join_message(t2, 0).message]).await?;
-    neighbor_up(&mut a1_rx, b.id()).await?;
-    let reader = conn.clone();
-    let _read = AbortOnDropHandle::new(spawn(async move {
-        let mut tasks = JoinSet::new();
-        while let Ok(mut stream) = reader.accept_uni().await {
-            tasks.spawn(async move {
-                while let Ok(Some(_)) = stream.read_chunk(4096).await {
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                }
-            });
-        }
-    }));
-
-    let (c2, _c2_rx) = c.gossip.subscribe_and_join(t2, vec![a.id()]).await?.split();
-    let _flood = AbortOnDropHandle::new(spawn(async move {
-        for i in 0u64.. {
-            let mut message = vec![1u8; 1000];
-            message[..8].copy_from_slice(&i.to_be_bytes());
-            if c2.broadcast(message.into()).await.is_err() {
-                break;
-            }
-        }
-    }));
-    // The relayed data fills the queue to B up to its limit.
-    let metrics = a.gossip.metrics().clone();
-    timeout(PROMPT, async {
-        while metrics.msgs_dropped.get() == 0 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .std_context("the queue to B never filled")?;
-
-    // More than the command channel holds, so the publisher waits for the actor.
-    for i in 0..100u32 {
-        timeout(PROMPT, a1.broadcast(Bytes::from(format!("own {i}"))))
-            .await
-            .std_context("the publisher starved")??;
-    }
-    assert!(conn.close_reason().is_none(), "the connection closed");
-    conn.close(0u32.into(), b"done");
-    Ok(())
-}
-
 /// A peer that reads nothing fills its queue, and the other peers still get each message (#47).
 ///
 /// A neighbor of the publisher keeps its connection open but never reads,
@@ -271,6 +131,7 @@ async fn blocked_peer_does_not_stall_the_others() -> Result {
     // B joins on its own connection, and then reads nothing.
     let b = direct_endpoint(&lookup, small_windows(16 * 1024)).await?;
     let conn = b.connect(a.id(), GOSSIP_ALPN).await?;
+    let _control = control_open(&conn).await?;
     let _join = open_stream(&conn, t1, &[join_message(t1, 0).message]).await?;
     neighbor_up(&mut a1_rx, b.id()).await?;
 
@@ -337,6 +198,7 @@ async fn slow_peer_gets_the_dropped_messages() -> Result {
     // C publishes on its own connection, and reads every stream of A at once.
     let c = direct_endpoint(&lookup, default()).await?;
     let c_conn = c.connect(a.id(), GOSSIP_ALPN).await?;
+    let _control = control_open(&c_conn).await?;
     let mut publish = open_stream(&c_conn, topic, &[join_message(topic, 0).message]).await?;
     let reader = c_conn.clone();
     let _read = AbortOnDropHandle::new(spawn(async move {
@@ -411,5 +273,31 @@ async fn slow_peer_gets_the_dropped_messages() -> Result {
         )
     })?;
     assert_eq!(received, sent);
+    Ok(())
+}
+
+/// A dialed connection fails when the peer grants no bidirectional stream for the control stream.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn dialer_fails_without_a_control_stream() -> Result {
+    let lookup = MemoryLookup::new();
+    let no_bidi = QuicTransportConfig::builder()
+        .max_concurrent_bidi_streams(VarInt::from_u32(0))
+        .build();
+    let a = direct_endpoint(&lookup, QuicTransportConfig::builder().build()).await?;
+    let b = direct_endpoint(&lookup, no_bidi).await?;
+    let accept = async {
+        let incoming = b.accept().await.std_context("endpoint closed")?;
+        incoming.await.std_context("accept")
+    };
+    let (conn, peer_conn) = tokio::join!(a.connect(b.id(), GOSSIP_ALPN), accept);
+    let (conn, _peer_conn) = (conn.std_context("connect")?, peer_conn?);
+    let test_conn = start_conn(conn, TEST_FRAME_LIMIT, Duration::from_secs(60));
+    let end = ended(
+        test_conn.task,
+        wire::HEADER_TIMEOUT + Duration::from_secs(2),
+    )
+    .await?;
+    assert_eq!(end, ConnEnd::Failed);
     Ok(())
 }
