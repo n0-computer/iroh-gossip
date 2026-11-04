@@ -365,6 +365,11 @@ pub(crate) enum Command {
 ///
 /// Build it with [`Self::with_bootstrap`] or [`Default`], and the methods that set an option.
 /// New options can come in a minor version, so you cannot construct it with a struct literal.
+///
+/// The message filter applies to all topics, so it is not a join option, see
+/// [`Builder::message_filter`].
+///
+/// [`Builder::message_filter`]: crate::net::Builder::message_filter
 #[derive(derive_more::Debug)]
 #[non_exhaustive]
 pub struct JoinOptions {

@@ -1157,6 +1157,68 @@ async fn slow_peer_does_not_block_shutdown() -> Result {
     Ok(())
 }
 
+/// A message that the middle node of a line rejects does not reach the far node.
+///
+/// The nodes a and c refuse each other, so b is the only path. The filter of b
+/// runs once per message and rejects the content `bad`. It neither delivers nor
+/// forwards it. A later message passes.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn rejected_message_stops_at_the_middle_node() -> Result {
+    let lookup = MemoryLookup::new();
+    let (secret_a, secret_c) = (SecretKey::generate(), SecretKey::generate());
+    let (id_a, id_c) = (secret_a.public(), secret_c.public());
+    let refuse = |peer: EndpointId| -> Option<AcceptFilter> {
+        Some(Arc::new(move |conn: &Connection| conn.remote_id() != peer))
+    };
+    let a = Node::spawn_custom(&lookup, secret_a, Gossip::builder(), refuse(id_c)).await?;
+    let c = Node::spawn_custom(&lookup, secret_c, Gossip::builder(), refuse(id_a)).await?;
+    let asked = Arc::new(AtomicUsize::new(0));
+    let builder = {
+        let asked = asked.clone();
+        Gossip::builder().message_filter(move |message| {
+            asked.fetch_add(1, Ordering::SeqCst);
+            match message.content().as_ref() == b"bad" {
+                true => Verdict::Reject,
+                false => Verdict::Accept,
+            }
+        })
+    };
+    let b = Node::spawn_custom(&lookup, SecretKey::generate(), builder, None).await?;
+    let t = topic("filter_line");
+    let mut sa = Sub::new(&a, t, vec![]).await?;
+    let mut sb = Sub::join(&b, t, vec![a.id()]).await?;
+    let mut sc = Sub::join(&c, t, vec![b.id()]).await?;
+    connected(&mut [&mut sa, &mut sb, &mut sc], &[a.id(), b.id(), c.id()]).await?;
+    assert!(!sa.rx.neighbors().any(|peer| peer == c.id()), "a and c met");
+
+    sa.broadcast(b"bad").await?;
+    sa.broadcast(b"good").await?;
+    for sub in [&mut sb, &mut sc] {
+        let mut saw_bad = false;
+        sub.wait(PROMPT, |event| match event {
+            Event::Received(m) if m.content == "bad" => {
+                saw_bad = true;
+                false
+            }
+            Event::Received(m) => m.content == "good",
+            _ => false,
+        })
+        .await?;
+        assert!(!saw_bad, "a rejected message was delivered");
+    }
+    // A late copy of the rejected message would have come by now.
+    let late = sc
+        .wait(
+            Duration::from_millis(500),
+            |event| matches!(event, Event::Received(m) if m.content == "bad"),
+        )
+        .await;
+    assert!(late.is_err(), "a rejected message came late");
+    assert_eq!(asked.load(Ordering::SeqCst), 2, "one ask per message");
+    Ok(())
+}
+
 /// A verifier that accepts the token `secret:<topic>` and nothing else, and counts its calls.
 fn shared_secret_builder(calls: Arc<AtomicUsize>) -> Builder {
     Gossip::builder().topic_auth(move |auth| {
@@ -1790,6 +1852,45 @@ async fn slow_reader_gets_lagged() -> Result {
     // The subscription stays open.
     sb.broadcast(b"after").await?;
     sa.received(b"after").await
+}
+
+/// A message to the neighbors only passes the filter too, and a rejected one is not delivered.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn rejected_neighbor_message_is_not_delivered() -> Result {
+    let lookup = MemoryLookup::new();
+    let builder =
+        Gossip::builder().message_filter(|message| match message.content().as_ref() == b"bad" {
+            true => Verdict::Reject,
+            false => Verdict::Accept,
+        });
+    let a = Node::spawn(&lookup).await?;
+    let b = Node::spawn_custom(&lookup, SecretKey::generate(), builder, None).await?;
+    let t = topic("filter_neighbors");
+    let mut sa = Sub::new(&a, t, vec![]).await?;
+    let mut sb = Sub::join(&b, t, vec![a.id()]).await?;
+    sa.neighbor_up(b.id()).await?;
+
+    sa.tx
+        .broadcast_neighbors(Bytes::from_static(b"bad"))
+        .await
+        .std_context("broadcast")?;
+    sa.tx
+        .broadcast_neighbors(Bytes::from_static(b"good"))
+        .await
+        .std_context("broadcast")?;
+    let mut saw_bad = false;
+    sb.wait(PROMPT, |event| match event {
+        Event::Received(m) if m.content == "bad" => {
+            saw_bad = true;
+            false
+        }
+        Event::Received(m) => m.content == "good",
+        _ => false,
+    })
+    .await?;
+    assert!(!saw_bad, "a rejected neighbor message was delivered");
+    Ok(())
 }
 
 /// A node whose `Gossip` drops without a `shutdown` goes down for its neighbors.

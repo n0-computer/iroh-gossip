@@ -9,9 +9,10 @@ use tracing::trace;
 
 use crate::proto::{
     hyparview,
+    plumtree::Gossip,
     topic::{self, Command},
     util::idbytes_impls,
-    Config, PeerData, PeerIdentity, MIN_MAX_MESSAGE_SIZE,
+    Config, FilterContext, PeerData, PeerIdentity, Verdict, MIN_MAX_MESSAGE_SIZE,
 };
 
 /// The identifier for a topic
@@ -195,6 +196,15 @@ pub trait IO<PI> {
     /// exists, so that a message goes out at once. If the connection fails, it reports
     /// [`InEvent::PeerDisconnected`]. A topic wants the connection until the peer is connected.
     fn connect(&mut self, peer: PI);
+
+    /// Asks the application whether to deliver and forward a received message.
+    ///
+    /// Returns `None` if there is no filter, which accepts every message. The
+    /// state calls this once per message id and topic, before it caches,
+    /// forwards or delivers the message.
+    fn filter(&mut self, _message: FilterContext<'_, PI>) -> Option<Verdict> {
+        None
+    }
 }
 
 impl<PI> IO<PI> for Vec<OutEvent<PI>> {
@@ -498,6 +508,16 @@ impl<PI: PeerIdentity, E: IO<PI>> topic::IO<PI> for TopicIO<'_, E> {
 
     fn connect(&mut self, peer: PI) {
         self.io.connect(peer);
+    }
+
+    fn filter(&mut self, message: &Gossip, delivered_from: PI) -> Option<Verdict> {
+        self.io.filter(FilterContext {
+            topic: self.topic,
+            id: message.id,
+            content: &message.content,
+            scope: message.scope,
+            delivered_from,
+        })
     }
 }
 
