@@ -94,16 +94,18 @@ async fn failed_retired_dial_releases_its_queue() -> Result {
     let mut actor = t_actor().await?;
     let peer = SecretKey::generate().public();
     actor
+        .state
         .peers
         .insert(peer, pending_with(vec![join_message([1; 32].into(), 0)]));
     actor
+        .state
         .peers
         .get_mut(&peer)
         .expect("known peer")
         .queue
         .close();
     actor.on_dial_failed(peer);
-    assert!(is_idle(&actor.peers[&peer]));
+    assert!(is_idle(&actor.state.peers[&peer]));
     Ok(())
 }
 
@@ -161,7 +163,7 @@ async fn overflow_during_a_handover_keeps_the_new_connection() -> Result {
     let peer = pair.ep2.id();
     let topic: TopicId = blake3::hash(b"overflow during a handover").into();
     let mut actor = t_actor().await?;
-    actor.send_queue_size = 8 << 20;
+    actor.state.send_queue_size = 8 << 20;
     actor.add_connection(old);
     for _ in 0..1000 {
         let message = ProtoMessage {
@@ -178,7 +180,11 @@ async fn overflow_during_a_handover_keeps_the_new_connection() -> Result {
     let data = PeerData::new(vec![0u8; 2000]);
     actor.handle_in_event(InEvent::UpdatePeerData(data), Instant::now());
     join_until_full(&mut actor, peer);
-    assert_eq!(actor.metrics.peers_send_queue_full.get(), 1, "no overflow");
+    assert_eq!(
+        actor.state.metrics.peers_send_queue_full.get(),
+        1,
+        "no overflow"
+    );
     timeout(Duration::from_secs(2), peer_old.closed())
         .await
         .std_context("the stuck old connection stayed open")?;
@@ -210,7 +216,7 @@ async fn retirement_by_the_peer_counts() -> Result {
             unset_flag(),
         )));
         if with_stream {
-            assert!(matches!(queue.push(join_message(topic, 0)), Pushed::Queued));
+            assert!(matches!(queue.send(join_message(topic, 0)), Pushed::Queued));
             timeout(Duration::from_secs(5), read_next_message(&peer_conn))
                 .await
                 .std_context("the message did not go out")??;
@@ -326,7 +332,7 @@ async fn stuck_replaced_connection_hands_over_its_queue() -> Result {
     let peer_id = pair.ep2.id();
     let topic: TopicId = blake3::hash(b"stuck").into();
     let mut actor = t_actor().await?;
-    actor.send_queue_size = 64 << 20;
+    actor.state.send_queue_size = 64 << 20;
     actor.add_connection(old);
     push_many(&actor, peer_id, topic, 3000);
     // Wait until flow control blocks the old writer.
@@ -411,7 +417,7 @@ async fn aborted_peer_during_a_handover_loses_both_connections() -> Result {
     let peer_id = pair.ep2.id();
     let topic: TopicId = blake3::hash(b"failed handover").into();
     let mut actor = t_actor().await?;
-    actor.send_queue_size = 64 << 20;
+    actor.state.send_queue_size = 64 << 20;
     actor.add_connection(old);
     push_many(&actor, peer_id, topic, 3000);
     // Wait until flow control blocks the old writer.
@@ -419,6 +425,7 @@ async fn aborted_peer_during_a_handover_loses_both_connections() -> Result {
     actor.add_connection(new);
 
     actor
+        .state
         .peers
         .get_mut(&peer_id)
         .expect("known peer")
@@ -553,6 +560,7 @@ async fn replaced_connection_stays_while_the_peer_sends_on_it() -> Result {
     );
 
     actor
+        .state
         .peers
         .get_mut(&peer_id)
         .expect("known peer")
@@ -584,6 +592,7 @@ async fn silent_late_dial_closes() -> Result {
     actor.add_connection(accepted);
     show_that_it_handles_a_close(&peer_accepted, topic).await;
     actor
+        .state
         .peers
         .get_mut(&peer_id)
         .expect("known peer")
@@ -601,7 +610,7 @@ async fn silent_late_dial_closes() -> Result {
     actor.add_connection(dialed);
     actor.on_conn_task_finished(peer, conn, res);
     assert!(
-        actor.peers.contains_key(&peer_id),
+        actor.state.peers.contains_key(&peer_id),
         "the flag went while the dial holds it"
     );
 
@@ -618,7 +627,7 @@ async fn silent_late_dial_closes() -> Result {
         .std_context("the peer did not see the close")?;
     actor.forget_peers(Instant::now() + PEER_RETENTION);
     assert!(
-        !actor.peers.contains_key(&peer_id),
+        !actor.state.peers.contains_key(&peer_id),
         "the flag outlived its time"
     );
     Ok(())
@@ -640,6 +649,7 @@ async fn silent_dial_after_the_last_connection_closes() -> Result {
     actor.add_connection(accepted);
     show_that_it_handles_a_close(&peer_accepted, topic).await;
     actor
+        .state
         .peers
         .get_mut(&peer_id)
         .expect("known peer")
@@ -654,7 +664,7 @@ async fn silent_dial_after_the_last_connection_closes() -> Result {
     let (peer, conn, res) = ended.expect("one task").expect("no panic");
     actor.on_conn_task_finished(peer, conn, res);
     assert!(
-        actor.peers.contains_key(&peer_id),
+        actor.state.peers.contains_key(&peer_id),
         "the flag went with the last connection"
     );
 
@@ -689,10 +699,13 @@ async fn peer_with_unset_close_flag_expires() -> Result {
         .std_context("the connection stayed open")?;
     let (peer, conn, res) = ended.expect("one task").expect("no panic");
     actor.on_conn_task_finished(peer, conn, res);
-    assert!(actor.peers.contains_key(&peer_id), "retain the idle peer");
+    assert!(
+        actor.state.peers.contains_key(&peer_id),
+        "retain the idle peer"
+    );
     actor.forget_peers(Instant::now() + PEER_RETENTION);
     assert!(
-        !actor.peers.contains_key(&peer_id),
+        !actor.state.peers.contains_key(&peer_id),
         "the idle peer did not expire"
     );
     Ok(())
@@ -711,7 +724,10 @@ async fn silent_dial_stays() -> Result {
     let mut actor = t_actor().await?;
 
     actor.add_connection(conn);
-    assert!(is_idle(&actor.peers[&peer_id]), "the dial got a queue");
+    assert!(
+        is_idle(&actor.state.peers[&peer_id]),
+        "the dial got a queue"
+    );
 
     tokio::time::sleep(RETIRE_GRACE + Duration::from_secs(1)).await;
     assert!(
@@ -736,8 +752,9 @@ async fn overtaken_dial_stays_while_the_peer_sends_on_it() -> Result {
     let peer_id = pair.ep2.id();
     let topic: TopicId = blake3::hash(b"overtaken_dial").into();
     let mut actor = t_actor().await?;
-    actor.peers.insert(peer_id, pending_with(vec![]));
+    actor.state.peers.insert(peer_id, pending_with(vec![]));
     actor
+        .state
         .peers
         .get_mut(&peer_id)
         .expect("known peer")
@@ -763,6 +780,7 @@ async fn overtaken_dial_stays_while_the_peer_sends_on_it() -> Result {
     );
 
     actor
+        .state
         .peers
         .get_mut(&peer_id)
         .expect("known peer")
@@ -819,9 +837,11 @@ async fn disconnected_pending_dial_flushes_then_closes() -> Result {
         .await
         .std_context("connect")?;
     actor
+        .state
         .peers
         .insert(ep2_id, pending_with(vec![join_message(topic, 0)]));
     actor
+        .state
         .peers
         .get_mut(&ep2_id)
         .expect("known peer")
@@ -930,7 +950,7 @@ async fn shuffle_reply_connection_closes() -> Result {
     .std_context("the reply connection was not closed")?;
     assert!(replied, "the shuffle reply did not arrive");
     assert!(
-        actor.peers.get(&origin_id).is_none_or(is_idle),
+        actor.state.peers.get(&origin_id).is_none_or(is_idle),
         "the origin's queue was kept"
     );
     Ok(())

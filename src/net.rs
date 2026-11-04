@@ -39,7 +39,6 @@ type ProtoEvent = proto::Event<PublicKey>;
 type ProtoCommand = proto::Command<PublicKey>;
 
 type InEvent = proto::InEvent<PublicKey>;
-type OutEvent = proto::OutEvent<PublicKey>;
 type Timer = proto::Timer<PublicKey>;
 type ProtoMessage = proto::Message<PublicKey>;
 

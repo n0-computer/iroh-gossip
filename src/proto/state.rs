@@ -7,14 +7,11 @@ use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use tracing::trace;
 
-use crate::{
-    metrics::Metrics,
-    proto::{
-        hyparview,
-        topic::{self, Command},
-        util::idbytes_impls,
-        Config, PeerData, PeerIdentity, MIN_MAX_MESSAGE_SIZE,
-    },
+use crate::proto::{
+    hyparview,
+    topic::{self, Command},
+    util::idbytes_impls,
+    Config, PeerData, PeerIdentity, MIN_MAX_MESSAGE_SIZE,
 };
 
 /// The identifier for a topic
@@ -43,6 +40,19 @@ impl<PI> Message<PI> {
     pub fn kind(&self) -> MessageKind {
         self.message.kind()
     }
+
+    /// Returns whether a runtime may drop this message to a slow peer, see [`IO::send`].
+    ///
+    /// This holds for a payload and for an announcement of payloads. The state announces
+    /// a dropped payload again, and the peer can request it.
+    pub fn is_droppable(&self) -> bool {
+        matches!(
+            self.message,
+            topic::Message::Gossip(
+                super::plumtree::Message::Gossip(_) | super::plumtree::Message::IHave(_)
+            )
+        )
+    }
 }
 
 /// Whether this is a control or data message
@@ -62,12 +72,11 @@ impl<PI: Serialize> Message<PI> {
     }
 }
 
-/// A timer to be registered into the runtime
+/// A timer that the runtime arms for the protocol state.
 ///
-/// As the implementation of the protocol is an IO-less state machine, registering timers does not
-/// happen within the protocol implementation. Instead, these `Timer` structs are emitted as
-/// [`OutEvent`]s. The implementer must register the timer in its runtime to be emitted on the specified [`Instant`],
-/// and once triggered inject an [`InEvent::TimerExpired`] into the protocol state.
+/// The state is IO-less, so it arms timers through [`IO::schedule`] with a
+/// delay. When the delay ends, the runtime hands the timer back with
+/// [`InEvent::TimerExpired`].
 #[derive(Clone, Debug)]
 pub struct Timer<PI> {
     topic: TopicId,
@@ -103,33 +112,41 @@ pub enum InEvent<PI> {
     PeerDisconnected(PI),
     /// Update the opaque peer data about yourself.
     UpdatePeerData(PeerData),
-    /// The network dropped a message to the peer, as the queue to it was full.
-    ///
-    /// Plumtree announces a dropped broadcast to the peer later, so that the
-    /// peer can request it.
-    SendDropped(PI, Message<PI>),
 }
 
-/// Output event from the protocol state.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub enum OutEvent<PI> {
-    /// Send a message on the network
-    SendMessage(PI, Message<PI>),
-    /// Emit an event to the application.
-    EmitEvent(TopicId, topic::Event<PI>),
-    /// Schedules a timer.
+/// The receiver of the actions of the protocol state.
+///
+/// The state calls this while it handles an event, and never waits on it. A runtime
+/// may drop only some messages, see [`IO::send`].
+pub trait IO<PI> {
+    /// Sends `message` to `peer`. Returns the message if the queue dropped it.
     ///
-    /// The runtime sends an [InEvent::TimerExpired] after the duration.
-    ScheduleTimer(Duration, Timer<PI>),
-    /// Close the connection to a peer on the network level.
-    DisconnectPeer(PI),
-    /// Updated peer data
-    PeerData(PI, PeerData),
+    /// A queue may drop a message for which [`Message::is_droppable`] holds: a payload
+    /// or an announcement, to a slow peer that stays connected. The state then
+    /// announces the message to the peer, which can request it once it has room. It
+    /// returns `None` if the message is queued, or if the peer is gone.
+    ///
+    /// The queue must not drop any other message, such as a membership message, a
+    /// prune, or a graft. The two peers would then disagree on their links, and neither
+    /// would notice. If the runtime cannot queue such a message, it closes every
+    /// connection of the peer, drops what it queued for the peer, and hands
+    /// [`InEvent::PeerDisconnected`] to the state. Both sides then start over.
+    fn send(&mut self, peer: PI, message: Message<PI>) -> Option<Message<PI>>;
+
+    /// Hands an event of `topic` to the application.
+    fn emit(&mut self, topic: TopicId, event: topic::Event<PI>);
+
+    /// Arms `timer`, which comes back as [`InEvent::TimerExpired`] after `delay`.
+    fn schedule(&mut self, delay: Duration, timer: Timer<PI>);
+
+    /// Hands the runtime new [`PeerData`] of `peer`, for example its addresses.
+    fn peer_data(&mut self, peer: PI, data: PeerData);
+
+    /// Asks to close the connection to `peer`, as no topic uses it anymore.
+    fn disconnect(&mut self, peer: PI);
 }
 
 type ConnsMap<PI> = HashMap<PI, HashSet<TopicId>>;
-type Outbox<PI> = Vec<OutEvent<PI>>;
 
 enum InEventMapped<PI> {
     All(topic::InEvent<PI>),
@@ -150,9 +167,6 @@ impl<PI> From<InEvent<PI>> for InEventMapped<PI> {
             }
             InEvent::PeerDisconnected(peer) => Self::All(topic::InEvent::PeerDisconnected(peer)),
             InEvent::UpdatePeerData(data) => Self::All(topic::InEvent::UpdatePeerData(data)),
-            InEvent::SendDropped(peer, Message { topic, message }) => {
-                Self::TopicEvent(topic, topic::InEvent::SendDropped(peer, message))
-            }
         }
     }
 }
@@ -160,7 +174,7 @@ impl<PI> From<InEvent<PI>> for InEventMapped<PI> {
 /// The state of the `iroh-gossip` protocol.
 ///
 /// The implementation works as an IO-less state machine. The implementer injects events through
-/// [`Self::handle`], which returns an iterator of [`OutEvent`]s to be processed.
+/// [`Self::handle`], which writes the actions of the state into an [`IO`].
 ///
 /// This struct contains a map of [`topic::State`] for each topic that was joined. It mostly acts as
 /// a forwarder of [`InEvent`]s to matching topic state. Each topic's state is completely
@@ -172,7 +186,6 @@ pub struct State<PI, R> {
     config: Config,
     rng: R,
     states: HashMap<TopicId, topic::State<PI, R>>,
-    outbox: Outbox<PI>,
     peer_topics: ConnsMap<PI>,
     /// The instance of each joined topic, so that the timers of a former one do nothing.
     instances: HashMap<TopicId, u64>,
@@ -201,7 +214,6 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
             config,
             rng,
             states: Default::default(),
-            outbox: Default::default(),
             peer_topics: Default::default(),
             instances: Default::default(),
             next_instance: 0,
@@ -275,24 +287,14 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
         self.config.max_message_size
     }
 
-    /// Handle an [`InEvent`]
-    ///
-    /// This returns an iterator of [`OutEvent`]s that must be processed.
-    pub fn handle(
-        &mut self,
-        event: InEvent<PI>,
-        now: Instant,
-        metrics: Option<&Metrics>,
-    ) -> impl Iterator<Item = OutEvent<PI>> + '_ + use<'_, PI, R> {
+    /// Handles an [`InEvent`], and puts what it does into `io`.
+    pub fn handle(&mut self, event: InEvent<PI>, now: Instant, io: &mut impl IO<PI>) {
         trace!("in : {event:?}");
-        if let Some(metrics) = &metrics {
-            track_in_event(&event, metrics);
-        }
 
         // A timer of a topic we quit, or of its former instance, is stale.
         if let InEvent::TimerExpired(timer) = &event {
             if self.instances.get(&timer.topic) != Some(&timer.instance) {
-                return self.outbox.drain(..);
+                return;
             }
         }
         let event: InEventMapped<PI> = event.into();
@@ -324,17 +326,19 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
                     if let topic::InEvent::RecvMessage(from, topic::Message::Swarm(_)) = &event {
                         self.peer_topics.entry(*from).or_default().insert(topic);
                     }
-                    let out = state.handle(event, now);
-                    for event in out {
-                        handle_out_event(topic, event, &mut self.peer_topics, &mut self.outbox);
-                    }
+                    let mut topic_io = TopicIO {
+                        topic,
+                        instance: self.instances.get(&topic).copied().unwrap_or(0),
+                        peer_topics: &mut self.peer_topics,
+                        io,
+                    };
+                    state.handle(event, now, &mut topic_io);
                 } else if let topic::InEvent::RecvMessage(from, message) = &event {
                     // The sender thinks that we are on the topic. Plumtree messages are
                     // mostly stragglers after we left, so they get no answer.
                     if matches!(message, topic::Message::Swarm(_)) && !message.is_disconnect() {
                         let message = topic::Message::Swarm(hyparview::Message::left());
-                        self.outbox
-                            .push(OutEvent::SendMessage(*from, Message { topic, message }));
+                        io.send(*from, Message { topic, message });
                     }
                 }
 
@@ -351,7 +355,7 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
                     }
                     for peer in unused {
                         self.peer_topics.remove(&peer);
-                        self.outbox.push(OutEvent::DisconnectPeer(peer));
+                        io.disconnect(peer);
                     }
                 }
             }
@@ -361,138 +365,155 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
                     self.me_data = data.clone();
                 }
                 for (topic, state) in self.states.iter_mut() {
-                    let out = state.handle(event.clone(), now);
-                    for event in out {
-                        handle_out_event(*topic, event, &mut self.peer_topics, &mut self.outbox);
-                    }
+                    let mut topic_io = TopicIO {
+                        topic: *topic,
+                        instance: self.instances.get(topic).copied().unwrap_or(0),
+                        peer_topics: &mut self.peer_topics,
+                        io,
+                    };
+                    state.handle(event.clone(), now, &mut topic_io);
                 }
                 // If the peer disconnected, make sure to clear its `peer_topics` entry here.
-                // `handle_out_event` does the same, but only for peers that we were neighbors
+                // `TopicIO::disconnect` does the same, but only for peers that we were neighbors
                 // with. Peers that only relayed a shuffle or forward join to us also have
                 // entries in `peer_topics`, so we clear them here explicitly. This has to
-                // stay after the loop: `handle_out_event` needs the entry to tell whether a
-                // topic's `DisconnectPeer` was the peer's last.
+                // stay after the loop: `TopicIO::disconnect` needs the entry to tell whether a
+                // topic's disconnect was the peer's last.
                 if let topic::InEvent::PeerDisconnected(peer) = &event {
                     self.peer_topics.remove(peer);
                 }
             }
         }
-
-        for event in self.outbox.iter_mut() {
-            if let OutEvent::ScheduleTimer(_, timer) = event {
-                timer.instance = self.instances.get(&timer.topic).copied().unwrap_or(0);
-            }
-        }
-
-        // track metrics
-        if let Some(metrics) = &metrics {
-            track_out_events(&self.outbox, metrics);
-        }
-
-        self.outbox.drain(..)
     }
 }
 
-fn handle_out_event<PI: PeerIdentity>(
+/// The IO of one topic: it tags each action of the topic state with the topic.
+///
+/// It also keeps track of which topics use which peer.
+struct TopicIO<'a, PI, E> {
     topic: TopicId,
-    event: topic::OutEvent<PI>,
-    conns: &mut ConnsMap<PI>,
-    outbox: &mut Outbox<PI>,
-) {
-    trace!("out: {event:?}");
-    match event {
-        topic::OutEvent::SendMessage(to, message) => {
-            // HyParView may send to a peer that is no neighbor yet. The topic uses it from then on.
-            if matches!(message, topic::Message::Swarm(_)) {
-                conns.entry(to).or_default().insert(topic);
-            }
-            outbox.push(OutEvent::SendMessage(to, Message { topic, message }))
-        }
-        topic::OutEvent::EmitEvent(event) => outbox.push(OutEvent::EmitEvent(topic, event)),
-        topic::OutEvent::ScheduleTimer(delay, timer) => {
-            // `State::handle` sets the instance.
-            let timer = Timer {
-                topic,
-                instance: 0,
-                timer,
-            };
-            outbox.push(OutEvent::ScheduleTimer(delay, timer))
-        }
-        topic::OutEvent::DisconnectPeer(peer) => {
-            // The connection is shared by every topic that uses the peer.
-            if let Some(topics) = conns.get_mut(&peer) {
-                topics.remove(&topic);
-                if topics.is_empty() {
-                    // If the peer is no longer used by any topic, disconnect.
-                    conns.remove(&peer);
-                    outbox.push(OutEvent::DisconnectPeer(peer));
-                }
-            }
-        }
-        topic::OutEvent::PeerData(peer, data) => outbox.push(OutEvent::PeerData(peer, data)),
-    }
+    instance: u64,
+    peer_topics: &'a mut ConnsMap<PI>,
+    io: &'a mut E,
 }
 
-fn track_out_events<PI: Serialize>(events: &[OutEvent<PI>], metrics: &Metrics) {
-    for event in events {
-        match event {
-            OutEvent::SendMessage(_to, message) => match message.kind() {
-                MessageKind::Data => {
-                    metrics.msgs_data_sent.inc();
-                    metrics
-                        .msgs_data_sent_size
-                        .inc_by(message.size().unwrap_or(0) as u64);
-                }
-                MessageKind::Control => {
-                    metrics.msgs_ctrl_sent.inc();
-                    metrics
-                        .msgs_ctrl_sent_size
-                        .inc_by(message.size().unwrap_or(0) as u64);
-                }
-            },
-            OutEvent::EmitEvent(_topic, event) => match event {
-                super::Event::NeighborUp(_peer) => {
-                    metrics.neighbor_up.inc();
-                }
-                super::Event::NeighborDown(_peer) => {
-                    metrics.neighbor_down.inc();
-                }
-                _ => {}
-            },
-            _ => {}
+impl<PI: PeerIdentity, E: IO<PI>> topic::IO<PI> for TopicIO<'_, PI, E> {
+    fn send(
+        &mut self,
+        peer: PI,
+        message: impl Into<topic::Message<PI>>,
+    ) -> Option<topic::Message<PI>> {
+        let message = message.into();
+        // HyParView may send to a peer that is no neighbor yet. The topic uses it from then on.
+        if matches!(message, topic::Message::Swarm(_)) {
+            self.peer_topics.entry(peer).or_default().insert(self.topic);
         }
+        let topic = self.topic;
+        self.io
+            .send(peer, Message { topic, message })
+            .map(|dropped| dropped.message)
     }
-}
 
-fn track_in_event<PI: Serialize>(event: &InEvent<PI>, metrics: &Metrics) {
-    if let InEvent::RecvMessage(_from, message) = event {
-        match message.kind() {
-            MessageKind::Data => {
-                metrics.msgs_data_recv.inc();
-                metrics
-                    .msgs_data_recv_size
-                    .inc_by(message.size().unwrap_or(0) as u64);
-            }
-            MessageKind::Control => {
-                metrics.msgs_ctrl_recv.inc();
-                metrics
-                    .msgs_ctrl_recv_size
-                    .inc_by(message.size().unwrap_or(0) as u64);
+    fn emit(&mut self, event: topic::Event<PI>) {
+        self.io.emit(self.topic, event);
+    }
+
+    fn schedule(&mut self, delay: Duration, timer: impl Into<topic::Timer<PI>>) {
+        let timer = Timer {
+            topic: self.topic,
+            instance: self.instance,
+            timer: timer.into(),
+        };
+        self.io.schedule(delay, timer);
+    }
+
+    fn peer_data(&mut self, peer: PI, data: PeerData) {
+        self.io.peer_data(peer, data);
+    }
+
+    fn disconnect(&mut self, peer: PI) {
+        // The connection is shared by every topic that uses the peer.
+        if let Some(topics) = self.peer_topics.get_mut(&peer) {
+            topics.remove(&self.topic);
+            if topics.is_empty() {
+                // If the peer is no longer used by any topic, disconnect.
+                self.peer_topics.remove(&peer);
+                self.io.disconnect(peer);
             }
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use rand::rngs::StdRng;
 
     use super::*;
     use crate::proto::{hyparview, plumtree};
 
+    /// An output of the protocol state, as a value, for the tests.
+    ///
+    /// A `Vec` of these implements [`IO`].
+    // The tests read only some of the fields.
+    #[allow(dead_code)]
+    #[derive(Debug, Clone)]
+    pub(crate) enum OutEvent<PI> {
+        /// Send a message on the network
+        SendMessage(PI, Message<PI>),
+        /// Emit an event to the application.
+        EmitEvent(TopicId, topic::Event<PI>),
+        /// Schedules a timer.
+        ///
+        /// The runtime sends an [InEvent::TimerExpired] after the duration.
+        ScheduleTimer(Duration, Timer<PI>),
+        /// Close the connection to a peer on the network level.
+        DisconnectPeer(PI),
+        /// Updated peer data
+        PeerData(PI, PeerData),
+    }
+
+    impl<PI> IO<PI> for Vec<OutEvent<PI>> {
+        fn send(&mut self, peer: PI, message: Message<PI>) -> Option<Message<PI>> {
+            self.push(OutEvent::SendMessage(peer, message));
+            None
+        }
+
+        fn emit(&mut self, topic: TopicId, event: topic::Event<PI>) {
+            self.push(OutEvent::EmitEvent(topic, event));
+        }
+
+        fn schedule(&mut self, delay: Duration, timer: Timer<PI>) {
+            self.push(OutEvent::ScheduleTimer(delay, timer));
+        }
+
+        fn peer_data(&mut self, peer: PI, data: PeerData) {
+            self.push(OutEvent::PeerData(peer, data));
+        }
+
+        fn disconnect(&mut self, peer: PI) {
+            self.push(OutEvent::DisconnectPeer(peer));
+        }
+    }
+
+    /// Handles `event` and returns what it produces.
+    fn run(state: &mut State<u32, StdRng>, event: InEvent<u32>) -> Vec<OutEvent<u32>> {
+        run_at(state, event, Instant::now())
+    }
+
+    /// Handles `event` at `now` and returns what it produces.
+    fn run_at(
+        state: &mut State<u32, StdRng>,
+        event: InEvent<u32>,
+        now: Instant,
+    ) -> Vec<OutEvent<u32>> {
+        let mut out = Vec::new();
+        state.handle(event, now, &mut out);
+        out
+    }
+
     /// Handles `event` and drops what it produces.
     fn handle(state: &mut State<u32, StdRng>, event: InEvent<u32>) {
-        state.handle(event, Instant::now(), None).for_each(drop);
+        run(state, event);
     }
 
     /// A message for a topic that we are not on gets a `Disconnect`, and uses no peer.
@@ -526,7 +547,7 @@ mod tests {
         ];
         for (peer, (message, answered)) in (1u32..).zip(messages) {
             let event = InEvent::RecvMessage(peer, Message { topic, message });
-            let out: Vec<_> = state.handle(event, Instant::now(), None).collect();
+            let out = run(&mut state, event);
             let left = out
                 .iter()
                 .filter(|e| {
@@ -554,8 +575,8 @@ mod tests {
                 topic,
                 message: topic::Message::Swarm(hyparview::Message::Join(None)),
             };
-            state
-                .handle(InEvent::RecvMessage(1, join), Instant::now(), None)
+            run(state, InEvent::RecvMessage(1, join))
+                .iter()
                 .filter(|e| matches!(e, OutEvent::SendMessage(1, m) if m.message.is_disconnect()))
                 .count()
         };
@@ -578,9 +599,7 @@ mod tests {
         let topic: TopicId = [0u8; 32].into();
         handle(&mut state, InEvent::Command(topic, Command::Join(vec![1])));
 
-        let out: Vec<_> = state
-            .handle(InEvent::Command(topic, Command::Quit), Instant::now(), None)
-            .collect();
+        let out = run(&mut state, InEvent::Command(topic, Command::Quit));
 
         assert!(
             out.iter()
@@ -616,6 +635,20 @@ mod tests {
         };
         handle(&mut state, InEvent::RecvMessage(peer, message));
         assert!(!state.peer_topics.contains_key(&peer));
+    }
+
+    /// Only payloads and announcements may be dropped, see [`IO::send`].
+    #[cfg(feature = "net")]
+    #[test]
+    fn only_payloads_and_announcements_are_droppable() {
+        let message = |message| Message {
+            topic: TopicId::from_bytes([0; 32]),
+            message,
+        };
+        assert!(message(topic::Message::<u32>::test_gossip(10)).is_droppable());
+        assert!(message(topic::Message::<u32>::test_ihave()).is_droppable());
+        assert!(!message(topic::Message::<u32>::test_prune()).is_droppable());
+        assert!(!message(topic::Message::test_shuffle(1u32, 0)).is_droppable());
     }
 
     /// A timer of a topic that we quit does nothing to the topic we joined again.
@@ -660,46 +693,55 @@ mod tests {
                 .expect("a neighbor request to peer 2")
         };
         handle(&mut state, join());
-        let old = request_timer(state.handle(reply(), now, None).collect());
+        let old = request_timer(run_at(&mut state, reply(), now));
         handle(&mut state, InEvent::Command(topic, Command::Quit));
         handle(&mut state, join());
-        let current = request_timer(state.handle(reply(), now, None).collect());
+        let current = request_timer(run_at(&mut state, reply(), now));
         let disconnects = |out: &[OutEvent<u32>]| {
             out.iter()
                 .any(|event| matches!(event, OutEvent::DisconnectPeer(2)))
         };
 
-        let out: Vec<_> = state
-            .handle(InEvent::TimerExpired(old), now, None)
-            .collect();
+        let out = run_at(&mut state, InEvent::TimerExpired(old), now);
         assert!(
             !disconnects(&out),
             "the old timer ended the new request: {out:?}"
         );
-        let out: Vec<_> = state
-            .handle(InEvent::TimerExpired(current), now, None)
-            .collect();
+        let out = run_at(&mut state, InEvent::TimerExpired(current), now);
         assert!(disconnects(&out), "the request did not time out: {out:?}");
+    }
+
+    /// Returns the IO of `topic` over `conns` and `outbox`.
+    fn topic_io<'a>(
+        topic: TopicId,
+        conns: &'a mut ConnsMap<u32>,
+        outbox: &'a mut Vec<OutEvent<u32>>,
+    ) -> TopicIO<'a, u32, Vec<OutEvent<u32>>> {
+        TopicIO {
+            topic,
+            instance: 1,
+            peer_topics: conns,
+            io: outbox,
+        }
     }
 
     /// Leaving one topic must not disconnect a peer another topic still uses.
     #[test]
     fn disconnect_peer_waits_for_the_last_topic() {
+        use topic::IO as _;
         let topic_a: TopicId = [1u8; 32].into();
         let topic_b: TopicId = [2u8; 32].into();
         let peer = 1u32;
         let mut conns = ConnsMap::from([(peer, HashSet::from([topic_a, topic_b]))]);
-        let mut outbox = Outbox::new();
+        let mut outbox = Vec::new();
 
-        let event = topic::OutEvent::DisconnectPeer(peer);
-        handle_out_event(topic_a, event, &mut conns, &mut outbox);
+        topic_io(topic_a, &mut conns, &mut outbox).disconnect(peer);
         assert!(
             outbox.is_empty(),
             "disconnected while topic_b still uses the peer"
         );
 
-        let event = topic::OutEvent::DisconnectPeer(peer);
-        handle_out_event(topic_b, event, &mut conns, &mut outbox);
+        topic_io(topic_b, &mut conns, &mut outbox).disconnect(peer);
         assert!(matches!(outbox[..], [OutEvent::DisconnectPeer(p)] if p == peer));
         assert!(!conns.contains_key(&peer));
     }
@@ -710,25 +752,16 @@ mod tests {
     /// disconnects it right after.
     #[test]
     fn disconnect_peer_after_sending_only() {
+        use topic::IO as _;
         let topic: TopicId = [1u8; 32].into();
         let peer = 1u32;
         let mut conns = ConnsMap::default();
-        let mut outbox = Outbox::new();
+        let mut outbox = Vec::new();
 
         let reply = hyparview::Message::test_shuffle_reply_with(Vec::new());
-        let message = topic::Message::Swarm(reply);
-        handle_out_event(
-            topic,
-            topic::OutEvent::SendMessage(peer, message),
-            &mut conns,
-            &mut outbox,
-        );
-        handle_out_event(
-            topic,
-            topic::OutEvent::DisconnectPeer(peer),
-            &mut conns,
-            &mut outbox,
-        );
+        let mut io = topic_io(topic, &mut conns, &mut outbox);
+        io.send(peer, topic::Message::Swarm(reply));
+        io.disconnect(peer);
 
         assert!(
             matches!(outbox[..], [OutEvent::SendMessage(..), OutEvent::DisconnectPeer(p)] if p == peer),

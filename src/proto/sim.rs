@@ -13,8 +13,11 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, debug_span, info, info_span, trace, warn};
 
-use super::{Command, Config, Event, InEvent, OutEvent, PeerIdentity, State, TopicId};
-use crate::proto::{PeerData, Scope};
+use super::{Command, Config, Event, InEvent, PeerIdentity, State, TopicId, IO};
+use crate::proto::{
+    state::{Message, Timer},
+    PeerData, Scope,
+};
 
 const DEFAULT_LATENCY_STATIC: Duration = Duration::from_millis(50);
 const DEFAULT_LATENCY_MIN: Duration = Duration::from_millis(10);
@@ -436,38 +439,19 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
             _ => {}
         }
         let state = self.peers.get_mut(&peer).expect("checked above");
-        let out = state.handle(event, self.time, None);
-        let mut kill = vec![];
-        for event in out {
-            match event {
-                OutEvent::SendMessage(to, message) => {
-                    let latency = latency_between(
-                        &self.config.latency,
-                        &mut self.latencies,
-                        &peer,
-                        &to,
-                        &mut self.rng,
-                    );
-                    self.queue
-                        .insert(self.time + latency, to, InEvent::RecvMessage(peer, message));
-                }
-                OutEvent::ScheduleTimer(time, timer) => {
-                    if !(self.cycles_stopped && timer.is_membership_cycle()) {
-                        self.queue
-                            .insert(self.time + time, peer, InEvent::TimerExpired(timer));
-                    }
-                }
-                OutEvent::DisconnectPeer(to) => {
-                    debug!(peer = ?peer, other = ?to, "disconnect");
-                    kill.push((peer, to));
-                }
-                OutEvent::EmitEvent(topic, event) => {
-                    debug!(peer = ?peer, "emit {event:?}");
-                    self.events.push_back((peer, topic, event));
-                }
-                OutEvent::PeerData(_peer, _data) => {}
-            }
-        }
+        let mut io = SimIO {
+            peer,
+            time: self.time,
+            cycles_stopped: self.cycles_stopped,
+            latency: &self.config.latency,
+            latencies: &mut self.latencies,
+            rng: &mut self.rng,
+            queue: &mut self.queue,
+            events: &mut self.events,
+            kill: Vec::new(),
+        };
+        state.handle(event, self.time, &mut io);
+        let kill = io.kill;
         for (from, to) in kill {
             self.kill_connection(from, to);
         }
@@ -616,6 +600,48 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
             peer_count: self.peers.len(),
             peers_without_neighbors,
         }
+    }
+}
+
+/// The IO of one peer in the simulation: it queues what the peer does.
+struct SimIO<'a, PI, R> {
+    peer: PI,
+    time: Instant,
+    cycles_stopped: bool,
+    latency: &'a LatencyConfig,
+    latencies: &'a mut FxHashMap<ConnId<PI>, Duration>,
+    rng: &'a mut R,
+    queue: &'a mut TimedEventQueue<PI>,
+    events: &'a mut VecDeque<(PI, TopicId, Event<PI>)>,
+    /// The connections that the peer closed.
+    kill: Vec<(PI, PI)>,
+}
+
+impl<PI: PeerIdentity + Ord, R: Rng> IO<PI> for SimIO<'_, PI, R> {
+    fn send(&mut self, to: PI, message: Message<PI>) -> Option<Message<PI>> {
+        let latency = latency_between(self.latency, self.latencies, &self.peer, &to, self.rng);
+        let event = InEvent::RecvMessage(self.peer, message);
+        self.queue.insert(self.time + latency, to, event);
+        None
+    }
+
+    fn emit(&mut self, topic: TopicId, event: Event<PI>) {
+        debug!(peer = ?self.peer, "emit {event:?}");
+        self.events.push_back((self.peer, topic, event));
+    }
+
+    fn schedule(&mut self, delay: Duration, timer: Timer<PI>) {
+        if !(self.cycles_stopped && timer.is_membership_cycle()) {
+            let event = InEvent::TimerExpired(timer);
+            self.queue.insert(self.time + delay, self.peer, event);
+        }
+    }
+
+    fn peer_data(&mut self, _peer: PI, _data: PeerData) {}
+
+    fn disconnect(&mut self, to: PI) {
+        debug!(peer = ?self.peer, other = ?to, "disconnect");
+        self.kill.push((self.peer, to));
     }
 }
 

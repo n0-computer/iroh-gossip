@@ -8,27 +8,31 @@ use tracing::{error, Instrument};
 #[derive(Debug)]
 pub(super) struct Dialer {
     endpoint: Endpoint,
+    /// The ALPN of every dial.
+    alpn: Bytes,
     pending: JoinSet<(EndpointId, Result<Connection, iroh::endpoint::ConnectError>)>,
     pending_dials: HashSet<EndpointId>,
 }
 
 impl Dialer {
-    /// Create a new dialer for a [`Endpoint`]
-    pub(super) fn new(endpoint: Endpoint) -> Self {
+    /// Creates a dialer that connects with `alpn` through `endpoint`.
+    pub(super) fn new(endpoint: Endpoint, alpn: Bytes) -> Self {
         Self {
             endpoint,
+            alpn,
             pending: Default::default(),
             pending_dials: Default::default(),
         }
     }
 
-    /// Starts to dial a endpoint by [`EndpointId`].
-    pub(super) fn queue_dial(&mut self, endpoint_id: EndpointId, alpn: Bytes) {
+    /// Starts to dial an endpoint by [`EndpointId`].
+    pub(super) fn queue_dial(&mut self, endpoint_id: EndpointId) {
         if self.is_dialing(endpoint_id) {
             return;
         }
         self.pending_dials.insert(endpoint_id);
         let endpoint = self.endpoint.clone();
+        let alpn = self.alpn.clone();
         self.pending.spawn(
             async move {
                 let res = endpoint.connect(endpoint_id, &alpn).await;
@@ -38,7 +42,7 @@ impl Dialer {
         );
     }
 
-    /// Checks if a endpoint is currently being dialed.
+    /// Checks if an endpoint is currently being dialed.
     pub(super) fn is_dialing(&self, endpoint: EndpointId) -> bool {
         self.pending_dials.contains(&endpoint)
     }

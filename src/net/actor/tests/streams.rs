@@ -141,7 +141,7 @@ async fn send_loop_reports_its_streams() -> Result {
     ));
     flag_becomes(&mut has_streams, false).await?;
 
-    assert!(matches!(queue.push(join_message(topic, 0)), Pushed::Queued));
+    assert!(matches!(queue.send(join_message(topic, 0)), Pushed::Queued));
     let mut stream = peer_conn.accept_uni().await.std_context("accept")?;
     let mut buffer = BytesMut::new();
     wire::StreamHeader::read(&mut stream, &mut buffer, TEST_FRAME_LIMIT).await?;
@@ -216,7 +216,7 @@ async fn queued_message_comes_before_the_initial_topics() -> Result {
     );
     let mut queue = SendQueue::new(queue::MIN_QUEUE_SIZE);
     assert!(matches!(
-        queue.push(join_message(queued, 0)),
+        queue.send(join_message(queued, 0)),
         Pushed::Queued
     ));
     let _send = AbortOnDropHandle::new(spawn(
@@ -246,7 +246,7 @@ async fn left_topic_gets_no_initial_stream() -> Result {
     let topic: TopicId = blake3::hash(b"left_topic_gets_no_initial_stream").into();
     let mut queue = SendQueue::new(queue::MIN_QUEUE_SIZE);
     assert!(matches!(
-        queue.push(disconnect_message(topic)),
+        queue.send(disconnect_message(topic)),
         Pushed::Queued
     ));
     let _send = AbortOnDropHandle::new(spawn(
@@ -383,7 +383,7 @@ async fn closed_send_loop_lets_go_of_the_queue() -> Result {
         .await
         .std_context("the send loop did not end")??;
     let message = join_message(TopicId::from_bytes([0; 32]), 0);
-    assert!(matches!(queue.push(message), Pushed::Queued));
+    assert!(matches!(queue.send(message), Pushed::Queued));
     let reader = queue
         .try_reader()
         .std_context("the queue is still locked")?;
@@ -433,7 +433,7 @@ async fn disconnect_ends_its_stream() -> Result {
     ];
     let mut queue = SendQueue::new(queue::MIN_QUEUE_SIZE);
     for message in messages {
-        assert!(matches!(queue.push(message), Pushed::Queued));
+        assert!(matches!(queue.send(message), Pushed::Queued));
     }
     let send_loop = SendLoop::new(conn, queue.lease(), 1024, unset_flag(), Vec::new());
     drop(queue);
@@ -485,7 +485,7 @@ async fn next_message_after_a_stop_opens_a_new_stream() -> Result {
     let aborted = CancellationToken::new();
     let _feed = AbortOnDropHandle::new(spawn(async move {
         loop {
-            queue.push(join_message(topic, 0));
+            queue.send(join_message(topic, 0));
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }));
@@ -816,11 +816,11 @@ async fn oversized_message_is_dropped() -> Result {
     )));
 
     assert!(matches!(
-        queue.push(join_message(topic, 4096)),
+        queue.send(join_message(topic, 4096)),
         Pushed::Queued
     ));
     assert!(matches!(
-        queue.push(join_message(topic, 16)),
+        queue.send(join_message(topic, 16)),
         Pushed::Queued
     ));
 

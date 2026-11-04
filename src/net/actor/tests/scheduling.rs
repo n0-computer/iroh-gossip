@@ -23,7 +23,7 @@ async fn message_before_a_close_is_handled_first() -> Result {
     let topic = [1; 32].into();
     let state = TopicHandles::default();
     let mut events = state.events.subscribe();
-    actor.topics.insert(topic, state);
+    actor.state.topics.insert(topic, state);
     actor.handle_in_event(
         InEvent::Command(topic, ProtoCommand::Join(vec![])),
         Instant::now(),
@@ -44,7 +44,7 @@ async fn message_before_a_close_is_handled_first() -> Result {
     actor.on_conn_task_finished(peer, conn, result);
 
     assert!(
-        !actor.state.has_active_peers(&topic),
+        !actor.proto.has_active_peers(&topic),
         "the join made a neighbor after its close"
     );
     let up = events.try_recv().std_context("no event")?;
@@ -231,10 +231,10 @@ async fn admission_leaves_other_topics_ready() -> Result {
 async fn admission_follows_current_eager_peers() -> Result {
     let topic: TopicId = blake3::hash(b"eager").into();
     let mut actor = t_actor().await?;
-    actor.send_queue_size = queue::MIN_QUEUE_SIZE;
-    actor.topics.insert(topic, TopicHandles::default());
+    actor.state.send_queue_size = queue::MIN_QUEUE_SIZE;
+    actor.state.topics.insert(topic, TopicHandles::default());
     // A subscriber keeps the topic, which the actor quits otherwise.
-    let _events = actor.topics[&topic].events.subscribe();
+    let _events = actor.state.topics[&topic].events.subscribe();
     actor.handle_in_event(
         InEvent::Command(topic, ProtoCommand::Join(vec![])),
         Instant::now(),
@@ -246,7 +246,7 @@ async fn admission_follows_current_eager_peers() -> Result {
         let _lease = state
             .handle_connection(Side::Server, id)
             .expect("an accepted connection takes the lease");
-        actor.peers.insert(peer, state);
+        actor.state.peers.insert(peer, state);
         let join = join_message(topic, 0);
         actor.handle_in_event(InEvent::RecvMessage(peer, join), Instant::now());
         peers.push(peer);
@@ -255,17 +255,17 @@ async fn admission_follows_current_eager_peers() -> Result {
         unreachable!()
     };
     assert_eq!(
-        actor.state.eager_peers(&topic).count(),
+        actor.proto.eager_peers(&topic).count(),
         2,
         "both joined eager"
     );
     let fill = |actor: &Actor, peer| {
-        let queue = &actor.peers[&peer].queue;
+        let queue = &actor.state.peers[&peer].queue;
         while !queue.is_busy() {
-            assert!(matches!(queue.push(numbered(topic, 0)), Pushed::Queued));
+            assert!(matches!(queue.send(numbered(topic, 0)), Pushed::Queued));
         }
     };
-    let backed_up = |actor: &Actor| all_eager_peers_busy(&actor.state, &actor.peers, topic);
+    let backed_up = |actor: &Actor| all_eager_peers_busy(&actor.proto, &actor.state.peers, topic);
 
     fill(&actor, full);
     assert!(
@@ -288,19 +288,25 @@ async fn admission_follows_current_eager_peers() -> Result {
         topic,
         commands_of(vec![Command::Broadcast(Bytes::from_static(b"first"))]),
     );
-    actor.topics.get_mut(&topic).unwrap().command_receivers += 1;
+    actor
+        .state
+        .topics
+        .get_mut(&topic)
+        .unwrap()
+        .command_receivers += 1;
     assert!(
         timeout(
             BROADCAST_RECHECK_INTERVAL * 2,
             actor
                 .command_rx
-                .next(|topic| { all_eager_peers_busy(&actor.state, &actor.peers, topic) })
+                .next(|topic| { all_eager_peers_busy(&actor.proto, &actor.state.peers, topic) })
         )
         .await
         .is_err(),
         "the first broadcast must wait before protocol processing"
     );
     actor
+        .state
         .peers
         .get_mut(&full)
         .unwrap()
@@ -310,7 +316,7 @@ async fn admission_follows_current_eager_peers() -> Result {
         BROADCAST_RECHECK_INTERVAL * 2,
         actor
             .command_rx
-            .next(|topic| all_eager_peers_busy(&actor.state, &actor.peers, topic)),
+            .next(|topic| all_eager_peers_busy(&actor.proto, &actor.state.peers, topic)),
     )
     .await
     .std_context("queue replacement did not resume admission")?;

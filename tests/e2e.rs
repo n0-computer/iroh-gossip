@@ -1164,3 +1164,29 @@ async fn new_subscriber_gets_all_neighbors() -> Result {
     assert_eq!(late.rx.neighbors().count(), 2);
     Ok(())
 }
+
+/// A broadcast of the largest content that the sender takes reaches the peer.
+///
+/// The send queue once sized a message with its topic, 32 bytes more than the frame.
+/// A broadcast near the limit then went out as too large, and reached no peer.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn broadcast_of_the_content_limit_arrives() -> Result {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (Node::spawn(&lookup).await?, Node::spawn(&lookup).await?);
+    let t = topic("content_limit");
+    let mut sa = Sub::new(&a, t, vec![]).await?;
+    let sb = Sub::join(&b, t, vec![a.id()]).await?;
+    sa.neighbor_up(b.id()).await?;
+    let max = sb.tx.max_content_size();
+    let content = Bytes::from(vec![7u8; max]);
+    sb.tx
+        .broadcast(content.clone())
+        .await
+        .std_context("broadcast")?;
+    sa.wait(
+        PROMPT,
+        |e| matches!(e, Event::Received(m) if m.content == content),
+    )
+    .await
+}
