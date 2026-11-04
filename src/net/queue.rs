@@ -216,7 +216,7 @@ impl Drop for Reservation {
 ///   reads each stream on its own, so it may handle a `Join` before an
 ///   earlier `Disconnect`. The peer also limits its streams, to 100 by
 ///   default. Over that limit, an open waits
-///   [`OPEN_TIMEOUT`](super::util::OPEN_TIMEOUT) and closes the connection,
+///   [`OPEN_TIMEOUT`](super::wire::OPEN_TIMEOUT) and closes the connection,
 ///   again after each rejoin.
 /// - A handover keeps the order: the new connection waits for the old one to
 ///   finish its message. A control overflow meanwhile aborts the peer, and
@@ -230,7 +230,7 @@ impl Drop for Reservation {
 /// - Busy queues to all eager peers may mean that our uplink is the limit.
 ///   They may also mean that all eager peers are slow,
 ///   or that relayed traffic and other topics fill the queues. A waiting
-///   broadcast passes after [`BROADCAST_WAIT_LIMIT`](super::BROADCAST_WAIT_LIMIT) in any case.
+///   broadcast passes after [`BROADCAST_WAIT_LIMIT`](super::subscriptions::BROADCAST_WAIT_LIMIT) in any case.
 /// - Repair is capped, at 256 ids per peer, 4096 per topic, and 64 per peer
 ///   and second. It works only while the message is cached, and never for
 ///   neighbor scope.
@@ -301,7 +301,7 @@ impl SendQueue {
     /// connection can retire. When a topic sends to the peer again, the actor
     /// opens the queue.
     pub(super) fn set_closing(&self, closing: bool) {
-        super::util::set_flag(&self.closing, closing);
+        super::conn::set_flag(&self.closing, closing);
     }
 
     /// Returns whether the queue holds no messages.
@@ -388,7 +388,7 @@ impl QueueLease {
 /// A writer must not keep the lock without bound, or the next connection waits
 /// forever. Every way out of the loop of a writer unlocks: the end of the
 /// queue, a stop, a closed connection, an error, and a drop of its future. A
-/// stopped writer gets [`HANDOVER_LIMIT`](super::util::HANDOVER_LIMIT) for its
+/// stopped writer gets [`HANDOVER_LIMIT`](super::conn::HANDOVER_LIMIT) for its
 /// current message. Then it stops the write, and the next connection writes
 /// the message again.
 type SharedReader = Arc<tokio::sync::Mutex<QueueReader>>;
