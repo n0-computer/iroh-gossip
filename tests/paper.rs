@@ -663,7 +663,10 @@ fn plumtree_redundancy_drops_to_zero_after_two_rounds() {
         }
 
         let rmr: Vec<f32> = sim.round_stats().iter().map(|round| round.rmr).collect();
-        let mut settled = rmr[2..].to_vec();
+        // The first broadcasts are on the shared tree, which the first one builds. The
+        // sender's own tree starts as a copy of it at broadcast N + 1, and settles with the next.
+        let own_tree = Config::default().broadcast.source_tree_after as usize;
+        let mut settled = rmr[own_tree + 2..].to_vec();
         settled.sort_by(f32::total_cmp);
         let median = settled[settled.len() / 2];
         let mean = settled.iter().sum::<f32>() / settled.len() as f32;
@@ -672,8 +675,10 @@ fn plumtree_redundancy_drops_to_zero_after_two_rounds() {
             seed,
             format!(
                 "flooding {flooding:.2}; rounds 1 and 2 {:.2}, {:.2}; \
-                 from round 3 median {median:.3}, mean {mean:.3}",
-                rmr[0], rmr[1]
+                 from round {} median {median:.3}, mean {mean:.3}",
+                rmr[0],
+                rmr[1],
+                own_tree + 3
             ),
         );
 
@@ -684,10 +689,11 @@ fn plumtree_redundancy_drops_to_zero_after_two_rounds() {
             rmr[0] <= flooding + 0.02 && rmr[1] < flooding,
             "seed {seed}: building the tree cost more than flooding ({flooding:.2})"
         );
-        // An RMR of exactly 0 means one payload per recipient: the eager links
-        // form a spanning tree. Measured median 0 on all of 50 seeds, and mean
-        // at most 0.002. A tree that keeps being grafted and pruned sits at 0.1
-        // and up.
+        // An RMR of 0 means one payload per recipient: the eager links form a
+        // spanning tree. A tree that keeps being grafted and pruned sits at 0.1 and up.
+        // With `PAPER_SEEDS=50`, seed 45 sits at 0.005. From round 10 on, one node's graft
+        // timer fires each round for a lazy neighbor: its announcement beats the tree path by
+        // more than the timeout. The node then prunes the graft's copy as a duplicate.
         assert_eq!(
             median, 0.0,
             "seed {seed}: median RMR {median:.3} after tree construction is not zero"
@@ -789,72 +795,75 @@ fn plumtree_last_delivery_hop_stays_logarithmic() {
     }
 }
 
-/// Claim: a tree shared by many senders carries no redundant payload, at about
-/// twice the depth of a single sender's.
+/// Claim: with a tree per sender, a sender's messages carry no redundant payload.
 ///
-/// Plumtree Table 1 counts payload messages with a different random sender
-/// every cycle and gets 9999 for 10,000 nodes, RMR 0, for both the original
-/// protocol and the optimized one. 4.5 puts the latency cost of sharing one
-/// tree at "twice that value".
+/// They arrive as fast as flooding, whatever the other senders do.
 ///
-/// The paper's simulator is cycle driven: a graft only fires once the eager
-/// flood has finished, so it can never fire early. With a different source
-/// every round, the tree path from the new source can be far longer than a lazy
-/// shortcut to it, and a timeout that expires first grafts a peer that was
-/// about to deliver anyway. This test therefore waits 3s, long enough to span
-/// the whole tree, and gives each round up to 30s. That is close to the
-/// paper's setting, but a graft can still fire while the eager copy travels.
-/// The test does not cover the default timeout.
+/// Plumtree 3.7 offers two ways to serve many senders: "for optimal latency, a
+/// distinct instance of Plumtree may be used for each different sender", or a
+/// single shared tree whose depth "may be sub-optimal for all senders except
+/// the one whose original broadcast created the tree". Plumtree Table 1 counts
+/// payload messages with a different random sender every cycle and gets 9999
+/// for 10,000 nodes, RMR 0, on a shared tree. This implementation keeps a tree
+/// per sender, because a shared tree falls apart when senders broadcast
+/// concurrently.
+///
+/// Ten senders take turns. Each sender's first message builds its tree by
+/// flooding, which costs about as many redundant copies as a node has
+/// neighbors. After that, its tree carries almost no redundancy and is as deep
+/// as that first flood.
+///
+/// The default sends the first few messages of a sender on a shared tree, and
+/// gives it a tree of its own from then on. This test gives every sender its
+/// own tree from its first message, `source_tree_after = 0`.
 #[test]
-fn plumtree_shared_tree_has_no_redundancy() {
+fn plumtree_trees_per_sender_have_no_redundancy() {
     let peers = swarm_size(PEERS);
+    const SENDERS: usize = 10;
     const ROUNDS: usize = 40;
 
     for seed in seeds() {
-        let mut shared = swarm_from(
-            SimulatorConfig {
-                rng_seed: seed,
-                peers,
-                gossip_round_timeout: Duration::from_secs(30),
-            },
-            fixed_graft_timeout(Duration::from_secs(3)),
-        );
-        for _ in 0..ROUNDS {
-            assert_eq!(broadcast(&mut shared).missed, 0.0);
+        let mut config = Config::default();
+        config.broadcast.source_tree_after = 0;
+        let mut sim = swarm_with(peers, seed, config);
+        let mut rng = sim.rng();
+        let senders: Vec<u64> = sim.network.peer_ids().sample(&mut rng, SENDERS);
+        for round in 0..ROUNDS {
+            assert_eq!(
+                broadcast_from(&mut sim, senders[round % SENDERS]).missed,
+                0.0
+            );
         }
-        let settled = &shared.round_stats()[ROUNDS / 2..];
-        let rmr = mean_rmr(settled);
-        let shared_ldh = mean_ldh(settled);
-
-        let mut single = swarm(peers, seed);
-        let sender = single.random_peer();
-        for _ in 0..15 {
-            assert_eq!(broadcast_from(&mut single, sender).missed, 0.0);
-        }
-        let single_ldh = mean_ldh(&single.round_stats()[5..]);
+        let rounds = sim.round_stats();
+        let first = mean_rmr(&rounds[..SENDERS]);
+        let second = mean_rmr(&rounds[SENDERS..2 * SENDERS]);
+        let settled = mean_rmr(&rounds[2 * SENDERS..]);
+        let flood_ldh = mean_ldh(&rounds[..SENDERS]);
+        let settled_ldh = mean_ldh(&rounds[2 * SENDERS..]);
 
         report(
-            "plumtree: shared tree",
+            "plumtree: tree per sender",
             seed,
             format!(
-                "RMR {rmr:.3}, LDH {shared_ldh:.1} shared against {single_ldh:.1} single \
-                 ({:.2}x)",
-                shared_ldh / single_ldh
+                "RMR {first:.3} on a sender's first message, {second:.3} on its second, \
+                 {settled:.3} after; LDH {settled_ldh:.1} against {flood_ldh:.1} flooding"
             ),
         );
 
-        // Measured 0.001 median and 0.002 at most over 50 seeds. The defect
-        // this guards against, a timeout that grafts before the tree delivers,
-        // starts at 0.6.
+        // A flood over active views of 5 costs at most 3 redundant copies.
         assert!(
-            rmr < 0.1,
-            "seed {seed}: a shared tree carries RMR {rmr:.3}, the paper's is 0"
+            first < 3.0,
+            "seed {seed}: building a sender's tree cost RMR {first:.3}, more than a flood"
         );
-        // Measured at 1.2 to 2.0 times over 50 seeds.
         assert!(
-            shared_ldh <= single_ldh * 2.5,
-            "seed {seed}: a shared tree is {:.2} times as deep as a single sender's",
-            shared_ldh / single_ldh
+            settled < 0.1,
+            "seed {seed}: a sender's tree carries RMR {settled:.3} after its second message"
+        );
+        // The tree is the paths the flood arrived on first. Neighbors change
+        // between messages, so it can lose a hop here and there.
+        assert!(
+            settled_ldh <= flood_ldh + 0.5,
+            "seed {seed}: a sender's tree is {settled_ldh:.1} hops deep, its flood {flood_ldh:.1}"
         );
     }
 }

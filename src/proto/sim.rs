@@ -16,7 +16,7 @@ use tracing::{debug, debug_span, info, info_span, trace, warn};
 use super::{Command, Config, Event, InEvent, PeerIdentity, State, TopicId, IO};
 use crate::proto::{
     state::{Message, Timer},
-    PeerData, Scope,
+    PeerData, Scope, TreeId,
 };
 
 const DEFAULT_LATENCY_STATIC: Duration = Duration::from_millis(50);
@@ -537,18 +537,26 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
                         ok = false;
                     }
                 }
-                for other in state.gossip.eager_push_peers.iter() {
-                    let other_state = &self
-                        .peers
-                        .get(other)
-                        .unwrap()
-                        .state(topic)
-                        .unwrap()
-                        .gossip
-                        .eager_push_peers;
-                    if !other_state.contains(&peer) {
-                        debug!(node = %peer, other = ?other, "missing eager_push peer in other");
-                        ok = false;
+                for (tree_id, tree) in state.gossip.trees.iter() {
+                    for other in tree.eager.iter() {
+                        let other_state = &self
+                            .peers
+                            .get(other)
+                            .unwrap()
+                            .state(topic)
+                            .unwrap()
+                            .gossip
+                            .trees;
+                        // A missing shared tree counts as synced, as the other peer creates it
+                        // with every neighbor eager.
+                        let synced = match other_state.get(tree_id) {
+                            Some(tree) => tree.eager.contains(&peer),
+                            None => *tree_id == TreeId::default(),
+                        };
+                        if !synced {
+                            debug!(node = %peer, other = ?other, "missing eager_push peer in other");
+                            ok = false;
+                        }
                     }
                 }
             }
@@ -571,8 +579,6 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
             for (topic, state) in state.states() {
                 let active = &state.swarm.active_view;
                 let passive = &state.swarm.passive_view;
-                let eager = &state.gossip.eager_push_peers;
-                let lazy = &state.gossip.lazy_push_peers;
                 let fail =
                     |what: String| Err(format!("peer {me} on {}: {what}", topic.fmt_short()));
 
@@ -588,23 +594,26 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
                 if let Some(peer) = active.iter().find(|peer| passive.contains(*peer)) {
                     return fail(format!("{peer} is in both the active and the passive view"));
                 }
-                if let Some(peer) = eager.iter().find(|peer| lazy.contains(*peer)) {
-                    return fail(format!("{peer} is both an eager and a lazy peer"));
-                }
-                if let Some(peer) = eager
-                    .iter()
-                    .chain(lazy.iter())
-                    .find(|peer| !active.contains(*peer))
-                {
-                    return fail(format!("{peer} is a broadcast peer but not a neighbor"));
-                }
-                if let Some(peer) = active
-                    .iter()
-                    .find(|peer| !eager.contains(*peer) && !lazy.contains(*peer))
-                {
-                    return fail(format!(
-                        "neighbor {peer} is neither an eager nor a lazy peer"
-                    ));
+                for tree in state.gossip.trees.values() {
+                    let (eager, lazy) = (&tree.eager, &tree.lazy);
+                    if let Some(peer) = eager.iter().find(|peer| lazy.contains(*peer)) {
+                        return fail(format!("{peer} is both an eager and a lazy peer"));
+                    }
+                    if let Some(peer) = eager
+                        .iter()
+                        .chain(lazy.iter())
+                        .find(|peer| !active.contains(*peer))
+                    {
+                        return fail(format!("{peer} is a broadcast peer but not a neighbor"));
+                    }
+                    if let Some(peer) = active
+                        .iter()
+                        .find(|peer| !eager.contains(*peer) && !lazy.contains(*peer))
+                    {
+                        return fail(format!(
+                            "neighbor {peer} is neither an eager nor a lazy peer"
+                        ));
+                    }
                 }
             }
         }
@@ -619,8 +628,18 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
             let state = peer.state(&TOPIC).unwrap();
             add_one(&mut histograms.active, state.swarm.active_view.len());
             add_one(&mut histograms.passive, state.swarm.passive_view.len());
-            add_one(&mut histograms.eager, state.gossip.eager_push_peers.len());
-            add_one(&mut histograms.lazy, state.gossip.lazy_push_peers.len());
+            // The peers that are eager in at least one tree, and the rest.
+            let eager: BTreeSet<_> = state
+                .gossip
+                .trees
+                .values()
+                .flat_map(|tree| tree.eager.iter())
+                .collect();
+            add_one(&mut histograms.eager, eager.len());
+            add_one(
+                &mut histograms.lazy,
+                state.gossip.neighbors.len() - eager.len(),
+            );
             if state.swarm.active_view.is_empty() {
                 peers_without_neighbors.push(*id);
                 trace!(node=%id, active = ?state.swarm.active_view.iter().collect::<Vec<_>>(), passive=?state.swarm.passive_view.iter().collect::<Vec<_>>(), "active view empty^");
