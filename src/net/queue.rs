@@ -20,7 +20,10 @@ use std::{
 use tokio::sync::{mpsc, watch};
 
 use super::ProtoMessage;
-use crate::proto::{state::MessageKind, TopicId};
+use crate::{
+    api::AuthToken,
+    proto::{state::MessageKind, TopicId},
+};
 
 /// The bytes that a queued message takes on top of its encoded size.
 ///
@@ -66,6 +69,8 @@ pub(super) enum Pushed {
 pub(super) struct QueuedMessage {
     pub(super) message: ProtoMessage,
     reservation: Reservation,
+    /// The auth token of the topic, for a stream that this message opens.
+    pub(super) token: Option<AuthToken>,
 }
 
 impl QueuedMessage {
@@ -273,11 +278,18 @@ impl SendQueue {
     #[cfg(test)]
     pub(super) fn send(&self, message: ProtoMessage) -> Pushed {
         let len = super::wire::message_len(&message.message).ok();
-        self.push(message, len)
+        self.push(message, len, None)
     }
 
     /// Queues `message` with its encoded size `len`, if known, and never waits.
-    pub(super) fn push(&self, message: ProtoMessage, len: Option<usize>) -> Pushed {
+    ///
+    /// The message keeps `token`, for the stream that it may open.
+    pub(super) fn push(
+        &self,
+        message: ProtoMessage,
+        len: Option<usize>,
+        token: Option<AuthToken>,
+    ) -> Pushed {
         let section = Section::of(&message);
         let Some(reservation) = Reservation::new(&self.capacity, len, section) else {
             return match section {
@@ -288,6 +300,7 @@ impl SendQueue {
         let item = QueuedMessage {
             message,
             reservation,
+            token,
         };
         let sent = self.tx.send(QueueItem::Message(item));
         debug_assert!(sent.is_ok(), "the queue keeps its reader");
