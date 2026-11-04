@@ -22,7 +22,7 @@ use iroh::{
     Endpoint, EndpointId, RelayMode, SecretKey,
 };
 use iroh_gossip::{
-    api::{Event, GossipReceiver, GossipSender},
+    api::{Event, GossipReceiver, GossipSender, JoinOptions},
     net::{Builder, Gossip, GOSSIP_ALPN},
     proto::TopicId,
 };
@@ -1154,5 +1154,386 @@ async fn slow_peer_does_not_block_shutdown() -> Result {
     conn.close(0u32.into(), b"test finished");
     sender.abort();
     result.std_context("a flow-controlled peer blocked gossip shutdown")??;
+    Ok(())
+}
+
+/// Spawns a node whose gossip retires idle connections after `retire_after`.
+async fn node_retiring_after(lookup: &MemoryLookup, retire_after: Duration) -> Result<Node> {
+    let builder = Gossip::builder().retire_after(retire_after);
+    Node::spawn_custom(lookup, SecretKey::generate(), builder, None).await
+}
+
+/// Either side retires an idle connection: the acceptor with a short timer closes it too.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn either_side_retires() -> Result {
+    let lookup = MemoryLookup::new();
+    // `a` dials, and never retires on its own within this test. `b` accepts, with a short timer.
+    let a = node_retiring_after(&lookup, Duration::from_secs(600)).await?;
+    let b = node_retiring_after(&lookup, Duration::from_millis(200)).await?;
+    let t = topic("either_side_retires");
+    let mut sb = Sub::new(&b, t, vec![]).await?;
+    let sa = Sub::join(&a, t, vec![b.id()]).await?;
+    sb.neighbor_up(a.id()).await?;
+    drop(sa);
+    sb.neighbor_down(a.id()).await?;
+    eventually(PROMPT, "the acceptor did not retire", || {
+        open_between(&a, &b) == 0
+    })
+    .await
+}
+
+/// A neighbor edge keeps a stream, so a quiet topic keeps its connection and its neighbor.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn neighbor_edge_always_has_stream() -> Result {
+    let lookup = MemoryLookup::new();
+    let a = node_retiring_after(&lookup, Duration::from_millis(300)).await?;
+    let b = node_retiring_after(&lookup, Duration::from_millis(300)).await?;
+    let t = topic("neighbor_edge");
+    let mut sb = Sub::new(&b, t, vec![]).await?;
+    let mut sa = Sub::join(&a, t, vec![b.id()]).await?;
+    sb.neighbor_up(a.id()).await?;
+    let (up_a, up_b) = tokio::join!(
+        sa.stays_up(b.id(), Duration::from_secs(4)),
+        sb.stays_up(a.id(), Duration::from_secs(4))
+    );
+    up_a?;
+    up_b?;
+    assert_eq!(
+        open_between(&a, &b),
+        1,
+        "the quiet topic lost its connection"
+    );
+    exchange(&mut sa, &mut sb, b"01").await
+}
+
+/// A message that a join sends while the connection retires still arrives.
+///
+/// The offsets sweep the time around the retire. The message waits in the
+/// queue, and goes out on a new dial after the retire.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn message_during_retire_arrives() -> Result {
+    let lookup = MemoryLookup::new();
+    let retire_after = Duration::from_millis(300);
+    let a = node_retiring_after(&lookup, retire_after).await?;
+    let b = node_retiring_after(&lookup, retire_after).await?;
+    for round in 0..10u64 {
+        // A new topic each round, as a node ignores a message it saw before.
+        let t = topic(&format!("message_during_retire_{round}"));
+        let mut sb = Sub::new(&b, t, vec![]).await?;
+        let sa = Sub::join(&a, t, vec![b.id()]).await?;
+        sb.neighbor_up(a.id()).await?;
+        drop(sa);
+        sb.neighbor_down(a.id()).await?;
+        // Around the moment that the connection retires.
+        sleep(retire_after - Duration::from_millis(60) + Duration::from_millis(15 * round)).await;
+        let t2 = topic(&format!("message_during_retire_again_{round}"));
+        let mut sb2 = Sub::new(&b, t2, vec![]).await?;
+        let mut sa2 = Sub::join(&a, t2, vec![b.id()]).await?;
+        sb2.neighbor_up(a.id()).await?;
+        exchange(&mut sa2, &mut sb2, b"01").await?;
+    }
+    Ok(())
+}
+
+/// Nodes that dial each other at once end up with one connection, and lose no neighbor and no message.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn crossed_dials_lose_no_neighbor() -> Result {
+    let lookup = MemoryLookup::new();
+    for round in 0..4 {
+        let (a, b) = (Node::spawn(&lookup).await?, Node::spawn(&lookup).await?);
+        let t = topic(&format!("crossed_dials_{round}"));
+        let (sa, sb) = tokio::join!(
+            Sub::join(&a, t, vec![b.id()]),
+            Sub::join(&b, t, vec![a.id()])
+        );
+        let (mut sa, mut sb) = (sa?, sb?);
+        let (up_a, up_b) = tokio::join!(
+            sa.stays_up(b.id(), Duration::from_secs(1)),
+            sb.stays_up(a.id(), Duration::from_secs(1))
+        );
+        up_a?;
+        up_b?;
+        exchange(&mut sa, &mut sb, b"01").await?;
+        exchange(&mut sb, &mut sa, b"02").await?;
+        // The connection dialed by the higher id retires, the other one stays.
+        timeout(Duration::from_secs(2), async {
+            while open_between(&a, &b) != 1 {
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .std_context("crossed dials stayed two connections")?;
+        exchange(&mut sa, &mut sb, b"03").await?;
+        exchange(&mut sb, &mut sa, b"04").await?;
+        sa.stays_up(b.id(), Duration::from_millis(500)).await?;
+    }
+    Ok(())
+}
+
+/// Crossed dials keep the order of the messages on each topic, with two topics on the pair.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn crossed_dials_keep_order_two_topics() -> Result {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (Node::spawn(&lookup).await?, Node::spawn(&lookup).await?);
+    let topics = [topic("order_one"), topic("order_two")];
+    let mut subs = Vec::new();
+    for t in topics {
+        let (sa, sb) = tokio::join!(
+            Sub::join(&a, t, vec![b.id()]),
+            Sub::join(&b, t, vec![a.id()])
+        );
+        subs.push((sa?, sb?));
+    }
+    // Messages while the crossed connections are up, and while the loser retires.
+    const COUNT: usize = 30;
+    for (sa, _) in subs.iter() {
+        for i in 0..COUNT {
+            let content = Bytes::from(format!("{i:03}"));
+            sa.tx.broadcast(content).await?;
+        }
+    }
+    for (_, sb) in subs.iter_mut() {
+        let mut seen = Vec::new();
+        timeout(PROMPT, async {
+            while seen.len() < COUNT {
+                match sb.rx.next().await {
+                    Some(Ok(Event::Received(message))) => seen.push(message.content),
+                    Some(Ok(_)) => {}
+                    other => bail_any!("the subscription ended: {other:?}"),
+                }
+            }
+            Ok::<_, n0_error::AnyError>(())
+        })
+        .await
+        .std_context("messages are missing")??;
+        let expected: Vec<Bytes> = (0..COUNT).map(|i| Bytes::from(format!("{i:03}"))).collect();
+        assert_eq!(seen, expected, "the messages lost their order");
+    }
+    Ok(())
+}
+
+/// A clean restart: the peer sees the shutdown, resets the membership, and messages flow again.
+///
+/// The old instance leaves and closes with `SHUTDOWN`. The peer reports the neighbor as down, then up
+/// once the new instance with the same key joins.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn clean_restart_cleans_membership() -> Result {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (Node::spawn(&lookup).await?, Node::spawn(&lookup).await?);
+    let t = topic("clean_restart");
+    let mut sa = Sub::new(&a, t, vec![]).await?;
+    let sb = Sub::join(&b, t, vec![a.id()]).await?;
+    sa.neighbor_up(b.id()).await?;
+
+    drop(sb);
+    let secret = b.shutdown().await?;
+    sa.neighbor_down(secret.public()).await?;
+    let b = Node::spawn_with(&lookup, secret).await?;
+    let mut sb = Sub::join(&b, t, vec![a.id()]).await?;
+    sa.neighbor_up(b.id()).await?;
+    exchange(&mut sa, &mut sb, b"01").await
+}
+
+/// An unclean restart: the former instance is silent but keeps its connection.
+///
+/// The new instance dials with a new session id. The peer replaces the old connection, resets the
+/// membership (down, then up), and messages flow. This needs no idle timeout. The later end of
+/// the former instance must not hurt the new one.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn unclean_restart_replaces_on_dial() -> Result {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (Node::spawn(&lookup).await?, Node::spawn(&lookup).await?);
+    let t = topic("unclean_restart");
+    let mut sa = Sub::new(&a, t, vec![]).await?;
+    let _sb_former = Sub::join(&b, t, vec![a.id()]).await?;
+    sa.neighbor_up(b.id()).await?;
+
+    let b_new = Node::spawn_with(&lookup, b.secret.clone()).await?;
+    let mut sb = Sub::join(&b_new, t, vec![a.id()]).await?;
+    sa.neighbor_down(b.id()).await?;
+    sa.neighbor_up(b.id()).await?;
+    exchange(&mut sa, &mut sb, b"01").await?;
+
+    // The former instance dies: the idle timeout of its connection, or the close, ends it.
+    b.crash().await;
+    sb.stays_up(a.id(), IDLE_TIMEOUT + Duration::from_secs(2))
+        .await?;
+    exchange(&mut sa, &mut sb, b"02").await
+}
+
+/// An unclean restart of a node that accepts: the peer learns of it only from the idle timeout.
+///
+/// The old instance vanishes without a close. The peer keeps a dead connection until the QUIC idle
+/// timeout (`IDLE_TIMEOUT`) ends it, then reports the neighbor down. The new instance then joins
+/// and is a neighbor again.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn unclean_restart_of_the_acceptor_waits_for_idle() -> Result {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (Node::spawn(&lookup).await?, Node::spawn(&lookup).await?);
+    let t = topic("unclean_acceptor");
+    let sa = Sub::new(&a, t, vec![]).await?;
+    let mut sb = Sub::join(&b, t, vec![a.id()]).await?;
+    drop(sa);
+    let a_id = a.id();
+    // Dropped without leaving or closing: the node goes silent.
+    let secret = {
+        let secret = a.secret.clone();
+        drop(a);
+        secret
+    };
+    // Depends on the QUIC idle timeout of the transport (3 s in these tests).
+    sb.wait(
+        IDLE_TIMEOUT + PROMPT,
+        |e| matches!(e, Event::NeighborDown(p) if *p == a_id),
+    )
+    .await?;
+    let a = Node::spawn_with(&lookup, secret).await?;
+    let mut sa = Sub::join(&a, t, vec![b.id()]).await?;
+    sb.neighbor_up(a.id()).await?;
+    exchange(&mut sa, &mut sb, b"01").await
+}
+
+/// Both nodes write a burst while their crossed dials settle: nothing is lost.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn retire_loses_no_unread_data() -> Result {
+    const COUNT: usize = 50;
+    let lookup = MemoryLookup::new();
+    for round in 0..3 {
+        let (a, b) = (Node::spawn(&lookup).await?, Node::spawn(&lookup).await?);
+        let t = topic(&format!("burst_during_crossed_dial_{round}"));
+        let (sa, sb) = tokio::join!(
+            Sub::join(&a, t, vec![b.id()]),
+            Sub::join(&b, t, vec![a.id()])
+        );
+        let (mut sa, mut sb) = (sa?, sb?);
+        for i in 0..COUNT {
+            sa.tx.broadcast(Bytes::from(format!("a {i:03}"))).await?;
+            sb.tx.broadcast(Bytes::from(format!("b {i:03}"))).await?;
+        }
+        for (sub, from) in [(&mut sb, "a"), (&mut sa, "b")] {
+            let mut seen = Vec::new();
+            timeout(PROMPT, async {
+                while seen.len() < COUNT {
+                    match sub.rx.next().await {
+                        Some(Ok(Event::Received(m))) => seen.push(m.content),
+                        Some(Ok(_)) => {}
+                        other => bail_any!("the subscription ended: {other:?}"),
+                    }
+                }
+                Ok::<_, n0_error::AnyError>(())
+            })
+            .await
+            .std_context("messages are missing")??;
+            let expected: Vec<Bytes> = (0..COUNT)
+                .map(|i| Bytes::from(format!("{from} {i:03}")))
+                .collect();
+            assert_eq!(seen, expected, "round {round}");
+        }
+    }
+    Ok(())
+}
+
+/// A `subscription_capacity` of 0 counts as 1, and does not panic.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn zero_subscription_capacity_works() -> Result {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (Node::spawn(&lookup).await?, Node::spawn(&lookup).await?);
+    let t = topic("zero_capacity");
+    let mut sa = Sub::new(&a, t, vec![]).await?;
+    let opts = JoinOptions::with_bootstrap([a.id()]).with_subscription_capacity(0);
+    let (tx, rx) = b.gossip.subscribe_with_opts(t, opts).await?.split();
+    let mut sb = Sub { tx, rx };
+    sa.neighbor_up(b.id()).await?;
+    exchange(&mut sa, &mut sb, b"01").await
+}
+
+/// A reader that does not keep up gets `Lagged`, and the subscription stays open.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn slow_reader_gets_lagged() -> Result {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (Node::spawn(&lookup).await?, Node::spawn(&lookup).await?);
+    let t = topic("lagged");
+    let opts = JoinOptions::with_bootstrap([]).with_subscription_capacity(1);
+    let (tx, rx) = a.gossip.subscribe_with_opts(t, opts).await?.split();
+    let mut sa = Sub { tx, rx };
+    let sb = Sub::join(&b, t, vec![a.id()]).await?;
+    sa.neighbor_up(b.id()).await?;
+    // More events than the subscription and the topic channel hold, with no read in between.
+    for _ in 0..1000 {
+        sb.tx
+            .broadcast_neighbors(Bytes::from_static(b"x"))
+            .await
+            .std_context("broadcast")?;
+    }
+    eventually(PROMPT, "the messages did not arrive", || {
+        a.gossip.metrics().msgs_data_recv.get() >= 1000
+    })
+    .await?;
+    sa.wait(PROMPT, |e| matches!(e, Event::Lagged)).await?;
+    // The subscription stays open.
+    sb.broadcast(b"after").await?;
+    sa.received(b"after").await
+}
+
+/// A node whose `Gossip` drops without a `shutdown` goes down for its neighbors.
+///
+/// It sends no `Close`, so the neighbor sees the connection fail.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn dropped_gossip_is_seen_as_down() -> Result {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (Node::spawn(&lookup).await?, Node::spawn(&lookup).await?);
+    let t = topic("dropped_gossip");
+    let mut sa = Sub::new(&a, t, vec![]).await?;
+    let sb = Sub::join(&b, t, vec![a.id()]).await?;
+    sa.neighbor_up(b.id()).await?;
+    let id = b.id();
+    drop((b, sb));
+    sa.wait(
+        IDLE_TIMEOUT + PROMPT,
+        |e| matches!(e, Event::NeighborDown(p) if *p == id),
+    )
+    .await
+}
+
+/// The counters count what the nodes sent and received.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn counters_count_traffic() -> Result {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (Node::spawn(&lookup).await?, Node::spawn(&lookup).await?);
+    let t = topic("counters");
+    let mut sa = Sub::new(&a, t, vec![]).await?;
+    let mut sb = Sub::join(&b, t, vec![a.id()]).await?;
+    sa.neighbor_up(b.id()).await?;
+    sa.broadcast(b"01 a to b").await?;
+    sb.received(b"01 a to b").await?;
+
+    let (ma, mb) = (a.gossip.metrics(), b.gossip.metrics());
+    assert_eq!(ma.neighbor_up.get(), 1);
+    assert_eq!(mb.neighbor_up.get(), 1);
+    assert_eq!(ma.neighbor_down.get(), 0);
+    assert_eq!(ma.msgs_data_sent.get(), 1);
+    assert_eq!(mb.msgs_data_recv.get(), 1);
+    assert_eq!(ma.msgs_data_sent_size.get(), mb.msgs_data_recv_size.get());
+    assert!(mb.msgs_data_recv_size.get() > b"01 a to b".len() as u64);
+    assert!(ma.msgs_ctrl_recv.get() >= 1 && mb.msgs_ctrl_sent.get() >= 1);
+    assert_eq!(ma.msgs_dropped.get() + mb.msgs_dropped.get(), 0);
+    assert_eq!(
+        ma.peers_send_queue_full.get() + mb.peers_send_queue_full.get(),
+        0
+    );
+    assert!(ma.actor_tick_main.get() > 0);
     Ok(())
 }
