@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use futures_concurrency::future::TryJoin;
 use iroh::{
     address_lookup::memory::MemoryLookup,
@@ -305,7 +305,7 @@ async fn open_stream(
 /// Accepts the peer's next stream and reads it to its end.
 async fn read_next_stream(conn: &Connection) -> Result<(TopicId, Vec<TopicMessage>)> {
     let mut stream = conn.accept_uni().await.std_context("accept stream")?;
-    let mut buffer = BytesMut::new();
+    let mut buffer = Vec::new();
     let header = wire::StreamHeader::read(&mut stream, &mut buffer, TEST_FRAME_LIMIT)
         .await
         .std_context("read header")?;
@@ -330,7 +330,7 @@ fn disconnect_message(topic: TopicId) -> ProtoMessage {
 /// Accepts the peer's next stream and reads its first message.
 async fn read_next_message(conn: &Connection) -> Result<(TopicId, TopicMessage)> {
     let mut stream = conn.accept_uni().await.std_context("accept stream")?;
-    let mut buffer = BytesMut::new();
+    let mut buffer = Vec::new();
     let header = wire::StreamHeader::read(&mut stream, &mut buffer, TEST_FRAME_LIMIT)
         .await
         .std_context("read header")?;

@@ -164,6 +164,19 @@ impl<PI> Message<PI> {
 
 #[cfg(test)]
 impl<PI> Message<PI> {
+    /// Returns a forward join of `peer` with `data_len` bytes of peer data, for tests
+    /// outside this module.
+    #[cfg(feature = "net")]
+    pub(crate) fn test_forward_join(peer: PI, data_len: usize) -> Self {
+        Message::ForwardJoin(ForwardJoin {
+            peer: PeerInfo {
+                id: peer,
+                data: Some(PeerData::new(vec![0; data_len])),
+            },
+            ttl: Ttl(1),
+        })
+    }
+
     /// Returns a shuffle from `origin` carrying no nodes, for tests outside this module.
     pub(crate) fn test_shuffle(origin: PI, ttl: u16) -> Self {
         Message::Shuffle(Shuffle {

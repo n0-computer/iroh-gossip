@@ -50,12 +50,10 @@ pub(super) struct PeerState {
     ///
     /// [`Actor::forget_peers`]: super::actor::Actor::forget_peers
     forget_at: Option<Instant>,
-    /// Whether the peer sent [`StreamHeader::handles_close`].
+    /// Whether the peer opened a stream, which shows that it handles a close.
     ///
     /// It belongs to the peer, not to one connection. So a connection on which
     /// neither side sends closes too, as after two dials cross.
-    ///
-    /// [`StreamHeader::handles_close`]: super::wire::StreamHeader::handles_close
     pub(super) handles_close: watch::Sender<bool>,
     /// The topics that may have an open stream to this peer.
     ///
@@ -100,7 +98,7 @@ impl PeerState {
     /// Like [`Self::push`], and computes the encoded size of the message.
     #[cfg(test)]
     pub(super) fn send(&mut self, message: ProtoMessage) -> Pushed {
-        let len = postcard::experimental::serialized_size(&message.message).ok();
+        let len = super::wire::message_len(&message.message).ok();
         self.push(message, len)
     }
 
