@@ -317,7 +317,9 @@ pub struct Message {
     #[debug("Bytes({})", self.content.len())]
     pub content: Bytes,
     /// The scope of the message.
-    /// This tells us if the message is from a direct neighbor or actual gossip.
+    ///
+    /// It tells whether a direct neighbor sent the message to its neighbors, or the swarm gossiped
+    /// it.
     pub scope: DeliveryScope,
     /// The endpoint that delivered the message. This is not the same as the original author.
     ///

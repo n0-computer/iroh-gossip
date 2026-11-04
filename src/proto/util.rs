@@ -69,8 +69,7 @@ macro_rules! idbytes_impls {
 
 pub(crate) use idbytes_impls;
 
-/// A hash set where the iteration order of the values is independent of their
-/// hash values.
+/// A hash set whose iteration order does not depend on the hash values.
 ///
 /// This is wrapper around [indexmap::IndexSet] which couple of utility methods
 /// to randomly select elements from the set.
@@ -138,8 +137,7 @@ impl<T: Hash + Eq + PartialEq> IndexSet<T> {
         self.inner.swap_remove_index(index)
     }
 
-    /// Create an iterator over the set in the order of insertion, while skipping the element in
-    /// `without`.
+    /// Returns an iterator over the set in the order of insertion, without the element `without`.
     pub fn iter_without<'a>(&'a self, value: &'a T) -> impl Iterator<Item = &'a T> {
         self.iter().filter(move |x| *x != value)
     }
@@ -156,16 +154,14 @@ where
         items
     }
 
-    /// Create a vector of all elements in the set in random order, and shorten to
-    /// the first `len` elements after shuffling.
+    /// Returns at most `len` elements of the set, in random order.
     pub fn shuffled_and_capped<R: Rng + ?Sized>(&self, len: usize, rng: &mut R) -> Vec<T> {
         let mut items = self.shuffled(rng);
         items.truncate(len);
         items
     }
 
-    /// Create a vector of the elements in the set in random order while omitting
-    /// the elements in `without`.
+    /// Returns the elements of the set in random order, without the elements in `without`.
     pub fn shuffled_without<R: Rng + ?Sized>(&self, without: &[&T], rng: &mut R) -> Vec<T> {
         let mut items = self
             .inner
@@ -177,8 +173,7 @@ where
         items
     }
 
-    /// Create a vector of the elements in the set in random order while omitting
-    /// the elements in `without`, and shorten to the first `len` elements.
+    /// Returns at most `len` random elements of the set, without the elements in `without`.
     pub fn shuffled_without_and_capped<R: Rng + ?Sized>(
         &self,
         without: &[&T],

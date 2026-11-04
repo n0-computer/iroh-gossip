@@ -101,8 +101,9 @@ pub struct GossipEvent<PI> {
     /// The content of the gossip message.
     #[debug("<{}b>", content.len())]
     pub content: Bytes,
-    /// The peer that we received the gossip message from. Note that this is not the peer that
-    /// originally broadcasted the message, but the peer before us in the gossiping path.
+    /// The peer that delivered the message to us.
+    ///
+    /// This is the peer before us on the path of the message, not the peer that broadcast it.
     pub delivered_from: PI,
     /// The broadcast scope of the message.
     pub scope: DeliveryScope,
@@ -147,16 +148,18 @@ impl Round {
 /// Messages that we can send and receive from peers within the topic.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum Message {
-    /// When receiving Gossip, emit as event and forward full message to eager peer and (after a
-    /// delay) message IDs to lazy peers.
+    /// Carries the content of a message.
+    ///
+    /// A receiver emits it as an event, forwards it to its eager peers, and later announces its id
+    /// to its lazy peers.
     Gossip(Gossip),
     /// When receiving Prune, move the peer from the eager to the lazy set.
     Prune,
-    /// When receiving Graft, move the peer to the eager set and send the full content for the
-    /// included message ID.
+    /// Asks the receiver to make the sender eager, and to send the message with the included id.
     Graft(Graft),
-    /// When receiving IHave, do nothing initially, and request the messages for the included
-    /// message IDs after some time if they aren't pushed eagerly to us.
+    /// Announces the ids of messages that the sender has.
+    ///
+    /// A receiver waits, and requests a message with a `Graft` if no eager peer pushed it in time.
     IHave(Vec<IHave>),
 }
 
@@ -213,12 +216,11 @@ impl Gossip {
 
 /// The scope to deliver the message to.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Ord, PartialOrd, Copy)]
+#[non_exhaustive]
 pub enum DeliveryScope {
-    /// This message was received from the swarm, with a distance (in hops) travelled from the
-    /// original broadcaster.
+    /// The message comes from the swarm, with the number of hops from the broadcaster.
     Swarm(Round),
-    /// This message was received from a direct neighbor that broadcasted the message to neighbors
-    /// only.
+    /// The message comes from a direct neighbor that sent it to its neighbors only.
     Neighbors,
 }
 
@@ -253,6 +255,7 @@ pub(crate) fn max_gossip_size(content_len: usize, scope: Scope) -> usize {
 
 /// The broadcast scope of a gossip message.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Ord, PartialOrd, Copy)]
+#[non_exhaustive]
 pub enum Scope {
     /// The message is broadcast to all peers in the swarm.
     Swarm,
@@ -289,12 +292,12 @@ pub struct IHave {
     pub(crate) round: Round,
 }
 
-/// Control message to signal a peer that they have been moved to the eager set, and to ask the
-/// peer to do the same with this node.
+/// Tells a peer that we made it eager, and asks it to make us eager too.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct Graft {
-    /// Message id that triggers the graft, if any.
-    /// On receiving a graft, the payload message must be sent in reply if a message id is set.
+    /// The id of the message that the graft requests, if any.
+    ///
+    /// If the id is set, the receiver sends that message in reply.
     id: Option<MessageId>,
     /// Delivery round of the [`Message::IHave`] that triggered this Graft message.
     round: Round,
@@ -306,19 +309,22 @@ pub struct Graft {
 /// network (as recommended in the paper).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct Config {
-    /// When receiving an `IHave` message, this timeout is registered. If the message for the
-    /// `IHave` was not received once the timeout is expired, a `Graft` message is sent to the
-    /// peer that sent us the `IHave` to request the message payload.
+    /// How long we wait for a message after its `IHave`, before we request it.
+    ///
+    /// When the timeout expires without the message, we send a `Graft` to the peer that sent the
+    /// `IHave`.
     ///
     /// The plumtree paper notes:
     /// > The timeout value is a protocol parameter that should be configured considering the
     /// > diameter of the overlay and a target maximum recovery latency, defined by the application
     /// > requirements. (p.8)
     pub graft_timeout_1: Duration,
-    /// This timeout is registered when sending a `Graft` message. If a reply has not been
-    /// received once the timeout expires, we send another `Graft` message to the next peer that
-    /// sent us an `IHave` for this message.
+    /// How long we wait for the reply to a `Graft`, before we ask the next peer.
+    ///
+    /// When the timeout expires without a reply, we send a `Graft` to the next peer that sent us an
+    /// `IHave` for the message.
     ///
     /// The plumtree paper notes:
     /// > This second timeout value should be smaller that the first, in the order of an average
@@ -326,11 +332,10 @@ pub struct Config {
     pub graft_timeout_2: Duration,
     /// Timeout after which `IHave` messages are pushed to peers.
     pub dispatch_timeout: Duration,
-    /// The protocol performs a tree optimization, which promotes lazy peers to eager peers if the
-    /// `Message::IHave` messages received from them have a lower number of hops from the
-    /// message's origin as the `InEvent::Broadcast` messages received from our eager peers. This
-    /// parameter is the number of hops that the lazy peers must be closer to the origin than our
-    /// eager peers to be promoted to become an eager peer.
+    /// How many hops closer to the origin a lazy peer must be, before it replaces an eager peer.
+    ///
+    /// The protocol promotes a lazy peer to eager if its `Message::IHave` messages come with fewer
+    /// hops from the origin than the messages of our eager peers.
     pub optimization_threshold: Round,
 
     /// Duration for which to keep gossip messages in the internal message cache.
@@ -353,33 +358,26 @@ pub struct Config {
 }
 
 impl Default for Config {
-    /// Sensible defaults for the plumtree configuration
-    //
-    // TODO: Find out what good defaults are for the three timeouts here. Current numbers are
-    // guesses that need validation. The paper does not have concrete recommendations for these
-    // numbers.
+    /// Returns the default plumtree configuration.
+    ///
+    /// The paper gives no numbers for the timeouts, so they are chosen for typical
+    /// latencies of tens of milliseconds.
     fn default() -> Self {
         Self {
             // Paper: "The timeout value is a protocol parameter that should be configured considering
             // the diameter of the overlay and a target maximum recovery latency, defined by the
             // application requirements. This is a parameter that should be statically configured
             // at deployment time." (p. 8)
-            //
-            // Earthstar has 5ms it seems, see https://github.com/earthstar-project/earthstar/blob/1523c640fedf106f598bf79b184fb0ada64b1cc0/src/syncer/plum_tree.ts#L75
-            // However in the paper it is more like a few roundtrips if I read things correctly.
+            // In the paper it is a few roundtrips.
             graft_timeout_1: Duration::from_millis(80),
 
             // Paper: "This second timeout value should be smaller that the first, in the order of an
             // average round trip time to a neighbor." (p. 9)
-            //
-            // Earthstar doesn't have this step from my reading.
             graft_timeout_2: Duration::from_millis(40),
 
             // Again, paper does not tell a recommended number here. Likely should be quite small,
             // as to not delay messages without need. This would also be the time frame in which
             // `IHave`s are aggregated to save on packets.
-            //
-            // Eartstar dispatches immediately from my reading.
             dispatch_timeout: Duration::from_millis(5),
 
             // This number comes from experiment settings the plumtree paper (p. 12)
@@ -460,9 +458,9 @@ pub struct State<PI> {
     /// the full queue drops again would otherwise loop at the speed of a round trip.
     dropped: BTreeMap<PI, IndexMap<MessageId, Round, FxBuildHasher>>,
 
-    /// Messages for which a [`MessageId`] has been seen via a [`Message::IHave`] but we have not
-    /// yet received the full payload. For each, we store the peers that have claimed to have this
-    /// message.
+    /// Messages that a [`Message::IHave`] announced, and that we did not receive yet.
+    ///
+    /// For each, we keep the peers that announced it.
     missing_messages: HashMap<MessageId, VecDeque<(PI, Round)>>,
     /// Messages for which the full payload has been seen.
     received_messages: TimeBoundCache<MessageId, (), FxBuildHasher>,
@@ -774,9 +772,10 @@ impl<PI: PeerIdentity> State<PI> {
         true
     }
 
-    /// Optimize the tree by pruning the `sender` of a [`Message::Gossip`] if we previously
-    /// received a [`Message::IHave`] for the same message with a much lower number of delivery
-    /// hops from the original broadcaster of the message.
+    /// Optimizes the tree: prunes the `sender` of a [`Message::Gossip`] if a faster path exists.
+    ///
+    /// A path is faster if we received a [`Message::IHave`] for the same message with far fewer
+    /// hops from the broadcaster.
     ///
     /// See [Config::optimization_threshold].
     fn optimize_tree(
@@ -921,6 +920,7 @@ impl<PI: PeerIdentity> State<PI> {
     }
 
     /// Handle a [`InEvent::NeighborDown`] when a peer leaves the topic.
+    ///
     /// > When a neighbor is detected to leave the overlay, it is simple removed from the
     /// > membership. Furthermore, the record of IHAVE messages sent from failed members is deleted
     /// > from the missing history. (p9)
@@ -1047,8 +1047,9 @@ impl<PI: PeerIdentity> State<PI> {
         }
     }
 
-    /// Queue lazy message announcements into the queue that will be sent out as batched
-    /// [`Message::IHave`] messages once the [`Timer::DispatchLazyPush`] timer is triggered.
+    /// Queues announcements for the lazy peers.
+    ///
+    /// They go out as batched [`Message::IHave`] messages when [`Timer::DispatchLazyPush`] fires.
     fn lazy_push(&mut self, gossip: &Gossip, sender: &PI, io: &mut impl IO<PI>) {
         let Some(round) = gossip.round() else {
             return;
@@ -1078,8 +1079,9 @@ mod test {
     use super::*;
     use crate::proto::topic;
 
-    /// A control frame already in flight when a neighbor leaves must not add
-    /// that peer back to the broadcast view without a membership handshake.
+    /// A late control frame of a former neighbor does not add it back to the broadcast view.
+    ///
+    /// Only a membership handshake does.
     #[test]
     fn late_prune_does_not_recreate_a_departed_peer() {
         let mut state = State::new(1u32, Config::default(), 1024);
