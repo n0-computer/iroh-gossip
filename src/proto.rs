@@ -206,7 +206,7 @@ mod test {
         // Node 0 is full, so it will disconnect from either node 1 or node 2.
         network.command(3, t, Command::Join(vec![0]));
 
-        network.run_trips(2);
+        network.run_trips(3);
 
         // Confirm emitted events. There's two options because whether node 0 disconnects from
         // node 1 or node 2 is random.
@@ -260,7 +260,7 @@ mod test {
         (4..6).for_each(|i| network.command(i, t, Command::Join(vec![3])));
         // run ticks and drain events
 
-        network.run_trips(4);
+        network.run_trips(5);
 
         let _ = network.events();
         assert!(network.check_synchronicity());
@@ -321,7 +321,7 @@ mod test {
         network.command(1, t, Command::Join(vec![0]));
         network.command(2, t, Command::Join(vec![1]));
         network.command(3, t, Command::Join(vec![2]));
-        network.run_trips(2);
+        network.run_trips(3);
 
         // assert all peers appear in the connections
         let all_conns: HashSet<u64> = HashSet::from_iter((0u64..4).flat_map(|p| {

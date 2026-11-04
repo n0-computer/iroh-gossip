@@ -38,7 +38,7 @@ const INITIAL_SHUFFLE_INTERVAL: Duration = Duration::from_secs(1);
 /// it calls "random promotion", every 5s.
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Delay before the one retry of a Join requested by the caller.
+/// Delay before the one retry of a Join requested by the caller, and before a join can fail.
 ///
 /// Allow time for a first dial and the reply, including over a relay.
 const JOIN_RETRY_DELAY: Duration = Duration::from_secs(10);
@@ -67,6 +67,14 @@ fn backoff_due(n: u32) -> bool {
     }
 }
 
+/// Maximum number of peers per maintenance pass that we contact because a neighbor named them.
+///
+/// A `ForwardJoin` or a `Shuffle` at the end of its walk makes us send to the
+/// peer that it names, and the runtime dials that peer. In the paper
+/// simulations, honest walks end at a node at most 25 times in a pass. The cap
+/// keeps a neighbor from making us dial at the rate of its messages.
+const MAX_NAMED_CONTACTS_PER_PASS: usize = 32;
+
 /// Maximum number of contacts a topic remembers for a rejoin.
 ///
 /// The topic keeps the contacts of the latest joins. An isolated node sends a
@@ -87,8 +95,13 @@ pub enum InEvent<PI> {
     PeerDisconnected(PI),
     /// The peer refused us, and the connection stays usable.
     PeerRefused(PI),
-    /// Send a join request to a peer.
-    RequestJoin(PI),
+    /// A peer is connected, so a message to it goes out at once.
+    ///
+    /// The answer to [`IO::connect`]. The runtime also sends it for a connection that the peer
+    /// opened.
+    PeerConnected(PI),
+    /// Join the swarm through some of these peers, see [`Config::join_dials`].
+    RequestJoin(Vec<PI>),
     /// Update the peer data that is transmitted on join requests.
     UpdatePeerData(PeerData),
     /// Quit the swarm, informing peers about us leaving.
@@ -108,6 +121,8 @@ pub enum Timer<PI> {
     RetryJoin(PI, u64),
     /// The end of the wait for a reply to the retry of a Join, with its request id.
     ForgetJoin(PI, u64),
+    /// The earliest time at which a join request can fail, with its id.
+    JoinDeadline(u64),
 }
 
 /// Messages that we can send and receive from peers within the topic.
@@ -334,6 +349,19 @@ pub struct Config {
     /// It runs from when we send the request, so it covers a dial to the peer
     /// on a slow network. A dial that fails ends the request earlier.
     pub neighbor_request_timeout: Duration,
+    /// Number of bootstrap peers a join connects to at a time.
+    ///
+    /// A join first connects to this many peers, without a message. It joins
+    /// the first ones that connect, and connects to the next peers only when a
+    /// dial or a contact fails. A larger number finds a live peer sooner when many are dead.
+    pub join_dials: usize,
+    /// Number of contacts a join looks for among the bootstrap peers.
+    ///
+    /// Each contact gets a `Join`, unless it is a neighbor already. Each `Join` makes its
+    /// contact start forward walks, and each extra `Join` can evict neighbors. The join
+    /// replaces a contact that fails with the next bootstrap peer. The bootstrap peers that
+    /// stay unused go to the passive view.
+    pub join_contacts: usize,
 }
 impl Default for Config {
     /// Default values for the HyParView layer
@@ -358,8 +386,44 @@ impl Default for Config {
             // A dial and a round trip on a slow network. Each dead candidate
             // holds a refill slot this long.
             neighbor_request_timeout: Duration::from_secs(3),
+            join_dials: 5,
+            join_contacts: 2,
         }
     }
+}
+
+/// A join in progress: it connects to bootstrap peers, and joins a few of them.
+///
+/// The join connects to up to [`Config::join_dials`] peers at a time, without a
+/// message. The first [`Config::join_contacts`] of them to connect get a `Join`. The
+/// peers of later connections go to the passive view. When a contact fails, the join
+/// takes the next peer. It ends when it has its contacts, or has no peer left to try.
+#[derive(Debug)]
+struct JoinWave<PI> {
+    /// The peers not tried yet, in the order of the application.
+    queue: VecDeque<PI>,
+    /// The peers we dial, which are not connected yet.
+    dialing: HashSet<PI>,
+    /// The contacts we sent a `Join` to, which have not become neighbors.
+    awaiting: HashSet<PI>,
+    /// The number of `Join`s the wave may still send.
+    slots: usize,
+    /// Whether to emit [`Event::JoinFailed`] if it ends without a neighbor.
+    report: bool,
+}
+
+/// The latest join request, until [`JOIN_RETRY_DELAY`] after it.
+///
+/// A peer that is not on the topic yet, or has no known address yet, fails a
+/// join at once. The join reports the failure only at the deadline, and only
+/// without a neighbor. Meanwhile the peer can join us, or a maintenance pass
+/// rejoins through it.
+#[derive(Debug)]
+struct JoinDeadline {
+    /// The id of its timer.
+    id: u64,
+    /// Whether its join ended without a neighbor.
+    failed: bool,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -410,6 +474,9 @@ pub struct State<PI, RG = ThreadRng> {
     pending_neighbor_requests: HashMap<PI, u64>,
     /// The id of the next neighbor request
     next_neighbor_request: u64,
+    /// The join in progress, if any.
+    join_wave: Option<JoinWave<PI>>,
+    join_deadline: Option<JoinDeadline>,
     /// The joins that wait for a reply, with the id of their one retry.
     pending_joins: HashMap<PI, u64>,
     next_join: u64,
@@ -427,6 +494,8 @@ pub struct State<PI, RG = ThreadRng> {
     refused: HashSet<PI>,
     /// How many more requests a refill may send, see [`RefillLimit`].
     refill: RefillLimit,
+    /// The peers that we contacted in this maintenance pass, see [`MAX_NAMED_CONTACTS_PER_PASS`].
+    named_contacts: usize,
 }
 
 impl<PI, RG> State<PI, RG>
@@ -451,12 +520,15 @@ where
             stats: Stats::default(),
             pending_neighbor_requests: Default::default(),
             next_neighbor_request: 0,
+            join_wave: None,
+            join_deadline: None,
             pending_joins: Default::default(),
             next_join: 0,
             peer_data: Default::default(),
             alive_disconnect_peers: Default::default(),
             refused: Default::default(),
             refill: RefillLimit::Automatic,
+            named_contacts: 0,
         }
     }
 
@@ -474,6 +546,8 @@ where
                     if self.pending_joins.get(&peer) == Some(&id) {
                         self.join(peer, io);
                         io.schedule(JOIN_RETRY_DELAY, Timer::ForgetJoin(peer, id));
+                        // The contact did not answer in time, so the join continues without it.
+                        self.on_wave_peer_lost(peer, true, io);
                     }
                 }
                 Timer::ForgetJoin(peer, id) => {
@@ -482,19 +556,29 @@ where
                         self.pending_joins.remove(&peer);
                     }
                 }
+                Timer::JoinDeadline(id) => {
+                    let deadline = self.join_deadline.take_if(|deadline| deadline.id == id);
+                    if deadline.is_some_and(|deadline| deadline.failed) {
+                        self.report_join_failed(io);
+                    }
+                }
             },
             InEvent::PeerDisconnected(peer) => self.handle_connection_closed(peer, io),
+            InEvent::PeerConnected(peer) => self.on_connected(peer, io),
             InEvent::PeerRefused(peer) => {
                 // A refused join gets no retry: the peer would refuse it again.
                 self.pending_joins.remove(&peer);
+                self.on_wave_peer_lost(peer, true, io);
                 self.handle_connection_closed(peer, io);
             }
-            InEvent::RequestJoin(peer) => self.handle_join(peer, io),
+            InEvent::RequestJoin(peers) => self.handle_join(peers, io),
             InEvent::UpdatePeerData(data) => {
                 self.me_data = Some(data);
             }
             InEvent::Quit => self.handle_quit(io),
         }
+
+        self.settle_wave(io);
 
         // this will only happen on the first call
         if !self.timers_scheduled {
@@ -552,6 +636,14 @@ where
                 "{peer:?} is a neighbor with a Join retry pending"
             );
         }
+        if let Some(wave) = &self.join_wave {
+            for peer in wave.awaiting.iter() {
+                assert!(
+                    self.pending_joins.contains_key(peer),
+                    "the join waits for {peer:?}, which has no pending join"
+                );
+            }
+        }
     }
 
     fn handle_message(&mut self, from: PI, message: Message<PI>, io: &mut impl IO<PI>) {
@@ -579,23 +671,190 @@ where
         self.active_view.contains(peer)
             || self.pending_neighbor_requests.contains_key(peer)
             || self.pending_joins.contains_key(peer)
+            || self
+                .join_wave
+                .as_ref()
+                .is_some_and(|wave| wave.dialing.contains(peer))
     }
 
-    fn handle_join(&mut self, peer: PI, io: &mut impl IO<PI>) {
-        self.bootstrap_peers.retain(|known| *known != peer);
-        self.bootstrap_peers.push_back(peer);
-        if self.bootstrap_peers.len() > MAX_BOOTSTRAP_PEERS {
-            if let Some(evicted) = self.bootstrap_peers.pop_front() {
-                self.pending_joins.remove(&evicted);
+    /// Keeps `peers` for a rejoin, and starts a join through them.
+    ///
+    /// From a long list, we keep only the first peers, as the join tries the list from the front.
+    fn handle_join(&mut self, peers: Vec<PI>, io: &mut impl IO<PI>) {
+        for peer in peers.iter().take(MAX_BOOTSTRAP_PEERS).copied() {
+            self.bootstrap_peers.retain(|known| *known != peer);
+            self.bootstrap_peers.push_back(peer);
+            if self.bootstrap_peers.len() > MAX_BOOTSTRAP_PEERS {
+                if let Some(evicted) = self.bootstrap_peers.pop_front() {
+                    self.pending_joins.remove(&evicted);
+                }
             }
         }
-        // A neighbor would forward the Join to all its neighbors, which can
-        // rewire the overlay for nothing.
-        if self.active_view.contains(&peer) {
-            debug!(other = ?peer, "join: already a neighbor");
+        self.join_through(peers, true, io);
+    }
+
+    /// Starts a join through `peers`, see [`JoinWave`].
+    ///
+    /// `report` tells whether to emit [`Event::JoinFailed`] if no peer works out.
+    fn join_through(&mut self, peers: Vec<PI>, report: bool, io: &mut impl IO<PI>) {
+        // The list can be long, so the checks for duplicates use sets.
+        let mut seen = HashSet::new();
+        let mut fresh = Vec::new();
+        for peer in peers {
+            // A neighbor would forward the Join to all its neighbors, which changes
+            // the overlay with no gain.
+            if self.active_view.contains(&peer) {
+                debug!(other = ?peer, "join: already a neighbor");
+            } else if peer != self.me && seen.insert(peer) {
+                fresh.push(peer);
+            }
+        }
+        if fresh.is_empty() {
             return;
         }
-        self.join_and_expect_reply(peer, io);
+        if report {
+            let id = self.next_join;
+            self.next_join += 1;
+            self.join_deadline = Some(JoinDeadline { id, failed: false });
+            io.schedule(JOIN_RETRY_DELAY, Timer::JoinDeadline(id));
+        }
+        let wave = self.join_wave.get_or_insert_with(|| JoinWave {
+            queue: VecDeque::new(),
+            dialing: HashSet::new(),
+            awaiting: HashSet::new(),
+            slots: self.config.join_contacts.max(1),
+            report: false,
+        });
+        wave.report |= report;
+        // A request during a join adds its new peers to the queue. The join
+        // keeps its contacts, so that no peer gets a second `Join`.
+        let queued: HashSet<PI> = wave.queue.iter().copied().collect();
+        fresh.retain(|peer| {
+            !(queued.contains(peer) || wave.dialing.contains(peer) || wave.awaiting.contains(peer))
+        });
+        wave.queue.extend(fresh);
+        self.advance_wave(true, io);
+    }
+
+    /// Connects to queued peers of the join, up to [`Config::join_dials`] at a time.
+    ///
+    /// A join request dials a whole wave, to race the peers. The join replaces a lost peer,
+    /// and dials only while fewer peers are in flight than the join has contacts to find.
+    fn advance_wave(&mut self, race: bool, io: &mut impl IO<PI>) {
+        let width = self.config.join_dials.max(1);
+        let Some(wave) = self.join_wave.as_mut() else {
+            return;
+        };
+        let limit = if race { width } else { wave.slots.min(width) };
+        while wave.slots > 0 && wave.dialing.len() < limit {
+            let Some(peer) = wave.queue.pop_front() else {
+                break;
+            };
+            wave.dialing.insert(peer);
+            io.connect(peer);
+        }
+    }
+
+    /// Handles a new connection to `peer`.
+    ///
+    /// If the join dialed it, it gets the `Join`, or goes to the passive view if the join
+    /// has its contacts already. A peer that became a neighbor meanwhile counts as a contact
+    /// without a `Join`, as it would forward the `Join` to all its neighbors.
+    fn on_connected(&mut self, peer: PI, io: &mut impl IO<PI>) {
+        let neighbor = self.active_view.contains(&peer);
+        let Some(wave) = self.join_wave.as_mut() else {
+            return;
+        };
+        if !wave.dialing.remove(&peer) {
+            return;
+        }
+        if neighbor {
+            wave.slots = wave.slots.saturating_sub(1);
+            self.settle_wave(io);
+        } else if wave.slots > 0 {
+            wave.slots -= 1;
+            wave.awaiting.insert(peer);
+            self.join_and_expect_reply(peer, io);
+        } else {
+            self.add_passive(peer, None, io);
+        }
+    }
+
+    /// Handles a peer that the join lost.
+    ///
+    /// A peer is lost when its dial fails, and with `contact` also when a contact that
+    /// got a `Join` closes, refuses us, or does not answer. A contact whose connection
+    /// ends is not lost: the connection may only have retired, and the reply comes on
+    /// the next one.
+    ///
+    /// The join replaces a lost contact with the next peer in the queue. When nothing is left
+    /// to try, the join ends, and fails if it brought no neighbor.
+    fn on_wave_peer_lost(&mut self, peer: PI, contact: bool, io: &mut impl IO<PI>) {
+        let Some(wave) = self.join_wave.as_mut() else {
+            return;
+        };
+        wave.dialing.remove(&peer);
+        if contact && wave.awaiting.remove(&peer) {
+            wave.slots += 1;
+        }
+        self.advance_wave(false, io);
+        if self.join_wave.as_ref().is_some_and(|wave| {
+            wave.queue.is_empty() && wave.dialing.is_empty() && wave.awaiting.is_empty()
+        }) {
+            self.end_wave(io);
+        }
+    }
+
+    /// Ends the join when it has its contacts, or has no peer left to wait for.
+    fn settle_wave(&mut self, io: &mut impl IO<PI>) {
+        let Some(wave) = self.join_wave.as_mut() else {
+            return;
+        };
+        // The neighbors that answered are no longer awaited.
+        let active = &self.active_view;
+        wave.awaiting.retain(|peer| !active.contains(peer));
+        // A contact without a pending join gets no retry, which would report it lost.
+        // Examples are a refused crossed request, and an evicted bootstrap peer.
+        let orphans: Vec<_> = wave
+            .awaiting
+            .iter()
+            .filter(|peer| !self.pending_joins.contains_key(peer))
+            .copied()
+            .collect();
+        for peer in orphans {
+            self.on_wave_peer_lost(peer, true, io);
+        }
+        // A join through fewer peers than it has slots cannot fill them all.
+        if self.join_wave.as_ref().is_some_and(|wave| {
+            wave.awaiting.is_empty()
+                && (wave.slots == 0 || (wave.queue.is_empty() && wave.dialing.is_empty()))
+        }) {
+            self.end_wave(io);
+        }
+    }
+
+    /// Ends the join. The peers it did not try or still dials go to the passive view.
+    fn end_wave(&mut self, io: &mut impl IO<PI>) {
+        let Some(wave) = self.join_wave.take() else {
+            return;
+        };
+        for peer in wave.queue.into_iter().chain(wave.dialing) {
+            self.add_passive(peer, None, io);
+        }
+        if wave.report && self.active_view.is_empty() {
+            match &mut self.join_deadline {
+                Some(deadline) => deadline.failed = true,
+                None => self.report_join_failed(io),
+            }
+        }
+    }
+
+    /// Emits [`Event::JoinFailed`], unless we have a neighbor.
+    fn report_join_failed(&self, io: &mut impl IO<PI>) {
+        if self.active_view.is_empty() {
+            debug!("join failed: no bootstrap peer worked out");
+            io.emit(Event::JoinFailed);
+        }
     }
 
     /// Sends a join to `peer`, and expects a reply.
@@ -622,6 +881,7 @@ where
     fn on_close(&mut self, peer: PI, reason: CloseReason, io: &mut impl IO<PI>) {
         let alive = reason.stays();
         self.pending_joins.remove(&peer);
+        self.on_wave_peer_lost(peer, true, io);
         if !alive {
             // The peer left the topic, a rejoin through it would fail.
             self.recent_neighbors.retain(|known| *known != peer);
@@ -653,6 +913,7 @@ where
 
     /// A connection was closed by the peer.
     fn handle_connection_closed(&mut self, peer: PI, io: &mut impl IO<PI>) {
+        self.on_wave_peer_lost(peer, false, io);
         let requested = self.pending_neighbor_requests.remove(&peer).is_some();
         if self.active_view.contains(&peer) {
             self.remove_active(&peer, RemovalReason::ConnectionClosed, io);
@@ -669,6 +930,8 @@ where
     }
 
     fn handle_quit(&mut self, io: &mut impl IO<PI>) {
+        self.join_wave = None;
+        self.join_deadline = None;
         for peer in self.active_view.clone().into_iter() {
             self.active_view.remove(&peer);
             self.send_close(peer, CloseReason::Shutdown, io);
@@ -734,8 +997,9 @@ where
     fn on_forward_join(&mut self, sender: PI, message: ForwardJoin<PI>, io: &mut impl IO<PI>) {
         let peer_id = message.peer.id;
         // Only a made-up walk names us: a node forwards a walk only while the peer is not its
-        // neighbor. A request to ourselves would make the runtime dial us.
-        if peer_id == self.me {
+        // neighbor. A request to ourselves would make the runtime dial us. Only a neighbor
+        // sends us a walk.
+        if peer_id == self.me || !self.active_view.contains(&sender) {
             return;
         }
         // If the peer is already in our active view, we renew our neighbor relationship.
@@ -746,6 +1010,10 @@ where
         // "i) If the time to live is equal to zero or if the number of nodes in p’s active view is equal to one,
         // it will add the new node to its active view (7)"
         else if message.ttl.expired() || self.active_view.len() <= 1 {
+            if !self.may_contact_named(&peer_id) {
+                self.add_passive(peer_id, message.peer.data, io);
+                return;
+            }
             self.insert_peer_info(message.peer, io);
             // Modification from paper: Instead of adding the peer directly to our active view,
             // we only send the Neighbor message. We will add the peer to our active view once we receive a
@@ -840,7 +1108,8 @@ where
     /// > Otherwise, node q accepts the Shuffle request and send back (p.8)
     fn on_shuffle(&mut self, from: PI, shuffle: Shuffle<PI>, io: &mut impl IO<PI>) {
         // A forward never goes back to the origin, so only a made-up shuffle names us.
-        if shuffle.origin == self.me {
+        // Only a neighbor sends us a shuffle.
+        if shuffle.origin == self.me || !self.active_view.contains(&from) {
             return;
         }
         if shuffle.ttl.expired() || self.active_view.len() <= 1 {
@@ -848,7 +1117,9 @@ where
             for node in shuffle.nodes {
                 self.add_passive(node.id, node.data, io);
             }
-            self.send_shuffle_reply(shuffle.origin, len, io);
+            if self.may_contact_named(&shuffle.origin) {
+                self.send_shuffle_reply(shuffle.origin, len, io);
+            }
         } else if let Some(node) = self
             .active_view
             .pick_random_without(&[&shuffle.origin, &from], &mut self.rng)
@@ -860,6 +1131,21 @@ where
             });
             io.send(*node, message);
         }
+    }
+
+    /// Returns whether we may contact `peer`, which a message of a neighbor named.
+    ///
+    /// A neighbor needs no dial. Other peers count against [`MAX_NAMED_CONTACTS_PER_PASS`].
+    fn may_contact_named(&mut self, peer: &PI) -> bool {
+        if self.active_view.contains(peer) {
+            return true;
+        }
+        if self.named_contacts >= MAX_NAMED_CONTACTS_PER_PASS {
+            debug!(other = ?peer, "too many named peers in this pass, do not contact");
+            return false;
+        }
+        self.named_contacts += 1;
+        true
     }
 
     fn send_shuffle_reply(&mut self, to: PI, len: usize, io: &mut impl IO<PI>) {
@@ -946,6 +1232,7 @@ where
     ///
     /// Other refills start when a neighbor leaves, and on shuffle replies.
     fn handle_maintenance_timer(&mut self, io: &mut impl IO<PI>) {
+        self.named_contacts = 0;
         // Neighbors that stay count as seen again, so that churn does not push
         // them out.
         let active: Vec<_> = self.active_view.iter().copied().collect();
@@ -956,9 +1243,7 @@ where
             self.passes_alone += 1;
             if backoff_due(self.passes_alone) {
                 debug!("no neighbors and no passive peers, rejoin");
-                for peer in self.bootstrap_peers.clone() {
-                    self.join_and_expect_reply(peer, io);
-                }
+                let mut peers: Vec<_> = self.bootstrap_peers.iter().copied().collect();
                 // The bootstrap peers may be gone for good. Also try a random
                 // recent neighbor that is not one of them.
                 let recent = self
@@ -966,9 +1251,8 @@ where
                     .iter()
                     .filter(|peer| !self.bootstrap_peers.contains(peer))
                     .choose(&mut self.rng);
-                if let Some(peer) = recent.copied() {
-                    self.join_and_expect_reply(peer, io);
-                }
+                peers.extend(recent.copied());
+                self.join_through(peers, false, io);
             }
         } else {
             self.passes_alone = 0;
@@ -1402,6 +1686,79 @@ mod tests {
         assert!(!walks, "{io:?}");
     }
 
+    /// Returns the peers that `io` sends a `NeighborRequest` or a `ShuffleReply` to.
+    fn contacted(io: &Io) -> Vec<u32> {
+        io.iter()
+            .filter_map(|event| match event {
+                TopicOut::SendMessage(
+                    peer,
+                    topic::Message::Swarm(Message::NeighborRequest(_) | Message::ShuffleReply(_)),
+                ) => Some(*peer),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Returns a walk that introduces `peer` and ends at the receiver.
+    fn last_walk(peer: u32) -> Message<u32> {
+        Message::ForwardJoin(ForwardJoin {
+            peer: PeerInfo {
+                id: peer,
+                data: None,
+            },
+            ttl: Ttl(0),
+        })
+    }
+
+    /// A walk or a shuffle from a peer that is not a neighbor makes us contact nobody.
+    #[test]
+    fn walks_and_shuffles_of_a_non_neighbor_are_ignored() {
+        let mut state = new_state();
+        state.active_view.insert(1);
+        let io = &mut Io::new();
+        state.handle(InEvent::RecvMessage(9, last_walk(5)), io);
+        state.handle(InEvent::RecvMessage(9, Message::test_shuffle(6, 0)), io);
+        assert!(contacted(io).is_empty(), "{io:?}");
+        // The same messages from a neighbor contact both peers.
+        state.handle(InEvent::RecvMessage(1, last_walk(5)), io);
+        state.handle(InEvent::RecvMessage(1, Message::test_shuffle(6, 0)), io);
+        assert_eq!(contacted(io), vec![5, 6]);
+    }
+
+    /// A neighbor makes us contact at most [`MAX_NAMED_CONTACTS_PER_PASS`] peers per pass.
+    ///
+    /// Walks and shuffles share the cap. A walk past the cap leaves its peer in the
+    /// passive view. The next pass allows more.
+    #[test]
+    fn named_contacts_are_capped_per_pass() {
+        let mut state = new_state();
+        state.active_view.insert(1);
+        let io = &mut Io::new();
+        let first = 100;
+        for peer in first..first + MAX_NAMED_CONTACTS_PER_PASS as u32 + 4 {
+            let message = match peer % 2 {
+                0 => last_walk(peer),
+                _ => Message::test_shuffle(peer, 0),
+            };
+            state.handle(InEvent::RecvMessage(1, message), io);
+        }
+        assert_eq!(contacted(io).len(), MAX_NAMED_CONTACTS_PER_PASS);
+        let over = first + MAX_NAMED_CONTACTS_PER_PASS as u32 + 2;
+        assert!(
+            state.passive_view.contains(&over),
+            "a capped walk lost its peer"
+        );
+        // A neighbor needs no dial, so a walk that names one is not capped.
+        state.active_view.insert(2);
+        io.clear();
+        state.handle(InEvent::RecvMessage(1, Message::test_shuffle(2, 0)), io);
+        assert_eq!(contacted(io), vec![2]);
+        state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
+        io.clear();
+        state.handle(InEvent::RecvMessage(1, last_walk(over)), io);
+        assert_eq!(contacted(io), vec![over]);
+    }
+
     /// A peer cannot make us send a message to ourselves.
     ///
     /// A forward join that introduces us, and a shuffle with us as its origin, both end at us.
@@ -1485,7 +1842,7 @@ mod tests {
         let mut contact = new_state();
         let mut joiner = State::new(1, None, Config::default(), StdRng::seed_from_u64(2));
         let io = &mut Io::new();
-        joiner.handle(InEvent::RequestJoin(0), io);
+        request_join(&mut joiner, vec![0], io);
         ferry(&mut joiner, &mut contact, io);
 
         // The joiner drops the contact, and the network delays its `Close`.
@@ -1500,7 +1857,7 @@ mod tests {
             })
             .collect();
         assert_eq!(late.len(), 1, "no Close");
-        joiner.handle(InEvent::RequestJoin(0), io);
+        request_join(&mut joiner, vec![0], io);
         ferry(&mut joiner, &mut contact, io);
         assert!(joiner.active_view.contains(&0) && contact.active_view.contains(&1));
 
@@ -1520,7 +1877,7 @@ mod tests {
         let mut state = new_state();
         state.active_view.insert(1);
         let mut io = Io::new();
-        state.handle(InEvent::RequestJoin(1), &mut io);
+        request_join(&mut state, vec![1], &mut io);
         assert!(joined(&io).is_empty(), "joining a neighbor sent a Join");
         assert!(
             state.pending_joins.is_empty(),
@@ -1546,7 +1903,7 @@ mod tests {
         joiner.active_view.insert(2);
         let mut contact = State::new(1, None, Config::default(), StdRng::seed_from_u64(2));
         let mut io = Io::new();
-        joiner.handle(InEvent::RequestJoin(1), &mut io);
+        request_join(&mut joiner, vec![1], &mut io);
         let timer = join_retry_timer(&io);
         assert!(io.iter().any(|event| matches!(event,
             TopicOut::ScheduleTimer(delay, topic::Timer::Swarm(Timer::RetryJoin(..)))
@@ -1573,7 +1930,7 @@ mod tests {
         let mut joiner = new_state();
         let mut contact = State::new(1, None, Config::default(), StdRng::seed_from_u64(2));
         let mut io = Io::new();
-        joiner.handle(InEvent::RequestJoin(1), &mut io);
+        request_join(&mut joiner, vec![1], &mut io);
         let timer = join_retry_timer(&io);
         assert_eq!(ferry(&mut joiner, &mut contact, &mut io), 2);
         assert!(joiner.pending_joins.is_empty());
@@ -1597,7 +1954,7 @@ mod tests {
         ] {
             let mut state = new_state();
             let mut io = Io::new();
-            state.handle(InEvent::RequestJoin(1), &mut io);
+            request_join(&mut state, vec![1], &mut io);
             let timer = join_retry_timer(&io);
             state.handle(InEvent::RecvMessage(1, response), &mut io);
             assert!(state.pending_joins.is_empty());
@@ -1614,7 +1971,7 @@ mod tests {
     fn join_retry_ignores_superseded_and_evicted_requests() {
         let mut state = new_state();
         let mut io = Io::new();
-        state.handle(InEvent::RequestJoin(1), &mut io);
+        request_join(&mut state, vec![1], &mut io);
         let old = join_retry_timer(&io);
         io.clear();
         state.handle(
@@ -1626,7 +1983,7 @@ mod tests {
             ),
             &mut io,
         );
-        state.handle(InEvent::RequestJoin(1), &mut io);
+        request_join(&mut state, vec![1], &mut io);
         let current = join_retry_timer(&io);
         io.clear();
         state.handle(InEvent::TimerExpired(old), &mut io);
@@ -1635,12 +1992,11 @@ mod tests {
         assert_eq!(joined(&io), vec![1]);
 
         let mut evicted_io = Io::new();
-        state.handle(InEvent::RequestJoin(1), &mut evicted_io);
+        request_join(&mut state, vec![1], &mut evicted_io);
         let evicted = join_retry_timer(&evicted_io);
         for peer in 2..=MAX_BOOTSTRAP_PEERS as u32 + 1 {
-            state.handle(InEvent::RequestJoin(peer), &mut Io::new());
+            state.handle(InEvent::RequestJoin(vec![peer]), &mut Io::new());
         }
-        assert_eq!(state.pending_joins.len(), MAX_BOOTSTRAP_PEERS);
         assert!(!state.pending_joins.contains_key(&1));
         io.clear();
         state.handle(InEvent::TimerExpired(evicted), &mut io);
@@ -1652,7 +2008,7 @@ mod tests {
         let mut joiner = new_state();
         let mut contact = State::new(1, None, Config::default(), StdRng::seed_from_u64(2));
         let mut io = Io::new();
-        joiner.handle(InEvent::RequestJoin(1), &mut io);
+        request_join(&mut joiner, vec![1], &mut io);
         let timer = join_retry_timer(&io);
         io.clear();
         contact.handle(InEvent::RecvMessage(0, Message::Join(None)), &mut io);
@@ -1675,7 +2031,7 @@ mod tests {
         let mut joiner = State::new(1, None, Config::default(), StdRng::seed_from_u64(2));
         let io = &mut Io::new();
 
-        joiner.handle(InEvent::RequestJoin(0), io);
+        request_join(&mut joiner, vec![0], io);
         let messages = ferry(&mut joiner, &mut contact, io);
 
         assert_eq!(messages, 2, "join, neighbor reply");
@@ -1751,7 +2107,7 @@ mod tests {
         let io = &mut Io::new();
 
         us.send_neighbor(1, Priority::High, io);
-        peer.handle(InEvent::RequestJoin(0), io);
+        request_join(&mut peer, vec![0], io);
         let messages = ferry(&mut us, &mut peer, io);
 
         assert_eq!(messages, 4, "request, join, reply, reply");
@@ -2152,7 +2508,7 @@ mod tests {
         let io = &mut Io::new();
         assert!(!state.wants_connection(&1));
         // A pending join.
-        state.handle(InEvent::RequestJoin(1), io);
+        state.handle(InEvent::RequestJoin(vec![1]), io);
         assert!(state.wants_connection(&1));
         // A neighbor.
         state.handle(InEvent::RecvMessage(1, Message::Join(None)), io);
@@ -2174,7 +2530,7 @@ mod tests {
         state.handle(InEvent::PeerDisconnected(1), io);
         assert!(!state.wants_connection(&1));
         // A join that the peer answers with a close.
-        state.handle(InEvent::RequestJoin(2), io);
+        state.handle(InEvent::RequestJoin(vec![2]), io);
         assert!(state.wants_connection(&2));
         state.handle(
             InEvent::RecvMessage(
@@ -2193,13 +2549,246 @@ mod tests {
     fn refused_join_is_not_wanted() {
         let mut state = new_state();
         let io = &mut Io::new();
-        state.handle(InEvent::RequestJoin(1), io);
+        state.handle(InEvent::RequestJoin(vec![1]), io);
         assert!(state.wants_connection(&1));
         state.handle(InEvent::PeerRefused(1), io);
         assert!(!state.wants_connection(&1));
         io.clear();
         state.handle(InEvent::TimerExpired(Timer::RetryJoin(1, 0)), io);
         assert!(joined(io).is_empty());
+    }
+
+    /// Returns the peers that `io` asked to connect to.
+    fn connects(io: &Io) -> Vec<u32> {
+        io.iter()
+            .filter_map(|event| match event {
+                TopicOut::Connect(peer) => Some(*peer),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Answers the connects in `io` as a runtime with live peers does.
+    fn connect_all(state: &mut State<u32, StdRng>, io: &mut Io) {
+        for peer in connects(io) {
+            state.handle(InEvent::PeerConnected(peer), io);
+        }
+    }
+
+    /// Joins through `peers`, and connects the peers that the join dials.
+    fn request_join(state: &mut State<u32, StdRng>, peers: Vec<u32>, io: &mut Io) {
+        state.handle(InEvent::RequestJoin(peers), io);
+        connect_all(state, io);
+    }
+
+    /// A state with a join of `peers` in progress, and the connects it asked for.
+    fn joining(peers: std::ops::RangeInclusive<u32>) -> (State<u32, StdRng>, Io) {
+        let mut state = new_state();
+        let mut io = Io::new();
+        state.handle(InEvent::RequestJoin(peers.collect()), &mut io);
+        (state, io)
+    }
+
+    /// A join through a long list of peers takes linear time, and drops the duplicates.
+    ///
+    /// The list comes from the application. With a check for duplicates per peer, it
+    /// took quadratic time in the actor.
+    #[test]
+    fn join_through_a_long_list_is_fast() {
+        let peers: Vec<u32> = (1..=30_000).chain(1..=30_000).collect();
+        let start = std::time::Instant::now();
+        let mut state = new_state();
+        let mut io = Io::new();
+        state.handle(InEvent::RequestJoin(peers), &mut io);
+        state.handle(InEvent::RequestJoin((1..=30_000).collect()), &mut io);
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "took {:?}",
+            start.elapsed()
+        );
+        assert_eq!(connects(&io), vec![1, 2, 3, 4, 5]);
+        let wave = state.join_wave.as_ref().expect("a join runs");
+        assert_eq!(wave.queue.len(), 30_000 - 5);
+        assert_eq!(wave.queue.front(), Some(&6));
+    }
+
+    /// A join of more peers than it needs connects first, and sends no `Join` yet.
+    #[test]
+    fn join_connects_a_wave_before_it_sends() {
+        let (state, io) = joining(1..=20);
+        assert_eq!(connects(&io), vec![1, 2, 3, 4, 5]);
+        assert!(joined(&io).is_empty());
+        assert!(state.wants_connection(&1) && !state.wants_connection(&6));
+    }
+
+    /// The first peers to connect get the `Join`, and the rest go to the passive view.
+    #[test]
+    fn join_sends_to_the_first_connected_only() {
+        let (mut state, _) = joining(1..=20);
+        let mut io = Io::new();
+        for peer in [4, 2, 5, 1, 3] {
+            state.handle(InEvent::PeerConnected(peer), &mut io);
+        }
+        assert_eq!(joined(&io), vec![4, 2]);
+        assert!(connects(&io).is_empty(), "dialed more than it needs");
+        for peer in [5, 1, 3] {
+            assert!(state.passive_view.contains(&peer));
+            assert!(
+                !state.wants_connection(&peer),
+                "an unused peer stays wanted"
+            );
+        }
+        // The peers it never dialed are passive candidates as well, once the contacts answer.
+        for peer in [4, 2] {
+            state.handle(
+                InEvent::RecvMessage(peer, Message::NeighborReply(None)),
+                &mut io,
+            );
+        }
+        assert!(state.join_wave.is_none());
+        assert!((6..=20).all(|peer| state.passive_view.contains(&peer)));
+        assert!(state.active_view.contains(&4) && state.active_view.contains(&2));
+    }
+
+    /// A dial that fails brings the next peer, and the join does not fail while a peer is left.
+    #[test]
+    fn join_replaces_a_failed_dial() {
+        let (mut state, _) = joining(1..=20);
+        let mut io = Io::new();
+        // Enough dials stay in flight, so the first failures bring no new dial.
+        for peer in 1..=3 {
+            state.handle(InEvent::PeerDisconnected(peer), &mut io);
+        }
+        assert!(connects(&io).is_empty());
+        state.handle(InEvent::PeerDisconnected(4), &mut io);
+        assert_eq!(connects(&io), vec![6]);
+        io.clear();
+        state.handle(InEvent::PeerConnected(5), &mut io);
+        state.handle(InEvent::PeerConnected(6), &mut io);
+        assert_eq!(joined(&io), vec![5, 6]);
+        // A contact that closes is replaced by the next peer.
+        io.clear();
+        let close = Message::Close(Close {
+            reason: CloseReason::Shutdown,
+        });
+        state.handle(InEvent::RecvMessage(5, close), &mut io);
+        assert_eq!(connects(&io), vec![7]);
+        state.handle(InEvent::PeerConnected(7), &mut io);
+        assert_eq!(joined(&io), vec![7]);
+        assert_eq!(join_failed(&io), 0);
+    }
+
+    /// A join whose dials fail at once fails only at its deadline.
+    ///
+    /// iroh fails a dial at once when it has no address for the peer yet.
+    #[test]
+    fn join_with_failed_dials_fails_at_the_deadline() {
+        let (mut state, mut io) = joining(1..=2);
+        assert_eq!(connects(&io), vec![1, 2]);
+        assert!(joined(&io).is_empty());
+        state.handle(InEvent::PeerDisconnected(1), &mut io);
+        state.handle(InEvent::PeerDisconnected(2), &mut io);
+        assert!(state.join_wave.is_none());
+        assert_eq!(join_failed(&io), 0, "failed before the deadline");
+        expire_join_deadline(&mut state, &mut io);
+        assert_eq!(join_failed(&io), 1);
+    }
+
+    /// A join through a peer that is not on the topic yet does not fail, as the peer can join us.
+    ///
+    /// Two nodes that join through each other at the same time can do this.
+    #[test]
+    fn join_through_a_peer_not_on_the_topic_yet_does_not_fail() {
+        let (mut state, mut io) = joining(1..=1);
+        connect_all(&mut state, &mut io);
+        assert_eq!(joined(&io), vec![1]);
+        state.handle(InEvent::RecvMessage(1, Message::left()), &mut io);
+        assert!(state.join_wave.is_none());
+        state.handle(InEvent::RecvMessage(1, Message::Join(None)), &mut io);
+        expire_join_deadline(&mut state, &mut io);
+        assert!(state.active_view.contains(&1));
+        assert_eq!(join_failed(&io), 0);
+    }
+
+    /// A second join during a join sends no second `Join`, and adds no contact.
+    #[test]
+    fn join_during_a_join_keeps_its_contacts() {
+        let (mut state, mut io) = joining(1..=20);
+        connect_all(&mut state, &mut io);
+        assert_eq!(joined(&io), vec![1, 2]);
+        let mut io = Io::new();
+        request_join(&mut state, (1..=20).collect(), &mut io);
+        assert!(joined(&io).is_empty(), "a peer got a second Join");
+        assert!(connects(&io).is_empty(), "dialed more than it needs");
+        for peer in [1, 2] {
+            state.handle(
+                InEvent::RecvMessage(peer, Message::NeighborReply(None)),
+                &mut io,
+            );
+        }
+        assert!(state.join_wave.is_none());
+        assert_eq!(state.active_view.len(), 2);
+    }
+
+    /// A contact without a pending join counts as lost, so the join does not wait for it.
+    #[test]
+    fn join_replaces_a_contact_with_no_pending_join() {
+        let (mut state, mut io) = joining(1..=20);
+        connect_all(&mut state, &mut io);
+        // Eight newer bootstrap peers evict the pending joins of the contacts.
+        let mut io = Io::new();
+        state.handle(InEvent::RequestJoin((21..=28).collect()), &mut io);
+        assert_eq!(connects(&io), vec![6, 7]);
+    }
+
+    /// A dialed peer that became a neighbor meanwhile counts as a contact, and gets no `Join`.
+    #[test]
+    fn join_counts_a_new_neighbor_as_a_contact() {
+        let (mut state, _) = joining(1..=20);
+        let mut io = Io::new();
+        let request = Message::NeighborRequest(NeighborRequest {
+            priority: Priority::High,
+            data: None,
+        });
+        state.handle(InEvent::RecvMessage(1, request), &mut io);
+        assert!(state.active_view.contains(&1));
+        for peer in [1, 2, 3] {
+            state.handle(InEvent::PeerConnected(peer), &mut io);
+        }
+        assert_eq!(joined(&io), vec![2]);
+        state.handle(
+            InEvent::RecvMessage(2, Message::NeighborReply(None)),
+            &mut io,
+        );
+        assert!(state.join_wave.is_none());
+    }
+
+    /// A join through fewer peers than it has slots ends once they answered.
+    #[test]
+    fn join_through_one_peer_ends() {
+        let (mut state, mut io) = joining(1..=1);
+        connect_all(&mut state, &mut io);
+        state.handle(
+            InEvent::RecvMessage(1, Message::NeighborReply(None)),
+            &mut io,
+        );
+        assert!(state.join_wave.is_none());
+        assert_eq!(join_failed(&io), 0);
+    }
+
+    /// The peers that a join still dials when it ends go to the passive view.
+    #[test]
+    fn join_end_keeps_the_peers_it_dials() {
+        let (mut state, mut io) = joining(1..=20);
+        for peer in [1, 2] {
+            state.handle(InEvent::PeerConnected(peer), &mut io);
+            state.handle(
+                InEvent::RecvMessage(peer, Message::NeighborReply(None)),
+                &mut io,
+            );
+        }
+        assert!(state.join_wave.is_none());
+        assert!((3..=20).all(|peer| state.passive_view.contains(&peer)));
     }
 
     /// Fires the one-shot timers in `io` in rounds, until no new one comes.
@@ -2231,9 +2820,8 @@ mod tests {
     /// Else its connection stays open, as neither side retires it.
     #[test]
     fn unanswered_join_stops_wanting_the_peer() {
-        let mut state = new_state();
-        let mut io = Io::new();
-        state.handle(InEvent::RequestJoin(1), &mut io);
+        let (mut state, mut io) = joining(1..=1);
+        connect_all(&mut state, &mut io);
         assert_eq!(joined(&io), vec![1]);
         assert!(state.wants_connection(&1));
         expire_one_shot_timers(&mut state, &mut io);
@@ -2243,7 +2831,112 @@ mod tests {
         );
     }
 
-    /// Returns the peers that got a join.
+    /// Expires the deadlines of the join requests in `io`.
+    fn expire_join_deadline(state: &mut State<u32, StdRng>, io: &mut Io) {
+        let timers: Vec<_> = io
+            .iter()
+            .filter_map(|event| match event {
+                TopicOut::ScheduleTimer(_, topic::Timer::Swarm(timer @ Timer::JoinDeadline(_))) => {
+                    Some(timer.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        for timer in timers {
+            state.handle(InEvent::TimerExpired(timer), io);
+        }
+    }
+
+    fn join_failed(io: &Io) -> usize {
+        io.iter()
+            .filter(|event| matches!(event, TopicOut::EmitEvent(Event::JoinFailed)))
+            .count()
+    }
+
+    /// A join fails when every peer failed, once, and not before its deadline.
+    #[test]
+    fn join_fails_when_no_peer_works() {
+        let (mut state, mut io) = joining(1..=7);
+        // Dials fail one after the other, and each brings the next peer.
+        for peer in 1..=7 {
+            state.handle(InEvent::PeerDisconnected(peer), &mut io);
+        }
+        assert_eq!(join_failed(&io), 0);
+        expire_join_deadline(&mut state, &mut io);
+        assert_eq!(join_failed(&io), 1);
+        assert!(state.join_wave.is_none());
+        assert!(!state.wants_connection(&1));
+    }
+
+    /// A join of few peers fails too, also when they answer with a close.
+    #[test]
+    fn join_fails_when_the_contacts_close() {
+        let (mut state, mut io) = joining(1..=2);
+        connect_all(&mut state, &mut io);
+        let close = || {
+            Message::Close(Close {
+                reason: CloseReason::Shutdown,
+            })
+        };
+        state.handle(InEvent::RecvMessage(1, close()), &mut io);
+        assert_eq!(join_failed(&io), 0);
+        state.handle(InEvent::RecvMessage(2, close()), &mut io);
+        expire_join_deadline(&mut state, &mut io);
+        assert_eq!(join_failed(&io), 1);
+    }
+
+    /// A silent contact fails the join, and the end of its connection does not.
+    ///
+    /// The connection can end by a retire, and the reply then comes on the next one.
+    #[test]
+    fn join_fails_when_the_contacts_stay_silent() {
+        let (mut state, mut io) = joining(1..=2);
+        connect_all(&mut state, &mut io);
+        state.handle(InEvent::PeerDisconnected(1), &mut io);
+        state.handle(InEvent::PeerDisconnected(2), &mut io);
+        // The deadline passes first, so the end of the join reports at once.
+        expire_join_deadline(&mut state, &mut io);
+        assert_eq!(join_failed(&io), 0);
+        let timers: Vec<_> = io
+            .iter()
+            .filter_map(|event| match event {
+                TopicOut::ScheduleTimer(_, topic::Timer::Swarm(timer @ Timer::RetryJoin(..))) => {
+                    Some(timer.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        for timer in timers {
+            state.handle(InEvent::TimerExpired(timer), &mut io);
+        }
+        assert_eq!(join_failed(&io), 1);
+    }
+
+    /// A join that has a neighbor does not fail, and a rejoin does not fail either.
+    #[test]
+    fn join_with_a_neighbor_or_a_rejoin_does_not_fail() {
+        let (mut state, mut io) = joining(1..=2);
+        connect_all(&mut state, &mut io);
+        state.handle(
+            InEvent::RecvMessage(1, Message::NeighborReply(None)),
+            &mut io,
+        );
+        state.handle(InEvent::PeerRefused(2), &mut io);
+        // The neighbor that the join brought leaves before the deadline.
+        let close = Message::Close(Close {
+            reason: CloseReason::Shutdown,
+        });
+        state.handle(InEvent::RecvMessage(1, close), &mut io);
+        expire_join_deadline(&mut state, &mut io);
+        assert_eq!(join_failed(&io), 0);
+
+        let mut state = new_state();
+        let mut io = Io::new();
+        state.join_through(vec![1], false, &mut io);
+        state.handle(InEvent::PeerDisconnected(1), &mut io);
+        assert_eq!(join_failed(&io), 0);
+    }
+
     fn joined(io: &Io) -> Vec<u32> {
         io.iter()
             .filter_map(|event| match event {
@@ -2262,6 +2955,7 @@ mod tests {
         state.active_view.remove(&1);
         let io = &mut Io::new();
         state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
+        connect_all(&mut state, io);
         assert_eq!(joined(io), vec![1]);
     }
 
@@ -2279,6 +2973,7 @@ mod tests {
             state.active_view.remove(&2);
             let io = &mut Io::new();
             state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
+            connect_all(&mut state, io);
             assert_eq!(joined(io), vec![1, 2], "seed {seed}");
         }
     }
@@ -2302,6 +2997,7 @@ mod tests {
 
         let io = &mut Io::new();
         state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
+        connect_all(&mut state, io);
         assert_eq!(joined(io), vec![1]);
     }
 
@@ -2336,7 +3032,7 @@ mod tests {
     #[test]
     fn maintenance_rejoins_when_isolated() {
         let mut state = new_state();
-        state.handle(InEvent::RequestJoin(1), &mut Io::new());
+        state.handle(InEvent::RequestJoin(vec![1]), &mut Io::new());
         let accept = Message::NeighborRequest(NeighborRequest {
             priority: Priority::High,
             data: None,
@@ -2349,6 +3045,7 @@ mod tests {
 
         let io = &mut Io::new();
         state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
+        connect_all(&mut state, io);
         assert_eq!(joined(io), vec![1], "no rejoin through the bootstrap peer");
     }
 
@@ -2358,13 +3055,14 @@ mod tests {
     #[test]
     fn reply_to_a_rejoin_is_accepted() {
         let mut state = new_state();
-        state.handle(InEvent::RequestJoin(1), &mut Io::new());
+        state.handle(InEvent::RequestJoin(vec![1]), &mut Io::new());
         let close = Message::Close(Close {
             reason: CloseReason::Shutdown,
         });
         state.handle(InEvent::RecvMessage(1, close), &mut Io::new());
         let io = &mut Io::new();
         state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
+        connect_all(&mut state, io);
         assert_eq!(joined(io), vec![1], "no rejoin");
         let reply = Message::NeighborReply(None);
         state.handle(InEvent::RecvMessage(1, reply), &mut Io::new());
@@ -2375,7 +3073,8 @@ mod tests {
     #[test]
     fn rejoins_back_off() {
         let mut state = new_state();
-        state.handle(InEvent::RequestJoin(1), &mut Io::new());
+        state.handle(InEvent::RequestJoin(vec![1]), &mut Io::new());
+        state.handle(InEvent::PeerDisconnected(1), &mut Io::new());
         let mut rejoins = Vec::new();
         for tick in 0..60 {
             let io = &mut Io::new();
@@ -2385,8 +3084,9 @@ mod tests {
                 TopicOut::ScheduleTimer(delay, topic::Timer::Swarm(Timer::DoMaintenance))
                     if *delay == MAINTENANCE_INTERVAL
             )));
-            if !joined(io).is_empty() {
+            if !connects(io).is_empty() {
                 rejoins.push(tick);
+                state.handle(InEvent::PeerDisconnected(1), io);
             }
         }
         assert_eq!(rejoins, vec![0, 1, 3, 7, 11, 23, 35, 47, 59]);
@@ -2396,7 +3096,7 @@ mod tests {
     #[test]
     fn rejoin_backoff_resets_after_recovery() {
         let mut state = new_state();
-        state.handle(InEvent::RequestJoin(1), &mut Io::new());
+        state.handle(InEvent::RequestJoin(vec![1]), &mut Io::new());
         for _ in 0..60 {
             state.handle(InEvent::TimerExpired(Timer::DoMaintenance), &mut Io::new());
         }
@@ -2416,6 +3116,7 @@ mod tests {
         state.handle(InEvent::PeerDisconnected(1), &mut Io::new());
         let io = &mut Io::new();
         state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
+        connect_all(&mut state, io);
         assert_eq!(joined(io), vec![1]);
     }
 
@@ -2465,7 +3166,7 @@ mod tests {
         let mut state = new_state();
         let max = MAX_BOOTSTRAP_PEERS as u32;
         for peer in 1..=max + 5 {
-            state.handle(InEvent::RequestJoin(peer), &mut Io::new());
+            state.handle(InEvent::RequestJoin(vec![peer]), &mut Io::new());
         }
         assert_eq!(state.bootstrap_peers.len(), MAX_BOOTSTRAP_PEERS);
         assert!(
@@ -2473,9 +3174,9 @@ mod tests {
             "the oldest contacts go first"
         );
         // A repeated contact moves to the newest place instead of growing the set.
-        state.handle(InEvent::RequestJoin(7), &mut Io::new());
+        state.handle(InEvent::RequestJoin(vec![7]), &mut Io::new());
         assert_eq!(state.bootstrap_peers.len(), MAX_BOOTSTRAP_PEERS);
-        state.handle(InEvent::RequestJoin(max + 6), &mut Io::new());
+        state.handle(InEvent::RequestJoin(vec![max + 6]), &mut Io::new());
         assert!(
             !state.bootstrap_peers.contains(&6),
             "the oldest contact goes"
@@ -2485,14 +3186,33 @@ mod tests {
             "a repeated contact stays"
         );
 
-        // An isolated node rejoins through every remembered contact.
+        // The dials fail, so the join ends.
+        while let Some(peer) = state
+            .join_wave
+            .as_ref()
+            .and_then(|wave| wave.dialing.iter().next().copied())
+        {
+            state.handle(InEvent::PeerDisconnected(peer), &mut Io::new());
+        }
+        assert!(state.join_wave.is_none());
+
+        // An isolated node rejoins through the remembered contacts, a few at a time.
         let io = &mut Io::new();
         state.handle(InEvent::TimerExpired(Timer::DoMaintenance), io);
-        let mut rejoined = joined(io);
-        rejoined.sort();
-        let mut expected: Vec<u32> = state.bootstrap_peers.iter().copied().collect();
-        expected.sort();
-        assert_eq!(rejoined, expected);
+        assert!(joined(io).is_empty(), "joined before it connected");
+        let dialed = connects(io);
+        assert_eq!(dialed.len(), Config::default().join_dials);
+        assert!(dialed
+            .iter()
+            .all(|peer| state.bootstrap_peers.contains(peer)));
+    }
+
+    /// From a long list, the first peers stay as bootstrap peers, as the join tries them first.
+    #[test]
+    fn bootstrap_peers_keep_the_front_of_a_long_list() {
+        let (state, _) = joining(1..=20);
+        let max = MAX_BOOTSTRAP_PEERS as u32;
+        assert!(state.bootstrap_peers.iter().copied().eq(1..=max));
     }
 
     /// Returns the peers that `io` sent a `Neighbor`.
@@ -2949,7 +3669,7 @@ mod tests {
                 _ => None,
             }));
         };
-        handle(InEvent::RequestJoin(1));
+        handle(InEvent::RequestJoin(vec![1]));
         for _ in 0..7 {
             handle(InEvent::TimerExpired(Timer::DoShuffle));
         }

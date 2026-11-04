@@ -16,6 +16,11 @@ pub enum Error {
     /// [`Gossip::shutdown`]: crate::Gossip::shutdown
     #[error("the gossip actor stopped")]
     Closed,
+    /// The join got no neighbor from its bootstrap peers, see [`Event::JoinFailed`].
+    ///
+    /// [`Event::JoinFailed`]: crate::api::Event::JoinFailed
+    #[error("join failed: no bootstrap peer could be joined")]
+    JoinFailed,
     /// The message content is over the limit, see [`GossipSender::max_content_size`].
     ///
     /// [`GossipSender::max_content_size`]: crate::api::GossipSender::max_content_size

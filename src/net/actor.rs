@@ -449,7 +449,9 @@ impl Actor {
             async move { (peer_id, id, connection_loop(args).await) }
                 .instrument(error_span!("conn", peer = %peer_id.fmt_short())),
         );
-        self.perform_peer_actions(peer_id, actions, Instant::now());
+        let now = Instant::now();
+        self.perform_peer_actions(peer_id, actions, now);
+        self.handle_in_event(InEvent::PeerConnected(peer_id), now);
     }
 
     /// Performs the actions that the state of a peer returned.
@@ -749,6 +751,19 @@ impl IO<PublicKey> for ActorIO<'_> {
             "open queue without a connection or a dial"
         );
         dropped
+    }
+
+    fn connect(&mut self, peer_id: PublicKey) {
+        let state = &mut *self.state;
+        let peer = state.peers.get_or_insert(peer_id);
+        self.opened_queue |= peer.queue.is_closed();
+        peer.queue.open();
+        if peer.conn_count() > 0 {
+            state.follow_ups.push_back(InEvent::PeerConnected(peer_id));
+        } else if !state.dialer.is_dialing(peer_id) {
+            debug!(peer = %peer_id.fmt_short(), "start to dial");
+            state.dialer.queue_dial(peer_id);
+        }
     }
 
     fn emit(&mut self, topic_id: TopicId, event: ProtoEvent) {
