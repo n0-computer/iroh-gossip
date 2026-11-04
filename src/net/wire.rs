@@ -14,10 +14,7 @@ use crate::proto::TopicId;
 ///
 /// A peer extends its flow control window only after it read part of it, so
 /// the writes to a slow reader block for a while now and then.
-#[cfg(not(test))]
-const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
-#[cfg(test)]
-pub(super) const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const WRITE_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 5 } else { 60 });
 
 /// How long opening a stream may wait at the stream limit of the peer before it fails the connection.
 ///
@@ -25,10 +22,7 @@ pub(super) const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// topics as the limit, the wait does not end. The limit is the
 /// `max_concurrent_uni_streams` of the peer's endpoint, 100 by default. A
 /// stalled open of an initial topic only skips the other initial topics.
-#[cfg(not(test))]
-pub(super) const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
-#[cfg(test)]
-pub(super) const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const OPEN_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 5 } else { 15 });
 
 /// The flag of [`StreamHeader::handles_close`].
 const HANDLES_CLOSE: u8 = 1;
@@ -73,7 +67,7 @@ pub(super) enum WriteError {
 /// a header, as they ignore the rest of a frame.
 #[derive(Debug)]
 pub(super) struct StreamHeader {
-    pub(super) topic_id: TopicId,
+    pub(super) topic: TopicId,
     /// Whether the sender drops its state for a peer whose connection closes.
     ///
     /// A node without it loses every later message to a peer that closes a
@@ -100,23 +94,23 @@ impl StreamHeader {
     }
 
     fn decode(frame: &[u8]) -> Result<Self, ReadError> {
-        let (topic_id, rest) = postcard::take_from_bytes::<TopicId>(frame)?;
+        let (topic, rest) = postcard::take_from_bytes::<TopicId>(frame)?;
         Ok(Self {
-            topic_id,
+            topic,
             handles_close: rest.first().is_some_and(|flags| flags & HANDLES_CLOSE != 0),
         })
     }
 
-    /// Writes the header that we send on a stream for `topic_id`.
+    /// Writes the header that we send on a stream for `topic`.
     ///
     /// We always set [`Self::handles_close`].
     pub(super) async fn write(
-        topic_id: TopicId,
+        topic: TopicId,
         stream: &mut SendStream,
         buffer: &mut Vec<u8>,
         max_message_size: usize,
     ) -> Result<(), WriteError> {
-        write_frame(stream, &(topic_id, HANDLES_CLOSE), buffer, max_message_size).await
+        write_message(stream, &(topic, HANDLES_CLOSE), buffer, max_message_size).await
     }
 }
 
@@ -143,7 +137,7 @@ pub(super) enum ReadError {
 }
 
 /// Read a length-prefixed frame and decode with postcard.
-pub(super) async fn read_frame<T: DeserializeOwned>(
+pub(super) async fn read_message<T: DeserializeOwned>(
     reader: &mut RecvStream,
     buffer: &mut BytesMut,
     max_message_size: usize,
@@ -181,18 +175,18 @@ pub(super) async fn read_lp<'a>(
 }
 
 /// Writes a length-prefixed frame.
-pub(super) async fn write_frame<T: Serialize>(
+pub(super) async fn write_message<T: Serialize>(
     stream: &mut SendStream,
     message: &T,
     buffer: &mut Vec<u8>,
     max_message_size: usize,
 ) -> Result<(), WriteError> {
     let len = postcard::experimental::serialized_size(&message)?;
-    write_sized_frame(stream, message, len, buffer, max_message_size).await
+    write_sized_message(stream, message, len, buffer, max_message_size).await
 }
 
 /// Writes a length-prefixed frame of `message`, whose encoded size is `len`.
-pub(super) async fn write_sized_frame<T: Serialize>(
+pub(super) async fn write_sized_message<T: Serialize>(
     stream: &mut SendStream,
     message: &T,
     len: usize,
@@ -243,11 +237,11 @@ mod tests {
         assert_eq!(read_by_old.topic_id, topic_id);
 
         let header = StreamHeader::decode(&old).expect("new reads old");
-        assert_eq!(header.topic_id, topic_id);
+        assert_eq!(header.topic, topic_id);
         assert!(!header.handles_close);
 
         let header = StreamHeader::decode(&new).expect("new reads new");
-        assert_eq!(header.topic_id, topic_id);
+        assert_eq!(header.topic, topic_id);
         assert!(header.handles_close);
     }
 }

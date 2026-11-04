@@ -6,7 +6,7 @@ async fn reopened_queue_keeps_the_waiting_writer() {
     let topic = [42; 32].into();
     let mut peer = open_peer(queue::MIN_QUEUE_SIZE);
     let lease = peer.handle_connection(Side::Server, 1).unwrap();
-    peer.close_queue();
+    peer.queue.close();
     let mut reader = lease.lock().await;
     assert!(*lease.closing().borrow(), "the queue is closed");
 
@@ -14,7 +14,7 @@ async fn reopened_queue_keeps_the_waiting_writer() {
     assert!(matches!(peer.send(message.clone()), Pushed::Queued));
     assert!(!lease.revoked().is_cancelled());
     assert!(!peer.needs_dial(), "the waiting writer takes the queue");
-    assert!(reader.next().await);
+    assert!(reader.wait_next().await);
     assert_eq!(reader.current().unwrap().message.message, message.message);
 }
 
@@ -40,7 +40,7 @@ fn completed_dial_leaves_an_existing_writer() {
     assert!(is_idle(&peer));
 
     let mut peer = open_peer(queue::MIN_QUEUE_SIZE);
-    peer.close_queue();
+    peer.queue.close();
     let first = peer.handle_connection(Side::Server, 1).unwrap();
     let second = peer.handle_connection(Side::Server, 2).unwrap();
     let late = peer.handle_connection(Side::Client, 3);
@@ -76,10 +76,10 @@ async fn discarded_queue_goes_out_on_its_writer() {
     assert!(!aborted.is_cancelled());
 
     let mut reader = lease.lock().await;
-    assert!(reader.next().await);
+    assert!(reader.wait_next().await);
     assert_eq!(reader.current().unwrap().message.message, message.message);
     reader.advance();
-    assert!(!reader.next().await, "the old queue must end");
+    assert!(!reader.wait_next().await, "the old queue must end");
 }
 
 /// A failed dial does not disconnect a peer whose connection still writes a closed queue.
@@ -91,9 +91,9 @@ async fn failed_dial_leaves_the_draining_writer() -> Result {
     let _lease = state.handle_connection(Side::Server, 1).unwrap();
     let aborted = state.aborted.clone();
     state.send(join_message([8; 32].into(), 0));
-    state.close_queue();
+    state.queue.close();
     actor.peers.insert(peer_id, state);
-    actor.handle_dial_failed(peer_id);
+    actor.on_dial_failed(peer_id);
     assert_eq!(
         actor.peers[&peer_id].writer,
         Some(1),
@@ -132,7 +132,7 @@ fn lost_writer_of_a_closed_queue_drops_it() {
     let mut peer = open_peer(queue::MIN_QUEUE_SIZE);
     let _writer = peer.handle_connection(Side::Server, 1).unwrap();
     peer.send(join_message([9; 32].into(), 0));
-    peer.close_queue();
+    peer.queue.close();
     assert_eq!(peer.connection_finished(1, now, false), Finished::Quiet);
     assert!(is_idle(&peer));
     assert!(!peer.needs_dial(), "no dial for a closed peer");
@@ -147,10 +147,10 @@ fn dropped_message_reopens_a_closed_queue() {
     while matches!(peer.send(numbered(topic, i)), Pushed::Queued) {
         i += 1;
     }
-    peer.close_queue();
+    peer.queue.close();
     assert!(!peer.needs_dial(), "a closed queue needs no dial");
     assert!(matches!(peer.send(numbered(topic, i)), Pushed::Dropped(_)));
-    assert!(!peer.queue.is_closing());
+    assert!(!peer.queue.is_closed());
     assert!(peer.needs_dial(), "the reopened queue has no writer");
 }
 
@@ -240,7 +240,7 @@ async fn answer_to_an_unused_peer_closes_its_queue() -> Result {
     );
     let state = &actor.peers[&peer];
     assert!(!state.queue.is_empty(), "the disconnect was not queued");
-    assert!(state.queue.is_closing(), "the queue stayed open");
+    assert!(state.queue.is_closed(), "the queue stayed open");
     Ok(())
 }
 
@@ -261,19 +261,21 @@ async fn dial_failure_keeps_a_peer_with_a_writer() -> Result {
     // The senders keep the event loop running.
     let (mut actor, _to_actor) = Actor::new(
         endpoint,
-        Default::default(),
+        ActorConfig {
+            proto: Default::default(),
+            ..Default::default()
+        },
         metrics.clone(),
-        None,
         Default::default(),
     );
-    actor.handle_connection(conn);
+    actor.add_connection(conn);
     // Our endpoint has no address for the peer, so the dial fails.
     actor.dialer.queue_dial(peer_id, actor.alpn.clone());
 
     let addr_updates = &mut n0_future::stream::pending();
     timeout(Duration::from_secs(5), async {
         while metrics.actor_tick_dialer_failure.get() == 0 {
-            actor.event_loop(addr_updates, 0).await;
+            actor.event_loop(addr_updates).await;
         }
     })
     .await
@@ -340,8 +342,8 @@ async fn control_overflow_closes_both_crossed_connections() -> Result {
     let writer = accepted.stable_id();
     let mut actor = t_actor().await?;
     actor.send_queue_size = queue::MIN_QUEUE_SIZE;
-    actor.handle_connection(accepted);
-    actor.handle_connection(dialed);
+    actor.add_connection(accepted);
+    actor.add_connection(dialed);
     assert_eq!(actor.peers[&peer].writer, Some(writer));
     assert_eq!(actor.peers[&peer].connections, 2);
 
@@ -381,11 +383,11 @@ async fn answers_to_an_unused_peer_need_no_dial() -> Result {
     let peer_id = pair.ep2.id();
     let topic: TopicId = blake3::hash(b"answers_need_no_dial").into();
     let mut actor = t_actor().await?;
-    actor.handle_connection(conn);
+    actor.add_connection(conn);
     for _ in 0..2 {
         let join = InEvent::RecvMessage(peer_id, join_message(topic, 0));
         actor.handle_in_event(join, Instant::now());
-        assert!(!actor.dialer.is_pending(peer_id), "the answer dialed");
+        assert!(!actor.dialer.is_dialing(peer_id), "the answer dialed");
         let (sent, message) = timeout(Duration::from_secs(5), read_next_message(&peer_conn))
             .await
             .std_context("the answer did not go out")??;
@@ -432,7 +434,7 @@ async fn aborted_peer_loses_the_connection_that_took_its_queue() -> Result {
         .std_context("the queue did not go out")??;
     peers.insert(peer_id, state);
     let state = peers.get_mut(&peer_id).expect("known peer");
-    state.close_queue();
+    state.queue.close();
     let _next = state.handle_connection(Side::Server, usize::MAX);
     // The writer lets go of the queue once the next connection revoked it.
     timeout(Duration::from_secs(5), async {
@@ -470,7 +472,8 @@ async fn peer_wanted_again_during_the_dial_keeps_its_queue() -> Result {
         .peers
         .get_mut(&peer_id)
         .expect("known peer")
-        .close_queue();
+        .queue
+        .close();
     let join = InEvent::Command(after, ProtoCommand::Join(vec![peer_id]));
     actor.handle_in_event(join, Instant::now());
     assert!(
@@ -478,7 +481,7 @@ async fn peer_wanted_again_during_the_dial_keeps_its_queue() -> Result {
         "the peer is not pending again"
     );
 
-    actor.handle_connection(conn);
+    actor.add_connection(conn);
     assert!(
         matches!(send_state(&actor, peer_id), Some((Some(_), false))),
         "the dial was not kept"
@@ -510,7 +513,7 @@ async fn dropped_peer_wanted_again_gets_the_old_queue_first() -> Result {
         (blake3::hash(b"left").into(), blake3::hash(b"joined").into());
     let mut actor = t_actor().await?;
     actor.send_queue_size = 64 << 20;
-    actor.handle_connection(old);
+    actor.add_connection(old);
     push_many(&actor, peer_id, left, 3000);
     push_active(&actor, peer_id, disconnect_message(left));
     // Wait until flow control blocks the old writer.
@@ -519,12 +522,13 @@ async fn dropped_peer_wanted_again_gets_the_old_queue_first() -> Result {
         .peers
         .get_mut(&peer_id)
         .expect("known peer")
-        .close_queue();
+        .queue
+        .close();
     let state = actor.peers.get_mut(&peer_id).expect("dropped");
     state.open_queue();
     let pushed = state.queue.push(join_message(joined, 0));
     assert!(matches!(pushed, Pushed::Queued));
-    actor.handle_connection(new);
+    actor.add_connection(new);
 
     let (topic, messages) = timeout(Duration::from_secs(10), read_next_stream(&peer_new))
         .await
@@ -559,7 +563,7 @@ async fn closed_peer_keeps_its_byte_limit() -> Result {
     };
     while matches!(push(&mut peers), Pushed::Queued) {}
 
-    peers.get_mut(&peer_id).expect("known peer").close_queue();
+    peers.get_mut(&peer_id).expect("known peer").queue.close();
     peers.get_mut(&peer_id).expect("dropped").open_queue();
     assert!(
         matches!(push(&mut peers), Pushed::Dropped(_)),
@@ -587,9 +591,10 @@ async fn inbound_during_disconnected_dial_is_kept() -> Result {
         .peers
         .get_mut(&peer_id)
         .expect("known peer")
-        .close_queue();
+        .queue
+        .close();
 
-    actor.handle_connection(conn);
+    actor.add_connection(conn);
 
     assert!(
         matches!(send_state(&actor, peer_id), Some((Some(_), false))),
@@ -616,7 +621,7 @@ async fn dial_for_a_peer_without_state_closes() -> Result {
     let topic: TopicId = blake3::hash(b"dial_without_state").into();
     let mut actor = t_actor().await?;
 
-    actor.handle_connection(conn);
+    actor.add_connection(conn);
     let mut stream = open_stream(&peer_conn, topic, &[join_message(topic, 0).message]).await?;
     stream.finish().std_context("finish")?;
 
@@ -628,7 +633,7 @@ async fn dial_for_a_peer_without_state_closes() -> Result {
     .await
     .std_context("the connection stayed open")?;
     let (peer, conn, res) = ended.expect("one task").expect("no panic");
-    actor.handle_connection_task_finished(peer, conn, res);
+    actor.on_conn_task_finished(peer, conn, res);
     timeout(Duration::from_secs(1), peer_conn.closed())
         .await
         .std_context("the peer did not see the close")?;

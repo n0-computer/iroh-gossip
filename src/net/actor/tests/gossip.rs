@@ -273,7 +273,7 @@ async fn subscription_cleanup() -> Result {
         actor
             .topics
             .get(&topic)
-            .map_or(0, |state| state.command_receiver_count)
+            .map_or(0, |state| state.command_receivers)
     };
     // Our subscribe, the connection, and the NeighborUp from the peer's information.
     let joined = |actor: &Actor| actor.joined(&topic);
@@ -748,10 +748,10 @@ fn sorted<T: Ord>(input: impl IntoIterator<Item = T>) -> Vec<T> {
     out
 }
 
-/// Test that dropping sender doesn't close topic while receiver is still listening.
+/// Dropping the sender does not close the topic while the receiver still listens.
 ///
 /// This is a common footgun: users split a GossipTopic, drop the sender early,
-/// and expect the receiver to keep working. With the bug (using && in still_needed),
+/// and expect the receiver to keep working. With the bug (using || in is_empty),
 /// the topic closes immediately when sender is dropped.
 #[tokio::test]
 #[traced_test]
