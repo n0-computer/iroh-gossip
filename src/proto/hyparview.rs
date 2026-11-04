@@ -14,7 +14,11 @@ use rand::{rngs::ThreadRng, seq::IteratorRandom, Rng, RngExt};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use super::{util::IndexSet, PeerData, PeerIdentity, PeerInfo, IO};
+use super::{
+    topic::{Event, IO},
+    util::IndexSet,
+    PeerData, PeerIdentity, PeerInfo,
+};
 
 /// Delay before the first shuffle.
 ///
@@ -87,30 +91,6 @@ pub enum InEvent<PI> {
     UpdatePeerData(PeerData),
     /// Quit the swarm, informing peers about us leaving.
     Quit,
-}
-
-/// Output event for HyParView
-#[derive(Debug)]
-pub enum OutEvent<PI> {
-    /// Ask the IO layer to send a [`Message`] to peer `PI`.
-    SendMessage(PI, Message<PI>),
-    /// Schedule a [`Timer`].
-    ScheduleTimer(Duration, Timer<PI>),
-    /// Ask the IO layer to close the connection to peer `PI`.
-    DisconnectPeer(PI),
-    /// Emit an [`Event`] to the application.
-    EmitEvent(Event<PI>),
-    /// New [`PeerData`] was received for peer `PI`.
-    PeerData(PI, PeerData),
-}
-
-/// Event emitted by the [`State`] to the application.
-#[derive(Clone, Debug)]
-pub enum Event<PI> {
-    /// A peer was added to our set of active connections.
-    NeighborUp(PI),
-    /// A peer was removed from our set of active connections.
-    NeighborDown(PI),
 }
 
 /// Kinds of timers HyParView needs to schedule.
@@ -466,10 +446,7 @@ where
         if !self.timers_scheduled {
             self.timers_scheduled = true;
             self.schedule_shuffle(io);
-            io.push(OutEvent::ScheduleTimer(
-                MAINTENANCE_INTERVAL,
-                Timer::DoMaintenance,
-            ));
+            io.schedule(MAINTENANCE_INTERVAL, Timer::DoMaintenance);
         }
 
         #[cfg(test)]
@@ -548,7 +525,7 @@ where
     fn release_if_unused(&self, peer: PI, io: &mut impl IO<PI>) {
         if !self.active_view.contains(&peer) && !self.pending_neighbor_requests.contains_key(&peer)
         {
-            io.push(OutEvent::DisconnectPeer(peer));
+            io.disconnect(peer);
         }
     }
 
@@ -573,19 +550,13 @@ where
             let id = self.next_join;
             self.next_join += 1;
             self.pending_joins.insert(peer, id);
-            io.push(OutEvent::ScheduleTimer(
-                JOIN_RETRY_DELAY,
-                Timer::RetryJoin(peer, id),
-            ));
+            io.schedule(JOIN_RETRY_DELAY, Timer::RetryJoin(peer, id));
         }
     }
 
     /// Sends a join to `peer`.
     fn join(&self, peer: PI, io: &mut impl IO<PI>) {
-        io.push(OutEvent::SendMessage(
-            peer,
-            Message::Join(self.me_data.clone()),
-        ));
+        io.send(peer, Message::Join(self.me_data.clone()));
     }
 
     /// We received a disconnect message.
@@ -664,8 +635,8 @@ where
             alive,
             _respond: false,
         });
-        io.push(OutEvent::SendMessage(peer, message));
-        io.push(OutEvent::DisconnectPeer(peer));
+        io.send(peer, message);
+        io.disconnect(peer);
     }
 
     fn on_join(&mut self, peer: PI, data: Option<PeerData>, io: &mut impl IO<PI>) {
@@ -697,7 +668,7 @@ where
                 peer: peer_info.clone(),
                 ttl,
             });
-            io.push(OutEvent::SendMessage(*node, message));
+            io.send(*node, message);
         }
     }
 
@@ -739,7 +710,7 @@ where
                             peer: message.peer,
                             ttl: message.ttl.next(),
                         });
-                        io.push(OutEvent::SendMessage(*next, message));
+                        io.send(*next, message);
                     }
                 }
             }
@@ -778,7 +749,7 @@ where
                 return;
             }
             if !data.0.is_empty() {
-                io.push(OutEvent::PeerData(peer_info.id, data.clone()));
+                io.peer_data(peer_info.id, data.clone());
             }
             self.peer_data.insert(peer_info.id, data);
         }
@@ -809,7 +780,7 @@ where
                 nodes: shuffle.nodes,
                 ttl: shuffle.ttl.next(),
             });
-            io.push(OutEvent::SendMessage(*node, message));
+            io.send(*node, message);
         }
     }
 
@@ -827,7 +798,7 @@ where
         let message = Message::ShuffleReply(ShuffleReply {
             nodes: nodes.collect(),
         });
-        io.push(OutEvent::SendMessage(to, message));
+        io.send(to, message);
     }
 
     fn on_shuffle_reply(&mut self, from: PI, message: ShuffleReply<PI>, io: &mut impl IO<PI>) {
@@ -879,7 +850,7 @@ where
                 nodes: nodes.collect(),
                 ttl: self.config.shuffle_random_walk_length,
             };
-            io.push(OutEvent::SendMessage(*node, Message::Shuffle(message)));
+            io.send(*node, Message::Shuffle(message));
         }
         self.schedule_shuffle(io);
     }
@@ -946,10 +917,7 @@ where
                 self.refused.clear();
             }
         }
-        io.push(OutEvent::ScheduleTimer(
-            MAINTENANCE_INTERVAL,
-            Timer::DoMaintenance,
-        ));
+        io.schedule(MAINTENANCE_INTERVAL, Timer::DoMaintenance);
     }
 
     /// Schedules the next shuffle, with the interval doubled up to its maximum.
@@ -960,10 +928,7 @@ where
         let interval = self.next_shuffle_interval;
         self.next_shuffle_interval = (interval * 2).min(self.config.shuffle_interval);
         let jitter = self.rng.random_range(0.75..1.25);
-        io.push(OutEvent::ScheduleTimer(
-            interval.mul_f64(jitter),
-            Timer::DoShuffle,
-        ));
+        io.schedule(interval.mul_f64(jitter), Timer::DoShuffle);
     }
 
     /// Returns whether the active view is below half its capacity.
@@ -1114,16 +1079,14 @@ where
         io: &mut impl IO<PI>,
     ) -> Option<PI> {
         if let Some(peer) = self.active_view.remove_index(peer_index) {
-            io.push(OutEvent::EmitEvent(Event::NeighborDown(peer)));
+            io.emit(Event::NeighborDown(peer));
 
             match reason {
                 // send a disconnect message, then close connection.
                 RemovalReason::Random => self.send_disconnect(peer, true, io),
                 // close connection without sending anything further.
-                RemovalReason::DisconnectReceived { is_alive: _ } => {
-                    io.push(OutEvent::DisconnectPeer(peer))
-                }
-                RemovalReason::ConnectionClosed => io.push(OutEvent::DisconnectPeer(peer)),
+                RemovalReason::DisconnectReceived { is_alive: _ } => io.disconnect(peer),
+                RemovalReason::ConnectionClosed => io.disconnect(peer),
             }
 
             let keep_as_passive = match reason {
@@ -1210,7 +1173,7 @@ where
         if self.active_view.insert(peer) {
             debug!(other = ?peer, "add to active view");
             self.remember_neighbor(peer);
-            io.push(OutEvent::EmitEvent(Event::NeighborUp(peer)));
+            io.emit(Event::NeighborUp(peer));
             // A recovery goes on, as more neighbors may be missing.
             if self.refill != RefillLimit::Recovery {
                 self.refill = RefillLimit::Automatic;
@@ -1249,11 +1212,11 @@ where
                 priority,
                 data: self.me_data.clone(),
             });
-            io.push(OutEvent::SendMessage(peer, message));
-            io.push(OutEvent::ScheduleTimer(
+            io.send(peer, message);
+            io.schedule(
                 self.config.neighbor_request_timeout,
                 Timer::PendingNeighborRequest(peer, id),
-            ));
+            );
         }
     }
 }

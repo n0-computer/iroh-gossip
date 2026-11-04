@@ -50,8 +50,8 @@ use std::{fmt, hash::Hash};
 use bytes::Bytes;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-mod hyparview;
-mod plumtree;
+pub(crate) mod hyparview;
+pub(crate) mod plumtree;
 pub mod state;
 pub mod topic;
 pub mod util;
@@ -61,8 +61,8 @@ pub mod sim;
 
 pub use hyparview::{Config as HyparviewConfig, Ttl};
 pub use plumtree::{Config as PlumtreeConfig, DeliveryScope, Round, Scope};
-pub use state::{InEvent, Message, OutEvent, State, Timer, TopicId};
-pub use topic::{Command, Config, Event, IO};
+pub use state::{InEvent, Message, OutEvent, State, Timer, TopicId, IO};
+pub use topic::{Command, Config, Event};
 
 /// The default maximum size in bytes for a gossip message.
 /// This is a sane but arbitrary default and can be changed in the [`Config`].

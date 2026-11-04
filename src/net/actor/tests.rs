@@ -34,7 +34,7 @@ use crate::{
         },
         wire, *,
     },
-    proto::{PeerData, Scope, TopicId},
+    proto::{hyparview, plumtree, PeerData, Scope, TopicId},
     Error,
 };
 
@@ -134,7 +134,7 @@ impl Gossip {
             metrics.clone(),
             address_lookup,
         );
-        let max_message_size = actor.state.max_message_size();
+        let max_message_size = actor.proto.max_message_size();
 
         let actor_handle = AbortOnDropHandle::new(task::spawn(n0_future::future::pending()));
         let gossip = Self::new(to_actor, actor_handle, max_message_size, metrics);
@@ -397,7 +397,7 @@ fn join_until_full(actor: &mut Actor, peer: EndpointId) {
         let topic: TopicId = blake3::hash(&i.to_be_bytes()).into();
         let join = InEvent::Command(topic, ProtoCommand::Join(vec![peer]));
         actor.handle_in_event(join, Instant::now());
-        if actor.metrics.peers_send_queue_full.get() > 0 {
+        if actor.state.metrics.peers_send_queue_full.get() > 0 {
             return;
         }
     }
@@ -405,7 +405,7 @@ fn join_until_full(actor: &mut Actor, peer: EndpointId) {
 
 /// Returns the queue of `peer_id`, which must have an active connection.
 fn active_queue(actor: &Actor, peer_id: EndpointId) -> &SendQueue {
-    let peer = &actor.peers[&peer_id];
+    let peer = &actor.state.peers[&peer_id];
     if peer.queue.is_closed() || peer.writer.is_none() {
         panic!("not active: {:?}, writer: {:?}", peer.queue, peer.writer);
     }
@@ -414,7 +414,7 @@ fn active_queue(actor: &Actor, peer_id: EndpointId) -> &SendQueue {
 
 /// Pushes `message` to the queue of the active peer `peer_id`.
 fn push_active(actor: &Actor, peer_id: EndpointId, message: ProtoMessage) {
-    let pushed = active_queue(actor, peer_id).push(message);
+    let pushed = active_queue(actor, peer_id).send(message);
     assert!(matches!(pushed, Pushed::Queued));
 }
 
@@ -437,7 +437,7 @@ fn numbered(topic: TopicId, i: usize) -> ProtoMessage {
 
 /// Returns the writer of the queue of `peer_id`, and whether the queue is draining.
 fn send_state(actor: &Actor, peer_id: EndpointId) -> Option<(Option<ConnId>, bool)> {
-    let peer = actor.peers.get(&peer_id)?;
+    let peer = actor.state.peers.get(&peer_id)?;
     Some((peer.writer, peer.queue.is_closed()))
 }
 
@@ -457,7 +457,7 @@ fn open_peer(size: usize) -> PeerState {
 fn pending_with(messages: Vec<ProtoMessage>) -> PeerState {
     let state = open_peer(queue::QUEUE_SIZE);
     for message in messages {
-        assert!(matches!(state.queue.push(message), Pushed::Queued));
+        assert!(matches!(state.queue.send(message), Pushed::Queued));
     }
     state
 }
@@ -475,12 +475,12 @@ fn join_message(topic: TopicId, data_len: usize) -> ProtoMessage {
         StdRng::seed_from_u64(1),
     );
     let join = InEvent::Command(topic, proto::Command::Join(vec![peer]));
-    let message = state
-        .handle(join, Instant::now(), None)
-        .find_map(|event| match event {
-            proto::OutEvent::SendMessage(_, message) => Some(message),
-            _ => None,
-        });
+    let mut out = Vec::new();
+    state.handle(join, Instant::now(), &mut out);
+    let message = out.into_iter().find_map(|event| match event {
+        proto::OutEvent::SendMessage(_, message) => Some(message),
+        _ => None,
+    });
     message.expect("a join sends a message")
 }
 
@@ -496,7 +496,7 @@ fn commands_of(commands: Vec<Command>) -> mpsc::Receiver<Command> {
 /// Joins a topic with a publisher that always has a command ready.
 fn publish_forever(actor: &mut Actor) {
     let topic = [1; 32].into();
-    actor.topics.insert(topic, TopicHandles::default());
+    actor.state.topics.insert(topic, TopicHandles::default());
     actor.handle_in_event(
         InEvent::Command(topic, ProtoCommand::Join(vec![])),
         Instant::now(),
@@ -504,6 +504,7 @@ fn publish_forever(actor: &mut Actor) {
     let commands = commands_of(vec![Command::Broadcast(Bytes::new()); 4096]);
     actor.command_rx.insert(topic, commands);
     actor
+        .state
         .topics
         .get_mut(&topic)
         .expect("inserted above")

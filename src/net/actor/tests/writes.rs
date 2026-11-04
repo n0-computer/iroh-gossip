@@ -8,7 +8,7 @@ fn queue_payloads(topic: TopicId, count: usize, len: usize) -> QueueLease {
             topic,
             message: TopicMessage::test_gossip(len),
         };
-        assert!(matches!(queue.push(message), Pushed::Queued));
+        assert!(matches!(queue.send(message), Pushed::Queued));
     }
     queue.lease()
 }
@@ -93,7 +93,7 @@ async fn stream_limit_closes_the_connection() -> Result {
     let mut queue = SendQueue::new(64 << 20);
     for i in 0..1000u32 {
         let topic: TopicId = blake3::hash(&i.to_be_bytes()).into();
-        assert!(matches!(queue.push(join_message(topic, 0)), Pushed::Queued));
+        assert!(matches!(queue.send(join_message(topic, 0)), Pushed::Queued));
     }
     let send_loop = SendLoop::new(
         conn,
@@ -110,4 +110,88 @@ async fn stream_limit_closes_the_connection() -> Result {
         "{result:?}"
     );
     closed_with(&peer_conn, conn::CLOSE_STALLED).await
+}
+
+/// The node later announces a payload that a full queue dropped.
+///
+/// Nobody reads the queue to the neighbor, so a burst fills its data section and
+/// drops the last payload. Plumtree notes the drop, and announces the payload
+/// when its timer runs. The peer stays, and no announcement goes out at once.
+#[tokio::test]
+#[traced_test]
+async fn dropped_payload_is_announced_later() -> Result {
+    let mut actor = t_actor().await?;
+    let peer = SecretKey::generate().public();
+    let mut state = open_peer(queue::MIN_QUEUE_SIZE);
+    let lease = state
+        .handle_connection(Side::Server, 1)
+        .expect("an accepted connection takes the lease");
+    actor.state.peers.insert(peer, state);
+    let topic: TopicId = blake3::hash(b"dropped payload").into();
+    let now = Instant::now();
+    actor.handle_in_event(InEvent::Command(topic, ProtoCommand::Join(vec![])), now);
+    let join = ProtoMessage {
+        topic,
+        message: TopicMessage::Swarm(hyparview::Message::Join(None)),
+    };
+    actor.handle_in_event(InEvent::RecvMessage(peer, join), now);
+    assert!(actor
+        .proto
+        .neighbors(&topic)
+        .any(|neighbor| *neighbor == peer));
+
+    // Broadcast until the queue drops a payload. The last one is the dropped one.
+    let mut content = Bytes::new();
+    for i in 0u32..1000 {
+        if actor.state.metrics.msgs_dropped.get() > 0 {
+            break;
+        }
+        content = Bytes::from([vec![7u8; 1000], i.to_be_bytes().to_vec()].concat());
+        let broadcast = ProtoCommand::Broadcast(content.clone(), Scope::Swarm);
+        actor.handle_in_event(InEvent::Command(topic, broadcast), now);
+    }
+    assert_eq!(
+        actor.state.metrics.msgs_dropped.get(),
+        1,
+        "no payload dropped"
+    );
+    assert_eq!(
+        actor.state.metrics.peers_send_queue_full.get(),
+        0,
+        "peer aborted"
+    );
+    let id = plumtree::MessageId::from_content(&content);
+
+    // The writer reads what the queue holds: payloads, and no announcement.
+    let mut reader = lease.lock().await;
+    assert!(announced(&mut reader).await.is_empty(), "announced at once");
+
+    // The announcement comes with the timers.
+    for tick in 1..=3u32 {
+        let at = now + Duration::from_millis(1500) * tick;
+        while let Some((_, timer)) = actor.state.timers.pop_before(at) {
+            actor.handle_in_event(InEvent::TimerExpired(timer), at);
+        }
+    }
+    assert_eq!(announced(&mut reader).await, vec![id]);
+    assert!(actor.state.peers.contains_key(&peer));
+    assert_eq!(
+        actor.state.metrics.peers_send_queue_full.get(),
+        0,
+        "peer aborted"
+    );
+    Ok(())
+}
+
+/// Takes the queued messages of `reader`, and returns the ids that its announcements name.
+async fn announced(reader: &mut queue::QueueReader) -> Vec<plumtree::MessageId> {
+    let mut ids = Vec::new();
+    while let Ok(true) = timeout(Duration::from_millis(20), reader.wait_next()).await {
+        let message = &reader.current().expect("next found it").message.message;
+        if let TopicMessage::Gossip(plumtree::Message::IHave(ihaves)) = message {
+            ids.extend(ihaves.iter().map(|ihave| ihave.id));
+        }
+        reader.advance();
+    }
+    ids
 }

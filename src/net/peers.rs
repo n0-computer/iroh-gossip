@@ -88,8 +88,15 @@ impl PeerState {
     /// Waiting for room would stop the actor, and with it every topic, for as
     /// long as this one peer does not read. On [`Pushed::Overflow`], the caller
     /// aborts the peer.
+    #[cfg(test)]
     pub(super) fn send(&mut self, message: ProtoMessage) -> Pushed {
-        self.open_queue().push(message)
+        let len = postcard::experimental::serialized_size(&message.message).ok();
+        self.push(message, len)
+    }
+
+    /// Like [`Self::send`], with the encoded size of the message if it has one.
+    pub(super) fn push(&mut self, message: ProtoMessage, len: Option<usize>) -> Pushed {
+        self.open_queue().push(message, len)
     }
 
     /// Puts a closed, empty queue in place of the queue.
