@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
 
     // and read messages from others!
     while let Some(event) = receiver.next().await {
-        match event? {
+        match event {
             Event::Received(message) => {
                 println!("received a message: {:?}", std::str::from_utf8(&message.content));
             }

@@ -73,7 +73,11 @@ pub enum Timer {
     AnnounceDropped,
 }
 
+/// A message that the topic received, as [`Event::Received`] carries it.
+///
+/// [`Event::Received`]: crate::proto::Event::Received
 #[derive(Clone, derive_more::Debug, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct GossipEvent<PI> {
     /// The content of the gossip message.
     #[debug("<{}b>", content.len())]
@@ -676,6 +680,7 @@ impl<PI: PeerIdentity> State<PI> {
     }
 
     /// Get access to the [`Stats`] of the plumtree.
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn stats(&self) -> &Stats {
         &self.stats
     }

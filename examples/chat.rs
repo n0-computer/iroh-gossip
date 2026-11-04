@@ -203,7 +203,7 @@ async fn subscribe_loop(
 ) -> Result<()> {
     // init a peerid -> name hashmap
     let mut names = HashMap::new();
-    while let Some(event) = receiver.try_next().await? {
+    while let Some(event) = receiver.next().await {
         if let Event::Received(msg) = event {
             let (from, message) = SignedMessage::verify_and_decode(&msg.content)?;
             match message {

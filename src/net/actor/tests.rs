@@ -21,7 +21,7 @@ use n0_tracing_test::traced_test;
 use rand::{rngs::StdRng, CryptoRng, RngExt, SeedableRng};
 use tokio::{spawn, sync::oneshot, time::timeout};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, warn};
 
 use super::*;
 use crate::{

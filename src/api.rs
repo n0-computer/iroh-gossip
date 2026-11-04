@@ -165,7 +165,7 @@ impl GossipTopic {
     /// # Errors
     ///
     /// Returns [`Error::TooLarge`] and [`Error::Closed`] as [`GossipSender::broadcast`] does.
-    pub async fn broadcast(&mut self, message: Bytes) -> Result<(), Error> {
+    pub async fn broadcast(&self, message: Bytes) -> Result<(), Error> {
         self.sender.broadcast(message).await
     }
 
@@ -174,7 +174,7 @@ impl GossipTopic {
     /// # Errors
     ///
     /// Returns [`Error::TooLarge`] and [`Error::Closed`] as [`GossipSender::broadcast`] does.
-    pub async fn broadcast_neighbors(&mut self, message: Bytes) -> Result<(), Error> {
+    pub async fn broadcast_neighbors(&self, message: Bytes) -> Result<(), Error> {
         self.sender.broadcast_neighbors(message).await
     }
 
@@ -197,7 +197,7 @@ impl GossipTopic {
 }
 
 impl Stream for GossipTopic {
-    type Item = Result<Event, Error>;
+    type Item = Event;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Pin::new(&mut self.receiver).poll_next(cx)
@@ -206,7 +206,8 @@ impl Stream for GossipTopic {
 
 /// Receiver for gossip events on a topic.
 ///
-/// This is a [`Stream`] of [`Event`]s emitted from the topic.
+/// This is a [`Stream`] of [`Event`]s emitted from the topic. The stream ends when the
+/// gossip actor stops.
 #[derive(Debug)]
 pub struct GossipReceiver {
     events_rx: mpsc::Receiver<Event>,
@@ -249,7 +250,7 @@ impl GossipReceiver {
     /// - [`Error::Closed`] if the gossip actor stopped.
     pub async fn joined(&mut self) -> Result<(), Error> {
         while !self.is_joined() {
-            let event = self.next().await.ok_or(e!(Error::Closed))??;
+            let event = self.next().await.ok_or(e!(Error::Closed))?;
             if event == Event::JoinFailed {
                 return Err(e!(Error::JoinFailed));
             }
@@ -264,7 +265,7 @@ impl GossipReceiver {
 }
 
 impl Stream for GossipReceiver {
-    type Item = Result<Event, Error>;
+    type Item = Event;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let item = std::task::ready!(self.events_rx.poll_recv(cx));
@@ -279,7 +280,7 @@ impl Stream for GossipReceiver {
                 _ => {}
             }
         }
-        Poll::Ready(item.map(Ok))
+        Poll::Ready(item)
     }
 }
 

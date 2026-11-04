@@ -1151,19 +1151,6 @@ fn static_swarm(peers: usize) -> Simulator {
     swarm_with(peers, 0, network)
 }
 
-/// Returns the payload messages that all peers received so far.
-fn payloads(sim: &Simulator) -> u64 {
-    sim.network
-        .peer_states()
-        .map(|peer| {
-            peer.state(&TOPIC)
-                .expect("peer joined the topic")
-                .gossip_stats()
-                .payload_messages_received
-        })
-        .sum()
-}
-
 /// A round counts every payload of its broadcast, also those after the last delivery.
 ///
 /// In a triangle, the two recipients forward the message to each other after
@@ -1173,11 +1160,11 @@ fn payloads(sim: &Simulator) -> u64 {
 fn broadcast_statistics_include_trailing_payloads() {
     let mut sim = static_swarm(3);
     assert_eq!(sim.gossip_round(vec![(0, "triangle".into())]), 0);
-    let at_delivery = payloads(&sim);
+    let at_delivery = sim.total_payload_messages();
     sim.network.run_duration(Duration::from_millis(500));
     assert_eq!(
         at_delivery,
-        payloads(&sim),
+        sim.total_payload_messages(),
         "the round left out payloads that arrived after the last delivery"
     );
 }
@@ -1191,7 +1178,7 @@ fn broadcast_statistics_include_trailing_payloads() {
 fn one_payload_to_one_recipient_has_zero_rmr() {
     let mut sim = static_swarm(2);
     assert_eq!(sim.gossip_round(vec![(0, "one".into())]), 0);
-    assert_eq!(payloads(&sim), 1);
+    assert_eq!(sim.total_payload_messages(), 1);
     assert_eq!(sim.round_stats()[0].rmr, 0.0);
 }
 
@@ -1220,7 +1207,7 @@ fn rmr_matches_the_payloads_of_the_round() {
             sim.gossip_round(vec![(sender, format!("m{round}").into())]),
             0
         );
-        let payloads = payloads(&sim);
+        let payloads = sim.total_payload_messages();
         let rmr = payloads as f32 / 199.0 - 1.0;
         assert_eq!(sim.round_stats()[round].rmr, rmr, "round {round}");
         if payloads == 199 {

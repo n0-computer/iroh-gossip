@@ -10,7 +10,7 @@ use iroh::{
 use n0_error::e;
 use n0_future::task::{self, AbortOnDropHandle};
 use tokio::sync::{mpsc, oneshot};
-use tracing::{error_span, warn, Instrument};
+use tracing::{error_span, Instrument};
 
 pub use self::auth::AuthContext;
 use self::{
@@ -131,9 +131,7 @@ impl ProtocolHandler for Gossip {
     }
 
     async fn shutdown(&self) {
-        if let Err(err) = self.shutdown().await {
-            warn!("error while shutting down gossip: {err:#}");
-        }
+        self.shutdown().await
     }
 }
 
@@ -545,19 +543,19 @@ impl Gossip {
         Ok(())
     }
 
-    /// Shutdown the gossip instance.
+    /// Shuts down the gossip instance.
     ///
     /// It leaves all topics and sends `Close` to the peers. Then it stops the actor, and
-    /// drops all state and connections. A gossip
-    /// instance that is shut down already, or shutting down, returns `Ok` too.
-    pub async fn shutdown(&self) -> Result<(), Error> {
+    /// drops all state and connections. On a gossip instance that is shut down already,
+    /// it returns at once. While another call shuts it down, it returns when that
+    /// shutdown ends.
+    pub async fn shutdown(&self) {
         let (reply, reply_rx) = oneshot::channel();
         let shutdown = ToActor::Shutdown { reply };
         // The actor is gone or about to go, which is what the caller asks for.
         if self.inner.to_actor.send(shutdown).await.is_ok() {
             reply_rx.await.ok();
         }
-        Ok(())
     }
 
     /// Returns the metrics tracked for this gossip instance.
