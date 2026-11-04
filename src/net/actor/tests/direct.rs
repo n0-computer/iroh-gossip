@@ -144,7 +144,7 @@ async fn left_topics_finish_their_streams() -> Result {
         timeout(prompt, neighbor_up(&mut b_rx, a.id()))
             .await
             .std_context("b did not get a as a neighbor in time")??;
-        // B leaves the topic. A gets its `Disconnect`, and no longer wants B for it.
+        // B leaves the topic. A gets its `Close`, and no longer wants B for it.
         drop((b_tx, b_rx));
         timeout(PROMPT, async {
             while let Some(event) = a_rx.try_next().await? {
