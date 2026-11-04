@@ -28,8 +28,8 @@ use crate::{
     api::{self, Command, Event, GossipReceiver, GossipSender},
     net::{
         conn::{
-            connection_loop, task_output, ConnArgs, ConnEvent, ConnEventKind, ConnExit, ConnShared,
-            Mailbox, TakeQueue,
+            self, connection_loop, task_output, ConnArgs, ConnEvent, ConnEventKind, ConnExit,
+            ConnShared, Mailbox, TakeQueue,
         },
         peers::{ConnEnd, PeerState, MAX_ACCEPTED_PER_PEER},
         queue::{Pushed, QueueReader, SendQueue},
@@ -467,6 +467,7 @@ impl RawControl {
 /// A connection task on its own, without an actor.
 struct TestConn {
     events: mpsc::Receiver<ConnEvent>,
+    retire: CancellationToken,
     queue: Arc<Mailbox<TakeQueue>>,
     aborted: CancellationToken,
     shutdown: CancellationToken,
@@ -493,12 +494,13 @@ fn start_conn(conn: Connection, max_message_size: usize, retire_after: Duration)
         id: 0,
         conn,
         aborted: aborted.clone(),
-        retire,
+        retire: retire.clone(),
         take_queue: queue.clone(),
         shared,
     };
     TestConn {
         events,
+        retire,
         queue,
         aborted,
         shutdown,
@@ -592,7 +594,7 @@ async fn pump_until(
 /// Returns a join for `topic` carrying `data_len` bytes of peer data.
 ///
 /// The protocol state builds it, as the message types are private to `proto`.
-pub(crate) fn join_message(topic: TopicId, data_len: usize) -> ProtoMessage {
+pub(in crate::net) fn join_message(topic: TopicId, data_len: usize) -> ProtoMessage {
     let me = SecretKey::generate().public();
     let peer = SecretKey::generate().public();
     let mut state = proto::State::new(
