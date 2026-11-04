@@ -380,7 +380,7 @@ async fn broadcast_refuses_an_oversized_message() -> Result {
         .find(|len| proto::topic::broadcast_fits(*len, Scope::Swarm, MAX))
         .expect("some content fits");
     assert_eq!(sender.max_content_size(), fits);
-    assert_eq!(MAX - fits, 6, "the docs say 6 bytes");
+    assert_eq!(MAX - fits, 14, "the docs say 14 bytes");
 
     sender.broadcast(vec![0; fits].into()).await?;
     let refused = sender.broadcast(vec![0; fits + 1].into()).await;

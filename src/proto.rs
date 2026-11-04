@@ -63,7 +63,7 @@ pub mod sim;
 pub use self::{
     hyparview::Config as MembershipConfig,
     peer::{PeerData, PeerIdentity},
-    plumtree::{Config as BroadcastConfig, DeliveryScope, Scope},
+    plumtree::{Config as BroadcastConfig, DeliveryScope, Scope, TreeId},
     state::{InEvent, Message, State, Timer, TopicId, IO},
     topic::{Command, Config, Event},
     util::ParseIdError,
