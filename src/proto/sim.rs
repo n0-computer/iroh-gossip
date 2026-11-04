@@ -447,12 +447,35 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
             rng: &mut self.rng,
             queue: &mut self.queue,
             events: &mut self.events,
-            kill: Vec::new(),
+            sent: Vec::new(),
         };
+        // Peers that the event can make unwanted: the ones wanted before it, the one
+        // it came from, and the ones it sent to. A connection that only a message
+        // opened, such as a Plumtree straggler, does not show that the peer is
+        // wanted. The runtime closes its queue.
+        let may_change_wants = event.may_change_wants();
+        let mut touched: Vec<PI> = Vec::new();
+        if may_change_wants {
+            touched.extend(
+                (self.conns.iter())
+                    .filter_map(|conn| conn.other(peer))
+                    .filter(|other| state.wants(other)),
+            );
+            if let InEvent::RecvMessage(from, _) | InEvent::PeerDisconnected(from) = &event {
+                touched.push(*from);
+            }
+        }
         state.handle(event, self.time, &mut io);
-        let kill = io.kill;
-        for (from, to) in kill {
-            self.kill_connection(from, to);
+        // Close the connections to peers that no topic wants.
+        if may_change_wants {
+            touched.extend(io.sent);
+            let unwanted: Vec<_> = (self.conns.iter())
+                .filter_map(|conn| conn.other(peer))
+                .filter(|other| touched.contains(other) && !state.wants(other))
+                .collect();
+            for other in unwanted {
+                self.kill_connection(peer, other);
+            }
         }
     }
 
@@ -612,14 +635,15 @@ struct SimIO<'a, PI, R> {
     rng: &'a mut R,
     queue: &'a mut TimedEventQueue<PI>,
     events: &'a mut VecDeque<(PI, TopicId, Event<PI>)>,
-    /// The connections that the peer closed.
-    kill: Vec<(PI, PI)>,
+    /// The peers that the peer sent to.
+    sent: Vec<PI>,
 }
 
 impl<PI: PeerIdentity + Ord, R: Rng> IO<PI> for SimIO<'_, PI, R> {
     fn send(&mut self, to: PI, message: Message<PI>) -> Option<Message<PI>> {
         let latency = latency_between(self.latency, self.latencies, &self.peer, &to, self.rng);
         let event = InEvent::RecvMessage(self.peer, message);
+        self.sent.push(to);
         self.queue.insert(self.time + latency, to, event);
         None
     }
@@ -637,11 +661,6 @@ impl<PI: PeerIdentity + Ord, R: Rng> IO<PI> for SimIO<'_, PI, R> {
     }
 
     fn peer_data(&mut self, _peer: PI, _data: PeerData) {}
-
-    fn disconnect(&mut self, to: PI) {
-        debug!(peer = ?self.peer, other = ?to, "disconnect");
-        self.kill.push((self.peer, to));
-    }
 }
 
 fn latency_between<PI: PeerIdentity + Ord + PartialOrd, R: Rng>(

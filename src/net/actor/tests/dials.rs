@@ -370,10 +370,8 @@ async fn full_queue_during_the_dial_drops_the_peer() -> Result {
     let peer = SecretKey::generate().public();
     join_until_full(&mut actor, peer);
     assert_eq!(actor.state.metrics.peers_send_queue_full.get(), 1);
-    assert!(
-        !actor.proto.uses_peer(&peer),
-        "the protocol still uses the closed peer"
-    );
+    // The pending join is still wanted, but the abort closed the queue and nothing reopens it.
+    assert!(actor.state.peers[&peer].queue.is_closed());
     Ok(())
 }
 
