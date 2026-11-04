@@ -8,7 +8,7 @@
 use std::{
     collections::BTreeSet,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -40,7 +40,7 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(3);
 /// A wait longer than a node keeps a connection without streams.
 ///
 /// That is the wait for our finished streams to be acknowledged, then the
-/// grace of 10 s, and a margin.
+/// default `retire_after` of 10 s, and a margin.
 const SETTLE: Duration = Duration::from_secs(16);
 
 /// Decides whether a node takes a connection, before gossip sees it.
@@ -593,7 +593,10 @@ async fn survivor_redials_a_peer_that_timed_out() -> Result {
     // `b` can get its `Disconnect` out before its endpoint stops. Then `a`
     // keeps its connection to `b` until it times out, and a dial to the
     // returned `b` before then fails with it.
-    sleep(IDLE_TIMEOUT + Duration::from_secs(1)).await;
+    eventually(IDLE_TIMEOUT + PROMPT, "a kept the connection of b", || {
+        a.open_from(secret.public()) == 0
+    })
+    .await?;
 
     let b = Node::spawn_with(&lookup, secret).await?;
     let mut sb = Sub::new(&b, t, vec![]).await?;
@@ -614,7 +617,10 @@ async fn join_after_a_failed_dial_connects() -> Result {
     let mut sb = Sub::new(&b, t, vec![]).await?;
     // `a` has no address for `b`, so the dial fails.
     let mut sa = Sub::new(&a, t, vec![b.id()]).await?;
-    sleep(Duration::from_secs(2)).await;
+    eventually(PROMPT, "the dial did not fail", || {
+        a.gossip.metrics().actor_tick_dialer_failure.get() > 0
+    })
+    .await?;
 
     lookup_a.set_endpoint_info(b.endpoint.addr());
     sa.tx.join_peers(vec![b.id()]).await.std_context("join")?;
@@ -629,9 +635,13 @@ async fn join_after_a_failed_dial_connects() -> Result {
 async fn refused_peer_joins_once_accepted() -> Result {
     let lookup = MemoryLookup::new();
     let accept = Arc::new(AtomicBool::new(false));
+    let asked = Arc::new(AtomicUsize::new(0));
     let filter: AcceptFilter = {
-        let accept = accept.clone();
-        Arc::new(move |_| accept.load(Ordering::SeqCst))
+        let (accept, asked) = (accept.clone(), asked.clone());
+        Arc::new(move |_| {
+            asked.fetch_add(1, Ordering::SeqCst);
+            accept.load(Ordering::SeqCst)
+        })
     };
     let a = Node::spawn_custom(
         &lookup,
@@ -644,7 +654,10 @@ async fn refused_peer_joins_once_accepted() -> Result {
     let t = topic("refused");
     let mut sa = Sub::new(&a, t, vec![]).await?;
     let mut sb = Sub::new(&b, t, vec![a.id()]).await?;
-    sleep(Duration::from_secs(2)).await;
+    eventually(PROMPT, "the connection did not come", || {
+        asked.load(Ordering::SeqCst) > 0
+    })
+    .await?;
 
     accept.store(true, Ordering::SeqCst);
     sb.tx.join_peers(vec![a.id()]).await.std_context("join")?;
@@ -778,9 +791,10 @@ async fn open_connections_link_neighbors() -> Result {
         nodes.push(node);
     }
     nodes.insert(0, bootstrap);
+    // No signal tells that the overlay is quiet, so wait for the idle connections to retire.
     sleep(SETTLE).await;
 
-    // A connection we are done with stays open for a grace of a few seconds,
+    // A connection we are done with stays open until one side retires it,
     // and the overlay keeps opening short-lived ones, for example for a
     // refused neighbor request. A leaked connection stays unlinked, so each
     // connection unlinked now must be linked or closed at some point within
@@ -858,7 +872,7 @@ async fn many_nodes_joining_each_other_at_once() -> Result {
         })
         .collect();
     let mut subs = joins.try_join().await?;
-    sleep(SETTLE).await;
+    connected(&mut subs.iter_mut().collect::<Vec<_>>(), &ids).await?;
 
     let contents: [&'static [u8]; NODES] = [b"n0", b"n1", b"n2", b"n3", b"n4", b"n5"];
     for (i, content) in contents.iter().enumerate() {
@@ -1064,19 +1078,18 @@ async fn join_with_a_dead_bootstrap_peer_reaches_the_live_one() -> Result {
 
 /// A former instance of a peer that leaves does not remove its replacement.
 ///
-/// KNOWN BUG: the protocol tells peers apart by their endpoint id only. The
-/// `Disconnect` of the former instance removes the replacement too. Telling
-/// the two apart needs an instance id on the wire.
+/// The session id in the control header tells the two instances apart: the
+/// connection of the former instance closes as stale, and its `Disconnect`
+/// never reaches the protocol.
 #[tokio::test(flavor = "multi_thread")]
 #[traced_test]
-#[should_panic(expected = "old instance leave removed the replacement neighbor")]
-async fn known_bug_former_instance_leaving_preserves_replacement() {
+async fn former_instance_leaving_preserves_replacement_neighbor() {
     former_instance_leaving_preserves_replacement()
         .await
         .unwrap();
 }
 
-/// Runs `known_bug_former_instance_leaving_preserves_replacement`.
+/// Runs `former_instance_leaving_preserves_replacement_neighbor`.
 async fn former_instance_leaving_preserves_replacement() -> Result {
     let lookup = MemoryLookup::new();
     let (a, b) = (Node::spawn(&lookup).await?, Node::spawn(&lookup).await?);
@@ -1110,6 +1123,13 @@ async fn slow_peer_does_not_block_shutdown() -> Result {
         .connect(a.endpoint.addr(), GOSSIP_ALPN)
         .await
         .std_context("connect")?;
+    // The control stream of the dialer: its header with a session id.
+    let (mut control, _control_recv) = conn.open_bi().await.std_context("open control")?;
+    let control_header = [0x0b, 0x00, 0x01, 0x08, 1, 2, 3, 4, 5, 6, 7, 8];
+    control
+        .write_all(&control_header)
+        .await
+        .std_context("send control header")?;
     let mut stream = conn.open_uni().await.std_context("open raw stream")?;
     // The wire format: the topic header, then `SWARM_JOIN(None)`.
     let mut join = vec![35, 0x01, 0x00, 32];
@@ -1125,7 +1145,11 @@ async fn slow_peer_does_not_block_shutdown() -> Result {
         }
         Ok::<_, iroh_gossip::Error>(())
     });
-    sleep(Duration::from_secs(2)).await;
+    // Once the send queue to the peer is full, it drops messages.
+    eventually(PROMPT, "the send queue did not fill", || {
+        a.gossip.metrics().msgs_dropped.get() > 0
+    })
+    .await?;
     let result = timeout(Duration::from_secs(2), a.gossip.shutdown()).await;
     conn.close(0u32.into(), b"test finished");
     sender.abort();

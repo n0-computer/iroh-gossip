@@ -1,8 +1,8 @@
 use super::*;
 
 /// Pushes `count` payloads of `len` bytes for `topic` into a large queue.
-fn queue_payloads(topic: TopicId, count: usize, len: usize) -> QueueLease {
-    let mut queue = SendQueue::new(64 << 20);
+fn queue_payloads(topic: TopicId, count: usize, len: usize) -> (SendQueue, QueueReader) {
+    let (queue, reader) = SendQueue::new(64 << 20);
     for _ in 0..count {
         let message = ProtoMessage {
             topic,
@@ -10,7 +10,7 @@ fn queue_payloads(topic: TopicId, count: usize, len: usize) -> QueueLease {
         };
         assert!(matches!(queue.send(message), Pushed::Queued));
     }
-    queue.lease()
+    (queue, reader)
 }
 
 /// A write that makes no progress for the write timeout closes the connection.
@@ -24,22 +24,11 @@ async fn stalled_write_closes_the_connection() -> Result {
     let (conn, peer_conn) = pair.connect().await?;
     let topic: TopicId = blake3::hash(b"stalled").into();
     // More than the windows of the peer, which reads nothing.
-    let queue_lease = queue_payloads(topic, 200, 60_000);
-    let send_loop = SendLoop::new(
-        conn,
-        queue_lease,
-        TEST_FRAME_LIMIT,
-        unset_flag(),
-        Vec::new(),
-    );
-    let result = timeout(wire::WRITE_TIMEOUT * 5, send_loop.run())
-        .await
-        .std_context("the writer never ended")?;
-    assert!(
-        matches!(result, Err(wire::WriteError::Stalled { .. })),
-        "{result:?}"
-    );
-    closed_with(&peer_conn, conn::CLOSE_STALLED).await
+    let (_queue, reader) = queue_payloads(topic, 200, 60_000);
+    let writer = start_writer(conn, &peer_conn, reader, TEST_FRAME_LIMIT, Vec::new()).await?;
+    let end = ended(writer.test.task, wire::WRITE_TIMEOUT * 5).await?;
+    assert_eq!(end, ConnEnd::Failed);
+    closed_with(&peer_conn, CloseCode::Blocked).await
 }
 
 /// A peer that reads one frame slower than the write timeout keeps the connection.
@@ -53,9 +42,8 @@ async fn slow_reader_keeps_the_connection() -> Result {
     let topic: TopicId = blake3::hash(b"slow").into();
     // At 64 KiB per 300 ms, the frame takes about 6.5 s, over the write timeout.
     let (count, len) = (1, 1_400_000);
-    let queue_lease = queue_payloads(topic, count, len);
-    let send_loop = SendLoop::new(conn, queue_lease, 4 << 20, unset_flag(), Vec::new());
-    let send = AbortOnDropHandle::new(spawn(async move { send_loop.run().await }));
+    let (_queue, reader) = queue_payloads(topic, count, len);
+    let writer = start_writer(conn, &peer_conn, reader, 4 << 20, Vec::new()).await?;
 
     let start = Instant::now();
     let mut stream = peer_conn.accept_uni().await.std_context("accept")?;
@@ -73,11 +61,8 @@ async fn slow_reader_keeps_the_connection() -> Result {
         start.elapsed() > wire::WRITE_TIMEOUT,
         "the reader was not slow"
     );
-    let result = timeout(Duration::from_secs(5), send)
-        .await
-        .std_context("the writer did not end")?
-        .std_context("send task")?;
-    assert!(result.is_ok(), "{result:?}");
+    assert!(!writer.test.task.is_finished(), "the writer failed");
+    assert!(peer_conn.close_reason().is_none(), "the connection closed");
     Ok(())
 }
 
@@ -90,26 +75,15 @@ async fn slow_reader_keeps_the_connection() -> Result {
 async fn stream_limit_closes_the_connection() -> Result {
     let pair = TestPair::new(1).await?;
     let (conn, peer_conn) = pair.connect().await?;
-    let mut queue = SendQueue::new(64 << 20);
+    let (queue, reader) = SendQueue::new(64 << 20);
     for i in 0..1000u32 {
         let topic: TopicId = blake3::hash(&i.to_be_bytes()).into();
         assert!(matches!(queue.send(join_message(topic, 0)), Pushed::Queued));
     }
-    let send_loop = SendLoop::new(
-        conn,
-        queue.lease(),
-        TEST_FRAME_LIMIT,
-        unset_flag(),
-        Vec::new(),
-    );
-    let result = timeout(wire::OPEN_TIMEOUT * 5, send_loop.run())
-        .await
-        .std_context("the writer never ended")?;
-    assert!(
-        matches!(result, Err(wire::WriteError::OpenStalled { .. })),
-        "{result:?}"
-    );
-    closed_with(&peer_conn, conn::CLOSE_STALLED).await
+    let writer = start_writer(conn, &peer_conn, reader, TEST_FRAME_LIMIT, Vec::new()).await?;
+    let end = ended(writer.test.task, wire::OPEN_TIMEOUT * 5).await?;
+    assert_eq!(end, ConnEnd::Failed);
+    closed_with(&peer_conn, CloseCode::Blocked).await
 }
 
 /// The sent counters count only the messages that a send queue took.
@@ -121,10 +95,8 @@ async fn stream_limit_closes_the_connection() -> Result {
 async fn dropped_payload_is_not_counted_as_sent() -> Result {
     let mut actor = t_actor().await?;
     let peer = SecretKey::generate().public();
-    let mut state = open_peer(queue::MIN_QUEUE_SIZE);
-    let _lease = state
-        .handle_connection(Side::Server, 1)
-        .expect("an accepted connection takes the lease");
+    let mut state = PeerState::open(queue::MIN_QUEUE_SIZE);
+    let _reader = state.take_reader().expect("no writer");
     actor.state.peers.insert(peer, state);
     let topic: TopicId = blake3::hash(b"dropped is not sent").into();
     let now = Instant::now();
@@ -167,10 +139,8 @@ async fn dropped_payload_is_not_counted_as_sent() -> Result {
 async fn dropped_payload_is_announced_later() -> Result {
     let mut actor = t_actor().await?;
     let peer = SecretKey::generate().public();
-    let mut state = open_peer(queue::MIN_QUEUE_SIZE);
-    let lease = state
-        .handle_connection(Side::Server, 1)
-        .expect("an accepted connection takes the lease");
+    let mut state = PeerState::open(queue::MIN_QUEUE_SIZE);
+    let mut reader = state.take_reader().expect("no writer");
     actor.state.peers.insert(peer, state);
     let topic: TopicId = blake3::hash(b"dropped payload").into();
     let now = Instant::now();
@@ -208,7 +178,6 @@ async fn dropped_payload_is_announced_later() -> Result {
     let id = plumtree::MessageId::from_content(&content);
 
     // The writer reads what the queue holds: payloads, and no announcement.
-    let mut reader = lease.lock().await;
     assert!(announced(&mut reader).await.is_empty(), "announced at once");
 
     // The announcement comes with the timers.

@@ -11,10 +11,11 @@
 //! ```
 //!
 //! Every later frame is a message: a type code, then its fields in postcard.
-//! A reader skips a payload, an announcement, or a message of a random walk
-//! (forward join, shuffle, shuffle reply) over its size limit. Another control
-//! message over the limit fails the connection. A reader ignores bytes after
-//! the fields it knows. A reader skips unknown header parameters, as they tell
+//! On a topic stream, a reader skips a payload, an announcement, or a message of a
+//! random walk (forward join, shuffle, shuffle reply) over its size limit. Another
+//! control message over the limit fails the connection, and so does any frame over
+//! the limit on the control stream. A reader ignores bytes
+//! after the fields it knows. A reader skips unknown header parameters, as they tell
 //! what a peer supports. A message of an unknown type fails the connection: a
 //! peer may send a new type only after both peers declared support for it in a
 //! header parameter.
@@ -22,7 +23,10 @@
 use std::{io, time::Duration};
 
 use bytes::Bytes;
-use iroh::{endpoint::SendStream, EndpointId};
+use iroh::{
+    endpoint::{SendStream, VarInt},
+    EndpointId,
+};
 use n0_error::{e, stack_error};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -44,11 +48,23 @@ pub(super) const WRITE_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 5
 /// stalled open of an initial topic only skips the other initial topics.
 pub(super) const OPEN_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 5 } else { 15 });
 
-/// How long a peer may take to send a stream header, from the accept of the stream.
+/// How long a peer may take to send a header, from the accept of its stream.
 ///
-/// A stream that is late loses its place and is dropped. So a peer that opens
-/// streams and sends nothing holds at most [`MAX_PENDING_HEADERS`] of them for this time.
+/// A header that is late fails the connection, as the streams after it wait for it.
 pub(super) const HEADER_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 3 } else { 10 });
+
+/// The maximum length of a header frame payload, in bytes.
+///
+/// A longer header fails the connection.
+///
+/// Headers do not count against the message size limit.
+const MAX_HEADER_LEN: usize = 4096;
+
+/// Header kind of the control stream.
+const KIND_CONTROL: u64 = 0x00;
+
+/// Header parameter with the 8 byte session id of the sender. Required on the control stream.
+const PARAM_SESSION: u64 = 0x01;
 
 /// Header kind of a stream of one topic.
 ///
@@ -77,6 +93,8 @@ mod types {
     /// Each scope is a type of its own. A scope that a later version adds is
     /// a new type.
     pub(super) const GOSSIP_MESSAGE_NEIGHBOR: u64 = 0x14;
+    /// Control stream: `opened: varint`, the number of topic streams the sender opened.
+    pub(super) const GOAWAY: u64 = 0x20;
 }
 
 /// The maximum length of a LEB128 varint of a `u64`.
@@ -108,6 +126,9 @@ pub(super) enum WriteError {
         #[error(std_err)]
         source: std::io::Error,
     },
+    /// The peer stopped the stream with `code`.
+    #[error("the peer stopped the stream with code {code}")]
+    Stopped { code: u64 },
     /// Message was larger than the configured maximum message size
     #[error("message too large")]
     TooLarge {},
@@ -136,12 +157,9 @@ pub(super) enum ReadError {
         #[error(std_err)]
         source: std::io::Error,
     },
-    /// A header was larger than the configured maximum message size, or a length overflowed.
+    /// A frame was over its size limit, or a length overflowed.
     #[error("frame over the size limit")]
     TooLarge {},
-    /// The header did not arrive in [`HEADER_TIMEOUT`].
-    #[error("no stream header for {HEADER_TIMEOUT:?}")]
-    HeaderTimeout {},
     /// A header of an unknown kind, or without a required parameter, or with an invalid one.
     #[error("malformed header")]
     Malformed {},
@@ -154,6 +172,28 @@ pub(super) enum ReadError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct StreamHeader {
     pub(super) topic: TopicId,
+}
+
+/// Reads the payload of a header frame into `buffer`.
+///
+/// A header over [`MAX_HEADER_LEN`] fails before the reader reads its payload. The
+/// whole header must arrive in [`HEADER_TIMEOUT`].
+async fn read_header<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    buffer: &mut Vec<u8>,
+) -> Result<(), ReadError> {
+    let read = async {
+        let len = read_prefix(reader)
+            .await?
+            .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
+        if len > MAX_HEADER_LEN as u64 {
+            return Err(e!(ReadError::TooLarge));
+        }
+        read_payload(reader, buffer, len).await
+    };
+    n0_future::time::timeout(HEADER_TIMEOUT, read)
+        .await
+        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
 }
 
 /// Decodes the payload of a header frame of `kind` into its parameters, in order.
@@ -183,27 +223,12 @@ fn param<const N: usize>(params: &[(u64, Bytes)], id: u64) -> Result<[u8; N], Re
 
 impl StreamHeader {
     /// Reads the header frame.
-    ///
-    /// A header over `max_message_size` fails before its payload is read. The
-    /// whole header must arrive in [`HEADER_TIMEOUT`].
     pub(super) async fn read<R: AsyncRead + Unpin>(
         reader: &mut R,
         buffer: &mut Vec<u8>,
-        max_message_size: usize,
     ) -> Result<Self, ReadError> {
-        let read = async {
-            let len = read_prefix(reader)
-                .await?
-                .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
-            if len > max_message_size as u64 {
-                return Err(e!(ReadError::TooLarge));
-            }
-            read_payload(reader, buffer, len).await?;
-            Self::decode(buffer)
-        };
-        n0_future::time::timeout(HEADER_TIMEOUT, read)
-            .await
-            .map_err(|_| e!(ReadError::HeaderTimeout))?
+        read_header(reader, buffer).await?;
+        Self::decode(buffer)
     }
 
     /// Decodes the payload of a header frame.
@@ -219,18 +244,156 @@ impl StreamHeader {
         topic: TopicId,
         stream: &mut SendStream,
         buffer: &mut Vec<u8>,
-        max_message_size: usize,
     ) -> Result<(), WriteError> {
+        let mut payload = Vec::new();
+        put_header(
+            &mut payload,
+            KIND_TOPIC,
+            &[(PARAM_TOPIC_ID, topic.as_bytes())],
+        );
         buffer.clear();
-        // Kind, parameter id, parameter length and the topic take 35 bytes.
-        put_varint(buffer, 35);
-        put_header(buffer, KIND_TOPIC, &[(PARAM_TOPIC_ID, topic.as_bytes())]);
-        debug_assert_eq!(buffer.len(), 36);
-        if buffer.len() - 1 > max_message_size {
-            return Err(e!(WriteError::TooLarge));
-        }
+        put_varint(buffer, payload.len() as u64);
+        buffer.extend_from_slice(&payload);
         write_all(stream, buffer).await
     }
+}
+
+/// The code of a connection close.
+///
+/// The orderly closes come first, then the failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CloseCode {
+    /// A finished retire.
+    ///
+    /// This is not 0. noq sends code 0 when the last handle of a connection drops without a
+    /// close, as in a crash or a dropped `Gossip`. Such a close must not read as a finished
+    /// retire.
+    Retired = 1,
+    /// The connection belongs to a former instance of the peer, as the peer restarted.
+    ///
+    /// The loser of a crossed dial retires instead, and closes with `Retired`.
+    Stale = 2,
+    /// The node shuts down.
+    Shutdown = 3,
+    /// The peer broke the protocol.
+    Protocol = 4,
+    /// A write to the peer failed.
+    SendFailed = 5,
+    /// A queue, a write, a stream open, or a retire made no progress in time.
+    Blocked = 6,
+}
+
+impl CloseCode {
+    /// Returns the code of a close, or `None` for an unknown one.
+    pub(super) fn from_code(code: VarInt) -> Option<Self> {
+        Some(match code.into_inner() {
+            1 => Self::Retired,
+            2 => Self::Stale,
+            3 => Self::Shutdown,
+            4 => Self::Protocol,
+            5 => Self::SendFailed,
+            6 => Self::Blocked,
+            _ => return None,
+        })
+    }
+
+    pub(super) fn code(self) -> VarInt {
+        VarInt::from_u32(self as u32)
+    }
+}
+
+/// A random id that a node draws once at start, and sends in the header of each control stream.
+///
+/// The control stream is the first bidirectional stream of a connection. The
+/// dialer opens it and writes its header. The acceptor answers with its own.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, derive_more::Debug)]
+#[debug("{}", hex::encode(_0))]
+pub(super) struct Session(pub(super) [u8; 8]);
+
+impl Session {
+    pub(super) fn random() -> Self {
+        Self(rand::random())
+    }
+
+    /// Returns the frame of the control header.
+    pub(super) fn to_frame(self) -> Vec<u8> {
+        let mut payload = Vec::new();
+        put_header(&mut payload, KIND_CONTROL, &[(PARAM_SESSION, &self.0)]);
+        framed(&payload)
+    }
+
+    pub(super) async fn read<R: AsyncRead + Unpin>(
+        reader: &mut R,
+        buffer: &mut Vec<u8>,
+    ) -> Result<Self, ReadError> {
+        read_header(reader, buffer).await?;
+        Self::decode(buffer)
+    }
+
+    fn decode(buf: &[u8]) -> Result<Self, ReadError> {
+        Ok(Self(param(
+            &decode_header(buf, KIND_CONTROL)?,
+            PARAM_SESSION,
+        )?))
+    }
+}
+
+/// A message on the control stream after the headers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ControlMessage {
+    /// The writer of the sender stopped, after it opened this number of topic streams.
+    Goaway(u64),
+}
+
+impl ControlMessage {
+    /// Returns the frame of the message.
+    pub(super) fn to_frame(self) -> Vec<u8> {
+        let Self::Goaway(opened) = self;
+        let mut payload = Vec::new();
+        put_varint(&mut payload, types::GOAWAY);
+        put_varint(&mut payload, opened);
+        framed(&payload)
+    }
+
+    /// Reads the next message.
+    ///
+    /// The end of the stream is an error, as are a frame over `max_message_size`
+    /// and a message of an unknown type.
+    pub(super) async fn read<R: AsyncRead + Unpin>(
+        reader: &mut R,
+        buffer: &mut Vec<u8>,
+        max_message_size: usize,
+    ) -> Result<Self, ReadError> {
+        let len = read_prefix(reader)
+            .await?
+            .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
+        if len > max_message_size as u64 {
+            return Err(e!(ReadError::TooLarge));
+        }
+        read_payload(reader, buffer, len).await?;
+        match Self::decode(buffer)? {
+            Some(message) => Ok(message),
+            None => Err(e!(ReadError::UnknownType {
+                code: take(&mut &buffer[..])?
+            })),
+        }
+    }
+
+    fn decode(mut buf: &[u8]) -> Result<Option<Self>, ReadError> {
+        let buf = &mut buf;
+        Ok(Some(match take(buf)? {
+            types::GOAWAY => Self::Goaway(take(buf)?),
+            _ => return Ok(None),
+        }))
+    }
+}
+
+/// Returns `payload` as a frame.
+fn framed(payload: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    put_varint(&mut buf, payload.len() as u64);
+    buf.extend_from_slice(payload);
+    buf
 }
 
 /// Appends the payload of a header frame.
@@ -513,7 +676,7 @@ pub(super) async fn write_message(
 }
 
 /// Writes all of `buffer`.
-async fn write_all(stream: &mut SendStream, buffer: &[u8]) -> Result<(), WriteError> {
+pub(super) async fn write_all(stream: &mut SendStream, buffer: &[u8]) -> Result<(), WriteError> {
     // Each write takes some bytes, or fails once the peer takes none for long.
     // A slow peer thus keeps the connection, however long the frame takes.
     let mut sent = 0;
@@ -521,7 +684,12 @@ async fn write_all(stream: &mut SendStream, buffer: &[u8]) -> Result<(), WriteEr
         sent += n0_future::time::timeout(WRITE_TIMEOUT, stream.write(&buffer[sent..]))
             .await
             .map_err(|_| e!(WriteError::Stalled))?
-            .map_err(io::Error::other)?;
+            .map_err(|err| match err {
+                iroh::endpoint::WriteError::Stopped(code) => e!(WriteError::Stopped {
+                    code: code.into_inner()
+                }),
+                other => WriteError::from(io::Error::other(other)),
+            })?;
     }
     Ok(())
 }
@@ -538,14 +706,6 @@ mod tests {
     fn header(params: &[(u64, &[u8])]) -> Vec<u8> {
         let mut buf = Vec::new();
         put_header(&mut buf, KIND_TOPIC, params);
-        buf
-    }
-
-    /// Returns `payload` as a frame.
-    fn framed(payload: &[u8]) -> Vec<u8> {
-        let mut buf = Vec::new();
-        put_varint(&mut buf, payload.len() as u64);
-        buf.extend_from_slice(payload);
         buf
     }
 
@@ -706,18 +866,21 @@ mod tests {
     /// A header over the limit fails on its length, before its payload.
     #[tokio::test]
     async fn oversized_header_is_rejected() {
-        let payload = header(&[(PARAM_TOPIC_ID, &TOPIC)]);
-        let mut bytes = framed(&payload);
-        let ok = StreamHeader::read(&mut &bytes[..], &mut Vec::new(), payload.len()).await;
+        // The kind and the topic parameter take 35 bytes. The id and length of the filler
+        // take 3 bytes.
+        let frame = |filler: usize| {
+            let filler = vec![0; filler];
+            framed(&header(&[(PARAM_TOPIC_ID, &TOPIC[..]), (58, &filler[..])]))
+        };
+        let fits = frame(MAX_HEADER_LEN - 38);
+        assert_eq!(fits.len(), 2 + MAX_HEADER_LEN);
+        let ok = StreamHeader::read(&mut &fits[..], &mut Vec::new()).await;
         assert!(ok.is_ok());
-        let err = StreamHeader::read(&mut &bytes[..], &mut Vec::new(), payload.len() - 1)
-            .await
-            .unwrap_err();
-        assert!(matches!(err, ReadError::TooLarge { .. }), "{err}");
         // Only the prefix is there, so the reader did not wait for the payload.
-        bytes.truncate(1);
+        let mut over = frame(MAX_HEADER_LEN - 37);
+        over.truncate(2);
         let mut buffer = Vec::new();
-        let err = StreamHeader::read(&mut &bytes[..], &mut buffer, 10)
+        let err = StreamHeader::read(&mut &over[..], &mut buffer)
             .await
             .unwrap_err();
         assert!(matches!(err, ReadError::TooLarge { .. }), "{err}");
@@ -728,10 +891,13 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn silent_header_times_out() {
         let (mut reader, _writer) = tokio::io::duplex(64);
-        let err = StreamHeader::read(&mut reader, &mut Vec::new(), 512)
+        let err = StreamHeader::read(&mut reader, &mut Vec::new())
             .await
             .unwrap_err();
-        assert!(matches!(err, ReadError::HeaderTimeout { .. }), "{err}");
+        assert!(
+            matches!(&err, ReadError::Io { source, .. } if source.kind() == io::ErrorKind::TimedOut),
+            "{err}"
+        );
     }
 
     #[tokio::test]
