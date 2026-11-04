@@ -378,7 +378,7 @@ async fn slow_peer_gets_the_dropped_messages() -> Result {
             let content = Bytes::from(content);
             sent.insert(content.clone());
             let message = TopicMessage::test_payload(content);
-            wire::write_frame(&mut publish, &message, &mut buffer, TEST_FRAME_LIMIT)
+            wire::write_message(&mut publish, &message, &mut buffer, TEST_FRAME_LIMIT)
                 .await
                 .std_context("publish")?;
         }

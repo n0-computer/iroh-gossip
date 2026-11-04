@@ -33,21 +33,22 @@ pub(super) const BROADCAST_RECHECK_INTERVAL: Duration = Duration::from_millis(10
 /// This bounds admission waiting, not API channel backlog or delivery time.
 pub(super) const BROADCAST_WAIT_LIMIT: Duration = Duration::from_millis(100);
 
+/// The senders and subscribers of a topic.
 #[derive(Debug)]
-pub(super) struct TopicState {
-    pub(super) event_sender: broadcast::Sender<ProtoEvent>,
+pub(super) struct TopicHandles {
+    pub(super) events: broadcast::Sender<ProtoEvent>,
     /// Counts subscription command receivers, including those waiting to publish.
     ///
     /// A receiver remains counted until the actor processes its end.
-    pub(super) command_receiver_count: usize,
+    pub(super) command_receivers: usize,
 }
 
-impl Default for TopicState {
+impl Default for TopicHandles {
     fn default() -> Self {
-        let (event_sender, _) = broadcast::channel(TOPIC_EVENT_CAP);
+        let (events, _) = broadcast::channel(TOPIC_EVENT_CAP);
         Self {
-            command_receiver_count: 0,
-            event_sender,
+            command_receivers: 0,
+            events,
         }
     }
 }
@@ -67,12 +68,12 @@ pub(super) fn all_eager_peers_busy(
         && eager_peers.all(|peer| peers.get(peer).is_some_and(|peer| peer.queue.is_busy()))
 }
 
-impl TopicState {
-    /// Check if the topic still has any publisher or subscriber.
-    pub(super) fn still_needed(&self) -> bool {
+impl TopicHandles {
+    /// Returns whether the topic still has a publisher or a subscriber.
+    pub(super) fn has_handles(&self) -> bool {
         // Keep topic alive if either senders or receivers exist.
         // Using || prevents topic closure when senders are dropped while receivers listen.
-        self.command_receiver_count != 0 || self.event_sender.receiver_count() > 0
+        self.command_receivers != 0 || self.events.receiver_count() > 0
     }
 }
 

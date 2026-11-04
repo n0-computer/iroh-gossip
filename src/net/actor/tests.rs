@@ -29,7 +29,7 @@ use crate::{
         peers::{ConnId, Finished, PeerState, PEER_RETENTION},
         queue::{Pushed, QueueLease, SendQueue},
         subscriptions::{
-            all_eager_peers_busy, SubscriptionCommands, TopicState, BROADCAST_RECHECK_INTERVAL,
+            all_eager_peers_busy, SubscriptionCommands, TopicHandles, BROADCAST_RECHECK_INTERVAL,
             BROADCAST_WAIT_LIMIT,
         },
         wire, *,
@@ -82,7 +82,7 @@ impl ManualActorLoop {
         // ignore updates that change our published address. This gives us better control over
         // events since the endpoint it no longer emitting changes
         let addr_update_stream = &mut n0_future::stream::pending();
-        actor.event_loop(addr_update_stream, *step).await
+        actor.event_loop(addr_update_stream).await
     }
 
     /// Steps until `done` holds, at most `max` times, and returns whether it holds.
@@ -125,7 +125,15 @@ impl Gossip {
             .expect("endpoint is not closed")
             .add(address_lookup.clone());
 
-        let (actor, to_actor) = Actor::new(endpoint, config, metrics.clone(), None, address_lookup);
+        let (actor, to_actor) = Actor::new(
+            endpoint,
+            ActorConfig {
+                proto: config,
+                ..Default::default()
+            },
+            metrics.clone(),
+            address_lookup,
+        );
         let max_message_size = actor.state.max_message_size();
 
         let actor_handle = AbortOnDropHandle::new(task::spawn(n0_future::future::pending()));
@@ -287,7 +295,7 @@ async fn open_stream(
         .await
         .std_context("write header")?;
     for message in messages {
-        wire::write_frame(&mut stream, message, &mut buffer, TEST_FRAME_LIMIT)
+        wire::write_message(&mut stream, message, &mut buffer, TEST_FRAME_LIMIT)
             .await
             .std_context("write frame")?;
     }
@@ -302,13 +310,13 @@ async fn read_next_stream(conn: &Connection) -> Result<(TopicId, Vec<TopicMessag
         .await
         .std_context("read header")?;
     let mut messages = Vec::new();
-    while let Some(message) = wire::read_frame(&mut stream, &mut buffer, TEST_FRAME_LIMIT)
+    while let Some(message) = wire::read_message(&mut stream, &mut buffer, TEST_FRAME_LIMIT)
         .await
         .std_context("read frame")?
     {
         messages.push(message);
     }
-    Ok((header.topic_id, messages))
+    Ok((header.topic, messages))
 }
 
 /// Returns a `Disconnect` for `topic`.
@@ -326,11 +334,11 @@ async fn read_next_message(conn: &Connection) -> Result<(TopicId, TopicMessage)>
     let header = wire::StreamHeader::read(&mut stream, &mut buffer, TEST_FRAME_LIMIT)
         .await
         .std_context("read header")?;
-    let message = wire::read_frame(&mut stream, &mut buffer, TEST_FRAME_LIMIT)
+    let message = wire::read_message(&mut stream, &mut buffer, TEST_FRAME_LIMIT)
         .await
         .std_context("read frame")?
         .std_context("the stream ended without a message")?;
-    Ok((header.topic_id, message))
+    Ok((header.topic, message))
 }
 
 /// Builds an actor without running its event loop.
@@ -342,9 +350,11 @@ async fn t_actor() -> Result<Actor, BindError> {
     let metrics = Arc::new(Metrics::default());
     let (actor, _to_actor) = Actor::new(
         endpoint,
-        Default::default(),
+        ActorConfig {
+            proto: Default::default(),
+            ..Default::default()
+        },
         metrics,
-        None,
         Default::default(),
     );
     Ok(actor)
@@ -396,7 +406,7 @@ fn join_until_full(actor: &mut Actor, peer: EndpointId) {
 /// Returns the queue of `peer_id`, which must have an active connection.
 fn active_queue(actor: &Actor, peer_id: EndpointId) -> &SendQueue {
     let peer = &actor.peers[&peer_id];
-    if peer.queue.is_closing() || peer.writer.is_none() {
+    if peer.queue.is_closed() || peer.writer.is_none() {
         panic!("not active: {:?}, writer: {:?}", peer.queue, peer.writer);
     }
     &peer.queue
@@ -428,12 +438,12 @@ fn numbered(topic: TopicId, i: usize) -> ProtoMessage {
 /// Returns the writer of the queue of `peer_id`, and whether the queue is draining.
 fn send_state(actor: &Actor, peer_id: EndpointId) -> Option<(Option<ConnId>, bool)> {
     let peer = actor.peers.get(&peer_id)?;
-    Some((peer.writer, peer.queue.is_closing()))
+    Some((peer.writer, peer.queue.is_closed()))
 }
 
 /// Whether the peer has no messages and its queue is closed.
 fn is_idle(peer: &PeerState) -> bool {
-    peer.queue.is_closing() && peer.queue.is_empty()
+    peer.queue.is_closed() && peer.queue.is_empty()
 }
 
 /// Returns the state of a peer with an open, empty queue of `size` bytes.
@@ -486,7 +496,7 @@ fn commands_of(commands: Vec<Command>) -> mpsc::Receiver<Command> {
 /// Joins a topic with a publisher that always has a command ready.
 fn publish_forever(actor: &mut Actor) {
     let topic = [1; 32].into();
-    actor.topics.insert(topic, TopicState::default());
+    actor.topics.insert(topic, TopicHandles::default());
     actor.handle_in_event(
         InEvent::Command(topic, ProtoCommand::Join(vec![])),
         Instant::now(),
@@ -497,7 +507,7 @@ fn publish_forever(actor: &mut Actor) {
         .topics
         .get_mut(&topic)
         .expect("inserted above")
-        .command_receiver_count += 1;
+        .command_receivers += 1;
 }
 
 /// Binds an endpoint without a relay, and adds its address to `lookup`.

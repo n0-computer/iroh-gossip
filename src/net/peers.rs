@@ -60,7 +60,7 @@ impl PeerState {
     pub(super) fn new(queue_size: usize) -> Self {
         let aborted = CancellationToken::new();
         let queue = SendQueue::new(queue_size);
-        queue.set_closing(true);
+        queue.close();
         Self {
             queue,
             aborted,
@@ -73,13 +73,13 @@ impl PeerState {
 
     /// Returns whether this peer needs a new dial because it has an open queue but no writer.
     pub(super) fn needs_dial(&self) -> bool {
-        self.writer.is_none() && !self.queue.is_closing()
+        self.writer.is_none() && !self.queue.is_closed()
     }
 
     /// Opens the queue, which keeps its messages and its byte limit.
     pub(super) fn open_queue(&mut self) -> &SendQueue {
         self.forget_at = None;
-        self.queue.set_closing(false);
+        self.queue.open();
         &self.queue
     }
 
@@ -92,18 +92,13 @@ impl PeerState {
         self.open_queue().push(message)
     }
 
-    /// Closes the queue, see [`SendQueue::set_closing`].
-    pub(super) fn close_queue(&mut self) {
-        self.queue.set_closing(true);
-    }
-
     /// Puts a closed, empty queue in place of the queue.
     ///
     /// A writer of the old queue still sends what it holds, and then ends. A
     /// later abort still closes its connection.
     pub(super) fn discard_queue(&mut self, now: Instant) {
         self.queue = SendQueue::new(self.queue.size());
-        self.queue.set_closing(true);
+        self.queue.close();
         self.writer = None;
         self.retain_if_idle(now);
     }
@@ -141,7 +136,7 @@ impl PeerState {
             // An accepted connection reopens a closed queue. A dial sends what is
             // left of it, and then waits.
             if side == Side::Server {
-                self.queue.set_closing(false);
+                self.queue.open();
             }
             Some(self.queue.lease())
         }
@@ -168,7 +163,7 @@ impl PeerState {
         if self.writer != Some(id) {
             self.retain_if_idle(now);
             Finished::Quiet
-        } else if self.queue.is_closing() || (retired && self.queue.is_empty()) {
+        } else if self.queue.is_closed() || (retired && self.queue.is_empty()) {
             self.discard_queue(now);
             Finished::Quiet
         } else if retired {
@@ -183,7 +178,7 @@ impl PeerState {
     /// finished. An open queue still needs a writer, even when empty.
     /// A later call does not extend retention.
     fn retain_if_idle(&mut self, now: Instant) {
-        if self.queue.is_closing() && self.queue.is_empty() && self.connections == 0 {
+        if self.queue.is_closed() && self.queue.is_empty() && self.connections == 0 {
             self.forget_at.get_or_insert(now + PEER_RETENTION);
         }
     }

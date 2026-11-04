@@ -17,8 +17,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error_span, warn, Instrument};
 
 use super::{
-    queue::{QueueLease, QueuedMessage},
-    wire::{read_frame, write_sized_frame, ReadError, StreamHeader, WriteError, OPEN_TIMEOUT},
+    queue::{set_if_changed, QueueLease, QueuedMessage},
+    wire::{read_message, write_sized_message, ReadError, StreamHeader, WriteError, OPEN_TIMEOUT},
     InEvent, ProtoMessage,
 };
 use crate::proto::TopicId;
@@ -222,6 +222,9 @@ pub(super) struct RecvLoop {
     has_streams: watch::Sender<bool>,
 }
 
+/// The result of a stream read: the stream, and its next message or its end.
+type ReadResult = (TopicReader, Result<Option<ProtoMessage>, ReadError>);
+
 impl RecvLoop {
     pub(super) fn new(
         remote_endpoint_id: EndpointId,
@@ -258,7 +261,7 @@ impl RecvLoop {
         while !conn_is_closed || !header_futures.is_empty() || !read_futures.is_empty() {
             // A partial header counts. Only a broken peer keeps one partial.
             let open = !header_futures.is_empty() || !read_futures.is_empty();
-            set_flag(&self.has_streams, open);
+            set_if_changed(&self.has_streams, open);
             tokio::select! {
                 _ = &mut closed, if !conn_is_closed => {
                     conn_is_closed = true;
@@ -271,7 +274,7 @@ impl RecvLoop {
                             continue;
                         }
                     };
-                    header_futures.push(RecvStreamState::new(stream, self.max_message_size));
+                    header_futures.push(TopicReader::accept(stream, self.max_message_size));
                 }
                 Some(state) = header_futures.next(), if !header_futures.is_empty() => {
                     // A bad header loses only its stream, as a bad frame does.
@@ -282,11 +285,11 @@ impl RecvLoop {
                             continue;
                         }
                     };
-                    debug!(topic=%state.header.topic_id.fmt_short(), "stream opened");
+                    debug!(topic=%state.header.topic.fmt_short(), "stream opened");
                     if state.header.handles_close {
                         self.handles_close.send_replace(true);
                     }
-                    let (topic, id) = (state.header.topic_id, state.stream.id());
+                    let (topic, id) = (state.header.topic, state.stream.id());
                     // A stream waits while there is an older stream for the same topic. If
                     // the header of an older stream arrives late, we read that stream right
                     // away, and it does not wait for the newer one.
@@ -294,7 +297,7 @@ impl RecvLoop {
                     let is_first_for_topic = before.is_none_or(|((t, _), _)| *t != topic);
                     if is_first_for_topic {
                         streams.insert((topic, id), Order::Reading);
-                        read_futures.push(state.next());
+                        read_futures.push(state.read_next());
                     } else {
                         streams.insert((topic, id), Order::Waiting(state));
                     }
@@ -306,22 +309,22 @@ impl RecvLoop {
                                 debug!("stop recv loop: actor closed");
                                 break;
                             }
-                            read_futures.push(state.next());
+                            read_futures.push(state.read_next());
                             continue;
                         }
                         Ok(None) => {
-                            debug!(topic=%state.header.topic_id.fmt_short(), "stream closed");
+                            debug!(topic=%state.header.topic.fmt_short(), "stream closed");
                         }
                         Err(err) => debug!("recv stream closed with error: {err:#}"),
                     }
-                    let (topic, id) = (state.header.topic_id, state.stream.id());
+                    let (topic, id) = (state.header.topic, state.stream.id());
                     streams.remove(&(topic, id));
                     // Start reading the next stream for this topic, unless we already do.
                     let after = streams.range_mut((topic, id)..).next();
                     let next_for_topic = after.filter(|((t, _), _)| *t == topic);
                     if let Some((_, order)) = next_for_topic {
                         if let Order::Waiting(next) = std::mem::replace(order, Order::Reading) {
-                            read_futures.push(next.next());
+                            read_futures.push(next.read_next());
                         }
                     }
                 }
@@ -334,19 +337,21 @@ impl RecvLoop {
 /// Whether a stream in a [`RecvLoop`] is read now, or waits for an older stream of the same topic.
 enum Order {
     Reading,
-    Waiting(RecvStreamState),
+    Waiting(TopicReader),
 }
 
+/// A topic stream that we read: its header, and the buffer for its frames.
 #[derive(Debug)]
-struct RecvStreamState {
+struct TopicReader {
     stream: RecvStream,
     header: StreamHeader,
     buffer: BytesMut,
     max_message_size: usize,
 }
 
-impl RecvStreamState {
-    async fn new(mut stream: RecvStream, max_message_size: usize) -> Result<Self, ReadError> {
+impl TopicReader {
+    /// Reads the header of a new stream.
+    async fn accept(mut stream: RecvStream, max_message_size: usize) -> Result<Self, ReadError> {
         let mut buffer = BytesMut::new();
         let header = StreamHeader::read(&mut stream, &mut buffer, max_message_size).await?;
         Ok(Self {
@@ -357,17 +362,12 @@ impl RecvStreamState {
         })
     }
 
-    /// Reads the next message from the stream.
+    /// Reads the next message of the stream, or `None` if it ended gracefully.
     ///
-    /// Returns `self` together with the result, also when the read failed. The
-    /// message is `None` if the stream ended gracefully.
-    ///
-    /// ## Cancellation safety
-    ///
-    /// This function is not cancellation-safe.
-    async fn next(mut self) -> (Self, Result<Option<ProtoMessage>, ReadError>) {
-        let msg = read_frame(&mut self.stream, &mut self.buffer, self.max_message_size).await;
-        let topic = self.header.topic_id;
+    /// Returns `self` together with the result, also when the read failed.
+    async fn read_next(mut self) -> ReadResult {
+        let msg = read_message(&mut self.stream, &mut self.buffer, self.max_message_size).await;
+        let topic = self.header.topic;
         let msg = msg.map(|msg| msg.map(|message| ProtoMessage { topic, message }));
         (self, msg)
     }
@@ -431,7 +431,7 @@ impl SendLoop {
             loop {
                 // Every pass of the loop starts here, so the flag clears with the last stream.
                 if self.live_streams.is_empty() {
-                    set_flag(&self.has_streams, false);
+                    set_if_changed(&self.has_streams, false);
                 }
                 let more = tokio::select! {
                     biased;
@@ -448,7 +448,7 @@ impl SendLoop {
                         }
                         continue;
                     }
-                    more = queue.next() => more,
+                    more = queue.wait_next() => more,
                     // This comes after the queue, so it only runs when the queue is empty. We
                     // finish our streams and keep waiting on this connection, so the next
                     // message does not need a dial. Dropping a stream finishes it.
@@ -514,7 +514,7 @@ impl SendLoop {
         }
         self.streams.clear();
         while self.live_streams.next().await.is_some() {}
-        set_flag(&self.has_streams, false);
+        set_if_changed(&self.has_streams, false);
         debug!("send loop closed");
         Ok(())
     }
@@ -535,7 +535,7 @@ impl SendLoop {
             .get_mut(topic)
             .expect("the stream was opened before");
         let len = item.encoded_len();
-        match write_sized_frame(
+        match write_sized_message(
             stream,
             message,
             len,
@@ -599,7 +599,7 @@ impl SendLoop {
             return Ok(true);
         };
         // Before the open, which can wait at the stream limit of the peer.
-        set_flag(&self.has_streams, true);
+        set_if_changed(&self.has_streams, true);
         let mut stream = tokio::select! {
             biased;
             // Before the open, so that a revoked lease starts no header.
@@ -620,9 +620,4 @@ impl SendLoop {
         entry.insert(stream);
         Ok(true)
     }
-}
-
-/// Sets `flag` to `value`, and wakes its receivers only if the value changed.
-pub(super) fn set_flag(flag: &watch::Sender<bool>, value: bool) {
-    flag.send_if_modified(|old| std::mem::replace(old, value) != value);
 }

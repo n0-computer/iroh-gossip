@@ -6,14 +6,14 @@ async fn read_next_header(conn: &Connection) -> Result<TopicId> {
     let header = wire::StreamHeader::read(&mut stream, &mut BytesMut::new(), TEST_FRAME_LIMIT)
         .await
         .std_context("read header")?;
-    Ok(header.topic_id)
+    Ok(header.topic)
 }
 
 /// The stream header that nodes from 0.90 to 0.101 write and read.
 ///
-/// Their `StreamHeader` and `read_frame` are the same in every release from
-/// 0.90 to 0.101, and their `read_lp` and `write_frame` are the same as ours
-/// since 0.95. So `wire::read_frame` and `wire::write_frame` of this struct
+/// Their `StreamHeader` and `read_message` are the same in every release from
+/// 0.90 to 0.101, and their `read_lp` and `write_message` are the same as ours
+/// since 0.95. So `wire::read_message` and `wire::write_message` of this struct
 /// read and write a header as those nodes do.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct OldStreamHeader {
@@ -37,12 +37,12 @@ async fn stream_headers_cross_versions_on_a_stream() -> Result {
     wire::StreamHeader::write(topic, &mut stream, &mut buffer, TEST_FRAME_LIMIT)
         .await
         .std_context("write header")?;
-    wire::write_frame(&mut stream, &join, &mut buffer, TEST_FRAME_LIMIT)
+    wire::write_message(&mut stream, &join, &mut buffer, TEST_FRAME_LIMIT)
         .await
         .std_context("write frame")?;
     stream.finish().std_context("finish")?;
     let mut recv = peer_conn.accept_uni().await.std_context("accept stream")?;
-    let header: OldStreamHeader = wire::read_frame(&mut recv, &mut read_buffer, TEST_FRAME_LIMIT)
+    let header: OldStreamHeader = wire::read_message(&mut recv, &mut read_buffer, TEST_FRAME_LIMIT)
         .await
         .std_context("old node reads header")?
         .expect("a header");
@@ -55,7 +55,7 @@ async fn stream_headers_cross_versions_on_a_stream() -> Result {
 
     // An old node writes, we read.
     let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
-    wire::write_frame(
+    wire::write_message(
         &mut stream,
         &OldStreamHeader { topic_id: topic },
         &mut buffer,
@@ -63,7 +63,7 @@ async fn stream_headers_cross_versions_on_a_stream() -> Result {
     )
     .await
     .std_context("write old header")?;
-    wire::write_frame(&mut stream, &join, &mut buffer, TEST_FRAME_LIMIT)
+    wire::write_message(&mut stream, &join, &mut buffer, TEST_FRAME_LIMIT)
         .await
         .std_context("write frame")?;
     stream.finish().std_context("finish")?;
@@ -71,7 +71,7 @@ async fn stream_headers_cross_versions_on_a_stream() -> Result {
     let header = wire::StreamHeader::read(&mut recv, &mut read_buffer, TEST_FRAME_LIMIT)
         .await
         .std_context("read old header")?;
-    assert_eq!(header.topic_id, topic);
+    assert_eq!(header.topic, topic);
     assert!(!header.handles_close);
     let frame = wire::read_lp(&mut recv, &mut read_buffer, TEST_FRAME_LIMIT)
         .await
@@ -94,7 +94,7 @@ async fn partial_header_keeps_the_connection() -> Result {
     let pair = TestPair::new(1).await?;
     let (conn, peer_conn) = pair.connect_back().await?;
     let mut actor = t_actor().await?;
-    actor.handle_connection(conn);
+    actor.add_connection(conn);
     show_that_it_handles_a_close(&peer_conn, [0; 32].into()).await;
     let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
     stream
@@ -146,7 +146,7 @@ async fn send_loop_reports_its_streams() -> Result {
     let mut buffer = BytesMut::new();
     wire::StreamHeader::read(&mut stream, &mut buffer, TEST_FRAME_LIMIT).await?;
     let message: Option<TopicMessage> =
-        wire::read_frame(&mut stream, &mut buffer, TEST_FRAME_LIMIT).await?;
+        wire::read_message(&mut stream, &mut buffer, TEST_FRAME_LIMIT).await?;
     assert!(message.is_some(), "the message did not go out");
     assert!(*has_streams.borrow(), "the open stream is not reported");
 
@@ -168,9 +168,9 @@ async fn send_loop_reports_its_streams() -> Result {
         .std_context("the stream did not open again")?
         .std_context("accept")?;
     let header = wire::StreamHeader::read(&mut next_stream, &mut buffer, TEST_FRAME_LIMIT).await?;
-    assert_eq!(header.topic_id, topic);
+    assert_eq!(header.topic, topic);
     let end: Option<TopicMessage> =
-        wire::read_frame(&mut stream, &mut buffer, TEST_FRAME_LIMIT).await?;
+        wire::read_message(&mut stream, &mut buffer, TEST_FRAME_LIMIT).await?;
     assert!(end.is_none(), "the old stream did not end");
     flag_becomes(&mut has_streams, false).await?;
     assert!(
@@ -179,9 +179,9 @@ async fn send_loop_reports_its_streams() -> Result {
     );
 
     // A closed queue finishes the stream. The flag clears once the peer acknowledged it.
-    queue.set_closing(true);
+    queue.close();
     let end: Option<TopicMessage> =
-        wire::read_frame(&mut next_stream, &mut buffer, TEST_FRAME_LIMIT).await?;
+        wire::read_message(&mut next_stream, &mut buffer, TEST_FRAME_LIMIT).await?;
     assert!(end.is_none(), "the new stream did not end");
     flag_becomes(&mut next_has_streams, false).await?;
     Ok(())
@@ -300,9 +300,9 @@ async fn streams_of_a_topic_keep_their_order() -> Result {
     // The newer stream arrives before the last message of the older one.
     let mut newer = peer_conn.open_uni().await.std_context("open stream")?;
     wire::StreamHeader::write(topic, &mut newer, &mut buffer, TEST_FRAME_LIMIT).await?;
-    wire::write_frame(&mut newer, &second.message, &mut buffer, TEST_FRAME_LIMIT).await?;
+    wire::write_message(&mut newer, &second.message, &mut buffer, TEST_FRAME_LIMIT).await?;
     tokio::time::sleep(Duration::from_millis(200)).await;
-    wire::write_frame(&mut older, &first.message, &mut buffer, TEST_FRAME_LIMIT).await?;
+    wire::write_message(&mut older, &first.message, &mut buffer, TEST_FRAME_LIMIT).await?;
     older.finish().std_context("finish")?;
 
     for expected in [first, second] {
@@ -341,7 +341,7 @@ async fn late_header_of_an_older_stream_does_not_wait() -> Result {
     older.write_all(&[0]).await.std_context("write")?;
     let mut newer = peer_conn.open_uni().await.std_context("open stream")?;
     wire::StreamHeader::write(topic, &mut newer, &mut buffer, TEST_FRAME_LIMIT).await?;
-    wire::write_frame(&mut newer, &second.message, &mut buffer, TEST_FRAME_LIMIT).await?;
+    wire::write_message(&mut newer, &second.message, &mut buffer, TEST_FRAME_LIMIT).await?;
     let mut expect = async |expected: ProtoMessage| {
         let event = timeout(Duration::from_secs(5), in_event_rx.recv())
             .await
@@ -358,7 +358,7 @@ async fn late_header_of_an_older_stream_does_not_wait() -> Result {
     let len = (header.len() as u32).to_be_bytes();
     older.write_all(&len[1..]).await.std_context("write")?;
     older.write_all(&header).await.std_context("write")?;
-    wire::write_frame(&mut older, &first.message, &mut buffer, TEST_FRAME_LIMIT).await?;
+    wire::write_message(&mut older, &first.message, &mut buffer, TEST_FRAME_LIMIT).await?;
     older.finish().std_context("finish")?;
     expect(first).await?;
     Ok(())
@@ -401,7 +401,7 @@ async fn new_writer_opens_the_streams_of_the_topics() -> Result {
     let peer_id = pair.ep2.id();
     let topic: TopicId = blake3::hash(b"new_writer_opens").into();
     let mut actor = t_actor().await?;
-    actor.handle_connection(old);
+    actor.add_connection(old);
     let join = InEvent::Command(topic, ProtoCommand::Join(vec![peer_id]));
     actor.handle_in_event(join, Instant::now());
     let (sent, _) = timeout(Duration::from_secs(5), read_next_message(&peer_old))
@@ -409,7 +409,7 @@ async fn new_writer_opens_the_streams_of_the_topics() -> Result {
         .std_context("the join did not go out")??;
     assert_eq!(sent, topic);
 
-    actor.handle_connection(new);
+    actor.add_connection(new);
     let opened = timeout(Duration::from_secs(5), read_next_header(&peer_new))
         .await
         .std_context("the new writer opened no stream")??;
@@ -475,10 +475,10 @@ async fn next_message_after_a_stop_opens_a_new_stream() -> Result {
             .await
             .expect("read header");
         let message: Option<TopicMessage> =
-            wire::read_frame(&mut next, &mut buffer, TEST_FRAME_LIMIT)
+            wire::read_message(&mut next, &mut buffer, TEST_FRAME_LIMIT)
                 .await
                 .expect("read frame");
-        (header.topic_id, message.is_some(), peer_conn)
+        (header.topic, message.is_some(), peer_conn)
     }));
     let mut queue = SendQueue::new(queue::MIN_QUEUE_SIZE);
     let queue_lease = queue.lease();
@@ -630,7 +630,7 @@ async fn pending_header_is_read_after_a_close() -> Result {
             .await
             .std_context("write topic")?;
         let mut buffer = Vec::new();
-        wire::write_frame(
+        wire::write_message(
             &mut partial,
             &join_message(topic, 0).message,
             &mut buffer,
@@ -746,14 +746,14 @@ async fn frame_over_the_size_limit_is_refused() -> Result {
     let size = postcard::experimental::serialized_size(&message).std_context("size")?;
 
     let mut stream = conn.open_uni().await.std_context("open stream")?;
-    wire::write_frame(&mut stream, &message, &mut Vec::new(), size + 1)
+    wire::write_message(&mut stream, &message, &mut Vec::new(), size + 1)
         .await
         .std_context("write")?;
     stream.finish().std_context("finish")?;
 
     let mut stream = peer_conn.accept_uni().await.std_context("accept")?;
     let read: Result<Option<TopicMessage>, _> =
-        wire::read_frame(&mut stream, &mut BytesMut::new(), size - 1).await;
+        wire::read_message(&mut stream, &mut BytesMut::new(), size - 1).await;
     assert!(
         matches!(read, Err(wire::ReadError::TooLarge { .. })),
         "{read:?}"
@@ -776,18 +776,18 @@ async fn frame_shorter_than_the_size_limit_goes_through() -> Result {
 
     let mut stream = conn.open_uni().await.std_context("open stream")?;
     let mut buffer = Vec::new();
-    let refused = wire::write_frame(&mut stream, &message, &mut buffer, size).await;
+    let refused = wire::write_message(&mut stream, &message, &mut buffer, size).await;
     assert!(
         matches!(refused, Err(wire::WriteError::TooLarge { .. })),
         "{refused:?}"
     );
-    wire::write_frame(&mut stream, &message, &mut buffer, size + 1)
+    wire::write_message(&mut stream, &message, &mut buffer, size + 1)
         .await
         .std_context("write")?;
     stream.finish().std_context("finish")?;
 
     let mut stream = peer_conn.accept_uni().await.std_context("accept")?;
-    let read: Option<TopicMessage> = wire::read_frame(&mut stream, &mut BytesMut::new(), size)
+    let read: Option<TopicMessage> = wire::read_message(&mut stream, &mut BytesMut::new(), size)
         .await
         .std_context("read")?;
     assert!(read.is_some(), "the frame did not arrive");

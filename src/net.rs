@@ -2,7 +2,6 @@
 
 use std::{collections::BTreeSet, sync::Arc};
 
-use bytes::Bytes;
 use iroh::{
     endpoint::Connection,
     protocol::{AcceptError, ProtocolHandler},
@@ -13,7 +12,10 @@ use n0_future::task::{self, AbortOnDropHandle};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{error_span, warn, Instrument};
 
-use self::{actor::Actor, address_lookup::GossipAddressLookup};
+use self::{
+    actor::{Actor, ActorConfig},
+    address_lookup::GossipAddressLookup,
+};
 use crate::{
     api::{Command, Event, GossipTopic, JoinOptions},
     metrics::Metrics,
@@ -54,7 +56,7 @@ const TOPIC_COMMANDS_CAP: usize = 64;
 /// Messages published on the swarm will be delivered to all peers that joined the swarm for that
 /// topic. You will also be relaying (gossiping) messages published by other peers.
 ///
-/// With the default settings, the protocol will maintain up to 5 peer connections per topic.
+/// With the default settings, a node has up to 5 active neighbors per topic (the default active view).
 ///
 /// Even though the [`Gossip`] is created from a [`Endpoint`], it does not accept connections
 /// itself. You should run an accept loop on the [`Endpoint`] yourself, check the ALPN protocol of incoming
@@ -119,9 +121,7 @@ impl ProtocolHandler for Gossip {
 /// Builder to configure and construct [`Gossip`].
 #[derive(Debug, Clone)]
 pub struct Builder {
-    config: proto::Config,
-    alpn: Option<Bytes>,
-    send_queue: QueueOptions,
+    config: ActorConfig,
 }
 
 impl Builder {
@@ -136,7 +136,7 @@ impl Builder {
     ///
     /// [`GossipSender::broadcast`]: crate::api::GossipSender::broadcast
     pub fn max_message_size(mut self, size: usize) -> Self {
-        self.config.max_message_size = size;
+        self.config.proto.max_message_size = size;
         self
     }
 
@@ -146,7 +146,7 @@ impl Builder {
     /// We have not tested how a swarm behaves with different values, so test your setup
     /// first if you mix them.
     pub fn membership_config(mut self, config: HyparviewConfig) -> Self {
-        self.config.membership = config;
+        self.config.proto.membership = config;
         self
     }
 
@@ -156,7 +156,7 @@ impl Builder {
     /// We have not tested how a swarm behaves with different values, so test your setup
     /// first if you mix them.
     pub fn broadcast_config(mut self, config: PlumtreeConfig) -> Self {
-        self.config.broadcast = config;
+        self.config.proto.broadcast = config;
         self
     }
 
@@ -168,13 +168,13 @@ impl Builder {
     ///
     /// [`RouterBuilder::accept`]: iroh::protocol::RouterBuilder::accept
     pub fn alpn(mut self, alpn: impl AsRef<[u8]>) -> Self {
-        self.alpn = Some(alpn.as_ref().to_vec().into());
+        self.config.alpn = alpn.as_ref().to_vec().into();
         self
     }
 
     /// Sets the options of the queue of messages to each peer.
     pub fn send_queue(mut self, options: QueueOptions) -> Self {
-        self.send_queue = options;
+        self.config.send_queue = options;
         self
     }
 
@@ -194,15 +194,7 @@ impl Builder {
         if let Ok(endpoint_addr_lookup) = endpoint.address_lookup().as_ref() {
             endpoint_addr_lookup.add(address_lookup.clone());
         }
-        let (mut actor, to_actor) = Actor::new(
-            endpoint,
-            self.config,
-            metrics.clone(),
-            self.alpn,
-            address_lookup,
-        );
-        actor.send_queue_size =
-            queue::queue_size(self.send_queue.size, actor.state.max_message_size());
+        let (actor, to_actor) = Actor::new(endpoint, self.config, metrics.clone(), address_lookup);
         let me = actor.endpoint.id().fmt_short();
         let max_message_size = actor.state.max_message_size();
 
@@ -294,12 +286,10 @@ impl Gossip {
         }
     }
 
-    /// Creates a default `Builder`, with the endpoint set.
+    /// Creates a default [`Builder`].
     pub fn builder() -> Builder {
         Builder {
             config: Default::default(),
-            alpn: None,
-            send_queue: Default::default(),
         }
     }
 
