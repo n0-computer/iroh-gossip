@@ -1,231 +1,22 @@
 //! Public API for using iroh-gossip
-//!
-//! The API is usable both locally and over RPC.
 
 use std::{
     collections::{BTreeSet, HashSet},
     pin::Pin,
-    sync::{Arc, OnceLock},
     task::{Context, Poll},
 };
 
 use bytes::Bytes;
 use iroh_base::EndpointId;
-use irpc::{
-    channel::{mpsc, oneshot},
-    rpc_requests, Client,
-};
-use n0_error::{e, stack_error};
-use n0_future::{Stream, StreamExt, TryStreamExt};
+use n0_error::e;
+use n0_future::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 
-use crate::proto::{DeliveryScope, TopicId};
+use crate::{proto::DeliveryScope, Error};
 
 /// Default channel capacity for topic subscription channels (one per topic)
 const TOPIC_EVENTS_DEFAULT_CAP: usize = 2048;
-/// Channel capacity for topic command send channels.
-const TOPIC_COMMANDS_CAP: usize = 64;
-
-/// Input messages for the gossip actor.
-#[rpc_requests(message = RpcMessage, rpc_feature = "rpc")]
-#[derive(Debug, Serialize, Deserialize)]
-pub(crate) enum Request {
-    #[rpc(tx=mpsc::Sender<Event>, rx=mpsc::Receiver<Command>)]
-    Join(JoinRequest),
-    /// Asks for the largest message content that a broadcast takes.
-    #[rpc(tx=oneshot::Sender<usize>)]
-    MaxContentSize(MaxContentSizeRequest),
-}
-
-/// The request for the size limit of the server, see [`GossipSender::max_content_size`].
-#[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct MaxContentSizeRequest;
-
-#[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct JoinRequest {
-    pub topic_id: TopicId,
-    pub bootstrap: BTreeSet<EndpointId>,
-}
-
-#[allow(missing_docs)]
-#[stack_error(derive, add_meta, from_sources)]
-#[non_exhaustive]
-pub enum ApiError {
-    #[error(transparent)]
-    Rpc { source: irpc::Error },
-    /// The gossip topic was closed.
-    #[error("topic closed")]
-    Closed,
-    /// The message content is over the limit, see [`GossipSender::max_content_size`].
-    #[error("message of {size} bytes is over the limit of {max_content} bytes")]
-    TooLarge {
-        /// The size of the content.
-        size: usize,
-        /// The largest content that a broadcast takes.
-        max_content: usize,
-    },
-}
-
-impl From<irpc::channel::SendError> for ApiError {
-    fn from(value: irpc::channel::SendError) -> Self {
-        irpc::Error::from(value).into()
-    }
-}
-
-impl From<irpc::channel::mpsc::RecvError> for ApiError {
-    fn from(value: irpc::channel::mpsc::RecvError) -> Self {
-        irpc::Error::from(value).into()
-    }
-}
-
-impl From<irpc::channel::oneshot::RecvError> for ApiError {
-    fn from(value: irpc::channel::oneshot::RecvError) -> Self {
-        irpc::Error::from(value).into()
-    }
-}
-
-/// API to control a [`Gossip`] instance.
-///
-/// This has methods to subscribe and join gossip topics, which return handles to publish
-/// and receive messages on topics.
-///
-/// [`Gossip`] derefs to [`GossipApi`], so all functions on [`GossipApi`] are directly callable
-/// from [`Gossip`].
-///
-/// Additionally, a [`GossipApi`] can be created by connecting to an RPC server. See [`Gossip::listen`]
-/// and [`GossipApi::connect`] (*requires the `rpc` feature).
-///
-/// [`Gossip`]: crate::net::Gossip
-/// [`Gossip::listen`]: crate::net::Gossip::listen
-#[derive(Debug, Clone)]
-pub struct GossipApi {
-    client: Client<Request>,
-    /// The largest content that a broadcast takes, once known.
-    ///
-    /// An RPC client asks its server on its first subscribe.
-    max_content: Arc<OnceLock<usize>>,
-}
-
-impl GossipApi {
-    #[cfg(feature = "net")]
-    pub(crate) fn local(
-        tx: tokio::sync::mpsc::Sender<RpcMessage>,
-        max_message_size: usize,
-    ) -> Self {
-        let local = irpc::LocalSender::<Request>::from(tx);
-        let max_content = crate::proto::topic::max_content_size(max_message_size);
-        Self {
-            client: local.into(),
-            max_content: Arc::new(OnceLock::from(max_content)),
-        }
-    }
-
-    /// Connect to a remote as a RPC client.
-    #[cfg(feature = "rpc")]
-    pub fn connect(endpoint: noq::Endpoint, addr: std::net::SocketAddr) -> Self {
-        let inner = irpc::Client::noq(endpoint, addr);
-        Self {
-            client: inner,
-            max_content: Default::default(),
-        }
-    }
-
-    /// Listen on a noq endpoint for incoming RPC connections.
-    #[cfg(all(feature = "rpc", feature = "net"))]
-    pub(crate) async fn listen(&self, endpoint: noq::Endpoint) {
-        use irpc::rpc::{listen, RemoteService};
-
-        let local = self
-            .client
-            .as_local()
-            .expect("cannot listen on remote client");
-        let handler = Request::remote_handler(local);
-
-        listen::<Request>(endpoint, handler).await
-    }
-
-    /// Returns the largest content that a broadcast takes, and asks the server once.
-    ///
-    /// A server older than 0.102.0 does not know the request, see
-    /// [`GossipSender::max_content_size`]. Such a server stops serving the
-    /// connection on it, so we ask only once, as the first request, and keep
-    /// the fallback too.
-    async fn max_content_size(&self) -> usize {
-        if let Some(max_content) = self.max_content.get() {
-            return *max_content;
-        }
-        let max_content = match self.client.rpc(MaxContentSizeRequest).await {
-            Ok(max_content) => max_content,
-            Err(err) => {
-                tracing::debug!("the server reported no size limit: {err:#}");
-                usize::MAX
-            }
-        };
-        *self.max_content.get_or_init(|| max_content)
-    }
-
-    /// Join a gossip topic with options.
-    ///
-    /// Returns a [`GossipTopic`] instantly. To wait for at least one connection to be established,
-    /// you can await [`GossipTopic::joined`].
-    ///
-    /// See [`JoinOptions`] for available options.
-    ///
-    /// A broadcast reaches only the neighbors that exist when the node sends it. Await
-    /// [`GossipTopic::joined`] before the first broadcast. With no bootstrap peers, the node
-    /// waits until another node joins it.
-    ///
-    /// The node leaves the topic when you drop all handles of the topic.
-    pub async fn subscribe_with_opts(
-        &self,
-        topic_id: TopicId,
-        opts: JoinOptions,
-    ) -> Result<GossipTopic, ApiError> {
-        let max_content = self.max_content_size().await;
-        let req = JoinRequest {
-            topic_id,
-            bootstrap: opts.bootstrap,
-        };
-        let (tx, rx) = self
-            .client
-            .bidi_streaming(req, TOPIC_COMMANDS_CAP, opts.subscription_capacity)
-            .await?;
-        Ok(GossipTopic::new(tx, rx, max_content))
-    }
-
-    /// Join a gossip topic with the default options and wait for at least one active connection.
-    ///
-    /// This call has no timeout. If no peer becomes a neighbor, it waits forever. This happens
-    /// when all bootstrap peers are offline. Wrap the call in a timeout to stop the wait.
-    pub async fn subscribe_and_join(
-        &self,
-        topic_id: TopicId,
-        bootstrap: Vec<EndpointId>,
-    ) -> Result<GossipTopic, ApiError> {
-        let mut sub = self
-            .subscribe_with_opts(topic_id, JoinOptions::with_bootstrap(bootstrap))
-            .await?;
-        sub.joined().await?;
-        Ok(sub)
-    }
-
-    /// Join a gossip topic with the default options.
-    ///
-    /// Note that this will not wait for any bootstrap endpoint to be available.
-    /// To ensure the topic is connected to at least one endpoint, use [`GossipTopic::joined`]
-    /// or [`Self::subscribe_and_join`]
-    pub async fn subscribe(
-        &self,
-        topic_id: TopicId,
-        bootstrap: Vec<EndpointId>,
-    ) -> Result<GossipTopic, ApiError> {
-        let sub = self
-            .subscribe_with_opts(topic_id, JoinOptions::with_bootstrap(bootstrap))
-            .await?;
-
-        Ok(sub)
-    }
-}
 
 /// Sender for a gossip topic.
 ///
@@ -259,9 +50,7 @@ impl GossipSender {
     /// Returns the largest message content that [`Self::broadcast`] takes.
     ///
     /// It is [`Builder::max_message_size`] less the encoding, about 40 bytes,
-    /// and holds for [`Self::broadcast_neighbors`] too. Over a remote RPC
-    /// connection, it is the limit of the server. If that server is older than
-    /// iroh-gossip 0.102.0, it is `usize::MAX`.
+    /// and holds for [`Self::broadcast_neighbors`] too.
     ///
     /// [`Builder::max_message_size`]: crate::net::Builder::max_message_size
     pub fn max_content_size(&self) -> usize {
@@ -269,9 +58,9 @@ impl GossipSender {
     }
 
     /// Returns an error if the message content is over the limit.
-    fn check_size(&self, message: &Bytes) -> Result<(), ApiError> {
+    fn check_size(&self, message: &Bytes) -> Result<(), Error> {
         if message.len() > self.max_content {
-            return Err(e!(ApiError::TooLarge {
+            return Err(e!(Error::TooLarge {
                 size: message.len(),
                 max_content: self.max_content
             }));
@@ -291,11 +80,11 @@ impl GossipSender {
     ///
     /// # Errors
     ///
-    /// Returns [`ApiError::TooLarge`] if the content is over
-    /// [`Self::max_content_size`].
+    /// Returns [`Error::TooLarge`] if the content is over [`Self::max_content_size`],
+    /// and [`Error::Closed`] if the gossip actor stopped.
     ///
     /// [`PlumtreeConfig::message_id_retention`]: crate::proto::PlumtreeConfig::message_id_retention
-    pub async fn broadcast(&self, message: Bytes) -> Result<(), ApiError> {
+    pub async fn broadcast(&self, message: Bytes) -> Result<(), Error> {
         self.check_size(&message)?;
         self.send(Command::Broadcast(message)).await?;
         Ok(())
@@ -308,8 +97,8 @@ impl GossipSender {
     ///
     /// # Errors
     ///
-    /// Returns [`ApiError::TooLarge`] as [`Self::broadcast`] does.
-    pub async fn broadcast_neighbors(&self, message: Bytes) -> Result<(), ApiError> {
+    /// Returns [`Error::TooLarge`] and [`Error::Closed`] as [`Self::broadcast`] does.
+    pub async fn broadcast_neighbors(&self, message: Bytes) -> Result<(), Error> {
         self.check_size(&message)?;
         self.send(Command::BroadcastNeighbors(message)).await?;
         Ok(())
@@ -320,14 +109,20 @@ impl GossipSender {
     /// A peer that is already a neighbor gets no join, as it would forward the
     /// join to all its neighbors. A join without an answer goes out once more
     /// after 10 seconds.
-    pub async fn join_peers(&self, peers: Vec<EndpointId>) -> Result<(), ApiError> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Closed`] if the gossip actor stopped.
+    pub async fn join_peers(&self, peers: Vec<EndpointId>) -> Result<(), Error> {
         self.send(Command::JoinPeers(peers)).await?;
         Ok(())
     }
 
-    async fn send(&self, command: Command) -> Result<(), irpc::channel::SendError> {
-        self.sender.send(command).await?;
-        Ok(())
+    async fn send(&self, command: Command) -> Result<(), Error> {
+        self.sender
+            .send(command)
+            .await
+            .map_err(|_| e!(Error::Closed))
     }
 }
 
@@ -374,8 +169,8 @@ impl GossipTopic {
     ///
     /// # Errors
     ///
-    /// Returns [`ApiError::TooLarge`] as [`GossipSender::broadcast`] does.
-    pub async fn broadcast(&mut self, message: Bytes) -> Result<(), ApiError> {
+    /// Returns [`Error::TooLarge`] and [`Error::Closed`] as [`GossipSender::broadcast`] does.
+    pub async fn broadcast(&mut self, message: Bytes) -> Result<(), Error> {
         self.sender.broadcast(message).await
     }
 
@@ -383,8 +178,8 @@ impl GossipTopic {
     ///
     /// # Errors
     ///
-    /// Returns [`ApiError::TooLarge`] as [`GossipSender::broadcast`] does.
-    pub async fn broadcast_neighbors(&mut self, message: Bytes) -> Result<(), ApiError> {
+    /// Returns [`Error::TooLarge`] and [`Error::Closed`] as [`GossipSender::broadcast`] does.
+    pub async fn broadcast_neighbors(&mut self, message: Bytes) -> Result<(), Error> {
         self.sender.broadcast_neighbors(message).await
     }
 
@@ -396,7 +191,7 @@ impl GossipTopic {
     /// Waits until we are connected to at least one endpoint.
     ///
     /// See [`GossipReceiver::joined`] for details.
-    pub async fn joined(&mut self) -> Result<(), ApiError> {
+    pub async fn joined(&mut self) -> Result<(), Error> {
         self.receiver.joined().await
     }
 
@@ -407,7 +202,7 @@ impl GossipTopic {
 }
 
 impl Stream for GossipTopic {
-    type Item = Result<Event, ApiError>;
+    type Item = Result<Event, Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Pin::new(&mut self.receiver).poll_next(cx)
@@ -417,19 +212,16 @@ impl Stream for GossipTopic {
 /// Receiver for gossip events on a topic.
 ///
 /// This is a [`Stream`] of [`Event`]s emitted from the topic.
-#[derive(derive_more::Debug)]
+#[derive(Debug)]
 pub struct GossipReceiver {
-    #[debug("BoxStream")]
-    stream: Pin<Box<dyn Stream<Item = Result<Event, ApiError>> + Send + Sync + 'static>>,
+    events_rx: mpsc::Receiver<Event>,
     neighbors: HashSet<EndpointId>,
 }
 
 impl GossipReceiver {
     pub(crate) fn new(events_rx: mpsc::Receiver<Event>) -> Self {
-        let stream = events_rx.into_stream().map_err(ApiError::from);
-        let stream = Box::pin(stream);
         Self {
-            stream,
+            events_rx,
             neighbors: Default::default(),
         }
     }
@@ -450,9 +242,9 @@ impl GossipReceiver {
     /// Note that this consumes this initial `NeighborUp` event. If you want to track
     /// neighbors, use [`Self::neighbors`] after awaiting [`Self::joined`], and then
     /// continue to track `NeighborUp` events on the event stream.
-    pub async fn joined(&mut self) -> Result<(), ApiError> {
+    pub async fn joined(&mut self) -> Result<(), Error> {
         while !self.is_joined() {
-            let _event = self.next().await.ok_or(e!(ApiError::Closed))??;
+            let _event = self.next().await.ok_or(e!(Error::Closed))??;
         }
         Ok(())
     }
@@ -464,11 +256,11 @@ impl GossipReceiver {
 }
 
 impl Stream for GossipReceiver {
-    type Item = Result<Event, ApiError>;
+    type Item = Result<Event, Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let item = std::task::ready!(Pin::new(&mut self.stream).poll_next(cx));
-        if let Some(Ok(item)) = &item {
+        let item = std::task::ready!(self.events_rx.poll_recv(cx));
+        if let Some(item) = &item {
             match item {
                 Event::NeighborUp(endpoint_id) => {
                     self.neighbors.insert(*endpoint_id);
@@ -479,7 +271,7 @@ impl Stream for GossipReceiver {
                 _ => {}
             }
         }
-        Poll::Ready(item)
+        Poll::Ready(item.map(Ok))
     }
 }
 
@@ -519,6 +311,7 @@ impl From<crate::proto::Event<EndpointId>> for Event {
 
 /// A gossip message
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, derive_more::Debug, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Message {
     /// The content of the message
     #[debug("Bytes({})", self.content.len())]
@@ -534,9 +327,8 @@ pub struct Message {
 }
 
 /// Command for a gossip topic.
-#[derive(Serialize, Deserialize, derive_more::Debug, Clone)]
-#[non_exhaustive]
-pub enum Command {
+#[derive(derive_more::Debug, Clone)]
+pub(crate) enum Command {
     /// Broadcasts a message to all endpoints in the swarm.
     Broadcast(#[debug("Bytes({})", _0.len())] Bytes),
     /// Broadcasts a message to all direct neighbors.
@@ -553,7 +345,11 @@ impl Command {
 }
 
 /// Options for joining a gossip topic.
-#[derive(Serialize, Deserialize, Debug)]
+///
+/// Build it with [`Self::with_bootstrap`] or [`Default`], and the methods that set an option.
+/// New options can come in a minor version, so you cannot construct it with a struct literal.
+#[derive(Debug)]
+#[non_exhaustive]
 pub struct JoinOptions {
     /// The initial bootstrap endpoints.
     pub bootstrap: BTreeSet<EndpointId>,
@@ -561,173 +357,39 @@ pub struct JoinOptions {
     ///
     /// A slow reader never blocks the gossip actor. When the buffer is full, the node drops
     /// the oldest events and the reader receives a [`Event::Lagged`]. The
-    /// subscription stays open.
+    /// subscription stays open. 0 counts as 1.
     ///
     /// After a `Lagged`, the neighbors that [`GossipReceiver::neighbors`] reports can be wrong.
     /// If you need the exact state, subscribe again.
     pub subscription_capacity: usize,
 }
 
+impl Default for JoinOptions {
+    /// Returns options with no bootstrap peers and the default subscription capacity.
+    fn default() -> Self {
+        Self::with_bootstrap([])
+    }
+}
+
 impl JoinOptions {
-    /// Creates [`JoinOptions`] with the provided bootstrap endpoints and the default subscription
-    /// capacity.
+    /// Creates [`JoinOptions`] with `endpoints` as bootstrap peers.
     pub fn with_bootstrap(endpoints: impl IntoIterator<Item = EndpointId>) -> Self {
         Self {
             bootstrap: endpoints.into_iter().collect(),
             subscription_capacity: TOPIC_EVENTS_DEFAULT_CAP,
         }
     }
+
+    /// Sets the number of events that a subscription buffers, see [`Self::subscription_capacity`].
+    pub fn with_subscription_capacity(mut self, capacity: usize) -> Self {
+        self.subscription_capacity = capacity;
+        self
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::api::GossipTopic;
-
-    #[cfg(all(feature = "rpc", feature = "net"))]
-    #[tokio::test]
-    #[n0_tracing_test::traced_test]
-    async fn test_rpc() -> n0_error::Result<()> {
-        use iroh::{address_lookup::memory::MemoryLookup, protocol::Router, RelayMap};
-        use n0_error::{AnyError, Result, StackResultExt, StdResultExt};
-        use n0_future::{time::Duration, StreamExt};
-        use rand::SeedableRng;
-
-        use crate::{
-            api::{Event, GossipApi},
-            net::{tests::create_endpoint, Gossip},
-            proto::TopicId,
-            ALPN,
-        };
-
-        let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(1);
-        let (relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
-
-        async fn create_gossip_endpoint(
-            rng: &mut rand::rngs::ChaCha12Rng,
-            relay_map: RelayMap,
-        ) -> Result<(Router, Gossip)> {
-            let endpoint = create_endpoint(rng, relay_map, None).await?;
-            let gossip = Gossip::builder().spawn(endpoint.clone());
-            let router = Router::builder(endpoint)
-                .accept(ALPN, gossip.clone())
-                .spawn();
-            Ok((router, gossip))
-        }
-
-        let topic_id = TopicId::from_bytes([0u8; 32]);
-
-        // create our gossip endpoint
-        let (router, gossip) = create_gossip_endpoint(&mut rng, relay_map.clone()).await?;
-
-        // create a second endpoint so that we can test actually joining
-        let (endpoint2_id, endpoint2_addr, endpoint2_task) = {
-            let (router, gossip) = create_gossip_endpoint(&mut rng, relay_map.clone()).await?;
-            let endpoint_addr = router.endpoint().addr();
-            let endpoint_id = router.endpoint().id();
-            let task = tokio::task::spawn(async move {
-                let mut topic = gossip.subscribe_and_join(topic_id, vec![]).await?;
-                topic.broadcast(b"hello".to_vec().into()).await?;
-                Ok::<_, AnyError>(router)
-            });
-            (endpoint_id, endpoint_addr, task)
-        };
-
-        // create a memory lookup service to add endpoint addr manually
-        let memory_lookup = MemoryLookup::new();
-        memory_lookup.add_endpoint_info(endpoint2_addr);
-
-        router.endpoint().address_lookup()?.add(memory_lookup);
-
-        // The size limit of the server, which an RPC client asks for.
-        let max_content = crate::proto::topic::max_content_size(gossip.max_message_size());
-
-        // expose the gossip endpoint over RPC
-        let (rpc_server_endpoint, rpc_server_cert) =
-            irpc::util::make_server_endpoint("127.0.0.1:0".parse().unwrap())
-                .context("make server endpoint")?;
-        let rpc_server_addr = rpc_server_endpoint
-            .local_addr()
-            .std_context("resolve server addr")?;
-        let rpc_server_task = tokio::task::spawn(async move {
-            gossip.listen(rpc_server_endpoint).await;
-        });
-
-        // connect to the RPC endpoint with a new client
-        let rpc_client_endpoint =
-            irpc::util::make_client_endpoint("127.0.0.1:0".parse().unwrap(), &[&rpc_server_cert])
-                .context("make client endpoint")?;
-        let rpc_client = GossipApi::connect(rpc_client_endpoint, rpc_server_addr);
-
-        // join via RPC
-        let recv = async move {
-            let mut topic = rpc_client
-                .subscribe_and_join(topic_id, vec![endpoint2_id])
-                .await?;
-            // The client refuses an oversized message itself, as a local one does.
-            assert_eq!(topic.max_content_size(), max_content);
-            let refused = topic.broadcast(vec![0; max_content + 1].into()).await;
-            assert!(
-                matches!(refused, Err(super::ApiError::TooLarge { .. })),
-                "{refused:?}"
-            );
-            // wait for a message
-            while let Some(event) = topic.try_next().await? {
-                match event {
-                    Event::Received(message) => {
-                        assert_eq!(&message.content[..], b"hello");
-                        break;
-                    }
-                    Event::Lagged => panic!("unexpected lagged event"),
-                    _ => {}
-                }
-            }
-            Ok::<_, AnyError>(())
-        };
-
-        // timeout to not hang in case of failure
-        tokio::time::timeout(Duration::from_secs(10), recv)
-            .await
-            .std_context("rpc recv timeout")??;
-
-        // shutdown
-        rpc_server_task.abort();
-        router.shutdown().await.std_context("shutdown router")?;
-        let router2 = endpoint2_task.await.std_context("join endpoint task")??;
-        router2
-            .shutdown()
-            .await
-            .std_context("shutdown second router")?;
-        Ok(())
-    }
-
-    /// A server that does not answer the size request is asked once, and its client keeps `usize::MAX`.
-    ///
-    /// A server older than 0.102.0 stops serving the connection on that request,
-    /// so a second request would cut off the topics on it.
-    #[cfg(feature = "net")]
-    #[tokio::test]
-    async fn unanswered_size_request_is_asked_once() {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<super::RpcMessage>(4);
-        let api = super::GossipApi {
-            client: irpc::LocalSender::<super::Request>::from(tx).into(),
-            max_content: Default::default(),
-        };
-        // Drops each request unanswered.
-        let asked = tokio::spawn(async move {
-            let mut asked = 0;
-            while let Some(message) = rx.recv().await {
-                if matches!(message, super::RpcMessage::MaxContentSize(_)) {
-                    asked += 1;
-                }
-            }
-            asked
-        });
-
-        assert_eq!(api.max_content_size().await, usize::MAX);
-        assert_eq!(api.max_content_size().await, usize::MAX);
-        drop(api);
-        assert_eq!(asked.await.expect("server task"), 1);
-    }
 
     #[test]
     fn ensure_gossip_topic_is_sync() {
