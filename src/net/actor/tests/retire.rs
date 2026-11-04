@@ -79,7 +79,7 @@ async fn shuffle_reply_connection_retires() -> Result {
     let _control = control_open(&conn).await?;
     let mut stream = conn.open_uni().await.std_context("open_uni")?;
     let mut buf = Vec::new();
-    wire::StreamHeader::write(topic, &mut stream, &mut buf)
+    wire::StreamHeader::write(topic, None, &mut stream, &mut buf)
         .await
         .std_context("header")?;
     let shuffle = proto::topic::Message::test_shuffle(origin_id, 0);
@@ -121,6 +121,8 @@ fn event_names(events: &mut mpsc::Receiver<ConnEvent>) -> Vec<&'static str> {
         seen.push(match event.kind {
             ConnEventKind::Header(..) => "header",
             ConnEventKind::Message(_) => "message",
+            ConnEventKind::Refused(_) => "refused",
+            ConnEventKind::Rejected(_) => "rejected",
             ConnEventKind::Retiring => "retiring",
         });
     }

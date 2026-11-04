@@ -111,6 +111,17 @@ pub enum InEvent<PI> {
     TimerExpired(Timer<PI>),
     /// Peer disconnected on the network level.
     PeerDisconnected(PI),
+    /// We rejected the peer for one topic, and the connection stays usable.
+    ///
+    /// Only that topic drops the peer, as for [`Self::PeerRefused`], but it emits no
+    /// [`Event::Refused`].
+    ///
+    /// [`Event::Refused`]: super::Event::Refused
+    PeerRejected(TopicId, PI),
+    /// The peer refused us for one topic, and the connection stays usable.
+    ///
+    /// Only that topic drops the peer. It emits [`topic::Event::Refused`].
+    PeerRefused(TopicId, PI),
     /// Update the opaque peer data about yourself.
     UpdatePeerData(PeerData),
 }
@@ -210,6 +221,12 @@ impl<PI> From<InEvent<PI>> for InEventMapped<PI> {
             }
             InEvent::TimerExpired(Timer { topic, timer, .. }) => {
                 Self::TopicEvent(topic, topic::InEvent::TimerExpired(timer))
+            }
+            InEvent::PeerRefused(topic, peer) => {
+                Self::TopicEvent(topic, topic::InEvent::PeerRefused(peer))
+            }
+            InEvent::PeerRejected(topic, peer) => {
+                Self::TopicEvent(topic, topic::InEvent::PeerRejected(peer))
             }
             InEvent::PeerDisconnected(peer) => Self::All(topic::InEvent::PeerDisconnected(peer)),
             InEvent::UpdatePeerData(data) => Self::All(topic::InEvent::UpdatePeerData(data)),
@@ -326,7 +343,7 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
     }
 
     /// Returns the topics that want a connection to `peer`.
-    #[cfg(feature = "net")]
+    #[cfg(any(test, feature = "net"))]
     pub(crate) fn topics_wanting<'a>(&'a self, peer: &'a PI) -> impl Iterator<Item = TopicId> + 'a {
         self.states
             .iter()
@@ -499,6 +516,65 @@ mod tests {
     /// Handles `event` and drops what it produces.
     fn handle(state: &mut State<u32, StdRng>, event: InEvent<u32>) {
         run(state, event);
+    }
+
+    /// A refusal drops the peer for that topic only, and emits `Refused`.
+    #[test]
+    fn refusal_drops_the_peer_from_one_topic() {
+        let mut state = State::new(
+            0u32,
+            PeerData::default(),
+            Config::default(),
+            StdRng::seed_from_u64(1),
+        );
+        let (one, two): (TopicId, TopicId) = ([1u8; 32].into(), [2u8; 32].into());
+        for topic in [one, two] {
+            handle(&mut state, InEvent::Command(topic, Command::Join(vec![7])));
+        }
+        let out = run(&mut state, InEvent::PeerRefused(one, 7));
+        assert!(
+            out.iter().any(|event| matches!(
+                event,
+                OutEvent::EmitEvent(t, topic::Event::Refused(7)) if *t == one
+            )),
+            "{out:?}"
+        );
+        assert!(!out.iter().any(|event| matches!(
+            event,
+            OutEvent::EmitEvent(t, _) if *t == two
+        )));
+        assert!(!state.state(&one).unwrap().wants(&7));
+        assert!(state.state(&two).unwrap().wants(&7));
+        assert_eq!(state.topics_wanting(&7).collect::<Vec<_>>(), vec![two]);
+    }
+
+    /// A rejection drops the peer for that topic only, and emits no `Refused`.
+    #[test]
+    fn rejection_drops_the_peer_from_one_topic() {
+        let mut state = State::new(
+            0u32,
+            PeerData::default(),
+            Config::default(),
+            StdRng::seed_from_u64(1),
+        );
+        let (one, two): (TopicId, TopicId) = ([1u8; 32].into(), [2u8; 32].into());
+        for topic in [one, two] {
+            handle(&mut state, InEvent::Command(topic, Command::Join(vec![7])));
+            let join = Message {
+                topic,
+                message: topic::Message::Swarm(hyparview::Message::Join(None)),
+            };
+            handle(&mut state, InEvent::RecvMessage(7, join));
+        }
+        assert!(state.state(&one).unwrap().wants(&7));
+        let out = run(&mut state, InEvent::PeerRejected(one, 7));
+        assert!(
+            !out.iter()
+                .any(|event| matches!(event, OutEvent::EmitEvent(_, topic::Event::Refused(_)))),
+            "{out:?}"
+        );
+        assert!(!state.state(&one).unwrap().wants(&7));
+        assert_eq!(state.topics_wanting(&7).collect::<Vec<_>>(), vec![two]);
     }
 
     /// A message for a topic that we are not on gets a `Close`, and makes no topic want the peer.
