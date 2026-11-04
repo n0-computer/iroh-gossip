@@ -115,7 +115,7 @@ pub(super) async fn retire(mut ours: watch::Receiver<bool>, mut theirs: watch::R
 ///
 /// Returns `true` if the end of the connection does not count as a disconnect.
 /// That is the case when either side retired the connection, or when no topic
-/// used the peer at the moment the connection ended. A connection to a node up
+/// wanted the peer at the moment the connection ended. A connection to a node up
 /// to 0.101 never retires. Without a lease, the connection only receives.
 /// Every connection observes the peer abort signal, independently of whether
 /// it writes.
@@ -381,7 +381,7 @@ pub(super) struct SendLoop {
     /// A future per stream, which resolves once the peer stopped it or acknowledged all of it.
     live_streams: FuturesUnordered<BoxFuture<(TopicId, StreamId)>>,
     queue_lease: QueueLease,
-    /// The topics that used the peer when the writer started, for which it opens streams.
+    /// The topics that wanted the peer when the writer started, for which it opens streams.
     initial_topics: Vec<TopicId>,
     /// Whether we have a stream to the peer.
     ///

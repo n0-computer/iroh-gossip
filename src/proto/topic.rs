@@ -52,9 +52,6 @@ pub trait IO<PI> {
 
     /// Hands the runtime new [`PeerData`] of `peer`, for example its addresses.
     fn peer_data(&mut self, peer: PI, data: PeerData);
-
-    /// Asks to close the connection to `peer`, as the topic no longer uses it.
-    fn disconnect(&mut self, peer: PI);
 }
 
 /// Returns the largest encoded Plumtree message that fits a frame.
@@ -344,6 +341,13 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
         self.gossip.stats()
     }
 
+    /// Returns whether the topic wants a connection to `peer`.
+    ///
+    /// See [`hyparview::State::wants_connection`].
+    pub(crate) fn wants_connection(&self, peer: &PI) -> bool {
+        self.swarm.wants_connection(peer)
+    }
+
     /// Check if this topic has any active (connected) peers.
     pub fn has_active_peers(&self) -> bool {
         !self.swarm.active_view.is_empty()
@@ -377,10 +381,6 @@ impl<PI: PeerIdentity, E: IO<PI>> IO<PI> for SwarmIO<'_, PI, E> {
     fn peer_data(&mut self, peer: PI, data: PeerData) {
         self.io.peer_data(peer, data);
     }
-
-    fn disconnect(&mut self, peer: PI) {
-        self.io.disconnect(peer);
-    }
 }
 
 #[cfg(test)]
@@ -400,8 +400,6 @@ pub(crate) mod tests {
         ///
         /// The runtime sends an [InEvent::TimerExpired] after the duration.
         ScheduleTimer(Duration, Timer<PI>),
-        /// Close the connection to a peer on the network level.
-        DisconnectPeer(PI),
         /// Emitted when new [`PeerData`] was received for a peer.
         PeerData(PI, PeerData),
     }
@@ -422,10 +420,6 @@ pub(crate) mod tests {
 
         fn peer_data(&mut self, peer: PI, data: PeerData) {
             self.push_back(OutEvent::PeerData(peer, data));
-        }
-
-        fn disconnect(&mut self, peer: PI) {
-            self.push_back(OutEvent::DisconnectPeer(peer));
         }
     }
 

@@ -101,8 +101,6 @@ struct ActorState {
     timers: TimerMap<Timer>,
     address_lookup: GossipAddressLookup,
     metrics: Arc<Metrics>,
-    /// The peers that a topic may stop using in the current [`Actor::run_proto`].
-    touched_peers: Vec<EndpointId>,
     /// The peers that overflowed in the current call of [`Actor::run_proto`].
     overflowed_peers: Vec<EndpointId>,
 }
@@ -142,7 +140,6 @@ impl Actor {
             timers: TimerMap::new(),
             address_lookup,
             metrics: metrics.clone(),
-            touched_peers: Vec::new(),
             overflowed_peers: Vec::new(),
         };
 
@@ -349,7 +346,7 @@ impl Actor {
             .or_insert_with(|| PeerState::new(size));
         let queue_lease = peer.handle_connection(side, conn.stable_id());
         let initial_topics = match queue_lease {
-            Some(_) => self.proto.topics_of(&peer_id).collect(),
+            Some(_) => self.proto.topics_wanting(&peer_id).collect(),
             None => Vec::new(),
         };
 
@@ -512,28 +509,28 @@ impl Actor {
                 peer.discard_queue(now);
             }
         }
-        // The peers whose use by a topic may change in this batch.
-        self.state.touched_peers.clear();
         // The follow-up disconnect drops what we would queue for the peers that
         // overflowed, so we neither reopen their queue nor dial them.
         self.state.overflowed_peers.clear();
-        if let InEvent::RecvMessage(peer, _) | InEvent::PeerDisconnected(peer) = &event {
-            self.state.touched_peers.push(*peer);
-        }
         trace!(?event, "handle in_event");
         if let InEvent::RecvMessage(_from, message) = &event {
             let len = postcard::experimental::serialized_size(&message.message).ok();
             track_message(message.kind(), len, false, &self.metrics);
         }
+        let may_affect_membership = event.may_affect_membership();
         let mut io = ActorIO {
             state: &mut self.state,
             now,
+            opened_queue: false,
         };
         self.proto.handle(event, now, &mut io);
-        for peer in self.state.touched_peers.drain(..) {
-            if let Some(state) = self.state.peers.get_mut(&peer) {
-                if !self.proto.uses_peer(&peer) {
-                    state.queue.close();
+        // Close the queue of each peer that no topic wants. Only a membership event changes
+        // what a topic wants. A send can reopen the queue of a peer that no topic wants, for
+        // example for a Plumtree reply, so check after that too.
+        if may_affect_membership || io.opened_queue {
+            for (peer_id, peer) in self.state.peers.iter() {
+                if !peer.queue.is_closed() && !self.proto.wants_connection(peer_id) {
+                    peer.queue.close();
                 }
             }
         }
@@ -564,13 +561,14 @@ fn track_message(kind: MessageKind, len: Option<usize>, sent: bool, metrics: &Me
 struct ActorIO<'a> {
     state: &'a mut ActorState,
     now: Instant,
+    /// Whether a send opened a closed queue.
+    opened_queue: bool,
 }
 
 impl IO<PublicKey> for ActorIO<'_> {
     fn send(&mut self, peer_id: PublicKey, message: ProtoMessage) -> Option<ProtoMessage> {
         let state = &mut *self.state;
         trace!(peer = %peer_id.fmt_short(), ?message, "send");
-        state.touched_peers.push(peer_id);
         if state.overflowed_peers.contains(&peer_id) {
             return None;
         }
@@ -579,6 +577,7 @@ impl IO<PublicKey> for ActorIO<'_> {
             .peers
             .entry(peer_id)
             .or_insert_with(|| PeerState::new(size));
+        self.opened_queue |= peer.queue.is_closed();
         let len = postcard::experimental::serialized_size(&message.message).ok();
         let kind = message.kind();
         let dropped = match peer.push(message, len) {
@@ -658,10 +657,5 @@ impl IO<PublicKey> for ActorIO<'_> {
                 self.state.address_lookup.add(endpoint_addr);
             }
         }
-    }
-
-    fn disconnect(&mut self, peer_id: PublicKey) {
-        debug!(peer=%peer_id.fmt_short(), "gossip state indicates disconnect");
-        self.state.touched_peers.push(peer_id);
     }
 }

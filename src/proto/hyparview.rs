@@ -515,20 +515,17 @@ where
             Message::Neighbor(details) => self.on_neighbor(from, details, io),
             Message::Disconnect(details) => self.on_disconnect(from, details, io),
         }
-
-        // Disconnect from passive nodes right after receiving a message, a
-        // `Disconnect` included.
-        self.release_if_unused(from, io);
     }
 
-    /// Disconnects `peer` unless it is a neighbor or we wait for its `Neighbor` reply.
+    /// Returns whether we want a connection to `peer`.
     ///
-    /// The reply can come on the connection, and a closed connection would lose it.
-    fn release_if_unused(&self, peer: PI, io: &mut impl IO<PI>) {
-        if !self.active_view.contains(&peer) && !self.pending_neighbor_requests.contains_key(&peer)
-        {
-            io.disconnect(peer);
-        }
+    /// That is the case for a neighbor, and for a peer whose reply to our
+    /// `Neighbor` or `Join` we wait for: the reply can come on the connection,
+    /// and a closed connection would lose it. Other peers need no connection.
+    pub(crate) fn wants_connection(&self, peer: &PI) -> bool {
+        self.active_view.contains(peer)
+            || self.pending_neighbor_requests.contains_key(peer)
+            || self.pending_joins.contains_key(peer)
     }
 
     fn handle_join(&mut self, peer: PI, io: &mut impl IO<PI>) {
@@ -638,7 +635,6 @@ where
             _respond: false,
         });
         io.send(peer, message);
-        io.disconnect(peer);
     }
 
     fn on_join(&mut self, peer: PI, data: Option<PeerData>, io: &mut impl IO<PI>) {
@@ -771,8 +767,6 @@ where
                 self.add_passive(node.id, node.data, io);
             }
             self.send_shuffle_reply(shuffle.origin, len, io);
-            // The origin is usually no neighbor, and the reply its only use.
-            self.release_if_unused(shuffle.origin, io);
         } else if let Some(node) = self
             .active_view
             .pick_random_without(&[&shuffle.origin, &from], &mut self.rng)
@@ -1068,8 +1062,6 @@ where
             self.pending_neighbor_requests.remove(&peer);
             self.passive_view.remove(&peer);
             self.forget_peer(&peer);
-            // A passive message may have kept the connection for the reply.
-            self.release_if_unused(peer, io);
             self.refill_active_from_passive(&[], io);
         }
     }
@@ -1083,12 +1075,9 @@ where
         if let Some(peer) = self.active_view.remove_index(peer_index) {
             io.emit(Event::NeighborDown(peer));
 
-            match reason {
-                // send a disconnect message, then close connection.
-                RemovalReason::Random => self.send_disconnect(peer, true, io),
-                // close connection without sending anything further.
-                RemovalReason::DisconnectReceived { is_alive: _ } => io.disconnect(peer),
-                RemovalReason::ConnectionClosed => io.disconnect(peer),
+            // Send a disconnect message. After the other reasons, the peer knows already.
+            if matches!(reason, RemovalReason::Random) {
+                self.send_disconnect(peer, true, io);
             }
 
             let keep_as_passive = match reason {
@@ -1621,13 +1610,13 @@ mod tests {
             .count()
     }
 
-    /// After a shuffle reply to a non-neighbor, we disconnect it.
+    /// After a shuffle reply to a non-neighbor, we do not want it.
     ///
     /// The reply goes over a connection opened for it. The origin drops us once
     /// it read the reply, but cannot close the connection while our stream is
     /// open.
     #[test]
-    fn shuffle_reply_disconnects_a_non_neighbor() {
+    fn shuffle_reply_wants_no_non_neighbor() {
         let mut state = new_state();
         let io = &mut Io::new();
         state.handle(InEvent::RecvMessage(1, Message::Join(None)), io);
@@ -1637,23 +1626,14 @@ mod tests {
         state.handle(InEvent::RecvMessage(1, Message::test_shuffle(2, 0)), io);
 
         assert_eq!(shuffle_replies_sent(io, 2), 1);
-        let reply_at = io
-            .iter()
-            .position(|event| matches!(event, TopicOut::SendMessage(2, _)))
-            .expect("checked");
-        let disconnect_at = io
-            .iter()
-            .position(|event| matches!(event, TopicOut::DisconnectPeer(2)))
-            .expect("the origin was not disconnected");
-        assert!(reply_at < disconnect_at, "disconnected before the reply");
+        assert!(!state.wants_connection(&2), "the origin is wanted");
         assert!(
-            !io.iter()
-                .any(|event| matches!(event, TopicOut::DisconnectPeer(1))),
-            "the forwarding neighbor was disconnected"
+            state.wants_connection(&1),
+            "the forwarding neighbor is not wanted"
         );
     }
 
-    /// A shuffle reply to a neighbor leaves the neighbor alone.
+    /// A shuffle reply to a neighbor leaves it wanted.
     #[test]
     fn shuffle_reply_keeps_a_neighbor() {
         let mut state = new_state();
@@ -1664,11 +1644,7 @@ mod tests {
         state.handle(InEvent::RecvMessage(1, Message::test_shuffle(1, 0)), io);
 
         assert_eq!(shuffle_replies_sent(io, 1), 1);
-        assert!(
-            !io.iter()
-                .any(|event| matches!(event, TopicOut::DisconnectPeer(1))),
-            "the neighbor was disconnected"
-        );
+        assert!(state.wants_connection(&1), "the neighbor is not wanted");
     }
 
     #[test]
@@ -1830,9 +1806,8 @@ mod tests {
 
         assert!(!has_metadata(&state, 1));
         assert!(
-            io.iter()
-                .any(|event| matches!(event, TopicOut::DisconnectPeer(1))),
-            "the peer that did not answer was kept"
+            !state.wants_connection(&1),
+            "the peer that did not answer is wanted"
         );
     }
 
@@ -1935,19 +1910,12 @@ mod tests {
         assert!(state.pending_neighbor_requests.is_empty());
     }
 
-    /// Returns whether the state asked to close the connection to `peer`.
-    fn disconnected(io: &Io, peer: u32) -> bool {
-        io.iter()
-            .any(|event| matches!(event, TopicOut::DisconnectPeer(p) if *p == peer))
-    }
-
-    /// A `Disconnect` from a peer that is no neighbor closes its connection.
+    /// A `Disconnect` from a peer that is no neighbor leaves it unwanted.
     ///
     /// Two peers that evict each other at once both send one. The second
-    /// arrives from a peer that we dropped already. Without the disconnect,
-    /// the message would leave the peer in use and its connection open.
+    /// arrives from a peer that we dropped already.
     #[test]
-    fn disconnect_from_a_non_neighbor_releases_it() {
+    fn disconnect_from_a_non_neighbor_wants_no_peer() {
         let mut state = new_state();
         let io = &mut Io::new();
         let disconnect = Message::Disconnect(Disconnect {
@@ -1955,7 +1923,7 @@ mod tests {
             _respond: false,
         });
         state.handle(InEvent::RecvMessage(1, disconnect), io);
-        assert!(disconnected(io, 1));
+        assert!(!state.wants_connection(&1));
     }
 
     /// An unrelated passive reply keeps a connection that waits for a `Neighbor` acceptance.
@@ -1971,20 +1939,18 @@ mod tests {
             InEvent::RecvMessage(1, Message::ShuffleReply(ShuffleReply { nodes: vec![] })),
             io,
         );
-        assert!(state.pending_neighbor_requests.contains_key(&1));
         assert!(
-            !io.iter()
-                .any(|event| matches!(event, TopicOut::DisconnectPeer(1))),
-            "a passive reply closed the connection before the Neighbor reply"
+            state.wants_connection(&1),
+            "a passive reply dropped the peer before the Neighbor reply"
         );
     }
 
-    /// A request that ends without a neighbor releases the connection it kept.
+    /// A request that ends without a neighbor leaves its peer unwanted.
     ///
-    /// A passive message keeps the connection while the request is out. If the
-    /// reply never comes, the timeout must close it, or it stays open for good.
+    /// A passive message keeps the peer wanted while the request is out. If the
+    /// reply never comes, the timeout must drop it, or the peer stays wanted.
     #[test]
-    fn timed_out_request_releases_its_connection() {
+    fn timed_out_request_leaves_its_peer_unwanted() {
         let mut state = new_state();
         state.passive_view.insert(1);
         state.send_neighbor(1, Priority::High, &mut Io::new());
@@ -1995,7 +1961,7 @@ mod tests {
             InEvent::TimerExpired(Timer::PendingNeighborRequest(1, 0)),
             io,
         );
-        assert!(disconnected(io, 1), "the connection outlived its request");
+        assert!(!state.wants_connection(&1), "the peer outlived its request");
     }
 
     /// An accepted request keeps its connection, also after a passive message came first.
@@ -2014,9 +1980,53 @@ mod tests {
         state.handle(InEvent::RecvMessage(1, accept), io);
         assert!(state.active_view.contains(&1));
         assert!(
-            !disconnected(io, 1),
-            "closed the connection of a new neighbor"
+            state.wants_connection(&1),
+            "dropped the connection of a new neighbor"
         );
+    }
+
+    /// A topic wants a neighbor, and a peer it waits on, but not a passive peer.
+    #[test]
+    fn wants_connection_to_neighbors_and_pending_peers() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        assert!(!state.wants_connection(&1));
+        // A pending join.
+        state.handle(InEvent::RequestJoin(1), io);
+        assert!(state.wants_connection(&1));
+        // A neighbor.
+        state.handle(InEvent::RecvMessage(1, Message::Join(None)), io);
+        assert!(state.wants_connection(&1));
+        // A passive peer, and a passive peer with a request out.
+        state.passive_view.insert(2);
+        assert!(!state.wants_connection(&2));
+        state.send_neighbor(2, Priority::High, io);
+        assert!(state.wants_connection(&2));
+    }
+
+    /// A peer is no longer wanted once it is gone from the views and the requests.
+    #[test]
+    fn wants_connection_ends_with_the_peer() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.handle(InEvent::RecvMessage(1, Message::Join(None)), io);
+        assert!(state.wants_connection(&1));
+        state.handle(InEvent::PeerDisconnected(1), io);
+        assert!(!state.wants_connection(&1));
+        // A join that the peer answers with a disconnect.
+        state.handle(InEvent::RequestJoin(2), io);
+        assert!(state.wants_connection(&2));
+        state.handle(
+            InEvent::RecvMessage(
+                2,
+                Message::Disconnect(Disconnect {
+                    alive: false,
+                    _respond: false,
+                }),
+            ),
+            io,
+        );
+        assert!(!state.wants_connection(&2));
     }
 
     /// Returns the peers that got a join.

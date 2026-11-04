@@ -116,10 +116,12 @@ pub struct Network<PI, R> {
     tick: usize,
     peers: BTreeMap<PI, State<PI, R>>,
     conns: BTreeSet<ConnId<PI>>,
-    /// When each closed connection closed.
+    /// When each closed connection closed, in the order of the sends.
     ///
     /// It tells messages sent over a closed connection apart from messages that open a new one.
-    closed_at: FxHashMap<ConnId<PI>, Instant>,
+    /// The value is the sequence number that the event queue gives its next event. A message
+    /// with a lower one was sent before the close.
+    closed_at: FxHashMap<ConnId<PI>, i32>,
     events: VecDeque<(PI, TopicId, Event<PI>)>,
     latencies: FxHashMap<ConnId<PI>, Duration>,
     rng: R,
@@ -367,7 +369,7 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
 
     fn tick(&mut self) {
         self.tick += 1;
-        let Some((time, peer, event)) = self.queue.pop() else {
+        let Some((time, seq, peer, event)) = self.queue.pop() else {
             warn!("tick on empty queue");
             return;
         };
@@ -409,21 +411,15 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
                 // A message sent before its connection closed arrives over that
                 // connection. One sent afterwards opens a new connection.
                 let conn: ConnId<PI> = (*from, peer).into();
-                let latency = latency_between(
-                    &self.config.latency,
-                    &mut self.latencies,
-                    from,
-                    &peer,
-                    &mut self.rng,
-                );
-                let sent_at = self.time - latency;
                 // A sender that is gone sent this before it went, so it cannot
-                // open anything.
+                // open anything. The queue numbers its events in the order of the
+                // sends, so a message sent in the event that closed the connection
+                // went out before the close, as in the runtime.
                 let over_closed = !self.peers.contains_key(from)
                     || self
                         .closed_at
                         .get(&conn)
-                        .is_some_and(|closed_at| sent_at < *closed_at);
+                        .is_some_and(|closed_at| seq < *closed_at);
                 if !over_closed {
                     self.closed_at.remove(&conn);
                     self.conns.insert(conn);
@@ -448,12 +444,47 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
             rng: &mut self.rng,
             queue: &mut self.queue,
             events: &mut self.events,
-            kill: Vec::new(),
+            sent: Vec::new(),
         };
+        // Peers that the event can make unwanted: the ones wanted before it, the one
+        // it came from, and the ones it sent to. A connection that only a message
+        // opened, such as a Plumtree straggler, does not show that the peer is
+        // wanted. The runtime closes its queue.
+        let may_affect_membership = event.may_affect_membership();
+        let mut touched: Vec<PI> = Vec::new();
+        if may_affect_membership {
+            touched.extend(
+                (self.conns.iter())
+                    .filter_map(|conn| conn.other(peer))
+                    .filter(|other| state.wants_connection(other)),
+            );
+            if let InEvent::RecvMessage(from, _) | InEvent::PeerDisconnected(from) = &event {
+                touched.push(*from);
+            }
+        }
         state.handle(event, self.time, &mut io);
-        let kill = io.kill;
-        for (from, to) in kill {
-            self.kill_connection(from, to);
+        // Close the connections to peers that no topic wants.
+        let unwanted: Vec<_> = if may_affect_membership {
+            touched.extend(io.sent);
+            (self.conns.iter())
+                .filter_map(|conn| conn.other(peer))
+                .filter(|other| touched.contains(other) && !state.wants_connection(other))
+                .collect()
+        } else {
+            // A send reopens the queue to a peer, as the runtime does. A reply to a peer
+            // that no topic wants, such as a Plumtree reply, must not keep its
+            // connection open.
+            let mut sent = io.sent;
+            sent.sort();
+            sent.dedup();
+            sent.into_iter()
+                .filter(|other| {
+                    self.conns.contains(&(peer, *other).into()) && !state.wants_connection(other)
+                })
+                .collect()
+        };
+        for other in unwanted {
+            self.kill_connection(peer, other);
         }
     }
 
@@ -463,7 +494,7 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
     fn kill_connection(&mut self, from: PI, to: PI) {
         let conn = ConnId::from((from, to));
         if self.conns.remove(&conn) {
-            self.closed_at.insert(conn, self.time);
+            self.closed_at.insert(conn, self.queue.seq);
             // We add the event a microsecond after the regular latency between the two peers,
             // so that any messages queued from the current time arrive before the disconnected event.
             let latency = latency_between(
@@ -613,14 +644,15 @@ struct SimIO<'a, PI, R> {
     rng: &'a mut R,
     queue: &'a mut TimedEventQueue<PI>,
     events: &'a mut VecDeque<(PI, TopicId, Event<PI>)>,
-    /// The connections that the peer closed.
-    kill: Vec<(PI, PI)>,
+    /// The peers that the peer sent to.
+    sent: Vec<PI>,
 }
 
 impl<PI: PeerIdentity + Ord, R: Rng> IO<PI> for SimIO<'_, PI, R> {
     fn send(&mut self, to: PI, message: Message<PI>) -> Option<Message<PI>> {
         let latency = latency_between(self.latency, self.latencies, &self.peer, &to, self.rng);
         let event = InEvent::RecvMessage(self.peer, message);
+        self.sent.push(to);
         self.queue.insert(self.time + latency, to, event);
         None
     }
@@ -638,11 +670,6 @@ impl<PI: PeerIdentity + Ord, R: Rng> IO<PI> for SimIO<'_, PI, R> {
     }
 
     fn peer_data(&mut self, _peer: PI, _data: PeerData) {}
-
-    fn disconnect(&mut self, to: PI) {
-        debug!(peer = ?self.peer, other = ?to, "disconnect");
-        self.kill.push((self.peer, to));
-    }
 }
 
 fn latency_between<PI: PeerIdentity + Ord + PartialOrd, R: Rng>(
@@ -686,10 +713,11 @@ impl<PI> TimedEventQueue<PI> {
         ))
     }
 
-    fn pop(&mut self) -> Option<(Instant, PI, InEvent<PI>)> {
+    /// Returns the next event, with its sequence number in the order of the inserts.
+    fn pop(&mut self) -> Option<(Instant, i32, PI, InEvent<PI>)> {
         self.events
             .pop()
-            .map(|(e, _)| (e.time, e.event.0, e.event.1))
+            .map(|(e, neg_seq)| (e.time, -neg_seq, e.event.0, e.event.1))
     }
 
     fn peek_next(&self) -> Option<Instant> {
@@ -1470,5 +1498,47 @@ mod round_stats_tests {
         assert_eq!(combined.mean.rmr, 3.);
         assert_eq!(combined.mean.duration, Duration::from_millis(3000));
         assert_eq!(combined.len, 4);
+    }
+}
+
+#[cfg(test)]
+mod network_tests {
+    use super::*;
+
+    /// A Plumtree reply to a peer that no topic wants closes the connection after it.
+    ///
+    /// Peer 3 is on the topic, but no neighbor of 2. It pushes a message to 2 that 2 has
+    /// already. 2 answers with a `Prune`, which reopens its queue to 3. The connection
+    /// then closes again, as in the runtime.
+    #[test]
+    fn reply_to_an_unwanted_peer_closes_the_connection() {
+        use crate::proto::{plumtree, topic};
+        let topic = TopicId::from_bytes([0; 32]);
+        let mut network: Network<PeerId, rand::rngs::ChaCha12Rng> = Network::new(
+            NetworkConfig::default(),
+            rand::SeedableRng::seed_from_u64(1),
+        );
+        network.insert_and_join(1, topic, vec![]);
+        network.insert_and_join(2, topic, vec![1]);
+        network.insert_and_join(3, topic, vec![]);
+        network.run_trips(4);
+        let content = Bytes::from_static(b"hello");
+        network.command(1, topic, Command::Broadcast(content.clone(), Scope::Swarm));
+        network.run_trips(4);
+        assert!(network.conns().contains(&(1, 2)));
+        assert!(!network.conns().contains(&(2, 3)));
+
+        let push = Message {
+            topic,
+            message: topic::Message::Gossip(plumtree::Message::test_payload(content)),
+        };
+        let at = network.time;
+        network.queue.insert(at, 2, InEvent::RecvMessage(3, push));
+        network.run_trips(4);
+        assert!(
+            !network.conns().contains(&(2, 3)),
+            "the connection stayed open"
+        );
+        assert!(network.conns().contains(&(1, 2)));
     }
 }
