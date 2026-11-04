@@ -93,24 +93,46 @@ impl<T> PeerIdentity for T where
 ///
 /// Implementations may use these bytes to supply addresses or other information needed to connect
 /// to a peer that is not included in the peer's [`PeerIdentity`].
+///
+/// On the wire, the data is its kind as a varint, then the bytes with a length prefix.
+/// A reader keeps data of an unknown kind unchanged.
 #[derive(derive_more::Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
-#[debug("PeerData({}b)", self.0.len())]
-pub struct PeerData(Bytes);
+#[debug("PeerData({}, {}b)", self.kind, self.bytes.len())]
+pub struct PeerData {
+    kind: u64,
+    bytes: Bytes,
+}
 
 impl PeerData {
-    /// Create a new [`PeerData`] from a byte buffer.
+    /// The kind of data that holds the addresses of a peer.
+    pub const KIND_ADDRESSES: u64 = 0;
+
+    /// Creates a new [`PeerData`] of the addresses kind from a byte buffer.
     pub fn new(data: impl Into<Bytes>) -> Self {
-        Self(data.into())
+        Self::with_kind(Self::KIND_ADDRESSES, data)
+    }
+
+    /// Creates a new [`PeerData`] of `kind` from a byte buffer.
+    pub fn with_kind(kind: u64, data: impl Into<Bytes>) -> Self {
+        Self {
+            kind,
+            bytes: data.into(),
+        }
+    }
+
+    /// Returns the kind of the data.
+    pub fn kind(&self) -> u64 {
+        self.kind
     }
 
     /// Get a reference to the contained [`bytes::Bytes`].
     pub fn inner(&self) -> &bytes::Bytes {
-        &self.0
+        &self.bytes
     }
 
     /// Get the peer data as a byte slice.
     pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+        &self.bytes
     }
 }
 

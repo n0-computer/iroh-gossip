@@ -3,86 +3,10 @@ use super::*;
 /// Accepts the peer's next stream and reads only its header.
 async fn read_next_header(conn: &Connection) -> Result<TopicId> {
     let mut stream = conn.accept_uni().await.std_context("accept stream")?;
-    let header = wire::StreamHeader::read(&mut stream, &mut BytesMut::new(), TEST_FRAME_LIMIT)
+    let header = wire::StreamHeader::read(&mut stream, &mut Vec::new(), TEST_FRAME_LIMIT)
         .await
         .std_context("read header")?;
     Ok(header.topic)
-}
-
-/// The stream header that nodes from 0.90 to 0.101 write and read.
-///
-/// Their `StreamHeader` and `read_message` are the same in every release from
-/// 0.90 to 0.101, and their `read_lp` and `write_message` are the same as ours
-/// since 0.95. So `wire::read_message` and `wire::write_message` of this struct
-/// read and write a header as those nodes do.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct OldStreamHeader {
-    topic_id: TopicId,
-}
-
-/// Old and new nodes read the stream headers of each other on a stream, and the frames after them.
-#[tokio::test]
-#[traced_test]
-async fn stream_headers_cross_versions_on_a_stream() -> Result {
-    let pair = TestPair::new(1).await?;
-    let (conn, peer_conn) = pair.connect().await?;
-    let topic: TopicId = blake3::hash(b"versions").into();
-    let join = join_message(topic, 0).message;
-    let encoded_join = postcard::to_stdvec(&join).std_context("encode")?;
-    let mut buffer = Vec::new();
-    let mut read_buffer = BytesMut::new();
-
-    // We write, an old node reads.
-    let mut stream = conn.open_uni().await.std_context("open stream")?;
-    wire::StreamHeader::write(topic, &mut stream, &mut buffer, TEST_FRAME_LIMIT)
-        .await
-        .std_context("write header")?;
-    wire::write_message(&mut stream, &join, &mut buffer, TEST_FRAME_LIMIT)
-        .await
-        .std_context("write frame")?;
-    stream.finish().std_context("finish")?;
-    let mut recv = peer_conn.accept_uni().await.std_context("accept stream")?;
-    let header: OldStreamHeader = wire::read_message(&mut recv, &mut read_buffer, TEST_FRAME_LIMIT)
-        .await
-        .std_context("old node reads header")?
-        .expect("a header");
-    assert_eq!(header.topic_id, topic);
-    let frame = wire::read_lp(&mut recv, &mut read_buffer, TEST_FRAME_LIMIT)
-        .await
-        .std_context("old node reads frame")?
-        .expect("a frame");
-    assert_eq!(frame, encoded_join.as_slice(), "the frame after the header");
-
-    // An old node writes, we read.
-    let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
-    wire::write_message(
-        &mut stream,
-        &OldStreamHeader { topic_id: topic },
-        &mut buffer,
-        TEST_FRAME_LIMIT,
-    )
-    .await
-    .std_context("write old header")?;
-    wire::write_message(&mut stream, &join, &mut buffer, TEST_FRAME_LIMIT)
-        .await
-        .std_context("write frame")?;
-    stream.finish().std_context("finish")?;
-    let mut recv = conn.accept_uni().await.std_context("accept stream")?;
-    let header = wire::StreamHeader::read(&mut recv, &mut read_buffer, TEST_FRAME_LIMIT)
-        .await
-        .std_context("read old header")?;
-    assert_eq!(header.topic, topic);
-    assert!(!header.handles_close);
-    let frame = wire::read_lp(&mut recv, &mut read_buffer, TEST_FRAME_LIMIT)
-        .await
-        .std_context("read frame")?
-        .expect("a frame");
-    assert_eq!(
-        frame,
-        encoded_join.as_slice(),
-        "the frame after the old header"
-    );
-    Ok(())
 }
 
 /// A stream counts from its first byte, so a partial header keeps the connection.
@@ -98,7 +22,7 @@ async fn partial_header_keeps_the_connection() -> Result {
     show_that_it_handles_a_close(&peer_conn, [0; 32].into()).await;
     let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
     stream
-        .write_all(&[0, 0, 0, 32, 0])
+        .write_all(&[0x23, 0x01, 0x00])
         .await
         .std_context("partial header")?;
     tokio::time::sleep(RETIRE_GRACE + Duration::from_secs(1)).await;
@@ -143,7 +67,7 @@ async fn send_loop_reports_its_streams() -> Result {
 
     assert!(matches!(queue.send(join_message(topic, 0)), Pushed::Queued));
     let mut stream = peer_conn.accept_uni().await.std_context("accept")?;
-    let mut buffer = BytesMut::new();
+    let mut buffer = Vec::new();
     wire::StreamHeader::read(&mut stream, &mut buffer, TEST_FRAME_LIMIT).await?;
     let message: Option<TopicMessage> =
         wire::read_message(&mut stream, &mut buffer, TEST_FRAME_LIMIT).await?;
@@ -338,7 +262,7 @@ async fn late_header_of_an_older_stream_does_not_wait() -> Result {
     let (first, second) = (join_message(topic, 1), join_message(topic, 2));
     let mut buffer = Vec::new();
     let mut older = peer_conn.open_uni().await.std_context("open stream")?;
-    older.write_all(&[0]).await.std_context("write")?;
+    older.write_all(&[0x23]).await.std_context("write")?;
     let mut newer = peer_conn.open_uni().await.std_context("open stream")?;
     wire::StreamHeader::write(topic, &mut newer, &mut buffer, TEST_FRAME_LIMIT).await?;
     wire::write_message(&mut newer, &second.message, &mut buffer, TEST_FRAME_LIMIT).await?;
@@ -354,10 +278,14 @@ async fn late_header_of_an_older_stream_does_not_wait() -> Result {
     };
     expect(second).await?;
     // The rest of the older header, then a message. The newer stream stays open.
-    let header = postcard::to_stdvec(&(topic, 1u8)).std_context("encode")?;
-    let len = (header.len() as u32).to_be_bytes();
-    older.write_all(&len[1..]).await.std_context("write")?;
-    older.write_all(&header).await.std_context("write")?;
+    older
+        .write_all(&[0x01, 0x00, 0x20])
+        .await
+        .std_context("write")?;
+    older
+        .write_all(topic.as_bytes())
+        .await
+        .std_context("write")?;
     wire::write_message(&mut older, &first.message, &mut buffer, TEST_FRAME_LIMIT).await?;
     older.finish().std_context("finish")?;
     expect(first).await?;
@@ -470,7 +398,7 @@ async fn next_message_after_a_stop_opens_a_new_stream() -> Result {
         let mut first = peer_conn.accept_uni().await.expect("accept_uni");
         first.stop(0u32.into()).expect("stop");
         let mut next = peer_conn.accept_uni().await.expect("accept_uni");
-        let mut buffer = BytesMut::new();
+        let mut buffer = Vec::new();
         let header = wire::StreamHeader::read(&mut next, &mut buffer, TEST_FRAME_LIMIT)
             .await
             .expect("read header");
@@ -604,7 +532,7 @@ async fn pending_header_is_read_after_a_close() -> Result {
         let topic: TopicId = [1; 32].into();
         let mut partial = peer_conn.open_uni().await.std_context("open stream")?;
         partial
-            .write_all(&[0, 0])
+            .write_all(&[0x23, 0x01])
             .await
             .std_context("write partial header")?;
         // The loop accepts streams in order, so this message means it has the partial one.
@@ -622,7 +550,7 @@ async fn pending_header_is_read_after_a_close() -> Result {
         assert!(res.is_none(), "the recv loop ended: {res:?}");
 
         partial
-            .write_all(&[0, 32])
+            .write_all(&[0x00, 0x20])
             .await
             .std_context("write header length")?;
         partial
@@ -676,7 +604,7 @@ async fn partial_headers_are_limited() -> Result {
     for _ in 0..conn::MAX_PENDING_HEADERS {
         let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
         stream
-            .write_all(&[0, 0])
+            .write_all(&[0x23, 0x01])
             .await
             .std_context("write partial header")?;
         partials.push(stream);
@@ -688,7 +616,7 @@ async fn partial_headers_are_limited() -> Result {
 
     let partial = &mut partials[0];
     partial
-        .write_all(&[0, 32])
+        .write_all(&[0x00, 0x20])
         .await
         .std_context("write header length")?;
     // Another topic, so that its open stream does not hold back the one above.
@@ -735,66 +663,73 @@ async fn partial_header_does_not_block_other_streams() -> Result {
     Ok(())
 }
 
-/// A frame one byte over the size limit is refused on read.
+/// The reader skips a payload over the size limit, and reads the next frame.
 #[tokio::test]
 #[traced_test]
-async fn frame_over_the_size_limit_is_refused() -> Result {
+async fn frame_over_the_size_limit_is_skipped() -> Result {
     let pair = TestPair::new(1).await?;
     let (conn, peer_conn) = pair.connect().await?;
-    let topic: TopicId = blake3::hash(b"frame_over_the_size_limit").into();
-    let message = join_message(topic, 64).message;
-    let size = postcard::experimental::serialized_size(&message).std_context("size")?;
+    let big = TopicMessage::test_gossip(64);
+    let small = TopicMessage::test_prune();
+    let size = wire::message_len(&big).std_context("size")?;
 
     let mut stream = conn.open_uni().await.std_context("open stream")?;
-    wire::write_message(&mut stream, &message, &mut Vec::new(), size + 1)
+    let mut buffer = Vec::new();
+    wire::write_message(&mut stream, &big, &mut buffer, size)
+        .await
+        .std_context("write")?;
+    wire::write_message(&mut stream, &small, &mut buffer, size)
         .await
         .std_context("write")?;
     stream.finish().std_context("finish")?;
 
     let mut stream = peer_conn.accept_uni().await.std_context("accept")?;
-    let read: Result<Option<TopicMessage>, _> =
-        wire::read_message(&mut stream, &mut BytesMut::new(), size - 1).await;
-    assert!(
-        matches!(read, Err(wire::ReadError::TooLarge { .. })),
-        "{read:?}"
-    );
+    let mut buffer = Vec::new();
+    let read = wire::read_message(&mut stream, &mut buffer, size - 1)
+        .await
+        .std_context("read")?;
+    assert_eq!(read, Some(small));
+    let read = wire::read_message(&mut stream, &mut buffer, size - 1)
+        .await
+        .std_context("read")?;
+    assert_eq!(read, None);
     Ok(())
 }
 
-/// A frame shorter than the size limit goes through, and one of the limit does not.
-///
-/// Nodes up to 0.101 read a frame of the limit, but refuse to write one, so
-/// they could not forward it.
+/// A frame of the size limit goes through, and one byte more does not.
 #[tokio::test]
 #[traced_test]
-async fn frame_shorter_than_the_size_limit_goes_through() -> Result {
+async fn frame_of_the_size_limit_goes_through() -> Result {
     let pair = TestPair::new(1).await?;
     let (conn, peer_conn) = pair.connect().await?;
-    let topic: TopicId = blake3::hash(b"frame_shorter_than_the_size_limit").into();
+    let topic: TopicId = blake3::hash(b"frame_of_the_size_limit").into();
     let message = join_message(topic, 64).message;
-    let size = postcard::experimental::serialized_size(&message).std_context("size")?;
+    let size = wire::message_len(&message).std_context("size")?;
 
     let mut stream = conn.open_uni().await.std_context("open stream")?;
     let mut buffer = Vec::new();
-    let refused = wire::write_message(&mut stream, &message, &mut buffer, size).await;
+    let refused = wire::write_message(&mut stream, &message, &mut buffer, size - 1).await;
     assert!(
         matches!(refused, Err(wire::WriteError::TooLarge { .. })),
         "{refused:?}"
     );
-    wire::write_message(&mut stream, &message, &mut buffer, size + 1)
+    wire::write_message(&mut stream, &message, &mut buffer, size)
         .await
         .std_context("write")?;
     stream.finish().std_context("finish")?;
 
     let mut stream = peer_conn.accept_uni().await.std_context("accept")?;
-    let read: Option<TopicMessage> = wire::read_message(&mut stream, &mut BytesMut::new(), size)
+    let read = wire::read_message(&mut stream, &mut Vec::new(), size)
         .await
         .std_context("read")?;
     assert!(read.is_some(), "the frame did not arrive");
     Ok(())
 }
 
-/// The send task drops a message over the size limit, and the connection stays.
+/// The send task drops a payload or a forward join over the size limit, and the
+/// connection stays.
+///
+/// A forward join carries the peer data of the joiner, which our limit does not bound.
 #[tokio::test]
 #[traced_test]
 async fn oversized_message_is_dropped() -> Result {
@@ -815,10 +750,17 @@ async fn oversized_message_is_dropped() -> Result {
         unset_flag(),
     )));
 
-    assert!(matches!(
-        queue.send(join_message(topic, 4096)),
-        Pushed::Queued
-    ));
+    let payload = ProtoMessage {
+        topic,
+        message: TopicMessage::test_gossip(4096),
+    };
+    assert!(matches!(queue.send(payload), Pushed::Queued));
+    let joiner = SecretKey::generate().public();
+    let forward_join = ProtoMessage {
+        topic,
+        message: TopicMessage::Swarm(hyparview::Message::test_forward_join(joiner, 4096)),
+    };
+    assert!(matches!(queue.send(forward_join), Pushed::Queued));
     assert!(matches!(
         queue.send(join_message(topic, 16)),
         Pushed::Queued
@@ -827,8 +769,42 @@ async fn oversized_message_is_dropped() -> Result {
     let (_, message) = timeout(Duration::from_secs(5), read_next_message(&peer_conn))
         .await
         .std_context("nothing arrived after the oversized message")??;
-    let size = postcard::experimental::serialized_size(&message).std_context("size")?;
+    let size = wire::message_len(&message).std_context("size")?;
     assert!(size < 1024, "the oversized message went out");
     assert!(!task.is_finished(), "the connection ended");
+    Ok(())
+}
+
+/// A control message over the size limit fails the connection.
+///
+/// Without it, the membership of the peers would get out of step.
+#[tokio::test]
+#[traced_test]
+async fn oversized_control_message_fails_the_connection() -> Result {
+    let pair = TestPair::new(1).await?;
+    let (conn, _peer_conn) = pair.connect().await?;
+    let peer_id = pair.ep2.id();
+    let topic: TopicId = blake3::hash(b"oversized_control").into();
+    let mut queue = SendQueue::new(queue::MIN_QUEUE_SIZE);
+    let (in_event_tx, _in_event_rx) = mpsc::channel(16);
+    assert!(matches!(
+        queue.send(join_message(topic, 4096)),
+        Pushed::Queued
+    ));
+    let task = AbortOnDropHandle::new(spawn(connection_loop(
+        peer_id,
+        conn,
+        CancellationToken::new(),
+        Some(queue.lease()),
+        Vec::new(),
+        in_event_tx,
+        1024,
+        unset_flag(),
+    )));
+    let res = timeout(Duration::from_secs(5), task)
+        .await
+        .std_context("the connection stayed")?
+        .std_context("connection task")?;
+    assert!(res.is_err(), "{res:?}");
     Ok(())
 }

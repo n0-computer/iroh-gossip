@@ -514,7 +514,7 @@ impl Actor {
         self.state.overflowed_peers.clear();
         trace!(?event, "handle in_event");
         if let InEvent::RecvMessage(_from, message) = &event {
-            let len = postcard::experimental::serialized_size(&message.message).ok();
+            let len = super::wire::message_len(&message.message).ok();
             track_message(message.kind(), len, false, &self.metrics);
         }
         let may_affect_membership = event.may_affect_membership();
@@ -578,7 +578,7 @@ impl IO<PublicKey> for ActorIO<'_> {
             .entry(peer_id)
             .or_insert_with(|| PeerState::new(size));
         self.opened_queue |= peer.queue.is_closed();
-        let len = postcard::experimental::serialized_size(&message.message).ok();
+        let len = super::wire::message_len(&message.message).ok();
         let kind = message.kind();
         let dropped = match peer.push(message, len) {
             Pushed::Queued => {
