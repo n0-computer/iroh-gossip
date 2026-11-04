@@ -90,22 +90,13 @@ impl<PI> IO<PI> for VecDeque<OutEvent<PI>> {
     }
 }
 
-/// Returns the largest encoded Plumtree message that fits a frame.
-///
-/// A frame holds the enum tag of [`Message`] and the Plumtree message, as the
-/// stream header carries the topic. It must be shorter than `max_message_size`,
-/// as nodes up to 0.101 refuse to write a frame of that size.
-pub(crate) fn max_plumtree_size(max_message_size: usize) -> usize {
-    max_message_size - 2
-}
-
 /// Returns the largest content that a broadcast takes, so that it fits a frame at every hop.
 ///
 /// A broadcast to the neighbors encodes no larger than one to the swarm, so the
 /// limit holds for both.
 #[cfg(feature = "net")]
 pub(crate) fn max_content_size(max_message_size: usize) -> usize {
-    (0..=max_plumtree_size(max_message_size))
+    (0..=max_message_size)
         .rev()
         .find(|len| broadcast_fits(*len, Scope::Swarm, max_message_size))
         .unwrap_or(0)
@@ -114,7 +105,7 @@ pub(crate) fn max_content_size(max_message_size: usize) -> usize {
 /// Returns whether a broadcast with `content_len` bytes of content fits a frame at every hop.
 #[cfg(feature = "net")]
 pub(crate) fn broadcast_fits(content_len: usize, scope: Scope, max_message_size: usize) -> bool {
-    plumtree::max_gossip_size(content_len, scope) <= max_plumtree_size(max_message_size)
+    plumtree::max_gossip_size(content_len, scope) <= max_message_size
 }
 
 /// A protocol message for a particular topic
@@ -292,11 +283,7 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
         );
         Self {
             swarm: hyparview::State::new(me, me_data, config.membership, rng),
-            gossip: plumtree::State::new(
-                me,
-                config.broadcast,
-                max_plumtree_size(config.max_message_size),
-            ),
+            gossip: plumtree::State::new(me, config.broadcast, config.max_message_size),
             me,
         }
     }
@@ -444,8 +431,7 @@ mod tests {
                 )
             })
         };
-        // The frame holds the enum tag of the topic message, and must be shorter than the limit.
-        let limit = plumtree::max_gossip_size(content.len(), Scope::Swarm) + 2;
+        let limit = plumtree::max_gossip_size(content.len(), Scope::Swarm);
         assert!(goes_out(limit));
         assert!(!goes_out(limit - 1));
     }

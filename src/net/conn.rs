@@ -5,7 +5,6 @@ use std::{
     time::Duration,
 };
 
-use bytes::BytesMut;
 use iroh::{
     endpoint::{Connection, ConnectionError, RecvStream, SendStream, StreamId},
     EndpointId, PublicKey,
@@ -54,8 +53,8 @@ pub(super) const CLOSE_RETIRED: u32 = 4;
 
 /// The maximum number of stream headers that a [`RecvLoop`] reads at the same time.
 ///
-/// At this limit, the loop accepts no new stream until a header is complete.
-/// A peer that keeps many partial headers thus delays only its own streams.
+/// At this limit, the loop accepts no new stream until a header is complete or
+/// late. A peer that keeps many partial headers thus delays only its own streams.
 pub(super) const MAX_PENDING_HEADERS: usize = 16;
 
 #[allow(missing_docs)]
@@ -167,8 +166,7 @@ pub(super) async fn connection_loop(
         Ok(())
     };
     let retirement = async {
-        // An old node would lose its later messages to us after a close, see
-        // `StreamHeader::handles_close`.
+        // Waits until the peer opened a stream.
         if handles_close_rx.wait_for(|known| *known).await.is_err() {
             std::future::pending::<()>().await;
         }
@@ -214,7 +212,7 @@ pub(super) struct RecvLoop {
     conn: Connection,
     max_message_size: usize,
     in_event_tx: mpsc::Sender<InEvent>,
-    /// Whether a stream header of the peer had [`StreamHeader::handles_close`].
+    /// Whether the peer opened a stream, which shows that it handles a close.
     ///
     /// The actor shares it between all connections to the peer.
     handles_close: watch::Sender<bool>,
@@ -259,7 +257,8 @@ impl RecvLoop {
         let closed = self.conn.closed();
         tokio::pin!(closed);
         while !conn_is_closed || !header_futures.is_empty() || !read_futures.is_empty() {
-            // A partial header counts. Only a broken peer keeps one partial.
+            // A header that the loop still reads counts as an open stream. It times out
+            // after `HEADER_TIMEOUT`.
             let open = !header_futures.is_empty() || !read_futures.is_empty();
             set_if_changed(&self.has_streams, open);
             tokio::select! {
@@ -286,9 +285,8 @@ impl RecvLoop {
                         }
                     };
                     debug!(topic=%state.header.topic.fmt_short(), "stream opened");
-                    if state.header.handles_close {
-                        self.handles_close.send_replace(true);
-                    }
+                    // Every peer on this ALPN handles a close.
+                    self.handles_close.send_replace(true);
                     let (topic, id) = (state.header.topic, state.stream.id());
                     // A stream waits while there is an older stream for the same topic. If
                     // the header of an older stream arrives late, we read that stream right
@@ -345,14 +343,14 @@ enum Order {
 struct TopicReader {
     stream: RecvStream,
     header: StreamHeader,
-    buffer: BytesMut,
+    buffer: Vec<u8>,
     max_message_size: usize,
 }
 
 impl TopicReader {
     /// Reads the header of a new stream.
     async fn accept(mut stream: RecvStream, max_message_size: usize) -> Result<Self, ReadError> {
-        let mut buffer = BytesMut::new();
+        let mut buffer = Vec::new();
         let header = StreamHeader::read(&mut stream, &mut buffer, max_message_size).await?;
         Ok(Self {
             buffer,

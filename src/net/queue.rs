@@ -270,7 +270,7 @@ impl SendQueue {
     /// Queues `message` of the test, with its encoded size.
     #[cfg(test)]
     pub(super) fn send(&self, message: ProtoMessage) -> Pushed {
-        let len = postcard::experimental::serialized_size(&message.message).ok();
+        let len = super::wire::message_len(&message.message).ok();
         self.push(message, len)
     }
 
@@ -478,7 +478,7 @@ mod tests {
     }
 
     fn size(message: &ProtoMessage) -> usize {
-        postcard::experimental::serialized_size(&message.message).unwrap() + MESSAGE_OVERHEAD
+        crate::net::wire::message_len(&message.message).unwrap() + MESSAGE_OVERHEAD
     }
 
     /// Returns the bytes in use of the whole queue and of its data section.

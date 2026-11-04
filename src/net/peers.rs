@@ -45,7 +45,7 @@ pub(super) struct PeerState {
     pub(super) connections: usize,
     /// When [`Actor::forget_peers`] may remove the idle peer.
     forget_at: Option<Instant>,
-    /// Whether the peer sent [`StreamHeader::handles_close`].
+    /// Whether the peer opened a stream, which shows that it handles a close.
     ///
     /// It belongs to the peer, not to one connection. So a connection on which
     /// neither side sends closes too, as after two dials cross.
@@ -90,7 +90,7 @@ impl PeerState {
     /// aborts the peer.
     #[cfg(test)]
     pub(super) fn send(&mut self, message: ProtoMessage) -> Pushed {
-        let len = postcard::experimental::serialized_size(&message.message).ok();
+        let len = super::wire::message_len(&message.message).ok();
         self.push(message, len)
     }
 

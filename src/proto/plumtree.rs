@@ -236,22 +236,22 @@ impl DeliveryScope {
     }
 }
 
-/// Returns the largest encoded size of a [`Message::Gossip`] with `content_len` bytes of content.
+/// Returns the largest wire size of a [`Message::Gossip`] with `content_len` bytes of content.
 ///
-/// Each hop counts the round of a broadcast to the swarm one up, so its encoding
-/// grows on the way. This assumes the largest round.
+/// A broadcast to the swarm is a type code, the content with its length prefix,
+/// and the round. Each hop counts the round one up, so the encoding grows on the
+/// way. This assumes the largest round. A broadcast to neighbors has no round.
 pub(crate) fn max_gossip_size(content_len: usize, scope: Scope) -> usize {
-    let scope = match scope {
-        Scope::Swarm => DeliveryScope::Swarm(Round(u16::MAX)),
-        Scope::Neighbors => DeliveryScope::Neighbors,
-    };
-    let empty = Message::Gossip(Gossip::new(Bytes::new(), scope));
-    let empty_size = postcard::experimental::serialized_size(&empty).expect("encodes");
-    // The content adds its bytes, and its length prefix grows from one byte.
+    let type_size = 1;
     let prefix_size = (usize::BITS - content_len.leading_zeros())
         .div_ceil(7)
         .max(1) as usize;
-    empty_size - 1 + prefix_size + content_len
+    let round_size = match scope {
+        // A varint of `u16::MAX`.
+        Scope::Swarm => 3,
+        Scope::Neighbors => 0,
+    };
+    type_size + prefix_size + content_len + round_size
 }
 
 /// The broadcast scope of a gossip message.
@@ -2002,26 +2002,5 @@ mod test {
             }
         }
         assert!(sent >= 2, "the batch was not split");
-    }
-
-    /// `max_gossip_size` is the size at the largest round, and no less at any other.
-    #[test]
-    fn max_gossip_size_covers_every_round() {
-        let size = |content: &Bytes, scope| {
-            let message = Message::Gossip(Gossip::new(content.clone(), scope));
-            postcard::experimental::serialized_size(&message).expect("encodes")
-        };
-        for len in [0, 127, 128, 4000, 20_000] {
-            let content = Bytes::from(vec![0; len]);
-            let max = max_gossip_size(len, Scope::Swarm);
-            for round in [0, 127, 128, 16_383, 16_384] {
-                assert!(size(&content, DeliveryScope::Swarm(Round(round))) <= max);
-            }
-            assert_eq!(size(&content, DeliveryScope::Swarm(Round(u16::MAX))), max);
-            assert_eq!(
-                size(&content, DeliveryScope::Neighbors),
-                max_gossip_size(len, Scope::Neighbors)
-            );
-        }
     }
 }

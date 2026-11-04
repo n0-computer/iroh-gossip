@@ -1111,10 +1111,10 @@ async fn slow_peer_does_not_block_shutdown() -> Result {
         .await
         .std_context("connect")?;
     let mut stream = conn.open_uni().await.std_context("open raw stream")?;
-    // The wire format: the topic header, then `Swarm(Join(None))`.
-    let mut join = vec![0, 0, 0, 32];
+    // The wire format: the topic header, then `SWARM_JOIN(None)`.
+    let mut join = vec![35, 0x01, 0x00, 32];
     join.extend_from_slice(t.as_bytes());
-    join.extend_from_slice(&[0, 0, 0, 3, 0, 0, 0]);
+    join.extend_from_slice(&[2, 0x01, 0x00]);
     stream.write_all(&join).await.std_context("send join")?;
     sa.neighbor_up(b.id()).await?;
     // The peer keeps QUIC alive but does not read the gossip receive stream.
