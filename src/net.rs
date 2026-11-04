@@ -33,7 +33,7 @@ mod subscriptions;
 mod wire;
 
 /// ALPN protocol name
-pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/1";
+pub const GOSSIP_ALPN: &[u8] = b"iroh-gossip/2-canary.0";
 
 type ProtoEvent = proto::Event<PublicKey>;
 type ProtoCommand = proto::Command<PublicKey>;
@@ -127,8 +127,8 @@ impl Builder {
     /// Sets the maximum message size in bytes.
     ///
     /// By default this is `4096` bytes. The limit applies to the encoded message,
-    /// which is about 40 bytes longer than its content. [`GossipSender::broadcast`]
-    /// refuses a message over the limit.
+    /// which is about 10 bytes longer than its content, 9 at the default size.
+    /// [`GossipSender::broadcast`] refuses a message over the limit.
     ///
     /// Use the same limit on every node of a swarm. A node drops a message over
     /// its own limit, and the peers that sent it do not learn of it.
@@ -403,8 +403,8 @@ impl Gossip {
 
     /// Shutdown the gossip instance.
     ///
-    /// This leaves all topics, sending `Disconnect` messages to peers, and then
-    /// stops the gossip actor loop and drops all state and connections. A gossip
+    /// It leaves all topics and sends `Close` to the peers. Then it stops the actor, and
+    /// drops all state and connections. A gossip
     /// instance that is shut down already, or shutting down, returns `Ok` too.
     pub async fn shutdown(&self) -> Result<(), Error> {
         let (reply, reply_rx) = oneshot::channel();

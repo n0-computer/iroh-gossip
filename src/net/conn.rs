@@ -519,7 +519,7 @@ impl SendLoop {
         Ok(())
     }
 
-    /// Writes a message on the stream of its topic, and finishes the stream after a `Disconnect`.
+    /// Writes a message on the stream of its topic, and finishes the stream after a `Close`.
     ///
     /// If the write fails because the peer stopped the stream, the message is lost.
     /// Returns the error only if the connection is gone, or if the write made no
