@@ -370,10 +370,7 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
     #[cfg(test)]
     fn check_invariants(&self) {
         let gossip = &self.gossip;
-        let peers: std::collections::BTreeSet<_> = gossip
-            .eager_push_peers
-            .union(&gossip.lazy_push_peers)
-            .collect();
+        let peers: std::collections::BTreeSet<_> = gossip.neighbors.iter().collect();
         let neighbors: std::collections::BTreeSet<_> = self.swarm.active_view.iter().collect();
         assert_eq!(peers, neighbors, "Plumtree's peers are not the neighbors");
     }
