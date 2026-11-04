@@ -502,3 +502,589 @@ impl std::ops::DerefMut for Peers {
         &mut self.map
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::{actor::tests::join_message, queue::MIN_QUEUE_SIZE};
+
+    /// The state of a peer with an open queue.
+    fn state() -> PeerState {
+        let state = PeerState::new(MIN_QUEUE_SIZE, true);
+        state.queue.open();
+        state
+    }
+
+    /// Adds a connection, and its header unless we dialed it.
+    fn add(state: &mut PeerState, id: ConnId, dialed: bool, session: u8) -> Vec<Action> {
+        let mut out = Vec::new();
+        let side = if dialed { Side::Client } else { Side::Server };
+        state.add_conn(id, side, &mut out);
+        if !dialed {
+            state.on_header(id, Session([session; 8]), &mut out);
+        }
+        out
+    }
+
+    /// A dialed connection is the writer at once, an accepted one after its header.
+    #[test]
+    fn dialed_writes_at_once_accepted_after_header() {
+        let mut out = Vec::new();
+        state().add_conn(1, Side::Client, &mut out);
+        assert_eq!(out, vec![Action::TakeQueue(1)]);
+        let mut at_me = state();
+        let mut out = Vec::new();
+        at_me.add_conn(2, Side::Server, &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        at_me.on_header(2, Session([1; 8]), &mut out);
+        assert_eq!(out, vec![Action::TakeQueue(2)]);
+    }
+
+    /// A peer that restarts again and again leaves only the latest sessions in the state.
+    #[test]
+    fn old_sessions_keep_the_latest() {
+        let mut state = state();
+        let count = MAX_OLD_SESSIONS as u8 + 4;
+        for i in 0..count {
+            add(&mut state, i.into(), false, i);
+        }
+        assert_eq!(state.old_sessions.len(), MAX_OLD_SESSIONS);
+        // The newest older session still closes its connection as stale.
+        let out = add(&mut state, 100, false, count - 2);
+        assert!(
+            out.contains(&Action::Close(100, CloseCode::Stale)),
+            "{out:?}"
+        );
+    }
+
+    /// The connection that the higher endpoint id dialed loses a crossed dial, seen from both ends.
+    #[test]
+    fn crossed_dials_retire_the_loser_of_the_higher_dialer() {
+        // We are the lower id: our dialed connection 1 wins, the accepted 2 loses.
+        let mut lower = state();
+        let mut out = Vec::new();
+        lower.add_conn(1, Side::Client, &mut out);
+        lower.add_conn(2, Side::Server, &mut out);
+        assert_eq!(out, vec![Action::TakeQueue(1)]);
+        out.clear();
+        lower.on_header(1, Session([1; 8]), &mut out);
+        assert!(out.is_empty(), "wait for all headers: {out:?}");
+        lower.on_header(2, Session([1; 8]), &mut out);
+        assert_eq!(out, vec![Action::Retire(2)]);
+        // The winner stays, and keeps the writer.
+        out.clear();
+        lower.on_closed(2, ConnEnd::Retired, None, &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        assert_eq!((lower.conn_count(), lower.writer()), (1, Some(1)));
+
+        // We are the higher id: the connection that we dialed loses, and its writer moves.
+        let mut higher = PeerState::new(MIN_QUEUE_SIZE, false);
+        higher.queue.open();
+        let mut out = Vec::new();
+        higher.add_conn(1, Side::Client, &mut out);
+        let reader = higher.reader_for(1).expect("the writer gets the reader");
+        higher.on_header(1, Session([1; 8]), &mut out);
+        assert!(out.is_empty() || out == vec![Action::TakeQueue(1)]);
+        out.clear();
+        higher.add_conn(2, Side::Server, &mut out);
+        higher.on_header(2, Session([1; 8]), &mut out);
+        assert_eq!(out, vec![Action::Retire(1)]);
+        // The loser keeps the reader until it closes, so the peer reads a topic in order.
+        higher.send(join_message([2; 32].into(), 0));
+        out.clear();
+        higher.on_header(2, Session([1; 8]), &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        assert_eq!(higher.writer(), Some(1));
+        out.clear();
+        higher.on_closed(1, ConnEnd::Retired, Some(reader), &mut out);
+        assert_eq!(out, vec![Action::TakeQueue(2)]);
+        assert_eq!((higher.conn_count(), higher.writer()), (1, Some(2)));
+        let reader = higher.reader_for(2).expect("the reader came back");
+        assert!(reader.reads(&higher.queue) && !reader.is_empty());
+    }
+
+    /// No retiring connection becomes the writer: neither a crossed-dial loser nor an idle one.
+    #[test]
+    fn settle_skips_a_retiring_connection() {
+        // We are the lower id, so the accepted connection 2 loses.
+        let mut lower = state();
+        let mut out = Vec::new();
+        lower.add_conn(1, Side::Client, &mut out);
+        lower.add_conn(2, Side::Server, &mut out);
+        lower.on_header(1, Session([1; 8]), &mut out);
+        lower.on_header(2, Session([1; 8]), &mut out);
+        assert_eq!(out, vec![Action::TakeQueue(1), Action::Retire(2)]);
+        out.clear();
+        lower.on_closed(1, ConnEnd::Failed, None, &mut out);
+        assert_eq!(out, vec![Action::Disconnect]);
+        assert_eq!(lower.writer(), None);
+
+        // Connection 2 retires on its own.
+        let mut at_me = state();
+        add(&mut at_me, 1, false, 1);
+        add(&mut at_me, 2, false, 1);
+        let mut out = Vec::new();
+        at_me.on_retiring(2, &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        at_me.on_closed(1, ConnEnd::Failed, None, &mut out);
+        assert_eq!(out, vec![Action::Disconnect]);
+        assert_eq!(at_me.writer(), None);
+        // A message dials, and the new connection writes.
+        at_me.send(join_message([2; 32].into(), 0));
+        assert!(at_me.needs_dial());
+        out.clear();
+        at_me.add_conn(3, Side::Client, &mut out);
+        assert_eq!(out, vec![Action::TakeQueue(3)]);
+    }
+
+    /// A message while the only connection retires dials at once.
+    ///
+    /// The new connection waits for the reader.
+    #[test]
+    fn message_while_the_only_connection_retires_dials() {
+        let mut at_me = state();
+        add(&mut at_me, 1, true, 1);
+        let reader = at_me.reader_for(1).expect("the writer gets the reader");
+        let mut out = Vec::new();
+        at_me.on_retiring(1, &mut out);
+        assert!(out.is_empty(), "an empty queue needs no dial: {out:?}");
+        at_me.send(join_message([2; 32].into(), 0));
+        assert!(at_me.needs_dial());
+        // The retiring writer keeps the reader until its connection closes.
+        at_me.add_conn(2, Side::Client, &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        assert!(!at_me.needs_dial());
+        at_me.on_closed(1, ConnEnd::Retired, Some(reader), &mut out);
+        assert_eq!(out, vec![Action::TakeQueue(2)]);
+
+        // A retire that starts after the message dials too.
+        let mut at_me = state();
+        add(&mut at_me, 1, true, 1);
+        at_me.send(join_message([2; 32].into(), 0));
+        let mut out = Vec::new();
+        at_me.on_retiring(1, &mut out);
+        assert_eq!(out, vec![Action::Dial]);
+    }
+
+    /// A connection that waits for the reader of a retiring writer, and retires as idle, does not dial.
+    ///
+    /// Otherwise each idle retire dials again, until the writer closes.
+    #[test]
+    fn idle_retire_of_a_waiting_connection_does_not_dial() {
+        let mut at_me = state();
+        add(&mut at_me, 1, true, 1);
+        let reader = at_me.reader_for(1).expect("the writer gets the reader");
+        let mut out = Vec::new();
+        at_me.on_retiring(1, &mut out);
+        at_me.send(join_message([2; 32].into(), 0));
+        assert!(at_me.needs_dial());
+        // The dial gives connection 2, which waits, and retires as idle.
+        at_me.add_conn(2, Side::Client, &mut out);
+        at_me.on_retiring(2, &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        // The close of the writer dials once, and the next connection writes.
+        at_me.on_closed(1, ConnEnd::Retired, Some(reader), &mut out);
+        assert_eq!(out, vec![Action::Dial]);
+        assert_eq!(at_me.writer(), None);
+        out.clear();
+        at_me.add_conn(3, Side::Client, &mut out);
+        assert_eq!(out, vec![Action::TakeQueue(3)]);
+    }
+
+    /// A waiting connection that retires and closes before the retiring writer does not dial.
+    #[test]
+    fn close_of_a_waiting_connection_does_not_dial() {
+        let mut at_me = state();
+        add(&mut at_me, 1, true, 1);
+        let reader = at_me.reader_for(1).expect("the writer gets the reader");
+        let mut out = Vec::new();
+        at_me.on_retiring(1, &mut out);
+        at_me.send(join_message([2; 32].into(), 0));
+        at_me.add_conn(2, Side::Client, &mut out);
+        at_me.on_retiring(2, &mut out);
+        // The peer answers the retire of connection 2 at once.
+        at_me.on_closed(2, ConnEnd::Retired, None, &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        at_me.on_closed(1, ConnEnd::Retired, Some(reader), &mut out);
+        assert_eq!(out, vec![Action::Dial]);
+    }
+
+    /// Steady messages during a stalled retire dial once until the writer closes.
+    ///
+    /// Each connection that the dial gives waits for the reader, retires as idle, and closes.
+    #[test]
+    fn steady_messages_during_a_stalled_retire_dial_once() {
+        let mut at_me = state();
+        add(&mut at_me, 1, true, 1);
+        let reader = at_me.reader_for(1).expect("the writer gets the reader");
+        let mut out = Vec::new();
+        at_me.on_retiring(1, &mut out);
+        let mut dials = 0;
+        for id in 2..8 {
+            at_me.send(join_message([2; 32].into(), 0));
+            if at_me.needs_dial() {
+                at_me.on_dial();
+                dials += 1;
+            }
+            at_me.add_conn(id, Side::Client, &mut out);
+            at_me.on_retiring(id, &mut out);
+            at_me.on_closed(id, ConnEnd::Retired, None, &mut out);
+        }
+        assert!(out.is_empty(), "{out:?}");
+        assert_eq!(dials, 1);
+        // The close of the writer dials again, for the next writer.
+        at_me.on_closed(1, ConnEnd::Retired, Some(reader), &mut out);
+        assert_eq!(out, vec![Action::Dial]);
+    }
+
+    /// A dial during a retire is not a crossed dial on the side that knows of the retire.
+    #[test]
+    fn dial_during_a_retire_is_kept() {
+        // We are the higher id, so our dialed connection 2 would lose to the accepted 1.
+        let mut higher = PeerState::new(MIN_QUEUE_SIZE, false);
+        higher.queue.open();
+        let mut out = Vec::new();
+        higher.add_conn(1, Side::Server, &mut out);
+        higher.on_header(1, Session([1; 8]), &mut out);
+        higher.on_retiring(1, &mut out);
+        out.clear();
+        higher.add_conn(2, Side::Client, &mut out);
+        higher.on_header(2, Session([1; 8]), &mut out);
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    /// The state never retires a lone connection, whoever dialed it.
+    #[test]
+    fn a_lone_connection_is_kept() {
+        let mut at_me = state();
+        let mut out = Vec::new();
+        at_me.add_conn(1, Side::Server, &mut out);
+        at_me.on_header(1, Session([1; 8]), &mut out);
+        assert_eq!(out, vec![Action::TakeQueue(1)]);
+    }
+
+    /// After a restart the new connection is not the loser of a crossed dial with the old one.
+    #[test]
+    fn restart_does_not_retire_the_new_connection() {
+        let mut at_me = state();
+        let mut out = Vec::new();
+        at_me.add_conn(1, Side::Client, &mut out);
+        at_me.on_header(1, Session([1; 8]), &mut out);
+        out.clear();
+        let out = add(&mut at_me, 2, false, 2);
+        assert!(out.contains(&Action::Close(1, CloseCode::Stale)));
+        assert!(
+            !out.iter().any(|a| matches!(a, Action::Retire(_))),
+            "{out:?}"
+        );
+    }
+
+    /// A session that differs from the one of a dialed connection is a restart, not a crossed dial.
+    #[test]
+    fn restarted_peer_replaces_a_dead_dialed_connection() {
+        let mut at_a = state();
+        let mut out = Vec::new();
+        at_a.add_conn(1, Side::Client, &mut out);
+        at_a.on_header(1, Session([1; 8]), &mut out);
+        let out = add(&mut at_a, 2, false, 2);
+        assert!(out.contains(&Action::Close(1, CloseCode::Stale)));
+        assert!(out.contains(&Action::Disconnect));
+        assert_eq!(at_a.writer(), Some(2));
+    }
+
+    /// A new session replaces every connection of the old one, and the protocol sees a disconnect.
+    #[test]
+    fn restart_replaces_and_disconnects() {
+        let mut at_me = state();
+        add(&mut at_me, 1, false, 1);
+        add(&mut at_me, 2, false, 1);
+        at_me.send(join_message([1; 32].into(), 0));
+        let out = add(&mut at_me, 3, false, 2);
+        assert!(out.contains(&Action::Close(1, CloseCode::Stale)));
+        assert!(out.contains(&Action::Close(2, CloseCode::Stale)));
+        assert!(out.contains(&Action::Disconnect));
+        assert_eq!(at_me.conn_count(), 1);
+        assert_eq!(at_me.writer(), Some(3));
+        assert!(
+            at_me.queue.is_empty(),
+            "the queue of the old process stayed"
+        );
+        assert!(out.ends_with(&[Action::TakeQueue(3)]), "{out:?}");
+    }
+
+    /// A connection with an older session belongs to a former instance of the peer.
+    ///
+    /// Only that connection closes.
+    #[test]
+    fn former_instance_is_refused() {
+        let mut at_me = state();
+        add(&mut at_me, 1, false, 1);
+        add(&mut at_me, 2, false, 2);
+        let mut out = Vec::new();
+        at_me.add_conn(3, Side::Server, &mut out);
+        at_me.on_header(3, Session([1; 8]), &mut out);
+        assert_eq!(out, vec![Action::Close(3, CloseCode::Stale)]);
+        assert_eq!((at_me.conn_count(), at_me.writer()), (1, Some(2)));
+    }
+
+    /// After a restart, a dialed connection writes only once its header shows the new session.
+    #[test]
+    fn restart_makes_a_dialed_connection_wait_for_its_header() {
+        let mut at_me = state();
+        add(&mut at_me, 1, false, 1);
+        add(&mut at_me, 2, true, 1);
+        // Connection 2 may lead to the former instance.
+        let out = add(&mut at_me, 3, false, 2);
+        assert!(out.ends_with(&[Action::TakeQueue(3)]), "{out:?}");
+        let mut out = Vec::new();
+        at_me.on_header(2, Session([1; 8]), &mut out);
+        assert_eq!(out, vec![Action::Close(2, CloseCode::Stale)]);
+        // A later dial waits too.
+        at_me.on_closed(3, ConnEnd::Failed, None, &mut out);
+        out.clear();
+        at_me.add_conn(4, Side::Client, &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        at_me.on_header(4, Session([2; 8]), &mut out);
+        assert_eq!(out, vec![Action::TakeQueue(4)]);
+    }
+
+    /// An accepted last connection of a former instance dials for the queued messages.
+    #[test]
+    fn accepted_former_instance_on_the_last_connection_dials() {
+        let mut at_me = state();
+        add(&mut at_me, 1, false, 1);
+        add(&mut at_me, 2, false, 2);
+        let mut out = Vec::new();
+        at_me.on_closed(2, ConnEnd::Failed, None, &mut out);
+        at_me.send(join_message([2; 32].into(), 0));
+        let mut out = Vec::new();
+        at_me.add_conn(3, Side::Server, &mut out);
+        at_me.on_header(3, Session([1; 8]), &mut out);
+        assert_eq!(out, vec![Action::Close(3, CloseCode::Stale), Action::Dial]);
+        // The dial reaches the current instance, which gets the queue.
+        out.clear();
+        at_me.add_conn(4, Side::Client, &mut out);
+        at_me.on_closed(3, ConnEnd::Quiet, None, &mut out);
+        at_me.on_header(4, Session([2; 8]), &mut out);
+        assert_eq!(out, vec![Action::TakeQueue(4)]);
+        assert!(!at_me.queue.is_empty());
+    }
+
+    /// A dial that reaches a former instance on the last connection disconnects, and dials no more.
+    #[test]
+    fn dialed_former_instance_on_the_last_connection_disconnects() {
+        let mut at_me = state();
+        add(&mut at_me, 1, false, 1);
+        add(&mut at_me, 2, false, 2);
+        let mut out = Vec::new();
+        at_me.on_closed(2, ConnEnd::Failed, None, &mut out);
+        at_me.send(join_message([2; 32].into(), 0));
+        let mut out = Vec::new();
+        at_me.add_conn(3, Side::Client, &mut out);
+        at_me.on_header(3, Session([1; 8]), &mut out);
+        assert_eq!(
+            out,
+            vec![Action::Close(3, CloseCode::Stale), Action::Disconnect]
+        );
+        out.clear();
+        at_me.on_closed(3, ConnEnd::Quiet, None, &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        assert!(at_me.is_idle());
+    }
+
+    /// The state drops a reader of a discarded queue that comes back, and the current writer stays.
+    #[test]
+    fn reader_of_a_discarded_queue_is_dropped() {
+        let mut at_me = state();
+        add(&mut at_me, 1, false, 1);
+        let old = at_me.reader_for(1).expect("the writer gets the reader");
+        // A restart of the peer discards the queue, and the new connection writes.
+        add(&mut at_me, 2, false, 2);
+        let current = at_me
+            .reader_for(2)
+            .expect("the new writer gets a new reader");
+        assert!(!old.reads(&at_me.queue) && current.reads(&at_me.queue));
+        let mut out = Vec::new();
+        at_me.on_closed(1, ConnEnd::Quiet, Some(old), &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        assert_eq!(at_me.writer(), Some(2));
+        // The current one comes back.
+        at_me.on_closed(2, ConnEnd::Retired, Some(current), &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        assert_eq!(at_me.writer(), None);
+        assert!(at_me
+            .take_reader()
+            .is_some_and(|reader| reader.reads(&at_me.queue)));
+    }
+
+    /// A writer that fails returns a reader of the queue that its failure discards.
+    #[test]
+    fn failed_writer_returns_a_discarded_reader() {
+        let mut at_me = state();
+        add(&mut at_me, 1, false, 1);
+        add(&mut at_me, 2, false, 1);
+        let reader = at_me.reader_for(1).expect("the writer gets the reader");
+        let mut out = Vec::new();
+        at_me.on_closed(1, ConnEnd::Failed, Some(reader), &mut out);
+        assert_eq!(out, vec![Action::Disconnect, Action::TakeQueue(2)]);
+        assert!(at_me
+            .reader_for(2)
+            .is_some_and(|reader| reader.reads(&at_me.queue)));
+    }
+
+    /// Events of a connection that the state dropped change nothing.
+    #[test]
+    fn events_of_a_dropped_connection_are_ignored() {
+        let mut at_me = state();
+        add(&mut at_me, 1, false, 1);
+        add(&mut at_me, 2, false, 2);
+        let mut out = Vec::new();
+        at_me.on_header(1, Session([1; 8]), &mut out);
+        at_me.on_closed(1, ConnEnd::Failed, None, &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        assert_eq!(at_me.conn_count(), 1);
+    }
+
+    /// The end of the last connection while a topic uses the peer is a disconnect.
+    #[test]
+    fn last_connection_with_topic_disconnects() {
+        // Open queue: a topic uses the peer.
+        let mut at_me = state();
+        add(&mut at_me, 1, true, 1);
+        let mut out = Vec::new();
+        at_me.on_closed(1, ConnEnd::Failed, None, &mut out);
+        assert_eq!(out, vec![Action::Disconnect]);
+        // A non-writer that fails changes nothing while another connection lives.
+        let mut at_me = state();
+        add(&mut at_me, 1, false, 1);
+        add(&mut at_me, 2, false, 1);
+        let mut out = Vec::new();
+        at_me.on_closed(2, ConnEnd::Failed, None, &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        // A closed queue: nobody uses the peer.
+        let mut at_me = state();
+        at_me.queue.close();
+        let mut out = Vec::new();
+        at_me.add_conn(1, Side::Server, &mut out);
+        at_me.on_closed(1, ConnEnd::Failed, None, &mut out);
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    /// The writer that fails drops the queue, and the writer goes to another ready connection.
+    #[test]
+    fn failed_writer_hands_over_to_a_ready_connection() {
+        let mut at_me = state();
+        add(&mut at_me, 1, false, 1);
+        add(&mut at_me, 2, false, 1);
+        assert_eq!(at_me.writer(), Some(1));
+        let mut out = Vec::new();
+        at_me.on_closed(1, ConnEnd::Failed, None, &mut out);
+        assert_eq!(out, vec![Action::Disconnect, Action::TakeQueue(2)]);
+    }
+
+    /// A finished retire of the last connection dials while the queue is open, also when it is empty.
+    ///
+    /// An open queue means that a topic wants the peer, so the end is no disconnect.
+    #[test]
+    fn retired_with_an_open_queue_redials() {
+        let retire_last = |queued: bool, closed: bool| {
+            let mut at_me = state();
+            add(&mut at_me, 1, true, 1);
+            if queued {
+                at_me.send(join_message([2; 32].into(), 0));
+            }
+            if closed {
+                at_me.queue.close();
+            }
+            let mut out = Vec::new();
+            at_me.on_closed(1, ConnEnd::Retired, None, &mut out);
+            out
+        };
+        assert_eq!(retire_last(true, false), vec![Action::Dial]);
+        assert_eq!(retire_last(false, false), vec![Action::Dial]);
+        assert!(retire_last(false, true).is_empty());
+    }
+
+    /// After an abort, a message dials, and the end of the old connection keeps it queued.
+    #[test]
+    fn abort_keeps_the_next_queue() {
+        let mut at_me = state();
+        add(&mut at_me, 1, true, 1);
+        at_me.abort();
+        at_me.send(join_message([2; 32].into(), 0));
+        assert!(at_me.needs_dial());
+        let mut out = Vec::new();
+        at_me.on_closed(1, ConnEnd::Failed, None, &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        assert!(!at_me.queue.is_empty());
+        at_me.add_conn(2, Side::Client, &mut out);
+        assert_eq!(out, vec![Action::TakeQueue(2)]);
+    }
+
+    /// A connection that the peer closed as stale ends without a report, also with the queue open.
+    #[test]
+    fn quiet_end_reports_nothing() {
+        let mut at_me = state();
+        add(&mut at_me, 1, true, 1);
+        let mut out = Vec::new();
+        at_me.on_closed(1, ConnEnd::Quiet, None, &mut out);
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    /// A failed dial without a connection disconnects, and one with a connection does not.
+    #[test]
+    fn dial_failure_needs_no_connection_to_matter() {
+        let mut at_me = state();
+        let mut out = Vec::new();
+        at_me.on_dial_failed(&mut out);
+        assert_eq!(out, vec![Action::Disconnect]);
+        let mut at_me = state();
+        add(&mut at_me, 1, false, 1);
+        let mut out = Vec::new();
+        at_me.on_dial_failed(&mut out);
+        assert!(out.is_empty());
+    }
+
+    /// A new connection over the cap closes a retiring one first, then the oldest that does
+    /// not write. The cap does not count our own dials.
+    #[test]
+    fn make_room_closes_a_retiring_then_the_oldest_connection() {
+        let mut state = state();
+        let mut out = Vec::new();
+        state.add_conn(1, Side::Client, &mut out);
+        for id in 2..=5 {
+            add(&mut state, id, false, 1);
+        }
+        let mut out = Vec::new();
+        state.on_retiring(4, &mut out);
+        let mut out = Vec::new();
+        state.make_room(&mut out);
+        assert_eq!(out, vec![Action::Close(4, CloseCode::Blocked)]);
+        assert_eq!(state.accepted_count(), MAX_ACCEPTED_PER_PEER - 1);
+
+        state.add_conn(6, Side::Server, &mut Vec::new());
+        let mut out = Vec::new();
+        state.make_room(&mut out);
+        let writer = state.writer();
+        let oldest = (2..=5).find(|id| *id != 4 && Some(*id) != writer).unwrap();
+        assert_eq!(out, vec![Action::Close(oldest, CloseCode::Blocked)]);
+        // The closed connections never write.
+        assert!(writer.is_none_or(|writer| writer != 4 && writer != oldest));
+    }
+
+    /// A new connection over the cap never closes the writer, also when the writer retires.
+    ///
+    /// Closing it would discard the queue and drop the peer from all topics.
+    #[test]
+    fn make_room_keeps_a_retiring_writer() {
+        let mut state = state();
+        for id in 1..=4 {
+            add(&mut state, id, false, 1);
+        }
+        assert_eq!(state.writer(), Some(1));
+        state.on_retiring(1, &mut Vec::new());
+        let mut out = Vec::new();
+        state.make_room(&mut out);
+        assert_eq!(out, vec![Action::Close(2, CloseCode::Blocked)]);
+    }
+}
