@@ -900,6 +900,91 @@ mod tests {
         );
     }
 
+    fn session() -> Session {
+        Session([1, 2, 3, 4, 5, 6, 7, 8])
+    }
+
+    #[test]
+    fn control_header_vectors() {
+        let frame = session().to_frame();
+        assert_eq!(hex::encode(&frame), "0b0001080102030405060708");
+        assert_eq!(frame.len(), 12);
+        assert_eq!(Session::decode(&frame[1..]).unwrap(), session());
+        // The reader skips unknown parameters.
+        let mut payload = Vec::new();
+        put_header(
+            &mut payload,
+            KIND_CONTROL,
+            &[(7, b"a"), (PARAM_SESSION, &session().0)],
+        );
+        assert_eq!(Session::decode(&payload).unwrap(), session());
+    }
+
+    #[test]
+    fn malformed_control_headers_fail() {
+        let mut payload = Vec::new();
+        put_header(&mut payload, KIND_CONTROL, &[(PARAM_SESSION, &[1; 7])]);
+        assert!(Session::decode(&payload).is_err(), "short session");
+        let mut payload = Vec::new();
+        put_header(&mut payload, KIND_CONTROL, &[]);
+        assert!(Session::decode(&payload).is_err(), "no session");
+        let mut payload = Vec::new();
+        put_header(&mut payload, KIND_TOPIC, &[(PARAM_SESSION, &[1; 8])]);
+        assert!(Session::decode(&payload).is_err(), "wrong kind");
+    }
+
+    #[test]
+    fn control_message_vectors() {
+        for (message, hex) in [
+            (ControlMessage::Goaway(0), "022000"),
+            (ControlMessage::Goaway(5), "022005"),
+            (ControlMessage::Goaway(300), "0320ac02"),
+        ] {
+            let frame = message.to_frame();
+            assert_eq!(hex::encode(&frame), hex);
+            assert_eq!(ControlMessage::decode(&frame[1..]).unwrap(), Some(message));
+        }
+        assert_eq!(ControlMessage::decode(&[0x7f, 1]).unwrap(), None);
+        assert!(ControlMessage::decode(&[0x20]).is_err());
+    }
+
+    #[tokio::test]
+    async fn control_reader_fails_on_unknown_types_and_limits_frames() {
+        let mut bytes = framed(&[0x2f, 1]);
+        bytes.extend(ControlMessage::Goaway(1).to_frame());
+        let err = ControlMessage::read(&mut &bytes[..], &mut Vec::new(), 32).await;
+        assert!(
+            matches!(err, Err(ReadError::UnknownType { code: 0x2f, .. })),
+            "{err:?}"
+        );
+        let big = framed(&[0x22; 33]);
+        let err = ControlMessage::read(&mut &big[..], &mut Vec::new(), 32).await;
+        assert!(matches!(err, Err(ReadError::TooLarge { .. })));
+        let end = ControlMessage::read(&mut &[][..], &mut Vec::new(), 32).await;
+        assert!(
+            matches!(end, Err(ReadError::Io { .. })),
+            "the end is an error"
+        );
+    }
+
+    #[test]
+    fn close_codes() {
+        for code in [
+            CloseCode::Retired,
+            CloseCode::Stale,
+            CloseCode::Shutdown,
+            CloseCode::Protocol,
+            CloseCode::SendFailed,
+            CloseCode::Blocked,
+        ] {
+            assert_eq!(CloseCode::from_code(code.code()), Some(code));
+        }
+        assert_eq!(CloseCode::from_code(VarInt::from_u32(0)), None);
+        assert_eq!(CloseCode::from_code(VarInt::from_u32(99)), None);
+        assert_eq!(CloseCode::Retired.code(), VarInt::from_u32(1));
+        assert_eq!(CloseCode::Blocked.code(), VarInt::from_u32(6));
+    }
+
     #[tokio::test]
     async fn frames_over_the_limit_are_skipped_without_allocating() {
         let mut bytes = framed(&vec![types::GOSSIP_MESSAGE as u8; 5000]);
