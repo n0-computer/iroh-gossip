@@ -50,6 +50,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod filter;
 pub(crate) mod hyparview;
 mod peer;
 pub(crate) mod plumtree;
@@ -61,6 +62,7 @@ pub(crate) mod util;
 pub mod sim;
 
 pub use self::{
+    filter::{FilterContext, Verdict},
     hyparview::Config as MembershipConfig,
     peer::{PeerData, PeerIdentity},
     plumtree::{Config as BroadcastConfig, DeliveryScope, Scope, TreeId},
@@ -69,7 +71,10 @@ pub use self::{
     util::ParseIdError,
 };
 #[cfg(feature = "experimental-proto-internals")]
-pub use self::{hyparview::Ttl, plumtree::Round};
+pub use self::{
+    hyparview::Ttl,
+    plumtree::{MessageId, Round},
+};
 
 /// The default maximum size in bytes of a gossip message.
 ///

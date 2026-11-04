@@ -39,5 +39,5 @@ pub use self::{
         Message,
     },
     error::Error,
-    net::{AuthContext, Builder, Gossip, QueueOptions, Verdict, ALPN},
+    net::{AuthContext, Builder, FilterContext, Gossip, QueueOptions, Verdict, ALPN},
 };

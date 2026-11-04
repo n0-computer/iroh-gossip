@@ -33,7 +33,8 @@ use super::{
     queue::{self, Pushed},
     subscriptions::{topic_subscriber_loop, TopicHandles},
     wire::{CloseCode, Session},
-    InEvent, Join, ProtoCommand, ProtoEvent, ProtoMessage, QueueOptions, Timer, ToActor, ALPN,
+    InEvent, Join, MessageFilter, ProtoCommand, ProtoEvent, ProtoMessage, QueueOptions, Timer,
+    ToActor, ALPN,
 };
 use crate::{
     api::{AuthToken, Command},
@@ -59,6 +60,8 @@ pub(super) struct ActorConfig {
     ///
     /// [`Builder::max_peer_streams`]: super::Builder::max_peer_streams
     pub(super) max_peer_streams: Option<u32>,
+    /// The application's filter of received messages, if any.
+    pub(super) filter: Option<MessageFilter>,
     pub(super) topic_auth: TopicAuth,
     /// How long an idle connection waits before it retires.
     pub(super) retire_after: Duration,
@@ -71,6 +74,7 @@ impl Default for ActorConfig {
             alpn: ALPN.to_vec().into(),
             send_queue: Default::default(),
             max_peer_streams: None,
+            filter: None,
             topic_auth: Default::default(),
             retire_after: DEFAULT_RETIRE_AFTER,
         }
@@ -155,6 +159,8 @@ struct ActorState {
     follow_ups: VecDeque<InEvent>,
     /// Queued timers
     timers: TimerMap<Timer>,
+    /// The application's filter of received messages, if any.
+    filter: Option<MessageFilter>,
     address_lookup: GossipAddressLookup,
     metrics: Arc<Metrics>,
     /// The peers that overflowed in the current call of [`Actor::run_proto`].
@@ -173,6 +179,7 @@ impl Actor {
             alpn,
             send_queue,
             max_peer_streams,
+            filter,
             topic_auth,
             retire_after,
         } = config;
@@ -203,6 +210,7 @@ impl Actor {
             quit_queue: Default::default(),
             follow_ups: Default::default(),
             timers: TimerMap::default(),
+            filter,
             address_lookup,
             metrics: metrics.clone(),
             overflowed_peers: Vec::new(),
@@ -871,5 +879,12 @@ impl IO<PublicKey> for ActorIO<'_> {
                 self.state.address_lookup.add(endpoint_addr);
             }
         }
+    }
+
+    fn filter(&mut self, message: proto::FilterContext<'_, PublicKey>) -> Option<proto::Verdict> {
+        self.state
+            .filter
+            .as_ref()
+            .map(|filter| (filter.0)(super::FilterContext(message)))
     }
 }
