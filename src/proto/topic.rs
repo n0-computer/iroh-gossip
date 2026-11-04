@@ -120,6 +120,7 @@ pub(crate) fn broadcast_fits(content_len: usize, scope: Scope, max_message_size:
 
 /// A protocol message for a particular topic
 #[derive(From, Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Message<PI> {
     /// A message of the swarm membership layer
     Swarm(hyparview::Message<PI>),
@@ -218,6 +219,7 @@ impl<PI> From<plumtree::Event<PI>> for Event<PI> {
 /// This should be treated as an opaque value by the implementer and, once emitted, simply returned
 /// to the protocol through [`InEvent::TimerExpired`].
 #[derive(Clone, From, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Timer<PI> {
     /// A timer for the swarm layer
     Swarm(hyparview::Timer<PI>),
@@ -249,6 +251,7 @@ impl<PI: Clone> IO<PI> for VecDeque<OutEvent<PI>> {
 /// Protocol configuration
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct Config {
     /// Configuration for the swarm membership layer
     pub membership: hyparview::Config,

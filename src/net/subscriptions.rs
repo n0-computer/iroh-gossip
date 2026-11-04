@@ -71,8 +71,6 @@ pub(super) fn all_eager_peers_busy(
 impl TopicHandles {
     /// Returns whether the topic still has a publisher or a subscriber.
     pub(super) fn has_handles(&self) -> bool {
-        // Keep topic alive if either senders or receivers exist.
-        // Using || prevents topic closure when senders are dropped while receivers listen.
         self.command_receivers != 0 || self.events.receiver_count() > 0
     }
 }

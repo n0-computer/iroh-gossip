@@ -32,9 +32,9 @@ pub(super) type ConnId = usize;
 #[derive(Debug)]
 pub(super) struct PeerState {
     pub(super) queue: SendQueue,
-    /// Closes every connection of the peer, also receive-only ones.
+    /// Closes every connection of the peer when cancelled, also the receive-only ones.
     ///
-    /// An abort cancels it, and a fresh token takes its place for later connections.
+    /// An abort cancels it, and puts a new token in its place for later connections.
     pub(super) aborted: CancellationToken,
     /// The connection that writes the queue, or `None` until a dial takes it.
     ///
