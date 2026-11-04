@@ -12,12 +12,14 @@ use n0_future::task::{self, AbortOnDropHandle};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{error_span, warn, Instrument};
 
+pub use self::auth::AuthContext;
 use self::{
     actor::{Actor, ActorConfig},
     address_lookup::GossipAddressLookup,
+    auth::TopicAuth,
 };
 use crate::{
-    api::{Command, Event, GossipTopic, JoinOptions},
+    api::{AuthToken, Command, Event, GossipTopic, JoinOptions},
     metrics::Metrics,
     proto::{self, HyparviewConfig, PlumtreeConfig, TopicId},
     Error,
@@ -25,6 +27,7 @@ use crate::{
 
 mod actor;
 mod address_lookup;
+mod auth;
 mod conn;
 mod dialer;
 mod peers;
@@ -33,10 +36,20 @@ mod subscriptions;
 mod wire;
 
 /// ALPN protocol name
-pub const GOSSIP_ALPN: &[u8] = b"iroh-gossip/2-canary.2";
+pub const GOSSIP_ALPN: &[u8] = b"iroh-gossip/2-canary.3";
 
 type ProtoEvent = proto::Event<PublicKey>;
 type ProtoCommand = proto::Command<PublicKey>;
+
+/// The decision of a verifier about a stream of a peer, see [`Builder::topic_auth`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Verdict {
+    /// The node reads the stream.
+    Accept,
+    /// The node stops the stream, and reads nothing from it.
+    Reject,
+}
 
 type InEvent = proto::InEvent<PublicKey>;
 type Timer = proto::Timer<PublicKey>;
@@ -85,10 +98,11 @@ enum ToActor {
 }
 
 /// A request from [`Gossip::subscribe_with_opts`] to the actor to join a topic.
-#[derive(Debug)]
+#[derive(derive_more::Debug)]
 struct Join {
     topic_id: TopicId,
     bootstrap: BTreeSet<EndpointId>,
+    auth_token: Option<AuthToken>,
     events_tx: mpsc::Sender<Event>,
     commands_rx: mpsc::Receiver<Command>,
     /// The actor answers once it registered the topic and applied the join.
@@ -102,6 +116,8 @@ struct Inner {
     max_message_size: usize,
     /// The largest content that a broadcast takes.
     max_content: usize,
+    /// The largest auth token that fits in a stream header.
+    max_token: usize,
     metrics: Arc<Metrics>,
 }
 
@@ -177,6 +193,44 @@ impl Builder {
     /// Sets the options of the queue of messages to each peer.
     pub fn send_queue(mut self, options: QueueOptions) -> Self {
         self.config.send_queue = options;
+        self
+    }
+
+    /// Sets a verifier for the auth tokens of peers.
+    ///
+    /// A peer sends its token for a topic in the header of each stream that it opens for
+    /// the topic, see [`JoinOptions::auth_token`]. The verifier gets an [`AuthContext`] with
+    /// the topic, the authenticated id of the peer and the token, if the peer sent one. It
+    /// runs once per stream, before the node reads a message from it. After it rejects a
+    /// stream, the connection stops each later stream of the topic without a call. It
+    /// returns a [`Verdict`]:
+    ///
+    /// - [`Verdict::Accept`] reads the stream.
+    /// - [`Verdict::Reject`] stops the stream and reads nothing from it. The node does not
+    ///   process or forward any message of the peer on this topic, not even a membership message.
+    ///   It drops the peer from the topic, so it stops sending to the peer too. The peer sees
+    ///   [`Event::Refused`] on its topic. It sends no message of the topic to us on this
+    ///   connection again. Other topics on the connection do not change.
+    ///
+    /// The verifier applies to all topics of this [`Gossip`], also to topics that this
+    /// node has not joined, so it can set a policy for each topic. Without a verifier,
+    /// the node accepts every stream.
+    ///
+    /// - A token is opaque to gossip. To bind a token to its owner, include the endpoint id
+    ///   in it and compare it with the id the verifier gets.
+    /// - The verifier runs on the task of the connection, not on the actor. A slow one
+    ///   delays only the streams of that connection. It still must not block a thread.
+    /// - A panic in the verifier stops the gossip actor.
+    /// - The node never forwards a token. Every member must be able to check the token of every
+    ///   other member.
+    ///
+    /// [`JoinOptions::auth_token`]: crate::api::JoinOptions::auth_token
+    /// [`Event::Refused`]: crate::api::Event::Refused
+    pub fn topic_auth(
+        mut self,
+        verify: impl Fn(AuthContext<'_>) -> Verdict + Send + Sync + 'static,
+    ) -> Self {
+        self.config.topic_auth = TopicAuth::new(verify);
         self
     }
 
@@ -290,6 +344,7 @@ impl Gossip {
             _actor_handle: actor_handle,
             max_message_size,
             max_content: proto::topic::max_content_size(max_message_size),
+            max_token: wire::MAX_TOKEN_LEN,
             metrics,
         };
         Self {
@@ -322,12 +377,21 @@ impl Gossip {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Closed`] if the gossip actor stopped.
+    /// - [`Error::TokenTooLarge`] if the auth token does not fit in a stream header.
+    /// - [`Error::Closed`] if the gossip actor stopped.
     pub async fn subscribe_with_opts(
         &self,
         topic_id: TopicId,
         opts: JoinOptions,
     ) -> Result<GossipTopic, Error> {
+        if let Some(token) = &opts.auth_token {
+            if token.as_bytes().len() > self.inner.max_token {
+                return Err(e!(Error::TokenTooLarge {
+                    size: token.as_bytes().len(),
+                    max_token: self.inner.max_token
+                }));
+            }
+        }
         let (commands_tx, commands_rx) = mpsc::channel(TOPIC_COMMANDS_CAP);
         let (events_tx, events_rx) = mpsc::channel(opts.subscription_capacity.max(1));
         let (registered_tx, registered_rx) = oneshot::channel();
@@ -336,6 +400,7 @@ impl Gossip {
             .send(ToActor::Join(Join {
                 topic_id,
                 bootstrap: opts.bootstrap,
+                auth_token: opts.auth_token,
                 events_tx,
                 commands_rx,
                 registered: registered_tx,

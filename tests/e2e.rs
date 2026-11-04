@@ -23,7 +23,7 @@ use iroh::{
 };
 use iroh_gossip::{
     api::{Event, GossipReceiver, GossipSender, JoinOptions},
-    net::{Builder, Gossip, GOSSIP_ALPN},
+    net::{Builder, Gossip, Verdict, GOSSIP_ALPN},
     proto::TopicId,
 };
 use n0_error::{bail_any, Result, StdResultExt};
@@ -1157,6 +1157,159 @@ async fn slow_peer_does_not_block_shutdown() -> Result {
     Ok(())
 }
 
+/// A verifier that accepts the token `secret:<topic>` and nothing else, and counts its calls.
+fn shared_secret_builder(calls: Arc<AtomicUsize>) -> Builder {
+    Gossip::builder().topic_auth(move |auth| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        match auth.token() == Some(secret_for(auth.topic()).as_slice()) {
+            true => Verdict::Accept,
+            false => Verdict::Reject,
+        }
+    })
+}
+
+fn secret_for(topic: TopicId) -> Vec<u8> {
+    [b"secret:".as_slice(), topic.as_bytes()].concat()
+}
+
+/// Subscribes `node` to `topic` with `token`, without waiting for a neighbor.
+async fn subscribe_with_token(
+    node: &Node,
+    topic: TopicId,
+    bootstrap: Vec<EndpointId>,
+    token: Vec<u8>,
+) -> Result<Sub> {
+    let opts = JoinOptions::with_bootstrap(bootstrap).auth_token(token);
+    let (tx, rx) = node.gossip.subscribe_with_opts(topic, opts).await?.split();
+    Ok(Sub { tx, rx })
+}
+
+/// A peer with a wrong token is refused on that topic, and the connection stays usable.
+///
+/// The nodes meet on an open topic first. The joiner then joins a guarded topic with
+/// a wrong token. It gets `Refused`, and the verifier runs once. The open topic
+/// keeps its neighbor and still carries messages.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn wrong_token_is_refused_and_the_connection_stays_usable() -> Result {
+    let lookup = MemoryLookup::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let guard = {
+        let calls = calls.clone();
+        let guarded = topic("guarded");
+        Gossip::builder().topic_auth(move |auth| {
+            if auth.topic() != guarded {
+                return Verdict::Accept;
+            }
+            calls.fetch_add(1, Ordering::SeqCst);
+            match auth.token() == Some(b"good".as_slice()) {
+                true => Verdict::Accept,
+                false => Verdict::Reject,
+            }
+        })
+    };
+    let a = Node::spawn_custom(&lookup, SecretKey::generate(), guard, None).await?;
+    let b = Node::spawn(&lookup).await?;
+    let (open, guarded) = (topic("open"), topic("guarded"));
+    let mut a_open = Sub::new(&a, open, vec![]).await?;
+    let mut b_open = Sub::join(&b, open, vec![a.id()]).await?;
+    a_open.neighbor_up(b.id()).await?;
+
+    let mut a_guarded = Sub::new(&a, guarded, vec![]).await?;
+    let mut b_guarded = subscribe_with_token(&b, guarded, vec![a.id()], b"bad".to_vec()).await?;
+    b_guarded
+        .wait(PROMPT, |e| matches!(e, Event::Refused(p) if *p == a.id()))
+        .await?;
+    // No message of the refused peer reaches the guarded topic of a.
+    b_guarded.broadcast(b"intruder").await?;
+    let seen = a_guarded
+        .wait(Duration::from_secs(1), |e| {
+            matches!(e, Event::Received(_) | Event::NeighborUp(_))
+        })
+        .await;
+    assert!(seen.is_err(), "the refused peer got through");
+    assert_eq!(b_guarded.rx.neighbors().count(), 0);
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "one stream, one call");
+
+    // The connection carries the open topic as before.
+    b_open.stays_up(a.id(), Duration::from_secs(1)).await?;
+    exchange(&mut a_open, &mut b_open, b"01").await?;
+    Ok(())
+}
+
+/// Peers with the right token take part, in both directions.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn right_token_is_accepted() -> Result {
+    let lookup = MemoryLookup::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let a = Node::spawn_custom(
+        &lookup,
+        SecretKey::generate(),
+        shared_secret_builder(calls.clone()),
+        None,
+    )
+    .await?;
+    let b = Node::spawn_custom(
+        &lookup,
+        SecretKey::generate(),
+        shared_secret_builder(calls.clone()),
+        None,
+    )
+    .await?;
+    let t = topic("shared_secret");
+    let mut sa = subscribe_with_token(&a, t, vec![], secret_for(t)).await?;
+    let mut sb = subscribe_with_token(&b, t, vec![a.id()], secret_for(t)).await?;
+    sa.neighbor_up(b.id()).await?;
+    sb.neighbor_up(a.id()).await?;
+    exchange(&mut sa, &mut sb, b"02").await?;
+    assert!(calls.load(Ordering::SeqCst) >= 2, "both sides verified");
+    Ok(())
+}
+
+/// Without a verifier, a token or its absence changes nothing.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn no_verifier_accepts_everything() -> Result {
+    let lookup = MemoryLookup::new();
+    let a = Node::spawn(&lookup).await?;
+    let b = Node::spawn(&lookup).await?;
+    let t = topic("no_verifier");
+    let mut sa = Sub::new(&a, t, vec![]).await?;
+    let mut sb = subscribe_with_token(&b, t, vec![a.id()], b"unchecked".to_vec()).await?;
+    sa.neighbor_up(b.id()).await?;
+    sb.neighbor_up(a.id()).await?;
+    exchange(&mut sa, &mut sb, b"03").await?;
+    Ok(())
+}
+
+/// A token never shows in the debug output of the types that carry it.
+#[tokio::test(flavor = "multi_thread")]
+async fn debug_output_has_no_token() -> Result {
+    let token = b"hunter2-token".to_vec();
+    let opts = JoinOptions::with_bootstrap([]).auth_token(token.clone());
+    let builder = Gossip::builder().topic_auth(|_| Verdict::Accept);
+    let lookup = MemoryLookup::new();
+    let node = Node::spawn_custom(&lookup, SecretKey::generate(), builder.clone(), None).await?;
+    let sub = node
+        .gossip
+        .subscribe_with_opts(
+            topic("debug"),
+            JoinOptions::with_bootstrap([]).auth_token(token),
+        )
+        .await?;
+    for debug in [
+        format!("{opts:?}"),
+        format!("{builder:?}"),
+        format!("{:?}", node.gossip),
+        format!("{sub:?}"),
+    ] {
+        assert!(!debug.contains("hunter2"), "{debug}");
+        assert!(!debug.contains("104, 117"), "{debug}");
+    }
+    Ok(())
+}
+
 /// Spawns a node whose gossip retires idle connections after `retire_after`.
 async fn node_retiring_after(lookup: &MemoryLookup, retire_after: Duration) -> Result<Node> {
     let builder = Gossip::builder().retire_after(retire_after);
@@ -1453,6 +1606,44 @@ async fn zero_subscription_capacity_works() -> Result {
     let opts = JoinOptions::with_bootstrap([a.id()]).with_subscription_capacity(0);
     let (tx, rx) = b.gossip.subscribe_with_opts(t, opts).await?.split();
     let mut sb = Sub { tx, rx };
+    sa.neighbor_up(b.id()).await?;
+    exchange(&mut sa, &mut sb, b"01").await
+}
+
+/// A token that does not fit in a stream header fails the join with an error.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn token_over_the_header_limit_is_rejected() -> Result {
+    let lookup = MemoryLookup::new();
+    let a = Node::spawn(&lookup).await?;
+    let t = topic("big_token");
+    // The header limit is 4 KiB. The kind, the topic and the token parameter leave 4058
+    // bytes for the token.
+    let big = vec![7u8; 4059];
+    let res = a
+        .gossip
+        .subscribe_with_opts(t, JoinOptions::with_bootstrap([]).auth_token(big))
+        .await;
+    assert!(
+        matches!(res, Err(iroh_gossip::Error::TokenTooLarge { .. })),
+        "{res:?}"
+    );
+    let opts = JoinOptions::with_bootstrap([]).auth_token(vec![7u8; 4058]);
+    a.gossip.subscribe_with_opts(t, opts).await?;
+    Ok(())
+}
+
+/// A token over the message size limit fits in the stream header, and the peers connect.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn token_over_the_message_limit_fits_in_the_header() -> Result {
+    let lookup = MemoryLookup::new();
+    let small = || Gossip::builder().max_message_size(1024);
+    let a = Node::spawn_custom(&lookup, SecretKey::generate(), small(), None).await?;
+    let b = Node::spawn_custom(&lookup, SecretKey::generate(), small(), None).await?;
+    let t = topic("big_token");
+    let mut sa = Sub::new(&a, t, vec![]).await?;
+    let mut sb = subscribe_with_token(&b, t, vec![a.id()], vec![7u8; 4000]).await?;
     sa.neighbor_up(b.id()).await?;
     exchange(&mut sa, &mut sb, b"01").await
 }

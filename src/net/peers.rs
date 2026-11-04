@@ -19,6 +19,7 @@ use super::{
     wire::{CloseCode, Session},
     ProtoMessage,
 };
+use crate::api::AuthToken;
 
 /// The most connections that a peer may have open to us at once.
 ///
@@ -227,16 +228,21 @@ impl PeerState {
     /// Waiting for room would stop the actor, and with it every topic, for as
     /// long as this one peer does not read. On [`Pushed::Overflow`], the caller
     /// aborts the peer.
-    pub(super) fn push(&mut self, message: ProtoMessage, len: Option<usize>) -> Pushed {
+    pub(super) fn push(
+        &mut self,
+        message: ProtoMessage,
+        len: Option<usize>,
+        token: Option<AuthToken>,
+    ) -> Pushed {
         self.queue.open();
-        self.queue.push(message, len)
+        self.queue.push(message, len, token)
     }
 
     /// Queues a test message with its encoded size.
     #[cfg(test)]
     pub(super) fn send(&mut self, message: ProtoMessage) -> Pushed {
         let len = super::wire::message_len(&message.message).ok();
-        self.push(message, len)
+        self.push(message, len, None)
     }
 
     /// Replaces the queue with a closed, empty queue, whose reader the state keeps.

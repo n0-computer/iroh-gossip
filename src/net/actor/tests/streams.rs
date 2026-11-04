@@ -138,11 +138,11 @@ async fn streams_of_a_topic_keep_their_order() -> Result {
     let (first, second) = (join_message(topic, 1), join_message(topic, 2));
     let mut buffer = Vec::new();
     let mut older = peer_conn.open_uni().await.std_context("open stream")?;
-    wire::StreamHeader::write(topic, &mut older, &mut buffer).await?;
+    wire::StreamHeader::write(topic, None, &mut older, &mut buffer).await?;
     tokio::time::sleep(Duration::from_millis(200)).await;
     // The newer stream arrives before the last message of the older one.
     let mut newer = peer_conn.open_uni().await.std_context("open stream")?;
-    wire::StreamHeader::write(topic, &mut newer, &mut buffer).await?;
+    wire::StreamHeader::write(topic, None, &mut newer, &mut buffer).await?;
     wire::write_message(&mut newer, &second.message, &mut buffer, TEST_FRAME_LIMIT).await?;
     tokio::time::sleep(Duration::from_millis(200)).await;
     wire::write_message(&mut older, &first.message, &mut buffer, TEST_FRAME_LIMIT).await?;
@@ -173,7 +173,7 @@ async fn delayed_header_keeps_close_before_join() -> Result {
     let mut older = peer_conn.open_uni().await.std_context("open stream")?;
     older.write_all(&[0x23]).await.std_context("write")?;
     let mut newer = peer_conn.open_uni().await.std_context("open stream")?;
-    wire::StreamHeader::write(topic, &mut newer, &mut buffer).await?;
+    wire::StreamHeader::write(topic, None, &mut newer, &mut buffer).await?;
     wire::write_message(&mut newer, &join.message, &mut buffer, TEST_FRAME_LIMIT).await?;
     assert!(
         !reader.gets_message_within(Duration::from_millis(500)).await,
@@ -250,10 +250,175 @@ async fn disconnect_ends_its_stream() -> Result {
     Ok(())
 }
 
-/// A stream that the peer stopped fails the connection.
+/// A stream that the peer stopped with the reject code loses its message, and the connection stays.
+///
+/// The writer tells the actor that the peer refused the topic.
 #[tokio::test]
 #[traced_test]
-async fn stopped_stream_fails_the_connection() -> Result {
+async fn reject_stop_drops_only_the_message() -> Result {
+    let pair = TestPair::new(1).await?;
+    let (conn, peer_conn) = pair.connect().await?;
+    let topic: TopicId = blake3::hash(b"stopped_stream").into();
+    let (queue, reader) = SendQueue::new(queue::MIN_QUEUE_SIZE);
+    let mut writer = start_writer(conn, &peer_conn, reader, TEST_FRAME_LIMIT, Vec::new()).await?;
+    let feed = async {
+        loop {
+            queue.send(join_message(topic, 0));
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    let peer = async {
+        let mut first = peer_conn.accept_uni().await.std_context("accept_uni")?;
+        first.stop(conn::STOP_REJECTED).anyerr()?;
+        let event = loop {
+            let event = timeout(Duration::from_secs(5), writer.test.events.recv())
+                .await
+                .std_context("the writer reported no refusal")?
+                .std_context("the writer ended")?;
+            if !matches!(event.kind, ConnEventKind::Header(..)) {
+                break event;
+            }
+        };
+        assert!(matches!(event.kind, ConnEventKind::Refused(t) if t == topic));
+        n0_error::Ok(())
+    };
+    tokio::select! {
+        _ = feed => unreachable!(),
+        res = peer => res?,
+    }
+    assert!(peer_conn.close_reason().is_none(), "the connection closed");
+    assert!(!writer.test.task.is_finished(), "the writer ended");
+    Ok(())
+}
+
+/// A stream that the verifier rejects is reported, so that the topic drops the peer.
+///
+/// Else we would keep a peer as a neighbor that sends us nothing on the topic.
+#[tokio::test]
+#[traced_test]
+async fn rejected_stream_is_reported() -> Result {
+    let pair = TestPair::new(1).await?;
+    let (conn, theirs) = pair.connect_back().await?;
+    let reject = TopicAuth::new(|_| Verdict::Reject);
+    let mut test = start_conn_with(conn, TEST_FRAME_LIMIT, Duration::from_secs(60), reject);
+    let _control = RawControl::open(&theirs).await?;
+    let topic: TopicId = blake3::hash(b"rejected_stream").into();
+    let _stream = open_stream(&theirs, topic, &[join_message(topic, 0).message]).await?;
+    loop {
+        let event = timeout(Duration::from_secs(5), test.events.recv())
+            .await
+            .std_context("no rejection")?
+            .std_context("the connection task ended")?;
+        match event.kind {
+            ConnEventKind::Rejected(t) if t == topic => break,
+            ConnEventKind::Message(message) => panic!("a rejected stream got through: {message:?}"),
+            _ => {}
+        }
+    }
+    assert!(theirs.close_reason().is_none(), "the connection closed");
+    Ok(())
+}
+
+/// The actor passes a reject to the protocol, which drops the neighbor and emits no `Refused`.
+///
+/// The peer did not refuse us, so the application must not see `Refused`.
+#[tokio::test]
+#[traced_test]
+async fn reject_drops_the_neighbor_without_refused() -> Result {
+    let pair = TestPair::new(1).await?;
+    let (conn, _theirs) = pair.connect_back().await?;
+    let peer = conn.remote_id();
+    let mut actor = ManualActorLoop::new(t_actor().await?).await;
+    let topic: TopicId = blake3::hash(b"reject_drops_the_neighbor").into();
+    let mut events = actor
+        .state
+        .topics
+        .entry(topic)
+        .or_default()
+        .events
+        .subscribe();
+    let now = Instant::now();
+    actor.handle_in_event(InEvent::Command(topic, proto::Command::Join(vec![])), now);
+    let id = actor.next_conn;
+    actor.add_connection(conn);
+    let join = ProtoMessage {
+        topic,
+        message: TopicMessage::Swarm(hyparview::Message::Join(None)),
+    };
+    actor.handle_in_event(InEvent::RecvMessage(peer, join), now);
+    assert!(actor.joined(&topic), "the peer is no neighbor");
+
+    let kind = ConnEventKind::Rejected(topic);
+    actor.on_conn_event(
+        ConnEvent {
+            peer,
+            conn: id,
+            kind,
+        },
+        now,
+    );
+    assert!(!actor.joined(&topic), "the rejected peer stayed a neighbor");
+    let mut seen = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        seen.push(event);
+    }
+    assert!(
+        seen.iter()
+            .any(|event| matches!(event, ProtoEvent::NeighborDown(p) if *p == peer)),
+        "{seen:?}"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(event, ProtoEvent::Refused(_))),
+        "{seen:?}"
+    );
+    Ok(())
+}
+
+/// A membership message of a refused topic reports the refusal again.
+///
+/// The protocol of the node takes the peer back when the peer sends a second `Join`.
+/// The writer drops what the node then queues, so the node must drop the peer again.
+#[tokio::test]
+#[traced_test]
+async fn refused_topic_reports_each_membership_message() -> Result {
+    let pair = TestPair::new(1).await?;
+    let (conn, peer_conn) = pair.connect().await?;
+    let topic: TopicId = blake3::hash(b"refused_again").into();
+    let (queue, reader) = SendQueue::new(queue::MIN_QUEUE_SIZE);
+    let mut writer = start_writer(conn, &peer_conn, reader, TEST_FRAME_LIMIT, Vec::new()).await?;
+    let feed = async {
+        loop {
+            queue.send(join_message(topic, 0));
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    let peer = async {
+        let mut first = peer_conn.accept_uni().await.std_context("accept_uni")?;
+        first.stop(conn::STOP_REJECTED).anyerr()?;
+        let mut refusals = 0;
+        while refusals < 2 {
+            let event = timeout(Duration::from_secs(5), writer.test.events.recv())
+                .await
+                .std_context("the writer reported no second refusal")?
+                .std_context("the writer ended")?;
+            if matches!(event.kind, ConnEventKind::Refused(t) if t == topic) {
+                refusals += 1;
+            }
+        }
+        n0_error::Ok(())
+    };
+    tokio::select! {
+        _ = feed => unreachable!(),
+        res = peer => res,
+    }
+}
+
+/// A stream that the peer stopped with another code fails the connection.
+#[tokio::test]
+#[traced_test]
+async fn other_stop_code_fails_the_connection() -> Result {
     let pair = TestPair::new(1).await?;
     let (conn, peer_conn) = pair.connect().await?;
     let topic: TopicId = blake3::hash(b"stopped_stream").into();
