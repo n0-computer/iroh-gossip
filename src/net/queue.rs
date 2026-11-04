@@ -213,7 +213,7 @@ impl Drop for Reservation {
 ///   lost.
 /// - Each topic has one stream to a peer, and we write it in order. The peer
 ///   reads each stream on its own, so it may handle a `Join` before an
-///   earlier `Disconnect`. The peer also limits its streams, to 100 by
+///   earlier `Close`. The peer also limits its streams, to 100 by
 ///   default. Over that limit, an open waits
 ///   [`OPEN_TIMEOUT`](super::wire::OPEN_TIMEOUT) and closes the connection,
 ///   again after each rejoin.
@@ -474,7 +474,7 @@ mod tests {
     }
 
     fn disconnect() -> ProtoMessage {
-        proto(Message::test_disconnect())
+        proto(Message::test_close())
     }
 
     fn size(message: &ProtoMessage) -> usize {
@@ -499,7 +499,7 @@ mod tests {
         }
     }
 
-    /// The reader gets data, control and a `Disconnect` in the order of the pushes.
+    /// The reader gets data, control, and a `Close` in the order of the pushes.
     #[test]
     fn messages_keep_their_order() {
         let queue = SendQueue::new(MIN_QUEUE_SIZE);
@@ -533,7 +533,7 @@ mod tests {
         assert!(queue_bytes - used(&queue).0 < size(&shuffle()));
     }
 
-    /// A `Disconnect` takes room as any control message, so many of them overflow the queue.
+    /// A `Close` takes room like any control message, so many of them overflow the queue.
     #[test]
     fn disconnects_overflow_the_queue() {
         let queue = SendQueue::new(MIN_QUEUE_SIZE);
