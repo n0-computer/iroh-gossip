@@ -18,7 +18,7 @@ use n0_future::time::{Duration, Instant};
 use postcard::experimental::max_size::MaxSize;
 use rustc_hash::FxBuildHasher;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use super::{
     topic::{self, Event, IO},
@@ -71,6 +71,8 @@ pub enum Timer {
     EvictCache,
     /// Announce again the messages that a full send queue dropped.
     AnnounceDropped,
+    /// Expire the requests of pull mode, and check whether to leave it.
+    PullTick,
 }
 
 #[derive(Clone, derive_more::Debug, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -136,6 +138,30 @@ pub enum Message {
     /// When receiving IHave, do nothing initially, and request the messages for the included
     /// message IDs after some time if they aren't pushed eagerly to us.
     IHave(Vec<IHave>),
+    /// The sender enters or leaves pull mode, see [`Config::pull_window`].
+    Pull(PullMode),
+}
+
+/// The pull mode that a node tells a neighbor.
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+pub enum PullMode {
+    /// The node left pull mode, and takes eager pushes again.
+    Off,
+    /// The neighbor holds the node lazy in every tree, and announces messages to it.
+    Source,
+    /// The neighbor holds the node lazy in every tree, and sends it no announcements.
+    Silent,
+}
+
+impl<'de> Deserialize<'de> for PullMode {
+    /// Reads an unknown mode as `Off`, so the sender gets pushes as without pull mode.
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(match u64::deserialize(d)? {
+            1 => Self::Source,
+            2 => Self::Silent,
+            _ => Self::Off,
+        })
+    }
 }
 
 #[cfg(all(test, feature = "net"))]
@@ -404,6 +430,18 @@ pub struct Config {
     /// `0` gives every sender its own tree from its first message, which has to flood because
     /// there is no shared tree to copy yet. A very high value gives one shared tree.
     pub source_tree_after: u32,
+
+    /// How many requests a node in pull mode keeps in flight.
+    ///
+    /// A node with a link slower than the broadcast cannot take the eager pushes. They wait in
+    /// queues in front of its link, and each `Graft` for a message that waits there adds a
+    /// second copy. Such a node enters pull mode: its neighbors hold it lazy in every tree, and
+    /// it requests each announced message itself, oldest first, with at most this many requests
+    /// in flight. Its link then carries only the copies it asked for.
+    ///
+    /// A node enters pull mode when 16 messages did not arrive 500 ms after their announcement.
+    /// It leaves after 3 s with at most this many such messages. `0` turns pull mode off.
+    pub pull_window: usize,
 }
 
 impl Default for Config {
@@ -441,6 +479,10 @@ impl Default for Config {
             // names its own tree, copied from the shared one. Measured in the simulator: lower
             // redundancy than 3 when all nodes send, equal when few do. See `TreeId`.
             source_tree_after: 1,
+
+            // Measured with one node on a link at half the broadcast rate: windows of 4, 16 and
+            // 64 gave the same unique deliveries within the spread, and 4 the fewest duplicates.
+            pull_window: 4,
         }
     }
 }
@@ -492,6 +534,35 @@ const DROPPED_PER_TICK: usize = 64;
 /// The time between two [`Timer::AnnounceDropped`].
 const ANNOUNCE_DROPPED_INTERVAL: Duration = Duration::from_secs(1);
 
+/// A message is stale when it was announced this long ago and did not arrive.
+const PULL_STALE_AFTER: Duration = Duration::from_millis(500);
+/// A node enters pull mode with this many stale messages.
+///
+/// A node that keeps up has none: the eager copy, or the reply to a `Graft`,
+/// comes within a round trip after the graft timeout.
+const PULL_ENTER_STALE: usize = 16;
+/// How many stale messages that only one peer announced count for that peer.
+///
+/// One neighbor alone thus cannot put us in pull mode with made-up announcements.
+/// Once a message that the peer announced came late from another peer, all count,
+/// as the late copy proves a real backlog.
+const MAX_STALE_PER_PEER: usize = PULL_ENTER_STALE / 2;
+/// The shortest time between two checks to enter pull mode on announcements.
+const PULL_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+/// A node leaves pull mode after it has had at most the window of stale messages this long.
+const PULL_EXIT_AFTER: Duration = Duration::from_secs(3);
+/// How many neighbors announce to a node in pull mode.
+///
+/// Each announcer sends an announcement per message, of about 45 bytes.
+const PULL_SOURCES: usize = 2;
+/// The time between two [`Timer::PullTick`].
+const PULL_TICK: Duration = Duration::from_millis(250);
+/// How long a request may take before the next announcer gets one.
+///
+/// It is also how long we wait before we tell a neighbor that still pushes our pull mode
+/// again. Until then, the pushes can be data that it queued before it knew the mode.
+const PULL_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// The most trees we keep per topic. A tree past the cap replaces the least recently used one.
 ///
 /// A tree takes about 1.4 KB with 32 byte peer ids and 11 neighbors, so the cap
@@ -528,6 +599,71 @@ struct Missing<PI> {
     tree: TreeId,
 }
 
+/// Our pull mode, see [`Config::pull_window`].
+#[derive(Debug)]
+struct Pull<PI> {
+    /// Messages to request, oldest announcement first.
+    ///
+    /// It may hold ids that arrived or have no announcer left. [`State::pull_fill`] skips them.
+    queue: VecDeque<MessageId>,
+    /// The requests in flight, at most one per message.
+    in_flight: HashMap<MessageId, Request<PI>>,
+    /// What we told each neighbor, and when.
+    ///
+    /// A neighbor we did not tell yet learns it when it first sends to us.
+    told: BTreeMap<PI, (PullMode, Instant)>,
+    /// When the stale messages last fell to at most the window.
+    caught_up: Option<Instant>,
+}
+
+/// A message announced to us that we did not receive.
+#[derive(Debug)]
+struct Announced<PI> {
+    /// The time of the first announcement.
+    since: Instant,
+    /// The first peer that announced it.
+    by: PI,
+    /// Whether another peer announced it too.
+    by_others: bool,
+}
+
+/// Returns how many of the `announced` messages were announced at least [`PULL_STALE_AFTER`] ago.
+///
+/// The messages that only one peer announced count at most [`MAX_STALE_PER_PEER`] for that peer,
+/// unless the peer is in `late_announcers`.
+fn stale<PI: PeerIdentity>(
+    announced: &HashMap<MessageId, Announced<PI>>,
+    late_announcers: &HashSet<PI>,
+    now: Instant,
+) -> usize {
+    let mut count = 0;
+    let mut alone: HashMap<PI, usize> = HashMap::new();
+    let stale = announced
+        .values()
+        .filter(|entry| now.saturating_duration_since(entry.since) >= PULL_STALE_AFTER);
+    for entry in stale {
+        if entry.by_others || late_announcers.contains(&entry.by) {
+            count += 1;
+        } else {
+            *alone.entry(entry.by).or_default() += 1;
+        }
+    }
+    count
+        + alone
+            .values()
+            .map(|n| (*n).min(MAX_STALE_PER_PEER))
+            .sum::<usize>()
+}
+
+/// A request for a message in pull mode.
+///
+/// It is a `Graft` to one of the announcers of the message.
+#[derive(Debug)]
+struct Request<PI> {
+    peer: PI,
+    sent: Instant,
+}
+
 /// State of the plumtree.
 #[derive(Debug)]
 pub struct State<PI> {
@@ -556,6 +692,28 @@ pub struct State<PI> {
     /// yet received the full payload. For each, we store the peers that have claimed to have this
     /// message.
     missing_messages: HashMap<MessageId, Missing<PI>>,
+    /// Messages announced to us and not received, with the time of the first announcement.
+    ///
+    /// Unlike `missing_messages`, an entry stays after we asked its last announcer, until the
+    /// copy comes, every neighbor we asked leaves, or the cache retention ends.
+    announced: HashMap<MessageId, Announced<PI>>,
+    /// Neighbors that announced a message which then came late from another peer.
+    ///
+    /// A made-up id never comes, and an announcer cannot delay the copy of another
+    /// peer. So their stale messages count in full, see [`MAX_STALE_PER_PEER`].
+    late_announcers: HashSet<PI>,
+    /// Neighbors in pull mode.
+    ///
+    /// They are lazy in every tree.
+    pulling: BTreeMap<PI, PullMode>,
+    /// Our pull mode, if we are in it.
+    pull: Option<Pull<PI>>,
+    /// When an announcement may next check whether to enter pull mode.
+    pull_check_at: Option<Instant>,
+    /// Neighbors whose `Pull(Off)` a full queue dropped, to send again at the next eviction.
+    ///
+    /// Without it, the neighbor would hold us silent until one of us reconnects.
+    unsent_pull_off: BTreeSet<PI>,
     /// The messages whose payload we saw, with the time we first saw them.
     received_messages: TimeBoundCache<MessageId, Instant, FxBuildHasher>,
     /// The verdicts on messages to the neighbors, which `received_messages` does not hold.
@@ -600,6 +758,12 @@ impl<PI: PeerIdentity> State<PI> {
             dropped: Default::default(),
             config,
             missing_messages: Default::default(),
+            announced: Default::default(),
+            late_announcers: Default::default(),
+            pulling: Default::default(),
+            pull: None,
+            pull_check_at: None,
+            unsent_pull_off: Default::default(),
             received_messages: TimeBoundCache::with_hasher(FxBuildHasher),
             neighbor_verdicts: TimeBoundCache::with_hasher(FxBuildHasher),
             grafted: Default::default(),
@@ -629,6 +793,7 @@ impl<PI: PeerIdentity> State<PI> {
                 }
                 Timer::EvictCache => self.on_evict_cache_timer(now, io),
                 Timer::AnnounceDropped => self.on_announce_dropped_timer(io),
+                Timer::PullTick => self.on_pull_tick(now, io),
             },
         }
 
@@ -664,6 +829,41 @@ impl<PI: PeerIdentity> State<PI> {
                 "no announcer left for missing {id:?}"
             );
         }
+        for peer in self.pulling.keys() {
+            assert!(
+                self.neighbors.contains(peer),
+                "{peer:?} pulls, but is no peer"
+            );
+            assert!(
+                self.trees.values().all(|tree| !tree.eager.contains(peer)),
+                "{peer:?} pulls, but is eager"
+            );
+        }
+        if let Some(pull) = &self.pull {
+            assert!(pull.in_flight.len() <= self.config.pull_window);
+            assert!(pull.told.keys().all(|peer| self.neighbors.contains(peer)));
+            for (id, request) in pull.in_flight.iter() {
+                assert!(self.neighbors.contains(&request.peer));
+                // The peer we asked is no announcer until it announces again.
+                let asked_again = self.missing_messages.get(id).is_some_and(|missing| {
+                    missing
+                        .announcers
+                        .iter()
+                        .any(|(peer, _)| *peer == request.peer)
+                });
+                assert!(
+                    !asked_again,
+                    "{id:?} can be requested twice from {:?}",
+                    request.peer
+                );
+            }
+            for id in self.missing_messages.keys() {
+                assert!(
+                    pull.queue.contains(id) || pull.in_flight.contains_key(id),
+                    "missing {id:?} is never requested"
+                );
+            }
+        }
     }
 
     /// Get access to the [`Stats`] of the plumtree.
@@ -681,13 +881,24 @@ impl<PI: PeerIdentity> State<PI> {
         // A message from a non-neighbor is a straggler from a former one. Deliver
         // its payload, but let it change no peer set.
         let from_peer = self.neighbors.contains(&sender);
+        if from_peer {
+            self.tell_pull_mode(sender, &message, now, io);
+        }
         match message {
             Message::Gossip(details) => self.on_gossip(sender, from_peer, details, now, io),
             _ if !from_peer => {}
             Message::Prune(tree) => self.add_lazy(tree, sender, now),
-            Message::IHave(details) => self.on_ihave(sender, details, io),
+            Message::IHave(details) => {
+                self.on_ihave(sender, details, now, io);
+                if self.pull_check_at.is_none_or(|at| now >= at) {
+                    self.pull_check_at = Some(now + PULL_CHECK_INTERVAL);
+                    self.check_pull_enter(now, io);
+                }
+            }
             Message::Graft(details) => self.on_graft(sender, details, now, io),
+            Message::Pull(mode) => self.on_pull(sender, mode),
         }
+        self.pull_fill(now, io);
     }
 
     /// Dispatches messages from lazy queue over to lazy peers.
@@ -780,6 +991,15 @@ impl<PI: PeerIdentity> State<PI> {
                     now,
                     now + self.config.message_id_retention,
                 );
+                if let Some(entry) = self.announced.remove(&message.id) {
+                    let late = now.saturating_duration_since(entry.since) >= PULL_STALE_AFTER;
+                    if late && entry.by != sender {
+                        self.late_announcers.insert(entry.by);
+                    }
+                }
+                if let Some(pull) = &mut self.pull {
+                    pull.in_flight.remove(&message.id);
+                }
                 if verdict == Verdict::Reject {
                     // It counts as seen, and nothing more. We do not cache it, forward it,
                     // or graft for it.
@@ -822,8 +1042,10 @@ impl<PI: PeerIdentity> State<PI> {
                 // cleanup places where we track missing messages
                 self.graft_timer_scheduled.remove(&message.id);
                 let previous_ihaves = self.missing_messages.remove(&message.id);
-                // do the optimization step from the paper
-                if let Some(missing) = previous_ihaves.filter(|_| from_peer && !graft_out) {
+                // do the optimization step from the paper. In pull mode every copy comes
+                // after an announcement, so the hops tell nothing about the tree.
+                let optimize = from_peer && !graft_out && self.pull.is_none();
+                if let Some(missing) = previous_ihaves.filter(|_| optimize) {
                     self.optimize_tree(&sender, &message, missing.announcers, now, io);
                 }
                 self.stats.max_last_delivery_hop = self
@@ -1006,9 +1228,16 @@ impl<PI: PeerIdentity> State<PI> {
     /// > protocol parameter that should be configured considering the diameter of the overlay and a
     /// > target maximum recovery latency, defined by the application requirements. This is a
     /// > parameter that should be statically configured at deployment time. (p8)
-    fn on_ihave(&mut self, sender: PI, ihaves: Vec<IHave>, io: &mut impl IO<PI>) {
+    fn on_ihave(&mut self, sender: PI, ihaves: Vec<IHave>, now: Instant, io: &mut impl IO<PI>) {
         for ihave in ihaves {
             if !self.received_messages.contains_key(&ihave.id) {
+                let announced = self.announced.entry(ihave.id).or_insert(Announced {
+                    since: now,
+                    by: sender,
+                    by_others: false,
+                });
+                announced.by_others |= announced.by != sender;
+                let is_new = !self.missing_messages.contains_key(&ihave.id);
                 // Queue each peer once, as it answers every graft. A new
                 // announcement after a graft is a retry, for example after a
                 // dropped reply.
@@ -1023,7 +1252,18 @@ impl<PI: PeerIdentity> State<PI> {
                     missing.announcers.push_back((sender, ihave.round));
                 }
 
-                if !self.graft_timer_scheduled.contains(&ihave.id) {
+                if let Some(pull) = &mut self.pull {
+                    // The window decides when to ask, not a timer.
+                    let asked = pull.in_flight.get(&ihave.id).map(|request| request.peer);
+                    if asked == Some(sender) {
+                        // The peer announces again what its queue dropped, so our
+                        // request gets no reply.
+                        pull.in_flight.remove(&ihave.id);
+                        pull.queue.push_front(ihave.id);
+                    } else if is_new {
+                        pull.queue.push_back(ihave.id);
+                    }
+                } else if !self.graft_timer_scheduled.contains(&ihave.id) {
                     self.graft_timer_scheduled.insert(ihave.id);
                     io.schedule(self.config.graft_timeout_1, Timer::SendGraft(ihave.id));
                 }
@@ -1034,6 +1274,9 @@ impl<PI: PeerIdentity> State<PI> {
     /// A scheduled [`Timer::SendGraft`] has reached it's deadline.
     fn on_send_graft_timer(&mut self, id: MessageId, now: Instant, io: &mut impl IO<PI>) {
         self.graft_timer_scheduled.remove(&id);
+        if self.pull.is_some() {
+            return;
+        }
         // if the message was received before the timer ran out, there is no need to request it
         // again
         if self.received_messages.contains_key(&id) {
@@ -1078,6 +1321,243 @@ impl<PI: PeerIdentity> State<PI> {
             // A new announcement does not start a second chain of grafts meanwhile.
             self.graft_timer_scheduled.insert(id);
             io.schedule(self.config.graft_timeout_2, Timer::SendGraft(id));
+        }
+    }
+
+    /// Enters pull mode if at least [`PULL_ENTER_STALE`] messages are stale.
+    ///
+    /// The first [`PULL_SOURCES`] neighbors keep announcing to us, the others go silent.
+    fn check_pull_enter(&mut self, now: Instant, io: &mut impl IO<PI>) {
+        if self.pull.is_some() || self.config.pull_window == 0 {
+            return;
+        }
+        let stale = stale(&self.announced, &self.late_announcers, now);
+        if stale < PULL_ENTER_STALE {
+            return;
+        }
+        info!(me = ?self.me, stale, "enter pull mode");
+        let mut ids: Vec<_> = self
+            .missing_messages
+            .keys()
+            .map(|id| (self.announced.get(id).map(|entry| entry.since), *id))
+            .collect();
+        ids.sort_by_key(|(since, _)| *since);
+        self.pull = Some(Pull {
+            queue: ids.into_iter().map(|(_, id)| id).collect(),
+            in_flight: HashMap::new(),
+            told: BTreeMap::new(),
+            caught_up: None,
+        });
+        self.unsent_pull_off.clear();
+        for (i, peer) in self.neighbors.clone().into_iter().enumerate() {
+            let mode = match i < PULL_SOURCES {
+                true => PullMode::Source,
+                false => PullMode::Silent,
+            };
+            self.tell_pull(peer, mode, now, io);
+        }
+        io.schedule(PULL_TICK, Timer::PullTick);
+        self.pull_fill(now, io);
+    }
+
+    /// Sends our pull mode to `peer`, and notes it.
+    ///
+    /// If a full queue drops the message, [`Self::tell_pull_mode`] sends it again when the
+    /// peer still sends what we do not want.
+    fn tell_pull(&mut self, peer: PI, mode: PullMode, now: Instant, io: &mut impl IO<PI>) {
+        if let Some(pull) = &mut self.pull {
+            pull.told.insert(peer, (mode, now));
+            io.send(peer, Message::Pull(mode));
+        }
+    }
+
+    /// Sends `mode` to `peer`, and notes a dropped `Pull(Off)` to send it again.
+    fn send_pull(&mut self, peer: PI, mode: PullMode, io: &mut impl IO<PI>) {
+        if io.send(peer, Message::Pull(mode)).is_some() && mode == PullMode::Off {
+            self.unsent_pull_off.insert(peer);
+        }
+    }
+
+    /// Tells the neighbor `peer` our pull mode if it did not learn it.
+    ///
+    /// A peer learns it on its first message after we entered. A `Pull` that we send
+    /// when we make it a neighbor can arrive before it makes us one, and it then ignores
+    /// the `Pull`. A peer that pushes a message we did not request, or announces while
+    /// silent, may have lost the `Pull` to a full queue. It hears it again after
+    /// [`PULL_REQUEST_TIMEOUT`], as until then it may send what it queued before.
+    fn tell_pull_mode(&mut self, peer: PI, message: &Message, now: Instant, io: &mut impl IO<PI>) {
+        let Some(pull) = &self.pull else {
+            return;
+        };
+        let Some(&(mode, at)) = pull.told.get(&peer) else {
+            self.tell_pull(peer, PullMode::Silent, now, io);
+            return;
+        };
+        let unwanted = match message {
+            Message::Gossip(gossip) => {
+                gossip.round().is_some()
+                    && pull
+                        .in_flight
+                        .get(&gossip.id)
+                        .is_none_or(|request| request.peer != peer)
+            }
+            Message::IHave(_) => mode == PullMode::Silent,
+            _ => false,
+        };
+        if unwanted && now >= at + PULL_REQUEST_TIMEOUT {
+            self.tell_pull(peer, mode, now, io);
+        }
+    }
+
+    /// Sends requests until the window is full.
+    ///
+    /// A request is a `Graft` for one message, with the tree of the announcement, to the
+    /// first of its announcers with the fewest requests open. Like a `Graft` on the timer,
+    /// it removes the announcer, so no peer gets a second request for a message unless it
+    /// announces it again. The peer does not make us eager, see [`Self::on_pull`].
+    fn pull_fill(&mut self, now: Instant, io: &mut impl IO<PI>) {
+        let Some(pull) = &mut self.pull else {
+            return;
+        };
+        while pull.in_flight.len() < self.config.pull_window {
+            let Some(id) = pull.queue.pop_front() else {
+                break;
+            };
+            if pull.in_flight.contains_key(&id) {
+                continue;
+            }
+            let Some(missing) = self.missing_messages.get_mut(&id) else {
+                continue;
+            };
+            let tree = missing.tree;
+            // A peer with a long queue to us would otherwise hold the whole window.
+            let open = |peer: &PI| {
+                let requests = pull.in_flight.values();
+                requests.filter(|request| request.peer == *peer).count()
+            };
+            let (peer, round) = missing
+                .announcers
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, (peer, _))| open(peer))
+                .map(|(i, _)| i)
+                .and_then(|i| missing.announcers.remove(i))
+                .expect("a missing message has an announcer");
+            if missing.announcers.is_empty() {
+                self.missing_messages.remove(&id);
+            }
+            let graft = Message::Graft(Graft { id: Some(id), tree });
+            if io.send(peer, graft).is_some() {
+                // The queue to the peer is full. The next event tries again.
+                self.missing_messages
+                    .entry(id)
+                    .or_insert_with(|| Missing {
+                        announcers: VecDeque::new(),
+                        tree,
+                    })
+                    .announcers
+                    .push_front((peer, round));
+                pull.queue.push_front(id);
+                break;
+            }
+            pull.in_flight.insert(id, Request { peer, sent: now });
+        }
+    }
+
+    /// Expires requests, replaces sources that left, and leaves pull mode once we keep up.
+    fn on_pull_tick(&mut self, now: Instant, io: &mut impl IO<PI>) {
+        let window = self.config.pull_window;
+        let Some(pull) = &mut self.pull else {
+            return;
+        };
+        let mut expired: Vec<_> = pull
+            .in_flight
+            .iter()
+            .filter(|(_, request)| now >= request.sent + PULL_REQUEST_TIMEOUT)
+            .map(|(id, request)| (request.sent, *id))
+            .collect();
+        // The oldest goes to the front last, so it is the first again.
+        expired.sort_by_key(|(sent, _)| *sent);
+        for (_, id) in expired.into_iter().rev() {
+            pull.in_flight.remove(&id);
+            // The reply may still come, so the peer we asked gets no second request.
+            if self.missing_messages.contains_key(&id) {
+                pull.queue.push_front(id);
+            }
+        }
+        // A message with no announcer left to ask and no request open is no backlog we can
+        // work off. Its copy may still come, but it would keep us in pull mode for the
+        // whole cache retention.
+        let missing = &self.missing_messages;
+        self.announced.retain(|id, entry| {
+            now < entry.since + PULL_REQUEST_TIMEOUT
+                || missing.contains_key(id)
+                || pull.in_flight.contains_key(id)
+        });
+        if stale(&self.announced, &self.late_announcers, now) > window {
+            pull.caught_up = None;
+        } else if now >= *pull.caught_up.get_or_insert(now) + PULL_EXIT_AFTER {
+            self.leave_pull(io);
+            return;
+        }
+        let sources = pull
+            .told
+            .values()
+            .filter(|(mode, _)| *mode == PullMode::Source)
+            .count();
+        let more: Vec<_> = self
+            .neighbors
+            .iter()
+            .filter(|peer| {
+                pull.told
+                    .get(*peer)
+                    .is_none_or(|(mode, _)| *mode != PullMode::Source)
+            })
+            .take(PULL_SOURCES.saturating_sub(sources))
+            .copied()
+            .collect();
+        for peer in more {
+            self.tell_pull(peer, PullMode::Source, now, io);
+        }
+        io.schedule(PULL_TICK, Timer::PullTick);
+        self.pull_fill(now, io);
+    }
+
+    /// Leaves pull mode.
+    ///
+    /// The graft timers take over for the messages still missing.
+    fn leave_pull(&mut self, io: &mut impl IO<PI>) {
+        let Some(pull) = self.pull.take() else {
+            return;
+        };
+        info!(me = ?self.me, "leave pull mode");
+        for peer in pull.told.into_keys() {
+            self.send_pull(peer, PullMode::Off, io);
+        }
+        for id in self.missing_messages.keys() {
+            if self.graft_timer_scheduled.insert(*id) {
+                io.schedule(self.config.graft_timeout_1, Timer::SendGraft(*id));
+            }
+        }
+    }
+
+    /// Handles a neighbor that enters or leaves pull mode.
+    ///
+    /// It stays lazy in every tree until it leaves, and a `Graft` does not make it eager.
+    fn on_pull(&mut self, peer: PI, mode: PullMode) {
+        if mode == PullMode::Off {
+            self.pulling.remove(&peer);
+            return;
+        }
+        self.pulling.insert(peer, mode);
+        for tree in self.trees.values_mut() {
+            if tree.eager.remove(&peer) {
+                tree.lazy.insert(peer);
+            }
+        }
+        if mode == PullMode::Silent {
+            self.lazy_push_queue.remove(&peer);
+            self.dropped.remove(&peer);
         }
     }
 
@@ -1132,6 +1612,32 @@ impl<PI: PeerIdentity> State<PI> {
         for grafts in self.grafted.values_mut() {
             grafts.peers.retain(|(grafted, _)| *grafted != peer);
         }
+        self.pulling.remove(&peer);
+        self.unsent_pull_off.remove(&peer);
+        self.late_announcers.remove(&peer);
+        if let Some(pull) = &mut self.pull {
+            pull.told.remove(&peer);
+            let missing = &self.missing_messages;
+            pull.in_flight.retain(|id, request| {
+                if request.peer != peer {
+                    return true;
+                }
+                if missing.contains_key(id) {
+                    pull.queue.push_front(*id);
+                }
+                false
+            });
+        }
+        // A message that no neighbor can send us any more is no backlog.
+        let pull = self.pull.as_ref();
+        self.announced.retain(|id, _| {
+            self.missing_messages.contains_key(id)
+                || pull.is_some_and(|pull| pull.in_flight.contains_key(id))
+                || self
+                    .grafted
+                    .get(id)
+                    .is_some_and(|grafts| !grafts.peers.is_empty())
+        });
     }
 
     /// Sends an announcement, and notes it for later if the queue dropped it.
@@ -1152,7 +1658,7 @@ impl<PI: PeerIdentity> State<PI> {
         ihaves: impl IntoIterator<Item = IHave>,
         io: &mut impl IO<PI>,
     ) {
-        if !self.neighbors.contains(&peer) {
+        if !self.neighbors.contains(&peer) || self.pulling.get(&peer) == Some(&PullMode::Silent) {
             return;
         }
         let mut total: usize = self.dropped.values().map(IndexMap::len).sum();
@@ -1214,6 +1720,23 @@ impl<PI: PeerIdentity> State<PI> {
         }
         self.trees
             .retain(|_, tree| tree.last_used + TREE_RETENTION > now);
+        // No peer caches an older message, so nobody can send it.
+        let retention = self.config.message_cache_retention;
+        let missing = &mut self.missing_messages;
+        self.announced.retain(|id, entry| {
+            let keep = entry.since + retention > now;
+            if !keep {
+                missing.remove(id);
+            }
+            keep
+        });
+        if let Some(pull) = &mut self.pull {
+            pull.queue.retain(|id| missing.contains_key(id));
+        }
+        for peer in std::mem::take(&mut self.unsent_pull_off) {
+            self.send_pull(peer, PullMode::Off, io);
+        }
+        self.check_pull_enter(now, io);
         io.schedule(self.config.cache_evict_interval, Timer::EvictCache);
     }
 
@@ -1242,10 +1765,14 @@ impl<PI: PeerIdentity> State<PI> {
         }
         if !self.trees.contains_key(&id) {
             // The copy makes the switch of a sender to its own tree cost no flood.
-            let (eager, lazy) = match self.trees.get(&TreeId::default()) {
+            let (mut eager, mut lazy) = match self.trees.get(&TreeId::default()) {
                 Some(shared) => (shared.eager.clone(), shared.lazy.clone()),
                 None => (self.neighbors.clone(), BTreeSet::new()),
             };
+            for peer in self.pulling.keys() {
+                eager.remove(peer);
+                lazy.insert(*peer);
+            }
             let tree = Tree {
                 eager,
                 lazy,
@@ -1269,7 +1796,12 @@ impl<PI: PeerIdentity> State<PI> {
     ///
     /// Only a payload creates a tree, see [`Self::tree`]. A peer could otherwise
     /// make up tree ids in small control messages, and evict the real trees.
+    ///
+    /// A peer in pull mode stays lazy.
     fn add_eager(&mut self, tree: TreeId, peer: PI, now: Instant) {
+        if self.pulling.contains_key(&peer) {
+            return;
+        }
         if let Some(tree) = self.known_tree(tree, &peer, now) {
             tree.lazy.remove(&peer);
             tree.eager.insert(peer);
@@ -1337,10 +1869,11 @@ impl<PI: PeerIdentity> State<PI> {
             return;
         };
         self.tree(gossip.tree, now, Some(gossip.id));
+        let pulling = &self.pulling;
         for peer in self.trees[&gossip.tree]
             .lazy
             .iter()
-            .filter(|x| *x != sender)
+            .filter(|x| *x != sender && pulling.get(*x) != Some(&PullMode::Silent))
         {
             self.lazy_push_queue
                 .entry(*peer)
@@ -1600,6 +2133,7 @@ mod test {
         Nothing,
         Pushes,
         Announcements,
+        Pulls,
     }
 
     /// The IO of a peer whose queue drops what `Drops` names, as the queue to a slow peer does.
@@ -1631,6 +2165,7 @@ mod test {
                         Drops::Announcements,
                         topic::Message::Gossip(Message::IHave(_))
                     )
+                    | (Drops::Pulls, topic::Message::Gossip(Message::Pull(_)))
             );
             // Keep the message in `out`, so tests can look at what was dropped.
             self.out.send(peer, message.clone());
@@ -2984,5 +3519,662 @@ mod test {
         let endpoint = iroh::SecretKey::from_bytes(&origin).public();
         assert_eq!(TreeId::of(&endpoint), TreeId::of(endpoint.as_bytes()));
         assert_eq!(hex::encode(TreeId::of(&endpoint).0), "90bdeef49d5d2664");
+    }
+
+    /// The window of the pull mode tests.
+    const W: usize = 4;
+
+    /// Returns message `i` of a backlog, as received after one hop on [`T`].
+    fn numbered(i: usize) -> Gossip {
+        let content = Bytes::from(i.to_be_bytes().to_vec());
+        Gossip {
+            id: MessageId::from_content(&content),
+            content,
+            scope: DeliveryScope::Swarm(Round(1)),
+            tree: T,
+        }
+    }
+
+    /// Returns node 1 with the lazy neighbors 2 and 3, which both announced `n` messages at `now`.
+    fn backlog_state(n: usize, window: usize, now: Instant) -> (State<u32>, Vec<MessageId>) {
+        let config = Config {
+            pull_window: window,
+            ..Default::default()
+        };
+        let mut state = State::new(1u32, config, 1 << 20);
+        let mut io = VecDeque::new();
+        for peer in [2, 3] {
+            state.on_neighbor_up(peer);
+            state.handle(InEvent::RecvMessage(peer, Message::Prune(T)), now, &mut io);
+        }
+        let ids: Vec<_> = (0..n).map(|i| numbered(i).id).collect();
+        for id in &ids {
+            for peer in [2, 3] {
+                state.handle(InEvent::RecvMessage(peer, ihave(*id, 1)), now, &mut io);
+            }
+        }
+        (state, ids)
+    }
+
+    /// Runs the eviction timer, which checks whether to enter pull mode, at `now`.
+    fn check(state: &mut State<u32>, now: Instant) -> VecDeque<topic::OutEvent<u32>> {
+        let mut io = VecDeque::new();
+        state.handle(InEvent::TimerExpired(Timer::EvictCache), now, &mut io);
+        io
+    }
+
+    /// Runs a [`Timer::PullTick`] at `now`.
+    fn pull_tick(state: &mut State<u32>, now: Instant) -> VecDeque<topic::OutEvent<u32>> {
+        let mut io = VecDeque::new();
+        state.handle(InEvent::TimerExpired(Timer::PullTick), now, &mut io);
+        io
+    }
+
+    /// Returns the requests in `io`, as the peer and the id that each `Graft` names.
+    fn requests(io: &VecDeque<topic::OutEvent<u32>>) -> Vec<(u32, MessageId)> {
+        io.iter()
+            .filter_map(|event| match event {
+                topic::OutEvent::SendMessage(
+                    peer,
+                    topic::Message::Gossip(Message::Graft(Graft { id: Some(id), .. })),
+                ) => Some((*peer, *id)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Returns the pull modes that `io` sends to `peer`.
+    fn pulls_to(io: &VecDeque<topic::OutEvent<u32>>, peer: u32) -> Vec<PullMode> {
+        sent_to(io, peer)
+            .into_iter()
+            .filter_map(|message| match message {
+                Message::Pull(mode) => Some(mode),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A stale backlog enters pull mode: `Pull` to every neighbor, then the window of requests.
+    #[test]
+    fn stale_backlog_enters_pull_mode() {
+        let now = Instant::now();
+        let (mut state, ids) = backlog_state(PULL_ENTER_STALE, W, now);
+        // Young messages are no backlog, however many.
+        let io = check(&mut state, now + PULL_STALE_AFTER / 2);
+        assert!(state.pull.is_none());
+        assert!(pulls_to(&io, 2).is_empty());
+
+        let io = check(&mut state, now + PULL_STALE_AFTER);
+        assert!(state.pull.is_some());
+        for peer in [2, 3] {
+            assert_eq!(pulls_to(&io, peer), vec![PullMode::Source]);
+        }
+        // The oldest first, and no graft timer decides.
+        let requested = requests(&io);
+        assert_eq!(requested.len(), W);
+        assert!(requested.iter().all(|(_, id)| ids.contains(id)));
+        let grafts = sent_to(&io, 2).into_iter().chain(sent_to(&io, 3));
+        for message in grafts {
+            if let Message::Graft(graft) = message {
+                assert_eq!(
+                    graft.tree, T,
+                    "a request names the tree of the announcement"
+                );
+            }
+        }
+        assert_eq!(lazy(&state), BTreeSet::from([2, 3]));
+    }
+
+    /// Made-up announcements of one neighbor do not enter pull mode, and those of two do.
+    ///
+    /// Stale messages that only one peer announced count at most [`MAX_STALE_PER_PEER`] for it.
+    #[test]
+    fn one_neighbor_cannot_force_pull_mode() {
+        let now = Instant::now();
+        let (mut state, _) = backlog_state(0, W, now);
+        let mut io = VecDeque::new();
+        let made_up = |i: usize| numbered(1000 + i).id;
+        for i in 0..PULL_ENTER_STALE * 4 {
+            state.handle(InEvent::RecvMessage(2, ihave(made_up(i), 1)), now, &mut io);
+        }
+        check(&mut state, now + PULL_STALE_AFTER * 2);
+        assert!(state.pull.is_none(), "one neighbor forced pull mode");
+        for i in 0..PULL_ENTER_STALE - MAX_STALE_PER_PEER {
+            state.handle(
+                InEvent::RecvMessage(3, ihave(made_up(500 + i), 1)),
+                now,
+                &mut io,
+            );
+        }
+        check(&mut state, now + PULL_STALE_AFTER * 2);
+        assert!(state.pull.is_some());
+    }
+
+    /// A slow node with one lazy neighbor enters pull mode once a copy comes late.
+    ///
+    /// In a topic of three nodes with one sender, the sender pushes to us, and only the
+    /// other node announces. A late copy from the sender proves the backlog, and a late copy
+    /// from the announcer itself does not.
+    #[test]
+    fn lone_announcer_counts_in_full_after_a_late_copy() {
+        let now = Instant::now();
+        let mut state = State::new(1u32, Config::default(), 1 << 20);
+        let mut io = VecDeque::new();
+        state.on_neighbor_up(2);
+        state.on_neighbor_up(3);
+        state.handle(InEvent::RecvMessage(3, Message::Prune(T)), now, &mut io);
+        for i in 0..PULL_ENTER_STALE + 4 {
+            state.handle(
+                InEvent::RecvMessage(3, ihave(numbered(i).id, 1)),
+                now,
+                &mut io,
+            );
+        }
+        let late = now + PULL_STALE_AFTER;
+        let copy = |i| Message::Gossip(numbered(i));
+        state.handle(InEvent::RecvMessage(3, copy(0)), late, &mut io);
+        check(&mut state, late);
+        assert!(state.pull.is_none(), "the announcer proved its own backlog");
+        state.handle(InEvent::RecvMessage(2, copy(1)), late, &mut io);
+        check(&mut state, late);
+        assert!(
+            state.pull.is_some(),
+            "a real backlog did not enter pull mode"
+        );
+    }
+
+    /// Fewer stale messages than the threshold, or a window of 0, do not enter pull mode.
+    #[test]
+    fn small_backlog_or_no_window_enters_nothing() {
+        let now = Instant::now();
+        let (mut state, _) = backlog_state(PULL_ENTER_STALE - 1, W, now);
+        check(&mut state, now + PULL_STALE_AFTER * 5);
+        assert!(state.pull.is_none());
+        let (mut state, _) = backlog_state(PULL_ENTER_STALE * 4, 0, now);
+        check(&mut state, now + PULL_STALE_AFTER * 5);
+        assert!(state.pull.is_none());
+    }
+
+    /// A node that gets its messages does not enter pull mode, however many it gets.
+    #[test]
+    fn received_messages_are_no_backlog() {
+        let now = Instant::now();
+        let (mut state, _) = backlog_state(PULL_ENTER_STALE * 4, W, now);
+        for i in 0..PULL_ENTER_STALE * 4 {
+            recv_at(&mut state, 2, Message::Gossip(numbered(i)), now);
+        }
+        check(&mut state, now + PULL_STALE_AFTER * 5);
+        assert!(state.pull.is_none());
+    }
+
+    /// At most the window is in flight.
+    ///
+    /// An answer frees a slot, and a timeout asks the next announcer.
+    #[test]
+    fn pull_mode_keeps_a_window_in_flight() {
+        let now = Instant::now();
+        let (mut state, _) = backlog_state(PULL_ENTER_STALE, W, now);
+        let t1 = now + PULL_STALE_AFTER;
+        let first = requests(&check(&mut state, t1));
+        assert_eq!(first.len(), W);
+
+        // One answer, one more request.
+        let (from, id) = first[0];
+        let index = (0..PULL_ENTER_STALE)
+            .find(|i| numbered(*i).id == id)
+            .unwrap();
+        let more = requests(&recv_at(
+            &mut state,
+            from,
+            Message::Gossip(numbered(index)),
+            t1,
+        ));
+        assert_eq!(more.len(), 1);
+        assert_ne!(more[0].1, id);
+        assert_eq!(state.pull.as_ref().unwrap().in_flight.len(), W);
+        // The reply did not make the announcer eager: we are still pulling.
+        assert_eq!(eager(&state), BTreeSet::new());
+
+        // No answer for a long time: the requests go to the other announcer.
+        let retried = requests(&pull_tick(&mut state, t1 + PULL_REQUEST_TIMEOUT));
+        assert_eq!(retried.len(), W);
+        for (peer, id) in &retried {
+            if let Some((was, _)) = first.iter().chain(&more).find(|(_, first)| first == id) {
+                assert_ne!(was, peer, "asked the same announcer again");
+            }
+        }
+        assert_eq!(state.pull.as_ref().unwrap().in_flight.len(), W);
+    }
+
+    /// Pull mode ends once the backlog is within the window for a while, and not before.
+    #[test]
+    fn pull_mode_is_left_after_keeping_up() {
+        let now = Instant::now();
+        let (mut state, ids) = backlog_state(PULL_ENTER_STALE, W, now);
+        let t1 = now + PULL_STALE_AFTER;
+        check(&mut state, t1);
+        // Everything arrives but the last message.
+        for i in 0..ids.len() - 1 {
+            recv_at(&mut state, 2, Message::Gossip(numbered(i)), t1);
+        }
+        let mut t = t1;
+        let left = loop {
+            t += PULL_TICK;
+            let io = pull_tick(&mut state, t);
+            if state.pull.is_none() {
+                break io;
+            }
+            assert!(t < t1 + PULL_EXIT_AFTER * 2, "still in pull mode");
+        };
+        assert!(t - t1 >= PULL_EXIT_AFTER, "left after {:?}", t - t1);
+        for peer in [2, 3] {
+            assert_eq!(pulls_to(&left, peer), vec![PullMode::Off]);
+        }
+        // The graft timer takes over the message that is still missing.
+        let last = ids[ids.len() - 1];
+        assert!(
+            !state.missing_messages.contains_key(&last)
+                || state.graft_timer_scheduled.contains(&last)
+        );
+
+        // A backlog above the window resets the wait.
+        let (mut state, _) = backlog_state(PULL_ENTER_STALE, W, now);
+        check(&mut state, t1);
+        pull_tick(&mut state, t1 + PULL_TICK);
+        assert!(state.pull.as_ref().unwrap().caught_up.is_none());
+    }
+
+    /// A neighbor learns of pull mode with its first message, and again if it keeps pushing.
+    #[test]
+    fn new_neighbor_learns_of_pull_mode() {
+        let now = Instant::now();
+        let (mut state, _) = backlog_state(PULL_ENTER_STALE, W, now);
+        check(&mut state, now + PULL_STALE_AFTER);
+        // Its `Pull` could arrive before the peer has us as a neighbor, so none goes out yet.
+        state.on_neighbor_up(5);
+        let t = now + PULL_STALE_AFTER;
+        let io = recv_at(&mut state, 5, Message::Gossip(gossip(b"pushed", 1)), t);
+        assert_eq!(pulls_to(&io, 5), vec![PullMode::Silent]);
+        // Pushes it queued before are no reason to tell it again, later ones are.
+        let io = recv_at(&mut state, 5, Message::Gossip(gossip(b"queued", 1)), t);
+        assert!(pulls_to(&io, 5).is_empty());
+        let later = t + PULL_REQUEST_TIMEOUT;
+        let io = recv_at(&mut state, 5, Message::Gossip(gossip(b"later", 1)), later);
+        assert_eq!(pulls_to(&io, 5), vec![PullMode::Silent]);
+        // A source that announces is what we asked for.
+        let io = recv_at(
+            &mut state,
+            2,
+            ihave(numbered(99).id, 1),
+            later + PULL_REQUEST_TIMEOUT,
+        );
+        assert!(pulls_to(&io, 2).is_empty());
+    }
+
+    /// A peer in pull mode gets announcements and replies, and no eager push in any tree.
+    #[test]
+    fn pulling_peer_is_not_pushed_to() {
+        let now = Instant::now();
+        let mut state = State::new(1u32, Config::default(), 1 << 20);
+        state.on_neighbor_up(2);
+        state.on_neighbor_up(3);
+        let first = gossip(b"first", 1);
+        recv_at(&mut state, 3, Message::Gossip(first.clone()), now);
+        assert_eq!(eager(&state), BTreeSet::from([2, 3]));
+
+        let io = recv_at(&mut state, 2, Message::Pull(PullMode::Source), now);
+        assert!(io.is_empty());
+        assert_eq!(eager(&state), BTreeSet::from([3]));
+        assert_eq!(lazy(&state), BTreeSet::from([2]));
+
+        // A new message is announced to it, not pushed.
+        let mut io = VecDeque::new();
+        let content = Bytes::from_static(b"second");
+        state.handle(InEvent::Broadcast(content, Scope::Swarm), now, &mut io);
+        assert!(pushed_to(&io, 2).is_none());
+        assert!(pushed_to(&io, 3).is_some());
+        assert_eq!(tick(&mut state, now, 2).len(), 1);
+
+        // A request gets the message, and does not make the peer eager.
+        let graft = Message::Graft(Graft {
+            id: Some(first.id),
+            tree: T,
+        });
+        let io = recv_at(&mut state, 2, graft.clone(), now);
+        assert!(matches!(pushed_to(&io, 2), Some(Message::Gossip(_))));
+        assert_eq!(lazy(&state), BTreeSet::from([2]));
+
+        // A tree that starts while the peer pulls has it lazy.
+        recv_at(
+            &mut state,
+            3,
+            Message::Gossip(on_tree(9, b"other tree")),
+            now,
+        );
+        assert!(!eager_in(&state, 9).contains(&2));
+
+        // After `Pull(Off)`, a graft makes it eager again.
+        recv_at(&mut state, 2, Message::Pull(PullMode::Off), now);
+        recv_at(&mut state, 2, graft, now);
+        assert_eq!(eager(&state), BTreeSet::from([2, 3]));
+
+        // A peer that restarts has left pull mode.
+        recv_at(&mut state, 2, Message::Pull(PullMode::Silent), now);
+        state.on_neighbor_down(2);
+        state.on_neighbor_up(2);
+        assert!(eager_in(&state, 9).contains(&2));
+        assert!(state.pulling.is_empty());
+    }
+
+    /// A message we already grafted counts for the backlog, though it has no announcer left.
+    #[test]
+    fn grafted_messages_count_as_stale() {
+        let now = Instant::now();
+        let (mut state, ids) = backlog_state(PULL_ENTER_STALE, W, now);
+        let mut io = VecDeque::new();
+        // Two announcers: the second graft timer leaves nothing missing.
+        for id in &ids {
+            for _ in 0..2 {
+                state.handle(InEvent::TimerExpired(Timer::SendGraft(*id)), now, &mut io);
+            }
+        }
+        assert!(state.missing_messages.is_empty());
+        check(&mut state, now + PULL_STALE_AFTER);
+        assert!(state.pull.is_some());
+    }
+
+    /// Two neighbors announce to a node in pull mode, and a new source replaces one that leaves.
+    #[test]
+    fn pull_mode_mutes_all_but_two_announcers() {
+        let now = Instant::now();
+        let (mut state, _) = backlog_state(PULL_ENTER_STALE, W, now);
+        let mut io = VecDeque::new();
+        for peer in [4, 5] {
+            state.on_neighbor_up(peer);
+            state.handle(InEvent::RecvMessage(peer, Message::Prune(T)), now, &mut io);
+        }
+        let io = check(&mut state, now + PULL_STALE_AFTER);
+        assert_eq!(pulls_to(&io, 2), vec![PullMode::Source]);
+        assert_eq!(pulls_to(&io, 3), vec![PullMode::Source]);
+        assert_eq!(pulls_to(&io, 4), vec![PullMode::Silent]);
+        assert_eq!(pulls_to(&io, 5), vec![PullMode::Silent]);
+
+        state.on_neighbor_down(2);
+        let io = pull_tick(&mut state, now + PULL_STALE_AFTER + PULL_TICK);
+        assert_eq!(pulls_to(&io, 4), vec![PullMode::Source]);
+        assert!(pulls_to(&io, 5).is_empty());
+    }
+
+    /// A silent peer gets no announcements, and a peer that leaves silence gets them again.
+    #[test]
+    fn silent_peer_is_not_announced_to() {
+        let now = Instant::now();
+        let mut state = State::new(1u32, Config::default(), 1 << 20);
+        for peer in [2, 3, 4] {
+            state.on_neighbor_up(peer);
+        }
+        recv_at(&mut state, 2, Message::Pull(PullMode::Silent), now);
+        recv_at(&mut state, 3, Message::Pull(PullMode::Source), now);
+        let broadcast = |state: &mut State<u32>, content: &'static [u8]| {
+            let mut io = VecDeque::new();
+            let content = Bytes::from_static(content);
+            state.handle(InEvent::Broadcast(content, Scope::Swarm), now, &mut io);
+            state.handle(InEvent::TimerExpired(Timer::DispatchLazyPush), now, &mut io);
+            io
+        };
+        let io = broadcast(&mut state, b"one");
+        assert!(announced_to(&io, 2).is_empty());
+        assert_eq!(announced_to(&io, 3).len(), 1);
+        recv_at(&mut state, 2, Message::Pull(PullMode::Off), now);
+        let io = broadcast(&mut state, b"two");
+        assert_eq!(announced_to(&io, 2).len(), 1);
+    }
+
+    /// Invariant: a node that gets its messages in time never enters pull mode.
+    ///
+    /// The cases are a node on many trees with late and lost eager copies, a node whose
+    /// filter rejects every message, and a node whose only announcer leaves.
+    #[test]
+    fn healthy_node_never_enters_pull_mode() {
+        let start = Instant::now();
+        let ms = |ms: u64| start + Duration::from_millis(ms);
+        let hold = Config::default().graft_timeout_1;
+
+        // Trees per sender: 400 messages at 250 per second on 8 trees. Announcements come
+        // before the eager copy, and every fifth copy is lost and grafted.
+        let mut state = State::new(1u32, Config::default(), 1 << 20);
+        let mut io = VecDeque::new();
+        for peer in [2, 3, 4] {
+            state.on_neighbor_up(peer);
+        }
+        for peer in [3, 4] {
+            state.handle(
+                InEvent::RecvMessage(peer, Message::Prune(T)),
+                start,
+                &mut io,
+            );
+        }
+        let mut events = Vec::new();
+        for i in 0..400u64 {
+            let mut message = numbered(i as usize);
+            message.tree = TreeId([1 + (i % 8) as u8; 8]);
+            let at = ms(4 * i);
+            for peer in [3, 4] {
+                let ihave = Message::IHave(vec![message.ihave().unwrap()]);
+                events.push((at, InEvent::RecvMessage(peer, ihave)));
+            }
+            if i % 5 == 0 {
+                let id = message.id;
+                events.push((at + hold, InEvent::TimerExpired(Timer::SendGraft(id))));
+                let reply = Message::Gossip(message);
+                events.push((at + hold * 2, InEvent::RecvMessage(3, reply)));
+            } else {
+                let push = Message::Gossip(message);
+                events.push((at + hold / 2, InEvent::RecvMessage(2, push)));
+            }
+        }
+        for t in (0..2000).step_by(100) {
+            events.push((ms(t), InEvent::TimerExpired(Timer::EvictCache)));
+        }
+        events.sort_by_key(|(at, _)| *at);
+        for (at, event) in events {
+            state.handle(event, at, &mut io);
+        }
+        check(&mut state, ms(3000));
+        assert!(state.pull.is_none(), "a node with late copies entered");
+        assert!(state.announced.is_empty());
+        assert!((2..=4).all(|peer| pulls_to(&io, peer).is_empty()));
+
+        // A filter that rejects every message.
+        let mut state = filtered_state();
+        let mut io = Filtering::new(Verdict::Reject);
+        for i in 0..PULL_ENTER_STALE * 4 {
+            let message = numbered(i);
+            state.handle(
+                InEvent::RecvMessage(4, ihave(message.id, 1)),
+                ms(0),
+                &mut io,
+            );
+            let push = InEvent::RecvMessage(2, Message::Gossip(message));
+            state.handle(push, ms(10), &mut io);
+        }
+        state.handle(InEvent::TimerExpired(Timer::EvictCache), ms(2000), &mut io);
+        assert!(state.pull.is_none(), "rejected messages are a backlog");
+
+        // The only announcer leaves after our grafts.
+        let mut state = State::new(1u32, Config::default(), 1 << 20);
+        let mut io = VecDeque::new();
+        state.on_neighbor_up(2);
+        for i in 0..PULL_ENTER_STALE * 4 {
+            let id = numbered(i).id;
+            announce(&mut state, 5, id, 1, ms(0));
+            state.handle(InEvent::TimerExpired(Timer::SendGraft(id)), ms(80), &mut io);
+        }
+        state.on_neighbor_down(5);
+        check(&mut state, ms(2000));
+        assert!(
+            state.pull.is_none(),
+            "messages nobody can send are a backlog"
+        );
+    }
+
+    /// Invariant: a node in pull mode leaves it, also when its sources leave or restart.
+    ///
+    /// The messages that only the gone sources announced no longer count. A restarted
+    /// source learns the mode again with its first message, and a `Pull(Off)` that a
+    /// full queue drops goes out again.
+    #[test]
+    fn pull_mode_is_left_when_sources_leave_or_restart() {
+        let now = Instant::now();
+        let (mut state, _) = backlog_state(PULL_ENTER_STALE * 2, W, now);
+        state.on_neighbor_up(4);
+        let t1 = now + PULL_STALE_AFTER;
+        check(&mut state, t1);
+        assert!(state.pull.is_some());
+
+        state.on_neighbor_down(2);
+        state.on_neighbor_down(3);
+        state.on_neighbor_up(3);
+        assert!(state.announced.is_empty());
+        let new = numbered(1000);
+        let io = recv_at(&mut state, 3, ihave(new.id, 1), t1);
+        assert_eq!(pulls_to(&io, 3), vec![PullMode::Silent]);
+        assert_eq!(requests(&io), vec![(3, new.id)]);
+        recv_at(&mut state, 3, Message::Gossip(new), t1);
+
+        let io = pull_tick(&mut state, t1 + PULL_TICK);
+        assert_eq!(pulls_to(&io, 3), vec![PullMode::Source]);
+        assert_eq!(pulls_to(&io, 4), vec![PullMode::Source]);
+
+        let mut t = t1 + PULL_TICK;
+        let mut io = Dropping::new(Drops::Pulls);
+        while state.pull.is_some() {
+            t += PULL_TICK;
+            assert!(
+                t <= t1 + PULL_EXIT_AFTER + PULL_TICK * 2,
+                "still in pull mode"
+            );
+            state.handle(InEvent::TimerExpired(Timer::PullTick), t, &mut io);
+        }
+        assert_eq!(state.unsent_pull_off, BTreeSet::from([3, 4]));
+        let io = check(&mut state, t);
+        for peer in [3, 4] {
+            assert_eq!(pulls_to(&io, peer), vec![PullMode::Off]);
+        }
+        assert!(state.unsent_pull_off.is_empty());
+    }
+
+    /// Invariant: no peer has two requests for one message at once.
+    ///
+    /// A request ends with its reply, with an announcement of the message from the same
+    /// peer (its queue dropped the reply), or when the peer leaves. Grafts on the timer
+    /// count as requests. The run enters and leaves pull mode, on two trees, with
+    /// timeouts, dropped replies, and a peer that restarts.
+    #[test]
+    fn no_message_is_requested_twice_from_one_peer() {
+        let start = Instant::now();
+        let mut state = State::new(
+            1u32,
+            Config {
+                pull_window: W,
+                ..Default::default()
+            },
+            1 << 20,
+        );
+        let mut setup = VecDeque::new();
+        for peer in [2, 3, 4] {
+            state.on_neighbor_up(peer);
+            state.handle(
+                InEvent::RecvMessage(peer, Message::Prune(T)),
+                start,
+                &mut setup,
+            );
+        }
+        let mut open: HashSet<(u32, MessageId)> = HashSet::new();
+        let mut messages: HashMap<MessageId, Gossip> = HashMap::new();
+        let (mut entered, mut left) = (0, 0);
+        let mut rng = 7u64;
+        let mut next = move |n: u64| {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (rng >> 33) % n
+        };
+        let mut sent = 0usize;
+        for step in 0..3000u64 {
+            let now = start + Duration::from_millis(step * 20);
+            let busy = (step / 500) % 2 == 0;
+            let was_pulling = state.pull.is_some();
+            let mut io = VecDeque::new();
+            // Peer 4 answers late, so its requests time out.
+            let pick = |open: &HashSet<(u32, MessageId)>, with_4: bool, i: u64| {
+                let mut open: Vec<_> = open
+                    .iter()
+                    .filter(|(peer, _)| with_4 || *peer != 4)
+                    .copied()
+                    .collect();
+                open.sort_by_key(|(peer, id)| (*peer, *id.as_bytes()));
+                open.get(i as usize % open.len().max(1)).copied()
+            };
+            // A busy phase announces more than it answers, a quiet one only answers.
+            match (busy, next(8)) {
+                (true, 0..=2) => {
+                    let mut message = numbered(sent);
+                    sent += 1;
+                    if sent.is_multiple_of(2) {
+                        message.tree = TreeId([7; 8]);
+                    }
+                    let ihave = Message::IHave(vec![message.ihave().unwrap()]);
+                    messages.insert(message.id, message);
+                    for peer in [2, 3, 4] {
+                        if next(3) > 0 {
+                            state.handle(InEvent::RecvMessage(peer, ihave.clone()), now, &mut io);
+                        }
+                    }
+                }
+                (_, 0..=3) => {
+                    if let Some((peer, id)) = pick(&open, next(8) == 0, next(1000)) {
+                        open.remove(&(peer, id));
+                        let reply = Message::Gossip(messages[&id].clone());
+                        state.handle(InEvent::RecvMessage(peer, reply), now, &mut io);
+                    }
+                }
+                (_, 4) if next(10) == 0 => {
+                    if let Some((peer, id)) = pick(&open, true, next(1000)) {
+                        open.remove(&(peer, id));
+                        let ihave = Message::IHave(vec![messages[&id].ihave().unwrap()]);
+                        state.handle(InEvent::RecvMessage(peer, ihave), now, &mut io);
+                    }
+                }
+                (_, 5) => {
+                    let ids: Vec<_> = state.graft_timer_scheduled.iter().copied().collect();
+                    for id in ids {
+                        state.handle(InEvent::TimerExpired(Timer::SendGraft(id)), now, &mut io);
+                    }
+                }
+                (_, 6) if next(20) == 0 => {
+                    let peer = 2 + next(3) as u32;
+                    state.on_neighbor_down(peer);
+                    open.retain(|(asked, _)| *asked != peer);
+                    state.on_neighbor_up(peer);
+                }
+                _ => {
+                    state.handle(InEvent::TimerExpired(Timer::PullTick), now, &mut io);
+                    state.handle(InEvent::TimerExpired(Timer::EvictCache), now, &mut io);
+                }
+            }
+            for request in requests(&io) {
+                assert!(
+                    open.insert(request),
+                    "requested twice at step {step}: {request:?}"
+                );
+            }
+            match (was_pulling, state.pull.is_some()) {
+                (false, true) => entered += 1,
+                (true, false) => left += 1,
+                _ => {}
+            }
+        }
+        assert!(entered >= 2 && left >= 2, "entered {entered}, left {left}");
     }
 }
