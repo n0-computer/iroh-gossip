@@ -53,10 +53,10 @@ pub(super) enum WriteError {
     /// Message was larger than the configured maximum message size
     #[error("message too large")]
     TooLarge {},
-    /// A write made no progress for [`WRITE_TIMEOUT`]
+    /// A write made no progress for [`WRITE_TIMEOUT`].
     #[error("no write progress for {WRITE_TIMEOUT:?}")]
     Stalled {},
-    /// Opening a stream waited for [`OPEN_TIMEOUT`] at the stream limit of the peer
+    /// Opening a stream waited for [`OPEN_TIMEOUT`] at the stream limit of the peer.
     #[error("stream limit of the peer reached for {OPEN_TIMEOUT:?}")]
     OpenStalled {},
 }
@@ -204,9 +204,9 @@ pub(super) async fn write_sized_message<T: Serialize>(
     postcard::to_slice(&message, &mut buffer[4..])?;
     // Each write takes some bytes, or fails once the peer takes none for long.
     // A slow peer thus keeps the connection, however long the frame takes.
-    let mut written = 0;
-    while written < buffer.len() {
-        written += n0_future::time::timeout(WRITE_TIMEOUT, stream.write(&buffer[written..]))
+    let mut sent = 0;
+    while sent < buffer.len() {
+        sent += n0_future::time::timeout(WRITE_TIMEOUT, stream.write(&buffer[sent..]))
             .await
             .map_err(|_| e!(WriteError::Stalled))?
             .map_err(io::Error::other)?;

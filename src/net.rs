@@ -140,7 +140,7 @@ impl Builder {
         self
     }
 
-    /// Set the membership configuration.
+    /// Sets the membership configuration.
     ///
     /// The defaults suit most apps. Use the same values on every node of a swarm.
     /// We have not tested how a swarm behaves with different values, so test your setup
@@ -150,7 +150,7 @@ impl Builder {
         self
     }
 
-    /// Set the broadcast configuration.
+    /// Sets the broadcast configuration.
     ///
     /// The defaults suit most apps. Use the same values on every node of a swarm.
     /// We have not tested how a swarm behaves with different values, so test your setup
@@ -160,10 +160,10 @@ impl Builder {
         self
     }
 
-    /// Set the ALPN this gossip instance uses.
+    /// Sets the ALPN this gossip instance uses.
     ///
     /// It has to be the same for all peers in the network. If you set a custom ALPN,
-    /// you have to use the same ALPN when registering the [`Gossip`] in on a iroh
+    /// you have to use the same ALPN when registering the [`Gossip`] on an iroh
     /// router with [`RouterBuilder::accept`].
     ///
     /// [`RouterBuilder::accept`]: iroh::protocol::RouterBuilder::accept
@@ -178,7 +178,7 @@ impl Builder {
         self
     }
 
-    /// Spawn a gossip actor and get a handle for it
+    /// Spawns a gossip actor, and returns its handle.
     ///
     /// This has to run inside a tokio runtime. The actor stops when you drop the last clone of
     /// the returned [`Gossip`].
@@ -190,7 +190,7 @@ impl Builder {
         // In that case, the gossip actor will close too very soon for other reasons,
         // so it's fine if we only add our `GossipAddressLookup` for the non-closed
         // case. The alternative would be to return a `Result` from `spawn`,
-        // but as long as this is the only direct error case, it seem unwarranted.
+        // but as long as this is the only direct error case, it seems unwarranted.
         if let Ok(endpoint_addr_lookup) = endpoint.address_lookup().as_ref() {
             endpoint_addr_lookup.add(address_lookup.clone());
         }
@@ -357,9 +357,8 @@ impl Gossip {
 
     /// Joins a gossip topic with the default options.
     ///
-    /// Note that this will not wait for any bootstrap endpoint to be available.
-    /// To ensure the topic is connected to at least one endpoint, use [`GossipTopic::joined`]
-    /// or [`Self::subscribe_and_join`]
+    /// It does not wait for a bootstrap peer. To wait for the first neighbor, use
+    /// [`GossipTopic::joined`] or [`Self::subscribe_and_join`].
     ///
     /// # Errors
     ///

@@ -80,8 +80,8 @@ pub const MIN_MAX_MESSAGE_SIZE: usize = 512;
 /// Note that the concrete type will be used in protocol messages. Therefore, implementations of
 /// the protocol are only compatible if the same concrete type is supplied for this trait.
 ///
-/// TODO: Rename to `PeerId`? It does not necessarily refer to a peer's address, as long as the
-/// networking layer can translate the value of its concrete type into an address.
+/// It does not need to be a peer's address, as long as the networking layer can translate
+/// the value of its concrete type into an address.
 pub trait PeerIdentity: Hash + Eq + Ord + Copy + fmt::Debug + Serialize + DeserializeOwned {}
 impl<T> PeerIdentity for T where
     T: Hash + Eq + Ord + Copy + fmt::Debug + Serialize + DeserializeOwned

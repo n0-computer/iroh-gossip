@@ -48,6 +48,7 @@ impl<PI> Message<PI> {
 
 /// Whether this is a control or data message
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum MessageKind {
     /// A data message.
     Data,

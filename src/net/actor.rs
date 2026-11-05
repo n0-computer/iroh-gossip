@@ -481,7 +481,7 @@ impl Actor {
                 Instant::now(),
             );
             if self.topics.remove(&topic_id).is_some() {
-                tracing::debug!(%topic_id, "publishers and subscribers gone; unsubscribing");
+                debug!(%topic_id, "no publisher or subscriber left, leave the topic");
             }
         }
     }

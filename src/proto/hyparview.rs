@@ -283,6 +283,7 @@ pub struct Disconnect {
 /// Configuration for the swarm membership layer
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct Config {
     /// Number of peers to which active connections are maintained
     pub active_view_capacity: usize,
