@@ -45,8 +45,6 @@ pub enum OutEvent<PI> {
     /// Schedule a timer. The runtime is responsible for sending an [InEvent::TimerExpired]
     /// after the duration.
     ScheduleTimer(Duration, Timer<PI>),
-    /// Close the connection to a peer on the network level.
-    DisconnectPeer(PI),
     /// Emitted when new [`PeerData`] was received for a peer.
     PeerData(PI, PeerData),
 }
@@ -70,9 +68,6 @@ pub trait IO<PI> {
 
     /// Reports new [`PeerData`] of `peer`.
     fn peer_data(&mut self, peer: PI, data: PeerData);
-
-    /// Asks to close the connection to `peer`, as the topic no longer uses it.
-    fn disconnect(&mut self, peer: PI);
 }
 
 #[cfg(test)]
@@ -92,10 +87,6 @@ impl<PI> IO<PI> for VecDeque<OutEvent<PI>> {
 
     fn peer_data(&mut self, peer: PI, data: PeerData) {
         self.push_back(OutEvent::PeerData(peer, data));
-    }
-
-    fn disconnect(&mut self, peer: PI) {
-        self.push_back(OutEvent::DisconnectPeer(peer));
     }
 }
 
@@ -386,6 +377,11 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
         self.gossip.stats()
     }
 
+    /// Returns whether the topic wants a connection to `peer`, see [`hyparview::State::wants`].
+    pub(crate) fn wants(&self, peer: &PI) -> bool {
+        self.swarm.wants(peer)
+    }
+
     /// Check if this topic has any active (connected) peers.
     pub fn has_active_peers(&self) -> bool {
         !self.swarm.active_view.is_empty()
@@ -418,10 +414,6 @@ impl<PI: PeerIdentity, E: IO<PI>> IO<PI> for SwarmIO<'_, PI, E> {
 
     fn peer_data(&mut self, peer: PI, data: PeerData) {
         self.io.peer_data(peer, data);
-    }
-
-    fn disconnect(&mut self, peer: PI) {
-        self.io.disconnect(peer);
     }
 }
 

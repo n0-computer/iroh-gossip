@@ -1294,10 +1294,6 @@ mod test {
         fn peer_data(&mut self, peer: u32, data: crate::proto::PeerData) {
             self.out.peer_data(peer, data);
         }
-
-        fn disconnect(&mut self, peer: u32) {
-            self.out.disconnect(peer);
-        }
     }
 
     /// Returns a state with neighbor 2, and the IO after a broadcast of `content` that `drops` hit.
