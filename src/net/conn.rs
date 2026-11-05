@@ -1,55 +1,37 @@
-//! Utilities for iroh-gossip networking
+//! The tasks of a connection: the send and receive loops, and the connection loop around them.
 
 use std::{
     collections::{hash_map, BTreeMap, HashMap},
-    io,
     time::Duration,
 };
 
 use bytes::BytesMut;
 use iroh::{
-    endpoint::{Connection, RecvStream, SendStream, StreamId},
-    EndpointId,
+    endpoint::{Connection, ConnectionError, RecvStream, SendStream, StreamId},
+    EndpointId, PublicKey,
 };
 use n0_error::{e, stack_error};
-use n0_future::{
-    boxed::BoxFuture,
-    time::{sleep_until, Instant},
-    FuturesUnordered, StreamExt,
-};
-use serde::{de::DeserializeOwned, Serialize};
-use tokio::{
-    io::AsyncReadExt,
-    sync::{mpsc, watch},
-};
+use n0_future::{boxed::BoxFuture, task, time, FuturesUnordered, StreamExt as _};
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{debug, error_span, warn, Instrument};
 
 use super::{
     queue::{QueueLease, QueuedMessage},
+    wire::{read_frame, write_sized_frame, ReadError, StreamHeader, WriteError, OPEN_TIMEOUT},
     InEvent, ProtoMessage,
 };
-use crate::proto::{util::TimerMap, TopicId};
+use crate::proto::TopicId;
 
-/// How long a write may make no progress before it fails the connection.
+/// How long a connection stays open once neither side has a stream on it.
 ///
-/// A peer extends its flow control window only after it read part of it, so
-/// the writes to a slow reader block for a while now and then.
+/// A topic that uses the peer keeps a stream open. Each side times the grace on
+/// its own, so a stream that we open as the peer closes loses its message.
 #[cfg(not(test))]
-pub(super) const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+const RETIRE_GRACE: Duration = Duration::from_secs(10);
+/// The e2e tests build without `cfg(test)`, so they see 10 s.
 #[cfg(test)]
-pub(super) const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// How long opening a stream may wait at the stream limit of the peer before it fails the connection.
-///
-/// The peer raises its limit only once one of our streams ends. With as many
-/// topics as the limit, the wait does not end. The limit is the
-/// `max_concurrent_uni_streams` of the peer's endpoint, 100 by default. A
-/// stalled open of an initial topic only skips the other initial topics.
-#[cfg(not(test))]
-pub(super) const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
-#[cfg(test)]
-pub(super) const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const RETIRE_GRACE: Duration = Duration::from_secs(5);
 
 /// How long a replaced connection may write its current message before it hands it over.
 ///
@@ -57,7 +39,7 @@ pub(super) const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 /// in order. A stream header that started is written in full first. Only
 /// the write timeout bounds it, which counts the time without progress.
 #[cfg(not(test))]
-pub(super) const HANDOVER_LIMIT: Duration = Duration::from_secs(5);
+const HANDOVER_LIMIT: Duration = Duration::from_secs(5);
 #[cfg(test)]
 pub(super) const HANDOVER_LIMIT: Duration = Duration::from_secs(1);
 
@@ -70,103 +52,164 @@ pub(super) const CLOSE_STALLED: u32 = 3;
 /// The code of a close for a connection without streams, see [`RETIRE_GRACE`](super::RETIRE_GRACE).
 pub(super) const CLOSE_RETIRED: u32 = 4;
 
-/// The flag of [`StreamHeader::handles_close`].
-const HANDLES_CLOSE: u8 = 1;
-
 /// The maximum number of stream headers that a [`RecvLoop`] reads at the same time.
 ///
 /// At this limit, the loop accepts no new stream until a header is complete.
 /// A peer that keeps many partial headers thus delays only its own streams.
-pub(crate) const MAX_PENDING_HEADERS: usize = 16;
+pub(super) const MAX_PENDING_HEADERS: usize = 16;
 
-/// Errors related to message writing
 #[allow(missing_docs)]
-#[stack_error(derive, add_meta, from_sources)]
+#[stack_error(derive, add_meta, from_sources, std_sources)]
 #[non_exhaustive]
-pub(crate) enum WriteError {
-    /// Connection error
-    #[error("Connection error")]
+pub(super) enum ConnectionLoopError {
+    #[error(transparent)]
+    Write {
+        source: WriteError,
+    },
+    #[error(transparent)]
     Connection {
         #[error(std_err)]
         source: iroh::endpoint::ConnectionError,
     },
-    /// Serialization failed
-    #[error("Serialization failed")]
-    Ser {
-        #[error(std_err)]
-        source: postcard::Error,
-    },
-    /// IO error
-    #[error("IO error")]
-    Io {
-        #[error(std_err)]
-        source: std::io::Error,
-    },
-    /// Message was larger than the configured maximum message size
-    #[error("message too large")]
-    TooLarge {},
-    /// A write made no progress for [`WRITE_TIMEOUT`]
-    #[error("no write progress for {WRITE_TIMEOUT:?}")]
-    Stalled {},
-    /// Opening a stream waited for [`OPEN_TIMEOUT`] at the stream limit of the peer
-    #[error("stream limit of the peer reached for {OPEN_TIMEOUT:?}")]
-    OpenStalled {},
+    ActorDropped {},
 }
 
-/// The first frame of a stream: the topic of its messages, and a byte of flags.
+impl<T> From<mpsc::error::SendError<T>> for ConnectionLoopError {
+    fn from(_value: mpsc::error::SendError<T>) -> Self {
+        e!(ConnectionLoopError::ActorDropped)
+    }
+}
+
+/// Returns a finished task's output, or `None` if the runtime cancelled the task.
 ///
-/// Nodes up to 0.101 send the topic alone, and ignore the flags when they read
-/// a header, as they ignore the rest of a frame.
-#[derive(Debug)]
-pub(crate) struct StreamHeader {
-    pub(crate) topic_id: TopicId,
-    /// Whether the sender drops its state for a peer whose connection closes.
-    ///
-    /// A node without it loses every later message to a peer that closes a
-    /// connection that is no neighbor link of the node. So we close no
-    /// connection to a peer that did not send it.
-    pub(crate) handles_close: bool,
-}
-
-impl StreamHeader {
-    pub(crate) async fn read(
-        stream: &mut RecvStream,
-        buffer: &mut BytesMut,
-        max_message_size: usize,
-    ) -> Result<Self, ReadError> {
-        let frame = read_lp(stream, buffer, max_message_size)
-            .await?
-            .ok_or_else(|| {
-                ReadError::from(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "stream ended before header",
-                ))
-            })?;
-        Self::decode(frame)
-    }
-
-    fn decode(frame: &[u8]) -> Result<Self, ReadError> {
-        let (topic_id, rest) = postcard::take_from_bytes::<TopicId>(frame)?;
-        Ok(Self {
-            topic_id,
-            handles_close: rest.first().is_some_and(|flags| flags & HANDLES_CLOSE != 0),
-        })
-    }
-
-    /// Writes the header that we send on a stream for `topic_id`.
-    ///
-    /// We always set [`Self::handles_close`].
-    pub(crate) async fn write(
-        topic_id: TopicId,
-        stream: &mut SendStream,
-        buffer: &mut Vec<u8>,
-        max_message_size: usize,
-    ) -> Result<(), WriteError> {
-        write_frame(stream, &(topic_id, HANDLES_CLOSE), buffer, max_message_size).await
+/// A task cancelled at runtime shutdown is no bug, so it must not panic the actor (#140).
+/// A panic in the task panics the caller with the same payload.
+pub(super) fn task_output<T>(res: Result<T, task::JoinError>) -> Option<T> {
+    match res {
+        Ok(output) => Some(output),
+        Err(err) if err.is_cancelled() => None,
+        #[cfg(not(target_family = "wasm"))]
+        Err(err) => std::panic::resume_unwind(err.into_panic()),
+        #[cfg(target_family = "wasm")]
+        Err(err) => panic!("task failed: {err}"),
     }
 }
 
-pub(crate) struct RecvLoop {
+/// Returns once the connection had no stream in either direction for [`RETIRE_GRACE`].
+pub(super) async fn retire(mut ours: watch::Receiver<bool>, mut theirs: watch::Receiver<bool>) {
+    loop {
+        let ours_open = *ours.borrow_and_update();
+        let theirs_open = *theirs.borrow_and_update();
+        tokio::select! {
+            // A stream that opens at the deadline keeps the connection.
+            biased;
+            // A dropped sender would make `changed` return at once.
+            res = ours.changed() => if res.is_err() { std::future::pending().await },
+            res = theirs.changed() => if res.is_err() { std::future::pending().await },
+            () = time::sleep(RETIRE_GRACE), if !ours_open && !theirs_open => return,
+        }
+    }
+}
+
+/// Runs the I/O of a connection, and closes it on an abort or once it carries no stream.
+///
+/// Returns `true` if the end of the connection does not count as a disconnect.
+/// That is the case when either side retired the connection, or when no topic
+/// used the peer at the moment the connection ended. A connection to a node up
+/// to 0.101 never retires. Without a lease, the connection only receives.
+/// Every connection observes the peer abort signal, independently of whether
+/// it writes.
+// Each argument is state the loops share. A struct would only wrap them.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn connection_loop(
+    from: PublicKey,
+    conn: Connection,
+    aborted: CancellationToken,
+    queue_lease: Option<QueueLease>,
+    initial_topics: Vec<TopicId>,
+    in_event_tx: mpsc::Sender<InEvent>,
+    max_message_size: usize,
+    handles_close: watch::Sender<bool>,
+) -> Result<bool, ConnectionLoopError> {
+    debug!(side = ?conn.side(), "connection established");
+    let mut handles_close_rx = handles_close.subscribe();
+    // Here, so that the flags outlive the loops. The send flag starts set, as a
+    // new writer can wait for the lock of the queue.
+    let our_streams = watch::Sender::new(queue_lease.is_some());
+    let their_streams = watch::Sender::new(false);
+
+    let queue_closed = queue_lease.as_ref().map(QueueLease::closing);
+    let send_loop = queue_lease.map(|lease| {
+        let flag = our_streams.clone();
+        SendLoop::new(conn.clone(), lease, max_message_size, flag, initial_topics)
+    });
+    let mut recv_loop = RecvLoop::new(
+        from,
+        conn.clone(),
+        in_event_tx,
+        max_message_size,
+        handles_close,
+        their_streams.clone(),
+    );
+
+    let io = async {
+        let recv_fut = recv_loop.run().instrument(error_span!("recv"));
+        tokio::pin!(recv_fut);
+        if let Some(send_loop) = send_loop {
+            tokio::select! {
+                res = send_loop.run().instrument(error_span!("send")) => res?,
+                _ = &mut recv_fut => return Ok(()),
+            }
+        }
+        // We are done sending. The peer may still send on this connection, as two
+        // peers that dialed each other can each use a different one.
+        recv_fut.await;
+        Ok(())
+    };
+    let retirement = async {
+        // An old node would lose its later messages to us after a close, see
+        // `StreamHeader::handles_close`.
+        if handles_close_rx.wait_for(|known| *known).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+        retire(our_streams.subscribe(), their_streams.subscribe()).await;
+    };
+    tokio::select! {
+        biased;
+        // All connections close, including receive-only ones, so the peer
+        // learns it on the connection that it uses. A
+        // node up to 0.101 may then lose its later messages to us (#155). It
+        // missed a control message, so its views differ from ours anyway.
+        _ = aborted.cancelled() => {
+            warn!("the peer is aborted, close the connection");
+            conn.close(CLOSE_QUEUE_FULL.into(), b"send queue full");
+            Ok(false)
+        }
+        res = io => {
+            // A retirement by the peer counts also when it cut one of our writes.
+            let retired_by_peer = matches!(
+                conn.close_reason(),
+                Some(ConnectionError::ApplicationClosed(close))
+                    if close.error_code == CLOSE_RETIRED.into()
+            );
+            // Read now, as a topic may open the queue before the actor sees the end.
+            // A message from then on needs a new dial, not a disconnect.
+            let queue_was_closed = queue_closed.is_some_and(|closed| *closed.borrow());
+            if retired_by_peer || queue_was_closed {
+                Ok(true)
+            } else {
+                res.map(|()| false)
+            }
+        }
+        _ = retirement => {
+            debug!("no stream for a while, close");
+            conn.close(CLOSE_RETIRED.into(), b"no stream");
+            Ok(true)
+        }
+    }
+}
+
+pub(super) struct RecvLoop {
     remote_endpoint_id: EndpointId,
     conn: Connection,
     max_message_size: usize,
@@ -180,7 +223,7 @@ pub(crate) struct RecvLoop {
 }
 
 impl RecvLoop {
-    pub(crate) fn new(
+    pub(super) fn new(
         remote_endpoint_id: EndpointId,
         conn: Connection,
         in_event_tx: mpsc::Sender<InEvent>,
@@ -201,7 +244,7 @@ impl RecvLoop {
     /// Reads the streams of the connection until it closes or the actor stops.
     ///
     /// A bad stream loses only itself, so this never fails.
-    pub(crate) async fn run(&mut self) {
+    pub(super) async fn run(&mut self) {
         // Each header is read in its own future, so a partial one blocks no other stream.
         let mut header_futures = FuturesUnordered::new();
         let mut read_futures = FuturesUnordered::new();
@@ -330,7 +373,7 @@ impl RecvStreamState {
     }
 }
 
-pub(crate) struct SendLoop {
+pub(super) struct SendLoop {
     conn: Connection,
     streams: HashMap<TopicId, SendStream>,
     buffer: Vec<u8>,
@@ -347,7 +390,7 @@ pub(crate) struct SendLoop {
 }
 
 impl SendLoop {
-    pub(crate) fn new(
+    pub(super) fn new(
         conn: Connection,
         queue_lease: QueueLease,
         max_message_size: usize,
@@ -371,7 +414,7 @@ impl SendLoop {
     /// Once no queued message waits, it also opens a stream for each initial
     /// topic. After the queue closed, it waits for the queue to open again.
     /// Takes `self`, so that the lease drops once it returns.
-    pub(crate) async fn run(mut self) -> Result<(), WriteError> {
+    pub(super) async fn run(mut self) -> Result<(), WriteError> {
         let conn = self.conn.clone();
         let closed = conn.closed();
         tokio::pin!(closed);
@@ -579,181 +622,7 @@ impl SendLoop {
     }
 }
 
-/// Errors related to message reading
-#[allow(missing_docs)]
-#[stack_error(derive, add_meta, from_sources)]
-#[non_exhaustive]
-pub(crate) enum ReadError {
-    /// Deserialization failed
-    #[error("Deserialization failed")]
-    De {
-        #[error(std_err)]
-        source: postcard::Error,
-    },
-    /// IO error
-    #[error("IO error")]
-    Io {
-        #[error(std_err)]
-        source: std::io::Error,
-    },
-    /// Message was larger than the configured maximum message size
-    #[error("message too large")]
-    TooLarge {},
-}
-
-/// Read a length-prefixed frame and decode with postcard.
-pub(crate) async fn read_frame<T: DeserializeOwned>(
-    reader: &mut RecvStream,
-    buffer: &mut BytesMut,
-    max_message_size: usize,
-) -> Result<Option<T>, ReadError> {
-    let Some(data) = read_lp(reader, buffer, max_message_size).await? else {
-        return Ok(None);
-    };
-    Ok(Some(postcard::from_bytes(data)?))
-}
-
-/// Reads a length prefixed buffer.
-///
-/// Borrows the frame from `buffer`, keeping its storage for the next read.
-/// Returns `None` if the stream ends before the frame length starts.
-pub(crate) async fn read_lp<'a>(
-    reader: &mut RecvStream,
-    buffer: &'a mut BytesMut,
-    max_message_size: usize,
-) -> Result<Option<&'a [u8]>, ReadError> {
-    let size = match reader.read_u32().await {
-        Ok(size) => size,
-        Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(err) => return Err(err.into()),
-    };
-    let size = usize::try_from(size).map_err(|_| e!(ReadError::TooLarge))?;
-    if size > max_message_size {
-        return Err(e!(ReadError::TooLarge));
-    }
-    buffer.resize(size, 0u8);
-    reader
-        .read_exact(&mut buffer[..])
-        .await
-        .map_err(io::Error::other)?;
-    Ok(Some(&buffer[..]))
-}
-
-/// Writes a length-prefixed frame.
-pub(crate) async fn write_frame<T: Serialize>(
-    stream: &mut SendStream,
-    message: &T,
-    buffer: &mut Vec<u8>,
-    max_message_size: usize,
-) -> Result<(), WriteError> {
-    let len = postcard::experimental::serialized_size(&message)?;
-    write_sized_frame(stream, message, len, buffer, max_message_size).await
-}
-
-/// Writes a length-prefixed frame of `message`, whose encoded size is `len`.
-async fn write_sized_frame<T: Serialize>(
-    stream: &mut SendStream,
-    message: &T,
-    len: usize,
-    buffer: &mut Vec<u8>,
-    max_message_size: usize,
-) -> Result<(), WriteError> {
-    // A frame must be shorter than the limit. Nodes up to 0.101 read a frame of
-    // the limit, but refuse to write one, so they could not forward it.
-    if len >= max_message_size {
-        return Err(e!(WriteError::TooLarge));
-    }
-    buffer.clear();
-    buffer.extend_from_slice(&(len as u32).to_be_bytes());
-    buffer.resize(4 + len, 0u8);
-    postcard::to_slice(&message, &mut buffer[4..])?;
-    // Each write takes some bytes, or fails once the peer takes none for long.
-    // A slow peer thus keeps the connection, however long the frame takes.
-    let mut written = 0;
-    while written < buffer.len() {
-        written += n0_future::time::timeout(WRITE_TIMEOUT, stream.write(&buffer[written..]))
-            .await
-            .map_err(|_| e!(WriteError::Stalled))?
-            .map_err(io::Error::other)?;
-    }
-    Ok(())
-}
-
 /// Sets `flag` to `value`, and wakes its receivers only if the value changed.
 pub(super) fn set_flag(flag: &watch::Sender<bool>, value: bool) {
     flag.send_if_modified(|old| std::mem::replace(old, value) != value);
-}
-
-/// A [`TimerMap`] with an async method to wait for the next timer expiration.
-#[derive(Debug)]
-pub(crate) struct Timers<T> {
-    map: TimerMap<T>,
-}
-
-impl<T> Default for Timers<T> {
-    fn default() -> Self {
-        Self {
-            map: TimerMap::default(),
-        }
-    }
-}
-
-impl<T> Timers<T> {
-    /// Creates a new timer map.
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
-    /// Inserts a new entry at the specified instant
-    pub(crate) fn insert(&mut self, instant: Instant, item: T) {
-        self.map.insert(instant, item);
-    }
-
-    /// Waits for the next timer to elapse.
-    pub(crate) async fn wait_next(&mut self) -> Instant {
-        match self.map.first() {
-            None => std::future::pending::<Instant>().await,
-            Some(instant) => {
-                sleep_until(*instant).await;
-                *instant
-            }
-        }
-    }
-
-    /// Pops the earliest timer that expires at or before `now`.
-    pub(crate) fn pop_before(&mut self, now: Instant) -> Option<(Instant, T)> {
-        self.map.pop_before(now)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use serde::Deserialize;
-
-    use super::*;
-
-    /// The header as nodes up to 0.101 encode and decode it.
-    #[derive(Debug, Serialize, Deserialize)]
-    struct OldStreamHeader {
-        topic_id: TopicId,
-    }
-
-    /// Old and new nodes read the stream headers of each other.
-    #[test]
-    fn stream_header_works_across_versions() {
-        let topic_id: TopicId = [7; 32].into();
-        let new = postcard::to_stdvec(&(topic_id, HANDLES_CLOSE)).expect("encode");
-        let old = postcard::to_stdvec(&OldStreamHeader { topic_id }).expect("encode");
-
-        let read_by_old: OldStreamHeader = postcard::from_bytes(&new).expect("old reads new");
-        assert_eq!(read_by_old.topic_id, topic_id);
-
-        let header = StreamHeader::decode(&old).expect("new reads old");
-        assert_eq!(header.topic_id, topic_id);
-        assert!(!header.handles_close);
-
-        let header = StreamHeader::decode(&new).expect("new reads new");
-        assert_eq!(header.topic_id, topic_id);
-        assert!(header.handles_close);
-    }
 }
