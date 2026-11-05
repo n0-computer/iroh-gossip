@@ -528,6 +528,16 @@ mod tests {
         assert!(!reader.reads(&next));
     }
 
+    #[test]
+    fn reader_sees_an_empty_queue() {
+        let (queue, mut reader) = SendQueue::new(MIN_QUEUE_SIZE);
+        assert!(reader.is_empty());
+        assert!(matches!(queue.send(data(10)), Pushed::Queued));
+        assert!(!reader.is_empty());
+        reader.unfinished = reader.rx.try_recv().ok();
+        assert!(!reader.is_empty());
+    }
+
     /// The least queue fits eight messages of the largest size, so its announcements fit one.
     #[test]
     fn least_size_fits_eight_large_messages() {

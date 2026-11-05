@@ -32,6 +32,31 @@ async fn partial_topic_header_fails_the_connection() -> Result {
     closed_with(&peer_conn, CloseCode::Protocol).await
 }
 
+/// A closed queue finishes the streams of the writer, so the connection can go idle.
+#[tokio::test]
+#[traced_test]
+async fn closed_queue_finishes_the_stream() -> Result {
+    let pair = TestPair::new(1).await?;
+    let (conn, peer_conn) = pair.connect().await?;
+    let topic: TopicId = blake3::hash(b"closed_queue_finishes_the_stream").into();
+    let (queue, reader) = SendQueue::new(queue::MIN_QUEUE_SIZE);
+    let _writer = start_writer(conn, &peer_conn, reader, TEST_FRAME_LIMIT, Vec::new()).await?;
+
+    assert!(matches!(queue.send(join_message(topic, 0)), Pushed::Queued));
+    let mut stream = peer_conn.accept_uni().await.std_context("accept")?;
+    let mut buffer = Vec::new();
+    wire::StreamHeader::read(&mut stream, &mut buffer).await?;
+    let message: Option<TopicMessage> =
+        wire::read_message(&mut stream, &mut buffer, TEST_FRAME_LIMIT).await?;
+    assert!(message.is_some(), "the message did not go out");
+
+    queue.close();
+    let end: Option<TopicMessage> =
+        wire::read_message(&mut stream, &mut buffer, TEST_FRAME_LIMIT).await?;
+    assert!(end.is_none(), "the stream did not end");
+    Ok(())
+}
+
 /// A queued message gets the stream of the peer before the initial topics of the writer.
 ///
 /// The peer here allows one stream. A stream of an initial topic would take it,
@@ -126,6 +151,47 @@ async fn streams_of_a_topic_keep_their_order() -> Result {
     for expected in [first, second] {
         assert_eq!(reader.next().await?.message, expected.message);
     }
+    Ok(())
+}
+
+/// A stream waits until every older stream decoded its header.
+///
+/// The old stream carries a `Close`, and its header is late. The new
+/// stream has its `Join` and its header first. The node must dispatch the
+/// `Close` before the `Join`, as the peer wrote them in that order.
+#[tokio::test]
+#[traced_test]
+async fn delayed_header_keeps_close_before_join() -> Result {
+    let pair = TestPair::new(1).await?;
+    let (conn, peer_conn) = pair.connect().await?;
+    let (mut reader, _control) = start_conn_peered(conn, &peer_conn, TEST_FRAME_LIMIT).await?;
+
+    let topic: TopicId = blake3::hash(b"delayed_header").into();
+    let (close, join) = (disconnect_message(topic), join_message(topic, 2));
+    let mut buffer = Vec::new();
+    // The old stream sends one byte of its header, and the rest comes late.
+    let mut older = peer_conn.open_uni().await.std_context("open stream")?;
+    older.write_all(&[0x23]).await.std_context("write")?;
+    let mut newer = peer_conn.open_uni().await.std_context("open stream")?;
+    wire::StreamHeader::write(topic, &mut newer, &mut buffer).await?;
+    wire::write_message(&mut newer, &join.message, &mut buffer, TEST_FRAME_LIMIT).await?;
+    assert!(
+        !reader.gets_message_within(Duration::from_millis(500)).await,
+        "the newer stream passed the older one"
+    );
+
+    older
+        .write_all(&[0x01, 0x00, 0x20])
+        .await
+        .std_context("write")?;
+    older
+        .write_all(topic.as_bytes())
+        .await
+        .std_context("write")?;
+    wire::write_message(&mut older, &close.message, &mut buffer, TEST_FRAME_LIMIT).await?;
+    older.finish().std_context("finish")?;
+    assert_eq!(reader.next().await?.message, close.message);
+    assert_eq!(reader.next().await?.message, join.message);
     Ok(())
 }
 
@@ -421,5 +487,123 @@ async fn oversized_message_is_dropped() -> Result {
     let size = wire::message_len(&message).std_context("size")?;
     assert!(size < 1024, "the oversized message went out");
     assert!(!writer.test.task.is_finished(), "the writer ended");
+    Ok(())
+}
+
+/// Appends `value` as a LEB128 varint.
+fn varint(buf: &mut Vec<u8>, value: u64) {
+    *buf = postcard::to_extend(&value, std::mem::take(buf)).expect("a varint encodes");
+}
+
+/// Appends `payload` as a frame.
+fn frame(buf: &mut Vec<u8>, payload: &[u8]) {
+    varint(buf, payload.len() as u64);
+    buf.extend_from_slice(payload);
+}
+
+/// Returns a header payload of `kind` with `params`.
+fn header(kind: u64, params: &[(u64, &[u8])]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    varint(&mut buf, kind);
+    for (id, value) in params {
+        varint(&mut buf, *id);
+        varint(&mut buf, value.len() as u64);
+        buf.extend_from_slice(value);
+    }
+    buf
+}
+
+/// A type code that no version uses yet.
+const LATER: u64 = 0x3f;
+
+/// A node skips what a later version may add without a negotiation, and keeps the connection.
+///
+/// The peer sends unknown parameters in both headers, a frame over the size
+/// limit, and bytes after the fields of a known message. The test spells out
+/// the wire codes, so a changed code fails it.
+#[tokio::test]
+#[traced_test]
+async fn skips_what_a_later_version_adds() -> Result {
+    let max_message_size = 1024;
+    let pair = TestPair::new(1).await?;
+    let (conn, theirs) = pair.connect_back().await?;
+    let mut test = start_conn(conn, max_message_size, Duration::from_secs(60));
+
+    let (mut control, mut control_recv) = theirs.open_bi().await.std_context("open control")?;
+    let mut bytes = Vec::new();
+    let control_header = header(0x00, &[(LATER, b"later"), (0x01, &PEER_SESSION.0)]);
+    frame(&mut bytes, &control_header);
+    control
+        .write_all(&bytes)
+        .await
+        .std_context("write control")?;
+
+    let topic = TopicId::from_bytes([7; 32]);
+    let mut bytes = Vec::new();
+    let topic_header = header(0x01, &[(0x00, topic.as_bytes()), (LATER, b"later")]);
+    frame(&mut bytes, &topic_header);
+    let mut oversized = vec![0x14];
+    oversized.resize(max_message_size + 1, 0);
+    frame(&mut bytes, &oversized);
+    // A message to the neighbors: type, then the content as postcard bytes.
+    let mut known = vec![0x14];
+    varint(&mut known, 5);
+    known.extend_from_slice(b"hello");
+    known.extend_from_slice(b"later fields");
+    frame(&mut bytes, &known);
+    let mut stream = theirs.open_uni().await.std_context("open stream")?;
+    stream.write_all(&bytes).await.std_context("write stream")?;
+    stream.finish().std_context("finish stream")?;
+
+    let message = test.next().await?;
+    assert_eq!(message.topic, topic);
+    let TopicMessage::Gossip(proto::plumtree::Message::Gossip(gossip)) = message.message else {
+        panic!("not a payload: {:?}", message.message);
+    };
+    assert_eq!(gossip.content, &b"hello"[..]);
+    assert_eq!(gossip.scope, proto::DeliveryScope::Neighbors);
+    Session::read(&mut control_recv, &mut Vec::new())
+        .await
+        .std_context("read control header")?;
+    // The node answers a GOAWAY once our stream ended.
+    control
+        .write_all(&ControlMessage::Goaway(1).to_frame())
+        .await
+        .std_context("write GOAWAY")?;
+    assert!(matches!(
+        read_control(&mut control_recv).await?,
+        ControlMessage::Goaway(_)
+    ));
+    assert!(theirs.close_reason().is_none(), "the connection closed");
+    Ok(())
+}
+
+/// A message of an unknown type fails the connection, on a topic stream and on the control stream.
+///
+/// A peer may send a new type only after both peers declared support for it in a header
+/// parameter. So an unknown type is a protocol error, not a message to skip.
+#[tokio::test]
+#[traced_test]
+async fn unknown_message_type_fails_the_connection() -> Result {
+    for on_control in [false, true] {
+        let pair = TestPair::new(1).await?;
+        let (conn, theirs) = pair.connect_back().await?;
+        let test = start_conn(conn, 1024, Duration::from_secs(60));
+        let (mut control, _control_recv) = control_open(&theirs).await?;
+        let mut unknown = Vec::new();
+        frame(&mut unknown, &[LATER as u8, 1, 2, 3]);
+        if on_control {
+            control.write_all(&unknown).await.std_context("write")?;
+        } else {
+            let topic = TopicId::from_bytes([7; 32]);
+            let mut bytes = Vec::new();
+            frame(&mut bytes, &header(0x01, &[(0x00, topic.as_bytes())]));
+            bytes.extend(unknown);
+            let mut stream = theirs.open_uni().await.std_context("open stream")?;
+            stream.write_all(&bytes).await.std_context("write stream")?;
+        }
+        closed_with(&theirs, CloseCode::Protocol).await?;
+        assert_eq!(ended(test.task, SECS_10).await?, ConnEnd::Failed);
+    }
     Ok(())
 }

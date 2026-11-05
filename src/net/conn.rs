@@ -39,7 +39,7 @@ use super::{
 use crate::proto::TopicId;
 
 /// How long a retire may take, from the time the writer stops writing.
-const RETIRE_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 3 } else { 120 });
+pub(super) const RETIRE_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 3 } else { 120 });
 
 /// An event from a connection task to the actor.
 ///

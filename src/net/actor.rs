@@ -39,7 +39,7 @@ use crate::{
 };
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 
 /// How long an idle connection waits before it retires, by default.
 const DEFAULT_RETIRE_AFTER: Duration = Duration::from_secs(10);
