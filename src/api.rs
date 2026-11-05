@@ -44,7 +44,7 @@ impl GossipSender {
 
     /// Returns the largest message content that [`Self::broadcast`] takes.
     ///
-    /// It is [`Builder::max_message_size`] less the encoding, about 7 bytes,
+    /// It is [`Builder::max_message_size`] less the encoding, about 15 bytes,
     /// and holds for [`Self::broadcast_neighbors`] too.
     ///
     /// [`Builder::max_message_size`]: crate::net::Builder::max_message_size

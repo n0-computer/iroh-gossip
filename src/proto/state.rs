@@ -595,7 +595,10 @@ mod tests {
                 topic::Message::Swarm(hyparview::Message::test_shuffle(2, 3)),
                 true,
             ),
-            (topic::Message::Gossip(plumtree::Message::Prune), false),
+            (
+                topic::Message::Gossip(plumtree::Message::Prune(Default::default())),
+                false,
+            ),
             (
                 topic::Message::Swarm(hyparview::Message::test_neighbor()),
                 true,
@@ -679,6 +682,7 @@ mod tests {
         let ihave = plumtree::IHave {
             id: plumtree::MessageId::from_content(b"late"),
             round: 1u16.into(),
+            tree: Default::default(),
         };
         let message = Message {
             topic,
@@ -786,7 +790,7 @@ mod tests {
     #[test]
     fn plumtree_events_do_not_change_wants() {
         let topic: TopicId = [0u8; 32].into();
-        let gossip = topic::Message::Gossip(plumtree::Message::Prune);
+        let gossip = topic::Message::Gossip(plumtree::Message::Prune(Default::default()));
         let swarm = topic::Message::Swarm(hyparview::Message::Join(None));
         let recv = |message| InEvent::RecvMessage(1, Message { topic, message });
         assert!(!recv(gossip).may_change_wants());
