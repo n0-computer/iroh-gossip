@@ -85,6 +85,8 @@ pub enum InEvent<PI> {
     TimerExpired(Timer<PI>),
     /// A peer was disconnected on the IO layer.
     PeerDisconnected(PI),
+    /// The peer refused us, and the connection stays usable.
+    PeerRefused(PI),
     /// Send a join request to a peer.
     RequestJoin(PI),
     /// Update the peer data that is transmitted on join requests.
@@ -470,6 +472,11 @@ where
                 }
             },
             InEvent::PeerDisconnected(peer) => self.handle_connection_closed(peer, io),
+            InEvent::PeerRefused(peer) => {
+                // A refused join gets no retry: the peer would refuse it again.
+                self.pending_joins.remove(&peer);
+                self.handle_connection_closed(peer, io);
+            }
             InEvent::RequestJoin(peer) => self.handle_join(peer, io),
             InEvent::UpdatePeerData(data) => {
                 self.me_data = Some(data);
@@ -2157,6 +2164,20 @@ mod tests {
             io,
         );
         assert!(!state.wants(&2));
+    }
+
+    /// A refused join is no longer wanted, and gets no retry.
+    #[test]
+    fn refused_join_is_not_wanted() {
+        let mut state = new_state();
+        let io = &mut Io::new();
+        state.handle(InEvent::RequestJoin(1), io);
+        assert!(state.wants(&1));
+        state.handle(InEvent::PeerRefused(1), io);
+        assert!(!state.wants(&1));
+        io.clear();
+        state.handle(InEvent::TimerExpired(Timer::RetryJoin(1, 0)), io);
+        assert!(joined(io).is_empty());
     }
 
     /// Fires the one-shot timers in `io` in rounds, until no new one comes.

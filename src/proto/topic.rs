@@ -29,6 +29,15 @@ pub enum InEvent<PI> {
     TimerExpired(Timer<PI>),
     /// Peer disconnected on the network level.
     PeerDisconnected(PI),
+    /// We rejected the peer for this topic, and the connection stays usable.
+    ///
+    /// The topic drops the peer as for [`Self::PeerRefused`], but emits no event.
+    PeerRejected(PI),
+    /// The peer refused us for this topic, and the connection stays usable.
+    ///
+    /// The topic drops the peer as it does for [`Self::PeerDisconnected`], and emits
+    /// [`Event::Refused`].
+    PeerRefused(PI),
     /// Update the opaque peer data about yourself.
     UpdatePeerData(PeerData),
 }
@@ -168,6 +177,12 @@ impl<PI> Message<PI> {
         matches!(self, Message::Swarm(hyparview::Message::Close(_)))
     }
 
+    /// Returns `true` if this is a message of the swarm membership layer.
+    #[cfg(feature = "net")]
+    pub(crate) fn is_membership(&self) -> bool {
+        matches!(self, Message::Swarm(_))
+    }
+
     /// Returns `true` if this announces messages, which the peer can still request.
     #[cfg(feature = "net")]
     pub(crate) fn is_announcement(&self) -> bool {
@@ -185,6 +200,8 @@ pub enum Event<PI> {
     NeighborDown(PI),
     /// A gossip message was received for this topic
     Received(GossipEvent<PI>),
+    /// The peer refused us for this topic, for example for a bad auth token.
+    Refused(PI),
 }
 
 /// A timer to be registered for a particular topic.
@@ -331,6 +348,15 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
             },
             InEvent::PeerDisconnected(peer) => {
                 swarm.handle(SwarmIn::PeerDisconnected(peer), &mut io);
+                io.gossip.on_neighbor_down(peer);
+            }
+            InEvent::PeerRefused(peer) => {
+                swarm.handle(SwarmIn::PeerRefused(peer), &mut io);
+                io.gossip.on_neighbor_down(peer);
+                io.io.emit(Event::Refused(peer));
+            }
+            InEvent::PeerRejected(peer) => {
+                swarm.handle(SwarmIn::PeerRefused(peer), &mut io);
                 io.gossip.on_neighbor_down(peer);
             }
             InEvent::UpdatePeerData(data) => swarm.handle(SwarmIn::UpdatePeerData(data), &mut io),

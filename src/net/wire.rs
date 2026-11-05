@@ -54,7 +54,7 @@ pub(super) const HEADER_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 
 ///
 /// A longer header fails the connection.
 ///
-/// Headers do not count against the message size limit.
+/// Headers do not count against the message size limit, so a large auth token fits.
 const MAX_HEADER_LEN: usize = 4096;
 
 /// Header kind of the control stream.
@@ -75,6 +75,9 @@ const KIND_TOPIC: u64 = 0x01;
 
 /// Header parameter with the 32 byte topic id. Required on topic streams.
 const PARAM_TOPIC_ID: u64 = 0x00;
+
+/// Header parameter with the auth token of the sender, opaque bytes. Optional.
+const PARAM_TOKEN: u64 = 0x02;
 
 /// The message type codes.
 mod types {
@@ -131,7 +134,7 @@ pub(super) enum WriteError {
     /// The peer stopped the stream with `code`.
     #[error("the peer stopped the stream with code {code}")]
     Stopped { code: u64 },
-    /// Message was larger than the configured maximum message size
+    /// A message or a header was over its size limit.
     #[error("message too large")]
     TooLarge {},
     /// A write made no progress for [`WRITE_TIMEOUT`].
@@ -170,10 +173,13 @@ pub(super) enum ReadError {
     UnknownType { code: u64 },
 }
 
-/// The first frame of a stream: the topic of its messages.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The first frame of a stream: the topic of its messages, and the token of the sender.
+#[derive(derive_more::Debug, Clone, PartialEq, Eq)]
 pub(super) struct StreamHeader {
     pub(super) topic: TopicId,
+    /// A credential, so it stays out of logs.
+    #[debug("{}", if token.is_some() { "Some(..)" } else { "None" })]
+    pub(super) token: Option<Bytes>,
 }
 
 /// Reads the payload of a header frame into `buffer`.
@@ -238,27 +244,41 @@ impl StreamHeader {
         let params = decode_header(buf, KIND_TOPIC)?;
         Ok(Self {
             topic: TopicId::from_bytes(param(&params, PARAM_TOPIC_ID)?),
+            token: params
+                .into_iter()
+                .find_map(|(id, value)| (id == PARAM_TOKEN).then_some(value)),
         })
     }
 
     /// Writes the header that we send on a stream for `topic`.
+    ///
+    /// Fails with [`WriteError::TooLarge`], before it writes, if the header is over
+    /// [`MAX_HEADER_LEN`].
     pub(super) async fn write(
         topic: TopicId,
+        token: Option<&[u8]>,
         stream: &mut SendStream,
         buffer: &mut Vec<u8>,
     ) -> Result<(), WriteError> {
         let mut payload = Vec::new();
-        put_header(
-            &mut payload,
-            KIND_TOPIC,
-            &[(PARAM_TOPIC_ID, topic.as_bytes())],
-        );
+        let mut params = vec![(PARAM_TOPIC_ID, topic.as_bytes().as_slice())];
+        params.extend(token.map(|token| (PARAM_TOKEN, token)));
+        put_header(&mut payload, KIND_TOPIC, &params);
+        if payload.len() > MAX_HEADER_LEN {
+            return Err(e!(WriteError::TooLarge));
+        }
         buffer.clear();
         put_varint(buffer, payload.len() as u64);
         buffer.extend_from_slice(&payload);
         write_all(stream, buffer).await
     }
 }
+
+/// The largest auth token that fits in a stream header.
+///
+/// The header holds the kind, the topic parameter (id, length, 32 bytes), the
+/// token id, a two byte token length, and the token.
+pub(super) const MAX_TOKEN_LEN: usize = MAX_HEADER_LEN - (1 + (1 + 1 + 32) + 1 + 2);
 
 /// The code of a connection close.
 ///
@@ -683,6 +703,13 @@ mod tests {
     }
 
     #[test]
+    fn max_token_fills_the_header() {
+        let token = vec![0u8; MAX_TOKEN_LEN];
+        let payload = header(&[(PARAM_TOPIC_ID, &TOPIC[..]), (PARAM_TOKEN, &token[..])]);
+        assert_eq!(payload.len(), MAX_HEADER_LEN);
+    }
+
+    #[test]
     fn varint_lengths() {
         for (value, len) in [
             (0, 1),
@@ -735,6 +762,45 @@ mod tests {
             hex::encode(framed(&payload)),
             format!("230100{}{}", "20", "11".repeat(32))
         );
+    }
+
+    /// The token is parameter 2. Our writer sends it after the topic.
+    #[test]
+    fn header_with_a_token() {
+        let payload = header(&[(PARAM_TOPIC_ID, &TOPIC), (PARAM_TOKEN, b"secret")]);
+        assert_eq!(
+            hex::encode(&payload),
+            format!("0100{}{}{}", "20", "11".repeat(32), "0206736563726574")
+        );
+        let decoded = StreamHeader::decode(&payload).unwrap();
+        assert_eq!(decoded.token.as_deref(), Some(&b"secret"[..]));
+        // The parameters can come in any order, and an empty token still counts as a token.
+        let payload = header(&[(PARAM_TOKEN, b""), (PARAM_TOPIC_ID, &TOPIC)]);
+        assert_eq!(
+            StreamHeader::decode(&payload).unwrap().token.as_deref(),
+            Some(&b""[..])
+        );
+        // No token parameter, no token.
+        let payload = header(&[(PARAM_TOPIC_ID, &TOPIC)]);
+        assert_eq!(StreamHeader::decode(&payload).unwrap().token, None);
+        // A long token has a two byte length.
+        let long = vec![7u8; 300];
+        let payload = header(&[(PARAM_TOPIC_ID, &TOPIC), (PARAM_TOKEN, &long)]);
+        assert_eq!(payload.len(), 35 + 1 + 2 + 300);
+        assert_eq!(
+            StreamHeader::decode(&payload).unwrap().token.as_deref(),
+            Some(&long[..])
+        );
+    }
+
+    #[test]
+    fn header_debug_hides_the_token() {
+        let header = StreamHeader {
+            topic: TopicId::from_bytes(TOPIC),
+            token: Some(Bytes::from_static(b"hunter2")),
+        };
+        let debug = format!("{header:?}");
+        assert!(!debug.contains("hunter2"), "{debug}");
     }
 
     #[test]

@@ -288,6 +288,11 @@ pub enum Event {
     /// [`Event::NeighborDown`]. The subscription stays open. See
     /// [`JoinOptions::subscription_capacity`] to set the capacity of the channel.
     Lagged,
+    /// A peer refused us on this topic, for example for a bad [`JoinOptions::auth_token`].
+    ///
+    /// The node drops the peer for this topic, and does not send it messages of the topic
+    /// on the same connection again. The connection stays open for other topics.
+    Refused(EndpointId),
 }
 
 impl From<crate::proto::Event<EndpointId>> for Event {
@@ -295,6 +300,7 @@ impl From<crate::proto::Event<EndpointId>> for Event {
         match event {
             crate::proto::Event::NeighborUp(endpoint_id) => Self::NeighborUp(endpoint_id),
             crate::proto::Event::NeighborDown(endpoint_id) => Self::NeighborDown(endpoint_id),
+            crate::proto::Event::Refused(endpoint_id) => Self::Refused(endpoint_id),
             crate::proto::Event::Received(message) => Self::Received(Message {
                 content: message.content,
                 scope: message.scope,
@@ -336,7 +342,7 @@ pub(crate) enum Command {
 ///
 /// Build it with [`Self::with_bootstrap`] or [`Default`], and the methods that set an option.
 /// New options can come in a minor version, so you cannot construct it with a struct literal.
-#[derive(Debug)]
+#[derive(derive_more::Debug)]
 #[non_exhaustive]
 pub struct JoinOptions {
     /// The initial bootstrap endpoints.
@@ -350,10 +356,15 @@ pub struct JoinOptions {
     /// After a `Lagged`, the neighbors that [`GossipReceiver::neighbors`] reports can be wrong.
     /// If you need the exact state, subscribe again.
     pub subscription_capacity: usize,
+    /// The token that we send to every peer on this topic, see [`Self::auth_token`].
+    ///
+    /// `None` sends no token. The debug output hides the token.
+    #[debug("{}", if auth_token.is_some() { "Some(..)" } else { "None" })]
+    pub auth_token: Option<Bytes>,
 }
 
 impl Default for JoinOptions {
-    /// Returns options with no bootstrap peers and the default subscription capacity.
+    /// Returns options with no bootstrap peers, no token and the default subscription capacity.
     fn default() -> Self {
         Self::with_bootstrap([])
     }
@@ -365,6 +376,7 @@ impl JoinOptions {
         Self {
             bootstrap: endpoints.into_iter().collect(),
             subscription_capacity: TOPIC_EVENTS_DEFAULT_CAP,
+            auth_token: None,
         }
     }
 
@@ -373,11 +385,44 @@ impl JoinOptions {
         self.subscription_capacity = capacity;
         self
     }
+
+    /// Sets the token that we send to every peer on this topic.
+    ///
+    /// The token is opaque to gossip. A peer that sets a verifier with
+    /// [`Builder::topic_auth`] checks it, and refuses us for the topic if it does not
+    /// accept it. We then get [`Event::Refused`].
+    ///
+    /// The token goes in the header of each stream we open on the topic, so the
+    /// header limit bounds it to at most 4058 bytes. [`Builder::max_message_size`] does not
+    /// apply. We also send it to peers that other members named, before they proved anything
+    /// to us. Bind the token to our endpoint id, so that a peer that sees it cannot use it as
+    /// its own.
+    ///
+    /// A topic has one token for as long as the node is on it. The first join with a token
+    /// sets the token of the topic, and a later join does not change it.
+    ///
+    /// [`Builder::topic_auth`]: crate::net::Builder::topic_auth
+    /// [`Builder::max_message_size`]: crate::net::Builder::max_message_size
+    pub fn auth_token(mut self, token: impl Into<Bytes>) -> Self {
+        self.auth_token = Some(token.into());
+        self
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::api::GossipTopic;
+
+    #[test]
+    fn debug_hides_the_token() {
+        let opts = JoinOptions::with_bootstrap([]).auth_token(&b"hunter2"[..]);
+        let debug = format!("{opts:?}");
+        assert!(
+            debug.contains("auth_token") && !debug.contains("hunter2"),
+            "{debug}"
+        );
+    }
 
     #[test]
     fn ensure_gossip_topic_is_sync() {

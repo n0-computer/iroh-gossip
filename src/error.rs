@@ -26,4 +26,14 @@ pub enum Error {
         /// The largest content that a broadcast takes.
         max_content: usize,
     },
+    /// The auth token does not fit in a stream header, see [`JoinOptions::auth_token`].
+    ///
+    /// [`JoinOptions::auth_token`]: crate::api::JoinOptions::auth_token
+    #[error("auth token of {size} bytes is over the limit of {max_token} bytes")]
+    TokenTooLarge {
+        /// The size of the token.
+        size: usize,
+        /// The largest token that fits in the header of a stream.
+        max_token: usize,
+    },
 }

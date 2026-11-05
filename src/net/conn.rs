@@ -8,11 +8,12 @@
 //! closes the connection once the peer finished its half too.
 
 use std::{
-    collections::{hash_map::Entry, HashMap, VecDeque},
+    collections::{hash_map::Entry, HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex},
     time::Duration,
 };
 
+use bytes::Bytes;
 use iroh::{
     endpoint::{Connection, ConnectionError, RecvStream, SendStream, StreamId, VarInt},
     EndpointId,
@@ -25,21 +26,30 @@ use n0_future::{
 };
 use tokio::sync::{mpsc, oneshot, watch, Notify};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error_span, warn, Instrument};
+use tracing::{debug, error_span, trace, warn, Instrument};
 
 use super::{
+    auth::TopicAuth,
     peers::{ConnEnd, ConnId},
     queue::{set_if_changed, QueueReader, QueuedMessage},
     wire::{
         read_message, write_all, write_sized_message, CloseCode, ControlMessage, ReadError,
         Session, StreamHeader, WriteError, HEADER_TIMEOUT, OPEN_TIMEOUT,
     },
-    ProtoMessage,
+    ProtoMessage, Verdict,
 };
 use crate::proto::TopicId;
 
 /// How long a retire may take, from the time the writer stops writing.
 pub(super) const RETIRE_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 3 } else { 120 });
+
+/// The most rejected topics that a connection remembers.
+///
+/// The peer picks the topic ids, so the set needs a cap.
+const MAX_REJECTED_TOPICS: usize = 1024;
+
+/// The stop code of a topic stream whose token the verifier rejected.
+pub(super) const STOP_REJECTED: VarInt = VarInt::from_u32(1);
 
 /// An event from a connection task to the actor.
 ///
@@ -55,11 +65,18 @@ pub(super) struct ConnEvent {
 pub(super) enum ConnEventKind {
     /// A message of the peer, in the order that the peer wrote it.
     Message(ProtoMessage),
+    /// The peer refused the topic on this connection.
+    Refused(TopicId),
+    /// We rejected a stream of the peer for the topic.
+    Rejected(TopicId),
     /// The session in the control header of the peer.
     Header(Session),
     /// The writer sent `GOAWAY`, and writes nothing more.
     Retiring,
 }
+
+/// A topic and the auth token for the header of its streams.
+type TopicToken = (TopicId, Option<Bytes>);
 
 /// The command that gives the writer of a connection the queue of the peer.
 ///
@@ -68,7 +85,7 @@ pub(super) enum ConnEventKind {
 pub(super) struct TakeQueue {
     pub(super) reader: QueueReader,
     /// The topics that get a stream at once.
-    pub(super) topics: Vec<TopicId>,
+    pub(super) topics: Vec<TopicToken>,
 }
 
 /// A slot for one value, which a later value replaces.
@@ -146,6 +163,8 @@ pub(super) struct ConnExit {
 pub(super) struct ConnShared {
     pub(super) events: mpsc::Sender<ConnEvent>,
     pub(super) max_message_size: usize,
+    /// Checks the token of each stream that the peer opens.
+    pub(super) verifier: TopicAuth,
     /// The session that we send in the control header.
     pub(super) session: Session,
     /// How long an idle connection waits before it retires.
@@ -295,6 +314,7 @@ async fn run_loops(args: ConnArgs, reader: &mut Option<QueueReader>) -> Result<C
     let ConnShared {
         events,
         max_message_size,
+        verifier,
         session,
         retire_after,
         shutdown,
@@ -323,6 +343,8 @@ async fn run_loops(args: ConnArgs, reader: &mut Option<QueueReader>) -> Result<C
         conn: conn.clone(),
         events: events.clone(),
         max_message_size,
+        verifier,
+        rejected_topics: Default::default(),
         signals: signals.clone(),
     };
     let send_loop = SendLoop {
@@ -340,6 +362,7 @@ async fn run_loops(args: ConnArgs, reader: &mut Option<QueueReader>) -> Result<C
         buffer: Default::default(),
         topics_to_open: Default::default(),
         opened_count: 0,
+        refused_topics: Default::default(),
         retiring_until: None,
     };
     let send = async { send_loop.run(reader).await.map_err(Failure::from) }
@@ -358,6 +381,11 @@ struct RecvLoop {
     conn: Connection,
     events: EventSink,
     max_message_size: usize,
+    verifier: TopicAuth,
+    /// The topics whose token the verifier rejected on this connection, at most [`MAX_REJECTED_TOPICS`].
+    ///
+    /// The loop stops a later stream of such a topic, and does not call the verifier.
+    rejected_topics: HashSet<TopicId>,
     signals: Arc<Signals>,
 }
 
@@ -381,7 +409,7 @@ impl RecvLoop {
     /// the actor sees the messages of a topic in the order the peer wrote them.
     /// A late header, a bad header, a bad frame, or a reset stream fails the
     /// connection.
-    async fn run(self, mut ctl: RecvStream) -> Result<ConnEnd, Failure> {
+    async fn run(mut self, mut ctl: RecvStream) -> Result<ConnEnd, Failure> {
         // The header of the stream that we accepted last, while we read it.
         let mut header: Option<BoxFuture<Result<TopicReader, ReadError>>> = None;
         // The next message of each stream that we read.
@@ -429,10 +457,14 @@ impl RecvLoop {
                 // The header of a new stream: verify it, then read the stream, or let it wait.
                 reader = async { header.as_mut().expect("guarded").await }, if header.is_some() => {
                     header = None;
-                    let reader = reader.map_err(|err| Failure::protocol(format!("stream header: {err:#}")))?;
+                    let mut reader = reader.map_err(|err| Failure::protocol(format!("stream header: {err:#}")))?;
                     let topic = reader.header.topic;
                     debug!(topic=%topic.fmt_short(), "stream opened");
-                    if let Some(queue) = waiting.get_mut(&topic) {
+                    if self.verify(&mut reader) == Verdict::Reject {
+                        // A stopped stream ends here.
+                        ended += 1;
+                        self.events.send(ConnEventKind::Rejected(topic)).await?;
+                    } else if let Some(queue) = waiting.get_mut(&topic) {
                         queue.push_back(reader);
                     } else {
                         waiting.insert(topic, VecDeque::new());
@@ -499,6 +531,29 @@ impl RecvLoop {
         debug!("recv loop closed");
         Ok(end_of(self.conn.close_reason()))
     }
+
+    /// Asks the verifier about a new stream, and stops the stream if it rejects.
+    fn verify(&mut self, reader: &mut TopicReader) -> Verdict {
+        let topic = reader.header.topic;
+        let verdict = if self.rejected_topics.contains(&topic) {
+            Verdict::Reject
+        } else {
+            // The loop needs the token only here.
+            let token = reader.header.token.take();
+            self.verifier
+                .verify(topic, self.conn.remote_id(), token.as_deref())
+        };
+        if verdict == Verdict::Reject {
+            debug!(topic=%topic.fmt_short(), "stream rejected, stop it");
+            // Past the cap, the loop does not remember the topic, and the verifier sees its
+            // streams again.
+            if self.rejected_topics.len() < MAX_REJECTED_TOPICS {
+                self.rejected_topics.insert(topic);
+            }
+            reader.stream.stop(STOP_REJECTED).ok();
+        }
+        verdict
+    }
 }
 
 /// A topic stream that we read: its header, and the buffer for its frames.
@@ -551,9 +606,14 @@ struct SendLoop {
     /// A future per stream, which resolves once the peer stopped it or acknowledged all of it.
     stream_ends: FuturesUnordered<BoxFuture<(TopicId, StreamId, Option<VarInt>)>>,
     /// The topics for which the writer opens a stream when it has the queue.
-    topics_to_open: Vec<TopicId>,
+    topics_to_open: Vec<TopicToken>,
     /// How many topic streams the writer opened on this connection.
     opened_count: u64,
+    /// The topics that the peer refused on this connection.
+    ///
+    /// We open no stream for such a topic, and drop its queued messages. A new
+    /// connection starts without refusals, so the writer tries the topic again there.
+    refused_topics: HashSet<TopicId>,
     /// The time at which a retire fails the connection.
     ///
     /// The writer sets it to [`RETIRE_TIMEOUT`] from now when it stops writing. It then
@@ -638,14 +698,7 @@ impl SendLoop {
                 // This arm comes before the queue. The queue of a busy peer is always ready,
                 // and would keep the loop from collecting ended streams.
                 Some((topic, id, stop)) = self.stream_ends.next(), if !self.stream_ends.is_empty() => {
-                    // A peer does not stop our streams. A stop fails the connection.
-                    if let Some(code) = stop {
-                        return Err(n0_error::e!(WriteError::Stopped { code: code.into_inner() }));
-                    }
-                    // The next message of the topic opens a new stream.
-                    if self.streams.get(&topic).is_some_and(|stream| stream.id() == id) {
-                        self.streams.remove(&topic);
-                    }
+                    self.on_stream_end(topic, id, stop).await?;
                 }
 
                 // The next message of the queue, or the end of the queue.
@@ -684,12 +737,13 @@ impl SendLoop {
 
                 // After the queue, so that queued messages get the streams of the peer
                 // first. A quiet topic needs a stream to keep the connection.
-                Some(topic) = async {
+                Some((topic, token)) = async {
                     if writing { self.topics_to_open.pop() } else { None }
-                } => match self.open_stream(topic).await {
+                } => match self.open_stream(topic, token).await {
                     // At the stream limit of the peer, the quiet topics get no stream.
                     Err(WriteError::OpenStalled { .. }) => self.topics_to_open.clear(),
-                    res => res?,
+                    Err(err) => tolerate_refusal(topic, err)?,
+                    Ok(()) => {}
                 },
 
                 // The connection was idle for `retire_after`.
@@ -712,6 +766,41 @@ impl SendLoop {
             conn.close(CloseCode::Shutdown.code(), b"shutdown");
         }
         debug!("send loop closed");
+        Ok(())
+    }
+
+    /// Handles a stream that the peer stopped, or acknowledged in full.
+    async fn on_stream_end(
+        &mut self,
+        topic: TopicId,
+        id: StreamId,
+        stop: Option<VarInt>,
+    ) -> Result<(), WriteError> {
+        // Only the reject code is expected. Any other stop fails the connection.
+        let rejected = match stop {
+            Some(code) if code != STOP_REJECTED => {
+                return Err(n0_error::e!(WriteError::Stopped {
+                    code: code.into_inner()
+                }));
+            }
+            stop => stop.is_some(),
+        };
+        // The next message of the topic opens a new stream.
+        if self
+            .streams
+            .get(&topic)
+            .is_some_and(|stream| stream.id() == id)
+        {
+            self.streams.remove(&topic);
+        }
+        // The peer refuses the topic, not the connection. Tell the
+        // protocol once, and send nothing more for the topic.
+        if rejected && self.refused_topics.insert(topic) {
+            warn!(topic = %topic.fmt_short(), "the peer refused the topic");
+            self.streams.remove(&topic);
+            self.topics_to_open.retain(|(t, _)| *t != topic);
+            self.events.send(ConnEventKind::Refused(topic)).await.ok();
+        }
         Ok(())
     }
 
@@ -748,11 +837,26 @@ impl SendLoop {
     async fn write_current(&mut self, queue: &mut QueueReader) -> Result<(), WriteError> {
         let item = queue.current().expect("wait_next returned a message");
         let topic = item.message.topic;
-        self.open_stream(topic).await?;
+        if self.refused_topics.contains(&topic) {
+            trace!(topic = %topic.fmt_short(), "the peer refused the topic, drop the message");
+            // The protocol took the peer back, for example after a second `Join`.
+            let message = &item.message.message;
+            let readded = message.is_membership() && !message.is_disconnect();
+            queue.advance();
+            if readded {
+                self.events.send(ConnEventKind::Refused(topic)).await.ok();
+            }
+            return Ok(());
+        }
+        if let Err(err) = self.open_stream(topic, item.token.clone()).await {
+            tolerate_refusal(topic, err)?;
+            queue.advance();
+            return Ok(());
+        }
         self.send(item).await?;
         // A topic that we just left needs no stream.
         if item.message.message.is_disconnect() {
-            self.topics_to_open.retain(|t| *t != topic);
+            self.topics_to_open.retain(|(t, _)| *t != topic);
         }
         queue.advance();
         Ok(())
@@ -760,7 +864,8 @@ impl SendLoop {
 
     /// Writes a message on the stream of its topic, and finishes the stream after a `Close`.
     ///
-    /// Returns the error if the write failed, which fails the connection.
+    /// If the write fails because the peer refused the stream, the message is lost.
+    /// Returns the error if the write failed otherwise, which fails the connection.
     async fn send(&mut self, item: &QueuedMessage) -> Result<(), WriteError> {
         let ProtoMessage { topic, message } = &item.message;
         let stream = self
@@ -789,7 +894,11 @@ impl SendLoop {
                 warn!(max = self.max_message_size, "message too large, dropped");
                 Ok(())
             }
-            Err(err) => Err(err),
+            Err(err) => {
+                tolerate_refusal(*topic, err)?;
+                self.streams.remove(topic);
+                Ok(())
+            }
         }
     }
 
@@ -797,14 +906,18 @@ impl SendLoop {
     ///
     /// The header goes out in full once the stream opened. If the actor aborts the
     /// peer, the connection closes anyway and cuts the header.
-    async fn open_stream(&mut self, topic: TopicId) -> Result<(), WriteError> {
+    async fn open_stream(
+        &mut self,
+        topic: TopicId,
+        token: Option<Bytes>,
+    ) -> Result<(), WriteError> {
         let Entry::Vacant(entry) = self.streams.entry(topic) else {
             return Ok(());
         };
         let mut stream = time::timeout(OPEN_TIMEOUT, self.conn.open_uni())
             .await
             .map_err(|_| n0_error::e!(WriteError::OpenStalled))??;
-        StreamHeader::write(topic, &mut stream, &mut self.buffer).await?;
+        StreamHeader::write(topic, token.as_deref(), &mut stream, &mut self.buffer).await?;
         self.opened_count += 1;
         debug!(topic=%topic.fmt_short(), "stream opened");
         // The QUIC stack of the peer acknowledges data that its app did not read
@@ -816,6 +929,19 @@ impl SendLoop {
         }));
         entry.insert(stream);
         Ok(())
+    }
+}
+
+/// Returns the error if the write failed in a way that fails the connection.
+///
+/// A stream that the peer stopped with the reject code only loses its message.
+fn tolerate_refusal(topic: TopicId, err: WriteError) -> Result<(), WriteError> {
+    match &err {
+        WriteError::Stopped { code, .. } if *code == STOP_REJECTED.into_inner() => {
+            debug!(topic = %topic.fmt_short(), "the peer refused the stream, drop the message");
+            Ok(())
+        }
+        _ => Err(err),
     }
 }
 
