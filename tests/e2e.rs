@@ -1123,7 +1123,7 @@ async fn slow_peer_does_not_block_shutdown() -> Result {
         for _ in 0..10000 {
             sa.tx.broadcast_neighbors(bytes.clone()).await?;
         }
-        Ok::<_, iroh_gossip::api::ApiError>(())
+        Ok::<_, iroh_gossip::Error>(())
     });
     sleep(Duration::from_secs(2)).await;
     let result = timeout(Duration::from_secs(2), a.gossip.shutdown()).await;
