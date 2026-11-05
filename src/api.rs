@@ -237,9 +237,22 @@ impl GossipReceiver {
     /// Note that this consumes this initial `NeighborUp` event. If you want to track
     /// neighbors, use [`Self::neighbors`] after awaiting [`Self::joined`], and then
     /// continue to track `NeighborUp` events on the event stream.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::JoinFailed`] if the join got no neighbor from its bootstrap peers, see
+    ///   [`Event::JoinFailed`]. The topic stays open, and the node keeps looking for a
+    ///   neighbor in the background.
+    ///   Call this method again to wait for a neighbor, or drop all handles of the topic to
+    ///   leave it. A bootstrap peer that refused us counts as failed. This method drops the
+    ///   [`Event::Refused`] events, so read the events to tell a refusal from a dead peer.
+    /// - [`Error::Closed`] if the gossip actor stopped.
     pub async fn joined(&mut self) -> Result<(), Error> {
         while !self.is_joined() {
-            let _event = self.next().await.ok_or(e!(Error::Closed))??;
+            let event = self.next().await.ok_or(e!(Error::Closed))??;
+            if event == Event::JoinFailed {
+                return Err(e!(Error::JoinFailed));
+            }
         }
         Ok(())
     }
@@ -293,6 +306,15 @@ pub enum Event {
     /// The node drops the peer for this topic, and does not send it messages of the topic
     /// on the same connection again. The connection stays open for other topics.
     Refused(EndpointId),
+    /// The join got no neighbor from its bootstrap peers.
+    ///
+    /// Every bootstrap peer failed: we could not connect, or it closed, refused, or did not
+    /// answer in time. The node keeps rejoining in the background, so a [`Event::NeighborUp`]
+    /// can still follow.
+    ///
+    /// The event comes no earlier than 10 seconds after the join, and only if we have no
+    /// neighbor then. A bootstrap peer that is not on the topic yet can still join us before.
+    JoinFailed,
 }
 
 impl From<crate::proto::Event<EndpointId>> for Event {
@@ -301,6 +323,7 @@ impl From<crate::proto::Event<EndpointId>> for Event {
             crate::proto::Event::NeighborUp(endpoint_id) => Self::NeighborUp(endpoint_id),
             crate::proto::Event::NeighborDown(endpoint_id) => Self::NeighborDown(endpoint_id),
             crate::proto::Event::Refused(endpoint_id) => Self::Refused(endpoint_id),
+            crate::proto::Event::JoinFailed => Self::JoinFailed,
             crate::proto::Event::Received(message) => Self::Received(Message {
                 content: message.content,
                 scope: message.scope,

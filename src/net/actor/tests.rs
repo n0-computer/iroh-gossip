@@ -619,6 +619,7 @@ pub(in crate::net) fn join_message(topic: TopicId, data_len: usize) -> ProtoMess
     let join = InEvent::Command(topic, proto::Command::Join(vec![peer]));
     let mut out = Vec::new();
     state.handle(join, Instant::now(), &mut out);
+    state.handle(InEvent::PeerConnected(peer), Instant::now(), &mut out);
     let message = out.into_iter().find_map(|event| match event {
         proto::OutEvent::SendMessage(_, message) => Some(message),
         _ => None,

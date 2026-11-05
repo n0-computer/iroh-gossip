@@ -122,6 +122,8 @@ pub enum InEvent<PI> {
     ///
     /// Only that topic drops the peer. It emits [`topic::Event::Refused`].
     PeerRefused(TopicId, PI),
+    /// A connection to the peer exists, see [`IO::connect`].
+    PeerConnected(PI),
     /// Update the opaque peer data about yourself.
     UpdatePeerData(PeerData),
 }
@@ -155,6 +157,8 @@ pub enum OutEvent<PI> {
     ScheduleTimer(Duration, Timer<PI>),
     /// Updated peer data
     PeerData(PI, PeerData),
+    /// Connect to a peer without a message, see [`IO::connect`].
+    Connect(PI),
 }
 
 /// The receiver of the actions of the protocol state.
@@ -184,6 +188,13 @@ pub trait IO<PI> {
 
     /// Reports new [`PeerData`] of `peer`.
     fn peer_data(&mut self, peer: PI, data: PeerData);
+
+    /// Connects to `peer` without a message.
+    ///
+    /// The runtime answers with [`InEvent::PeerConnected`] once a connection to the peer
+    /// exists, so that a message goes out at once. If the connection fails, it reports
+    /// [`InEvent::PeerDisconnected`]. A topic wants the connection until the peer is connected.
+    fn connect(&mut self, peer: PI);
 }
 
 impl<PI> IO<PI> for Vec<OutEvent<PI>> {
@@ -202,6 +213,10 @@ impl<PI> IO<PI> for Vec<OutEvent<PI>> {
 
     fn peer_data(&mut self, peer: PI, data: PeerData) {
         self.push(OutEvent::PeerData(peer, data));
+    }
+
+    fn connect(&mut self, peer: PI) {
+        self.push(OutEvent::Connect(peer));
     }
 }
 
@@ -229,6 +244,7 @@ impl<PI> From<InEvent<PI>> for InEventMapped<PI> {
                 Self::TopicEvent(topic, topic::InEvent::PeerRejected(peer))
             }
             InEvent::PeerDisconnected(peer) => Self::All(topic::InEvent::PeerDisconnected(peer)),
+            InEvent::PeerConnected(peer) => Self::All(topic::InEvent::PeerConnected(peer)),
             InEvent::UpdatePeerData(data) => Self::All(topic::InEvent::UpdatePeerData(data)),
         }
     }
@@ -478,6 +494,10 @@ impl<PI: PeerIdentity, E: IO<PI>> topic::IO<PI> for TopicIO<'_, E> {
 
     fn peer_data(&mut self, peer: PI, data: PeerData) {
         self.io.peer_data(peer, data);
+    }
+
+    fn connect(&mut self, peer: PI) {
+        self.io.connect(peer);
     }
 }
 
@@ -782,6 +802,7 @@ mod tests {
         let mut state = new_state(0);
         let topic: TopicId = [0u8; 32].into();
         handle(&mut state, InEvent::Command(topic, Command::Join(vec![1])));
+        handle(&mut state, InEvent::PeerConnected(1));
         handle(&mut state, InEvent::PeerDisconnected(1));
         assert!(state.wants(&1));
     }
