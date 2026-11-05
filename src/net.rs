@@ -39,7 +39,6 @@ type ProtoEvent = proto::Event<PublicKey>;
 type ProtoCommand = proto::Command<PublicKey>;
 
 type InEvent = proto::InEvent<PublicKey>;
-type OutEvent = proto::OutEvent<PublicKey>;
 type Timer = proto::Timer<PublicKey>;
 type ProtoMessage = proto::Message<PublicKey>;
 
@@ -196,7 +195,7 @@ impl Builder {
         }
         let (actor, to_actor) = Actor::new(endpoint, self.config, metrics.clone(), address_lookup);
         let me = actor.endpoint.id().fmt_short();
-        let max_message_size = actor.state.max_message_size();
+        let max_message_size = actor.proto.max_message_size();
 
         let actor_handle = task::spawn(actor.run().instrument(error_span!("gossip", %me)));
 

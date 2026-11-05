@@ -1,5 +1,6 @@
 //! This module contains the implementation of the gossiping protocol for an individual topic
 
+#[cfg(test)]
 use std::collections::VecDeque;
 
 use bytes::Bytes;
@@ -30,11 +31,10 @@ pub enum InEvent<PI> {
     PeerDisconnected(PI),
     /// Update the opaque peer data about yourself.
     UpdatePeerData(PeerData),
-    /// The network dropped a message to the peer, as the queue to it was full.
-    SendDropped(PI, Message<PI>),
 }
 
-/// An output event from the state handler.
+/// An action of the topic state, as a value. A `VecDeque` of these implements [`IO`].
+#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum OutEvent<PI> {
@@ -51,43 +51,51 @@ pub enum OutEvent<PI> {
     PeerData(PI, PeerData),
 }
 
-impl<PI> From<hyparview::OutEvent<PI>> for OutEvent<PI> {
-    fn from(event: hyparview::OutEvent<PI>) -> Self {
-        use hyparview::OutEvent::*;
-        match event {
-            SendMessage(to, message) => Self::SendMessage(to, message.into()),
-            ScheduleTimer(delay, timer) => Self::ScheduleTimer(delay, timer.into()),
-            DisconnectPeer(peer) => Self::DisconnectPeer(peer),
-            EmitEvent(event) => Self::EmitEvent(event.into()),
-            PeerData(peer, data) => Self::PeerData(peer, data),
-        }
-    }
-}
-
-impl<PI> From<plumtree::OutEvent<PI>> for OutEvent<PI> {
-    fn from(event: plumtree::OutEvent<PI>) -> Self {
-        use plumtree::OutEvent::*;
-        match event {
-            SendMessage(to, message) => Self::SendMessage(to, message.into()),
-            ScheduleTimer(delay, timer) => Self::ScheduleTimer(delay, timer.into()),
-            EmitEvent(event) => Self::EmitEvent(event.into()),
-        }
-    }
-}
-
-/// A trait for a concrete type to push `OutEvent`s to.
+/// The receiver of the actions of the topic state.
 ///
-/// The implementation is generic over this trait, which allows the upper layer to supply a
-/// container of their choice for `OutEvent`s emitted from the protocol state.
-pub trait IO<PI: Clone> {
-    /// Push an event in the IO container
-    fn push(&mut self, event: impl Into<OutEvent<PI>>);
+/// The state calls this while it handles an event, and never waits on it.
+pub trait IO<PI> {
+    /// Sends `message` to `peer`. Returns the message if the queue dropped it.
+    ///
+    /// A queue may drop a broadcast message to a slow peer that stays
+    /// connected. The state then announces the message to the peer, which
+    /// can request it once it has room.
+    fn send(&mut self, peer: PI, message: impl Into<Message<PI>>) -> Option<Message<PI>>;
 
-    /// Push all events from an iterator into the IO container
-    fn push_from_iter(&mut self, iter: impl IntoIterator<Item = impl Into<OutEvent<PI>>>) {
-        for event in iter.into_iter() {
-            self.push(event);
-        }
+    /// Hands `event` to the application.
+    fn emit(&mut self, event: Event<PI>);
+
+    /// Arms `timer`, which comes back as [`InEvent::TimerExpired`] after `delay`.
+    fn schedule(&mut self, delay: Duration, timer: impl Into<Timer<PI>>);
+
+    /// Reports new [`PeerData`] of `peer`.
+    fn peer_data(&mut self, peer: PI, data: PeerData);
+
+    /// Asks to close the connection to `peer`, as the topic no longer uses it.
+    fn disconnect(&mut self, peer: PI);
+}
+
+#[cfg(test)]
+impl<PI> IO<PI> for VecDeque<OutEvent<PI>> {
+    fn send(&mut self, peer: PI, message: impl Into<Message<PI>>) -> Option<Message<PI>> {
+        self.push_back(OutEvent::SendMessage(peer, message.into()));
+        None
+    }
+
+    fn emit(&mut self, event: Event<PI>) {
+        self.push_back(OutEvent::EmitEvent(event));
+    }
+
+    fn schedule(&mut self, delay: Duration, timer: impl Into<Timer<PI>>) {
+        self.push_back(OutEvent::ScheduleTimer(delay, timer.into()));
+    }
+
+    fn peer_data(&mut self, peer: PI, data: PeerData) {
+        self.push_back(OutEvent::PeerData(peer, data));
+    }
+
+    fn disconnect(&mut self, peer: PI) {
+        self.push_back(OutEvent::DisconnectPeer(peer));
     }
 }
 
@@ -197,23 +205,6 @@ pub enum Event<PI> {
     Received(GossipEvent<PI>),
 }
 
-impl<PI> From<hyparview::Event<PI>> for Event<PI> {
-    fn from(value: hyparview::Event<PI>) -> Self {
-        match value {
-            hyparview::Event::NeighborUp(peer) => Self::NeighborUp(peer),
-            hyparview::Event::NeighborDown(peer) => Self::NeighborDown(peer),
-        }
-    }
-}
-
-impl<PI> From<plumtree::Event<PI>> for Event<PI> {
-    fn from(value: plumtree::Event<PI>) -> Self {
-        match value {
-            plumtree::Event::Received(event) => Self::Received(event),
-        }
-    }
-}
-
 /// A timer to be registered for a particular topic.
 ///
 /// This should be treated as an opaque value by the implementer and, once emitted, simply returned
@@ -240,12 +231,6 @@ pub enum Command<PI> {
     Broadcast(#[debug("<{}b>", _0.len())] Bytes, Scope),
     /// Leave this topic and drop all state.
     Quit,
-}
-
-impl<PI: Clone> IO<PI> for VecDeque<OutEvent<PI>> {
-    fn push(&mut self, event: impl Into<OutEvent<PI>>) {
-        self.push_back(event.into())
-    }
 }
 
 /// Protocol configuration
@@ -283,8 +268,6 @@ pub struct State<PI, R> {
     me: PI,
     pub(crate) swarm: hyparview::State<PI, R>,
     pub(crate) gossip: plumtree::State<PI>,
-    outbox: VecDeque<OutEvent<PI>>,
-    stats: Stats,
 }
 
 impl<PI: PeerIdentity> State<PI, rand::rngs::ThreadRng> {
@@ -324,100 +307,59 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
                 max_plumtree_size(config.max_message_size),
             ),
             me,
-            outbox: VecDeque::new(),
-            stats: Stats::default(),
         }
     }
 
-    /// Handle an incoming event.
-    ///
-    /// Returns an iterator of outgoing events that must be processed by the application.
-    pub fn handle(
-        &mut self,
-        event: InEvent<PI>,
-        now: Instant,
-    ) -> impl Iterator<Item = OutEvent<PI>> + '_ {
-        let io = &mut self.outbox;
-        // Process the event, store out events in outbox.
+    /// Handles an incoming event, and puts what it does into `io`.
+    pub fn handle(&mut self, event: InEvent<PI>, now: Instant, io: &mut impl IO<PI>) {
+        let swarm = &mut self.swarm;
+        // The membership layer writes through the wrapper. The broadcast layer writes to `io`
+        // directly.
+        let mut io = SwarmIO {
+            io,
+            gossip: &mut self.gossip,
+        };
         match event {
             InEvent::Command(command) => match command {
                 Command::Join(peers) => {
                     for peer in peers {
-                        self.swarm.handle(SwarmIn::RequestJoin(peer), io);
+                        swarm.handle(SwarmIn::RequestJoin(peer), &mut io);
                     }
                 }
                 Command::Broadcast(data, scope) => {
-                    self.gossip
-                        .handle(GossipIn::Broadcast(data, scope), now, io)
+                    io.gossip
+                        .handle(GossipIn::Broadcast(data, scope), now, io.io)
                 }
                 Command::Quit => {
                     // The quit empties the active view without a `NeighborDown`.
-                    for peer in self.swarm.active_view.iter() {
-                        self.gossip.handle(GossipIn::NeighborDown(*peer), now, io);
+                    for peer in swarm.active_view.iter() {
+                        io.gossip.on_neighbor_down(*peer);
                     }
-                    self.swarm.handle(SwarmIn::Quit, io);
+                    swarm.handle(SwarmIn::Quit, &mut io);
                 }
             },
-            InEvent::RecvMessage(from, message) => {
-                self.stats.messages_received += 1;
-                match message {
-                    Message::Swarm(message) => {
-                        self.swarm.handle(SwarmIn::RecvMessage(from, message), io)
-                    }
-                    Message::Gossip(message) => {
-                        self.gossip
-                            .handle(GossipIn::RecvMessage(from, message), now, io)
-                    }
+            InEvent::RecvMessage(from, message) => match message {
+                Message::Swarm(message) => {
+                    swarm.handle(SwarmIn::RecvMessage(from, message), &mut io)
                 }
-            }
+                Message::Gossip(message) => {
+                    io.gossip
+                        .handle(GossipIn::RecvMessage(from, message), now, io.io)
+                }
+            },
             InEvent::TimerExpired(timer) => match timer {
-                Timer::Swarm(timer) => self.swarm.handle(SwarmIn::TimerExpired(timer), io),
-                Timer::Gossip(timer) => self.gossip.handle(GossipIn::TimerExpired(timer), now, io),
+                Timer::Swarm(timer) => swarm.handle(SwarmIn::TimerExpired(timer), &mut io),
+                Timer::Gossip(timer) => io.gossip.handle(GossipIn::TimerExpired(timer), now, io.io),
             },
             InEvent::PeerDisconnected(peer) => {
-                self.swarm.handle(SwarmIn::PeerDisconnected(peer), io);
-                self.gossip.handle(GossipIn::NeighborDown(peer), now, io);
+                swarm.handle(SwarmIn::PeerDisconnected(peer), &mut io);
+                io.gossip.on_neighbor_down(peer);
             }
-            InEvent::UpdatePeerData(data) => self.swarm.handle(SwarmIn::UpdatePeerData(data), io),
-            InEvent::SendDropped(peer, message) => {
-                // The network drops only data and announcements, both of Plumtree.
-                if let Message::Gossip(message) = message {
-                    self.gossip
-                        .handle(GossipIn::SendDropped(peer, message), now, io);
-                }
-            }
+            InEvent::UpdatePeerData(data) => swarm.handle(SwarmIn::UpdatePeerData(data), &mut io),
         }
-
-        // Forward NeighborUp and NeighborDown events from hyparview to plumtree
-        let mut io = VecDeque::new();
-        for event in self.outbox.iter() {
-            match event {
-                OutEvent::EmitEvent(Event::NeighborUp(peer)) => {
-                    self.gossip
-                        .handle(GossipIn::NeighborUp(*peer), now, &mut io)
-                }
-                OutEvent::EmitEvent(Event::NeighborDown(peer)) => {
-                    self.gossip
-                        .handle(GossipIn::NeighborDown(*peer), now, &mut io)
-                }
-                _ => {}
-            }
-        }
-        // Note that this is a no-op because plumtree::handle(NeighborUp | NeighborDown)
-        // above does not emit any OutEvents.
-        self.outbox.extend(io.drain(..));
-
-        // Update sent message counter
-        self.stats.messages_sent += self
-            .outbox
-            .iter()
-            .filter(|event| matches!(event, OutEvent::SendMessage(_, _)))
-            .count();
 
         #[cfg(test)]
         self.check_invariants();
-
-        self.outbox.drain(..)
     }
 
     /// Panics if Plumtree's peers are not exactly HyParView's neighbors.
@@ -432,17 +374,9 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
         assert_eq!(peers, neighbors, "Plumtree's peers are not the neighbors");
     }
 
-    /// Get stats on how many messages were sent and received.
-    // TODO: Remove/replace with metrics?
-    pub fn stats(&self) -> &Stats {
-        &self.stats
-    }
-
     /// Reset all statistics.
     pub fn reset_stats(&mut self) {
         self.gossip.stats = Default::default();
-        self.swarm.stats = Default::default();
-        self.stats = Default::default();
     }
 
     /// Get statistics for the gossip broadcast state
@@ -458,13 +392,37 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
     }
 }
 
-/// Statistics for the protocol state of a topic
-#[derive(Clone, Debug, Default)]
-pub struct Stats {
-    /// Number of messages sent
-    pub messages_sent: usize,
-    /// Number of messages received
-    pub messages_received: usize,
+/// The IO of the membership layer: its neighbor changes reach the broadcast layer first.
+struct SwarmIO<'a, PI, E> {
+    io: &'a mut E,
+    gossip: &'a mut plumtree::State<PI>,
+}
+
+impl<PI: PeerIdentity, E: IO<PI>> IO<PI> for SwarmIO<'_, PI, E> {
+    fn send(&mut self, peer: PI, message: impl Into<Message<PI>>) -> Option<Message<PI>> {
+        self.io.send(peer, message)
+    }
+
+    fn emit(&mut self, event: Event<PI>) {
+        match &event {
+            Event::NeighborUp(peer) => self.gossip.on_neighbor_up(*peer),
+            Event::NeighborDown(peer) => self.gossip.on_neighbor_down(*peer),
+            _ => {}
+        }
+        self.io.emit(event);
+    }
+
+    fn schedule(&mut self, delay: Duration, timer: impl Into<Timer<PI>>) {
+        self.io.schedule(delay, timer);
+    }
+
+    fn peer_data(&mut self, peer: PI, data: PeerData) {
+        self.io.peer_data(peer, data);
+    }
+
+    fn disconnect(&mut self, peer: PI) {
+        self.io.disconnect(peer);
+    }
 }
 
 #[cfg(test)]
@@ -483,15 +441,16 @@ mod tests {
             };
             let mut state = State::with_rng(0u32, None, config, rand::rng());
             let join = InEvent::RecvMessage(1, Message::Swarm(hyparview::Message::Join(None)));
-            state.handle(join, now).for_each(drop);
+            state.handle(join, now, &mut VecDeque::new());
             let broadcast = InEvent::Command(Command::Broadcast(content.clone(), Scope::Swarm));
-            let sent = state.handle(broadcast, now).any(|event| {
+            let mut out = VecDeque::new();
+            state.handle(broadcast, now, &mut out);
+            out.iter().any(|event| {
                 matches!(
                     event,
                     OutEvent::SendMessage(1, Message::Gossip(plumtree::Message::Gossip(_)))
                 )
-            });
-            sent
+            })
         };
         // The frame holds the enum tag of the topic message, and must be shorter than the limit.
         let limit = plumtree::max_gossip_size(content.len(), Scope::Swarm) + 2;

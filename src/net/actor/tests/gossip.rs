@@ -31,10 +31,10 @@ async fn subscribe_returns_after_the_topic_is_registered() {
     };
     let _topic = result.unwrap();
     assert!(
-        actor.state.state(&topic).is_some(),
+        actor.proto.state(&topic).is_some(),
         "topic is not registered"
     );
-    assert!(actor.topics.contains_key(&topic));
+    assert!(actor.state.topics.contains_key(&topic));
     cancel.cancel();
 }
 
@@ -271,6 +271,7 @@ async fn subscription_cleanup() -> Result {
     // advance and check that the topic is now subscribed
     let commands = |actor: &Actor| {
         actor
+            .state
             .topics
             .get(&topic)
             .map_or(0, |state| state.command_receivers)
@@ -292,7 +293,7 @@ async fn subscription_cleanup() -> Result {
     tx.send(()).await.std_context("signal drop handles")?;
     assert!(
         actor
-            .steps_until(20, |a| !a.topics.contains_key(&topic))
+            .steps_until(20, |a| !a.state.topics.contains_key(&topic))
             .await,
         "the topic is still subscribed"
     );

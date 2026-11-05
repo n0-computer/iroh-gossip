@@ -9,13 +9,15 @@ use iroh_metrics::{Counter, MetricsGroup};
 pub struct Metrics {
     /// Number of control messages sent
     ///
-    /// It counts a message to each peer, also one that a full send queue then dropped.
+    /// It counts one message for each peer, also when a full send queue dropped it or
+    /// we aborted the peer.
     pub msgs_ctrl_sent: Counter,
     /// Number of control messages received
     pub msgs_ctrl_recv: Counter,
     /// Number of data messages sent
     ///
-    /// It counts a message to each peer, also one that a full send queue then dropped.
+    /// It counts one message for each peer, also when a full send queue dropped it or
+    /// we aborted the peer.
     pub msgs_data_sent: Counter,
     /// Number of data messages received
     pub msgs_data_recv: Counter,
