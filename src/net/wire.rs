@@ -104,6 +104,10 @@ mod types {
     /// Each scope is a type of its own. A scope that a later version adds is
     /// a new type.
     pub(super) const GOSSIP_MESSAGE_NEIGHBOR: u64 = 0x14;
+    /// The sender enters or leaves pull mode: `mode: varint`, 0 off, 1 source, 2 silent.
+    ///
+    /// A reader takes an unknown mode as off.
+    pub(super) const GOSSIP_PULL: u64 = 0x15;
     /// Control stream: `opened: varint`, the number of topic streams the sender opened.
     pub(super) const GOAWAY: u64 = 0x20;
 }
@@ -537,6 +541,7 @@ impl Serialize for WireBody<'_> {
                 Broadcast::Prune(tree) => (types::GOSSIP_PRUNE, tree).serialize(s),
                 Broadcast::Graft(graft) => (types::GOSSIP_GRAFT, graft).serialize(s),
                 Broadcast::IHave(ihave) => (types::GOSSIP_IHAVE, ihave).serialize(s),
+                Broadcast::Pull(mode) => (types::GOSSIP_PULL, mode).serialize(s),
             },
         }
     }
@@ -582,6 +587,7 @@ fn decode_message(mut buf: &[u8]) -> Result<Option<WireMessage>, ReadError> {
         types::GOSSIP_PRUNE => WireMessage::Gossip(Broadcast::Prune(take(buf)?)),
         types::GOSSIP_GRAFT => WireMessage::Gossip(Broadcast::Graft(take(buf)?)),
         types::GOSSIP_IHAVE => WireMessage::Gossip(Broadcast::IHave(take(buf)?)),
+        types::GOSSIP_PULL => WireMessage::Gossip(Broadcast::Pull(take(buf)?)),
         _ => return Ok(None),
     };
     Ok(Some(message))
@@ -716,6 +722,9 @@ mod tests {
             format!("1201{ID}{T}"),
             format!("1200{T}"),
             format!("1301{ID}02{T}"),
+            "1500".to_string(),
+            "1501".to_string(),
+            "1502".to_string(),
         ]
     }
 
@@ -749,7 +758,7 @@ mod tests {
     fn every_message_type_roundtrips() {
         let vectors = vectors();
         let kinds: std::collections::BTreeSet<_> = vectors.iter().map(|v| &v[..2]).collect();
-        assert_eq!(kinds.len(), 12, "a type has no vector");
+        assert_eq!(kinds.len(), 13, "a type has no vector");
         for vector in vectors {
             let message = decode_hex(&vector);
             let bytes = encode(&message);
@@ -1069,6 +1078,7 @@ mod tests {
             "low priority"
         );
         assert_eq!(hex::encode(encode(&decode_hex("0709"))), "0700", "shutdown");
+        assert_eq!(hex::encode(encode(&decode_hex("1509"))), "1500", "pull off");
     }
 
     /// `max_gossip_size` is the size at the largest round, and no less at any other.

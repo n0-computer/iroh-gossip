@@ -37,7 +37,7 @@ mod subscriptions;
 mod wire;
 
 /// ALPN protocol name
-pub const GOSSIP_ALPN: &[u8] = b"iroh-gossip/2-canary.4";
+pub const GOSSIP_ALPN: &[u8] = b"iroh-gossip/2-canary.5";
 
 type ProtoEvent = proto::Event<PublicKey>;
 type ProtoCommand = proto::Command<PublicKey>;
