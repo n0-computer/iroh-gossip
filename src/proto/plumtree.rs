@@ -23,7 +23,7 @@ use tracing::{debug, warn};
 use super::{
     topic::{self, Event, IO},
     util::{idbytes_impls, TimeBoundCache},
-    PeerIdentity,
+    PeerIdentity, Verdict,
 };
 
 /// A message identifier, which is the message content's blake3 hash.
@@ -376,6 +376,12 @@ pub struct Config {
     /// able to retrieve messages once they need them. If this is high, the cache will grow.
     ///
     /// Should be at least around several round trip times to peers.
+    ///
+    /// The cache, the message ids and the verdicts of neighbor messages are bounded by time
+    /// only, not by count. Their size grows with the rate at which peers send messages, times
+    /// the retention. A peer cannot send faster than its connection and the send queues of the
+    /// swarm allow, and a message filter can drop what a peer sends before it enters the cache.
+    /// A node that takes data from peers it does not trust needs a filter, or a shorter retention.
     pub message_cache_retention: Duration,
 
     /// Duration for which to keep the `MessageId`s for received messages.
@@ -552,6 +558,11 @@ pub struct State<PI> {
     missing_messages: HashMap<MessageId, Missing<PI>>,
     /// The messages whose payload we saw, with the time we first saw them.
     received_messages: TimeBoundCache<MessageId, Instant, FxBuildHasher>,
+    /// The verdicts on messages to the neighbors, which `received_messages` does not hold.
+    ///
+    /// The state uses it only with a filter. A copy of such a message then gets the verdict
+    /// of the first one, and does not run the filter again.
+    neighbor_verdicts: TimeBoundCache<MessageId, Verdict, FxBuildHasher>,
     /// The grafts we sent for a message, see [`Self::on_late_graft_reply`].
     ///
     /// Entries expire `message_cache_retention` after the first graft. A later
@@ -590,6 +601,7 @@ impl<PI: PeerIdentity> State<PI> {
             config,
             missing_messages: Default::default(),
             received_messages: TimeBoundCache::with_hasher(FxBuildHasher),
+            neighbor_verdicts: TimeBoundCache::with_hasher(FxBuildHasher),
             grafted: Default::default(),
             graft_timer_scheduled: Default::default(),
             dispatch_timer_scheduled: false,
@@ -760,6 +772,7 @@ impl<PI: PeerIdentity> State<PI> {
             }
         // otherwise store the message, emit to application and forward to peers
         } else {
+            let verdict = self.verdict(sender, &message, now, io);
             if let DeliveryScope::Swarm(prev_round) = message.scope {
                 // insert the message in the list of received messages
                 self.received_messages.insert(
@@ -767,6 +780,13 @@ impl<PI: PeerIdentity> State<PI> {
                     now,
                     now + self.config.message_id_retention,
                 );
+                if verdict == Verdict::Reject {
+                    // It counts as seen, and nothing more. We do not cache it, forward it,
+                    // or graft for it.
+                    self.graft_timer_scheduled.remove(&message.id);
+                    self.missing_messages.remove(&message.id);
+                    return;
+                }
                 // increase the round for forwarding the message, and add to cache
                 // to reply to Graft messages later
                 // TODO: add callback/event to application to get missing messages that were received before?
@@ -813,7 +833,9 @@ impl<PI: PeerIdentity> State<PI> {
             }
 
             // emit event to application
-            io.emit(Event::Received(GossipEvent::from_message(&message, sender)));
+            if verdict == Verdict::Accept {
+                io.emit(Event::Received(GossipEvent::from_message(&message, sender)));
+            }
         }
     }
 
@@ -864,6 +886,30 @@ impl<PI: PeerIdentity> State<PI> {
         } else {
             TreeId::default()
         }
+    }
+
+    /// Returns the verdict on a new message, and asks the filter at most once per message id.
+    ///
+    /// The state does not deduplicate messages to the neighbors, so it keeps the first verdict
+    /// for their copies. A later copy to the swarm also gets that verdict.
+    fn verdict(
+        &mut self,
+        sender: PI,
+        message: &Gossip,
+        now: Instant,
+        io: &mut impl IO<PI>,
+    ) -> Verdict {
+        if let Some(verdict) = self.neighbor_verdicts.get(&message.id) {
+            return *verdict;
+        }
+        let Some(verdict) = io.filter(message, sender) else {
+            return Verdict::Accept;
+        };
+        if message.scope == DeliveryScope::Neighbors {
+            let expires = now + self.config.message_id_retention;
+            self.neighbor_verdicts.insert(message.id, verdict, expires);
+        }
+        verdict
     }
 
     /// Handles a duplicate that a peer we grafted sends after the eager copy came.
@@ -1161,6 +1207,7 @@ impl<PI: PeerIdentity> State<PI> {
     fn on_evict_cache_timer(&mut self, now: Instant, io: &mut impl IO<PI>) {
         self.cache.expire_until(now);
         self.received_messages.expire_until(now);
+        self.neighbor_verdicts.expire_until(now);
         self.grafted.expire_until(now);
         if let Some(shared) = self.trees.get_mut(&TreeId::default()) {
             shared.last_used = now;
@@ -2319,6 +2366,214 @@ mod test {
             }
         }
         assert!(sent >= 2, "the batch was not split");
+    }
+
+    /// The IO of a node with a filter that always gives `verdict`, and notes what it was asked.
+    struct Filtering {
+        out: VecDeque<topic::OutEvent<u32>>,
+        verdict: Verdict,
+        asked: Vec<(MessageId, u32, DeliveryScope)>,
+    }
+
+    impl Filtering {
+        fn new(verdict: Verdict) -> Self {
+            Self {
+                out: VecDeque::new(),
+                verdict,
+                asked: Vec::new(),
+            }
+        }
+    }
+
+    impl IO<u32> for Filtering {
+        fn send(
+            &mut self,
+            peer: u32,
+            message: impl Into<topic::Message<u32>>,
+        ) -> Option<topic::Message<u32>> {
+            self.out.send(peer, message)
+        }
+
+        fn emit(&mut self, event: Event<u32>) {
+            self.out.emit(event);
+        }
+
+        fn schedule(&mut self, delay: Duration, timer: impl Into<topic::Timer<u32>>) {
+            self.out.schedule(delay, timer);
+        }
+
+        fn peer_data(&mut self, peer: u32, data: crate::proto::PeerData) {
+            self.out.peer_data(peer, data);
+        }
+
+        fn connect(&mut self, peer: u32) {
+            self.out.connect(peer);
+        }
+
+        fn filter(&mut self, message: &Gossip, delivered_from: u32) -> Option<Verdict> {
+            self.asked.push((message.id, delivered_from, message.scope));
+            Some(self.verdict)
+        }
+    }
+
+    /// Returns node 1 with the eager neighbors 2 and 3 and the lazy neighbor 4.
+    fn filtered_state() -> State<u32> {
+        let mut state = State::new(1u32, Config::default(), 1024);
+        let mut io = VecDeque::new();
+        for peer in [2, 3, 4] {
+            state.on_neighbor_up(peer);
+        }
+        state.handle(
+            InEvent::RecvMessage(4, Message::Prune(T)),
+            Instant::now(),
+            &mut io,
+        );
+        state
+    }
+
+    fn received(io: &Filtering) -> usize {
+        io.out
+            .iter()
+            .filter(|event| matches!(event, topic::OutEvent::EmitEvent(Event::Received(_))))
+            .count()
+    }
+
+    /// An accepted message is delivered, cached, and forwarded to eager and lazy peers.
+    #[test]
+    fn filter_accept_changes_nothing() {
+        let (mut state, now) = (filtered_state(), Instant::now());
+        let mut io = Filtering::new(Verdict::Accept);
+        let message = gossip(b"ok", 1);
+        let id = message.id;
+        state.handle(
+            InEvent::RecvMessage(2, Message::Gossip(message)),
+            now,
+            &mut io,
+        );
+
+        assert_eq!(io.asked, vec![(id, 2, DeliveryScope::Swarm(Round(1)))]);
+        assert_eq!(received(&io), 1);
+        assert!(state.cache.contains_key(&id));
+        assert!(state.lazy_push_queue.contains_key(&4));
+        let pushed = io.out.iter().any(|event| {
+            matches!(
+                event,
+                topic::OutEvent::SendMessage(3, topic::Message::Gossip(_))
+            )
+        });
+        assert!(pushed, "not forwarded: {:?}", io.out);
+    }
+
+    /// A rejected message is not delivered, cached, forwarded or announced.
+    ///
+    /// It counts as seen: copies and announcements are dropped without a second
+    /// filter call, and a graft for it finds nothing.
+    #[test]
+    fn filter_reject_stops_the_message() {
+        let (mut state, now) = (filtered_state(), Instant::now());
+        let mut io = Filtering::new(Verdict::Reject);
+        let message = gossip(b"bad", 1);
+        let id = message.id;
+        state.handle(
+            InEvent::RecvMessage(2, Message::Gossip(message.clone())),
+            now,
+            &mut io,
+        );
+
+        assert_eq!(io.asked.len(), 1);
+        assert!(io.out.is_empty(), "a reject does something: {:?}", io.out);
+        assert!(state.cache.get(&id).is_none());
+        assert!(state.lazy_push_queue.is_empty());
+        assert!(state.received_messages.contains_key(&id));
+
+        // A copy from 3 is a duplicate: the filter does not run, and 3 turns lazy.
+        state.handle(
+            InEvent::RecvMessage(3, Message::Gossip(message)),
+            now,
+            &mut io,
+        );
+        assert_eq!(io.asked.len(), 1);
+        assert!(lazy(&state).contains(&3));
+        io.out.clear();
+
+        // An announcement of a seen id starts no graft.
+        state.handle(InEvent::RecvMessage(4, ihave(id, 1)), now, &mut io);
+        assert!(io.out.is_empty(), "announcement of a seen id: {:?}", io.out);
+
+        // A graft for it gets no payload.
+        let graft = Message::Graft(Graft {
+            id: Some(id),
+            tree: T,
+        });
+        state.handle(InEvent::RecvMessage(4, graft), now, &mut io);
+        assert!(io.out.is_empty(), "graft was answered: {:?}", io.out);
+        assert_eq!(io.asked.len(), 1);
+    }
+
+    /// A rejected message starts no graft, also after an earlier announcement.
+    #[test]
+    fn filter_reject_clears_missing() {
+        let (mut state, now) = (filtered_state(), Instant::now());
+        let mut io = Filtering::new(Verdict::Reject);
+        let message = gossip(b"bad", 1);
+        let id = message.id;
+        state.handle(InEvent::RecvMessage(4, ihave(id, 1)), now, &mut io);
+        state.handle(
+            InEvent::RecvMessage(2, Message::Gossip(message)),
+            now,
+            &mut io,
+        );
+        assert!(state.missing_messages.is_empty());
+        io.out.clear();
+        state.handle(InEvent::TimerExpired(Timer::SendGraft(id)), now, &mut io);
+        assert!(
+            io.out.is_empty(),
+            "graft for a rejected message: {:?}",
+            io.out
+        );
+    }
+
+    /// A message to the neighbors passes the filter once, however often it arrives.
+    #[test]
+    fn filter_runs_once_for_neighbors_messages() {
+        for verdict in [Verdict::Accept, Verdict::Reject] {
+            let (mut state, now) = (filtered_state(), Instant::now());
+            let mut io = Filtering::new(verdict);
+            let content = Bytes::from_static(b"hello");
+            let neighbors = Gossip::new(content.clone(), DeliveryScope::Neighbors, T);
+            for from in [2, 3, 2] {
+                let message = Message::Gossip(neighbors.clone());
+                state.handle(InEvent::RecvMessage(from, message), now, &mut io);
+            }
+            assert_eq!(io.asked.len(), 1, "{verdict:?}");
+            let delivered = if verdict == Verdict::Accept { 3 } else { 0 };
+            assert_eq!(received(&io), delivered, "{verdict:?}");
+
+            // The same content to the swarm takes the verdict too.
+            let swarm = Gossip::new(content, DeliveryScope::Swarm(Round(1)), T);
+            let id = swarm.id;
+            state.handle(
+                InEvent::RecvMessage(3, Message::Gossip(swarm)),
+                now,
+                &mut io,
+            );
+            assert_eq!(io.asked.len(), 1, "{verdict:?}");
+            assert_eq!(state.cache.contains_key(&id), verdict == Verdict::Accept);
+        }
+    }
+
+    /// Without a filter, the state keeps nothing about messages to the neighbors.
+    #[test]
+    fn no_filter_keeps_no_verdicts() {
+        let (mut state, now) = (filtered_state(), Instant::now());
+        let mut io = VecDeque::new();
+        let neighbors = Gossip::new(Bytes::from_static(b"x"), DeliveryScope::Neighbors, T);
+        state.handle(
+            InEvent::RecvMessage(2, Message::Gossip(neighbors)),
+            now,
+            &mut io,
+        );
+        assert!(state.neighbor_verdicts.is_empty());
     }
 
     /// Returns a payload on `tree`, as received after one hop.
