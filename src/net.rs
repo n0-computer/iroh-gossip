@@ -33,7 +33,7 @@ mod subscriptions;
 mod wire;
 
 /// ALPN protocol name
-pub const GOSSIP_ALPN: &[u8] = b"iroh-gossip/2-canary.1";
+pub const GOSSIP_ALPN: &[u8] = b"iroh-gossip/2-canary.2";
 
 type ProtoEvent = proto::Event<PublicKey>;
 type ProtoCommand = proto::Command<PublicKey>;
@@ -63,8 +63,11 @@ const TOPIC_COMMANDS_CAP: usize = 64;
 /// gossip actor through [Self::handle_connection].
 ///
 /// The gossip actor will, however, initiate new connections to other peers by itself.
-/// It closes a connection ten seconds after neither side has a stream on it. This includes
-/// connections that you passed to [`Self::handle_connection`], so do not use them for other traffic.
+///
+/// Either side retires a connection after 10 seconds without a stream in either
+/// direction. Gossip opens a control stream on each connection, which
+/// is the only bidirectional stream it opens. Do not use a connection that you passed to
+/// [`Self::handle_connection`] for other traffic.
 ///
 /// The actor stops when you drop the last clone of [`Gossip`]. Keep a clone for as long as you
 /// need the topics. Call [`Self::shutdown`] to leave the topics cleanly first.
@@ -177,6 +180,21 @@ impl Builder {
         self
     }
 
+    /// Sets how long a connection stays open without any stream, before this node retires it.
+    ///
+    /// The time runs while no stream is open on the connection in either direction, and no
+    /// message waits to go out. A connection to a neighbor keeps its streams open, so it
+    /// does not retire. To retire, the node finishes its streams and sends `GOAWAY`. A
+    /// later message to the peer opens a new connection. Either side can retire a
+    /// connection, so the shorter time of the two nodes applies.
+    ///
+    /// The default is 10 seconds. A shorter time closes unused connections sooner. A
+    /// longer one saves dials to peers that the node uses now and then.
+    pub fn retire_after(mut self, after: std::time::Duration) -> Self {
+        self.config.retire_after = after;
+        self
+    }
+
     /// Spawns a gossip actor, and returns its handle.
     ///
     /// This has to run inside a tokio runtime. The actor stops when you drop the last clone of
@@ -224,10 +242,6 @@ impl Builder {
 /// - A control message to the peer closes the connection, and
 ///   [`Metrics::peers_send_queue_full`] counts it. Both sides find new
 ///   neighbors.
-/// - Once the queues to all peers that a topic pushes to are half full of data,
-///   [`GossipSender::broadcast`] on that topic waits for room, up to 100 ms
-///   per message. Relayed traffic and other topics fill the same queues, so
-///   this slows a publisher that sends little as well.
 ///
 /// Independent of the size:
 ///
@@ -236,8 +250,6 @@ impl Builder {
 /// - A peer that takes no data for 60 s loses its connection, as does one
 ///   that shares more topics with this node than its stream limit allows,
 ///   100 by default.
-///
-/// [`GossipSender::broadcast`]: crate::api::GossipSender::broadcast
 #[derive(Debug, Clone, Copy)]
 pub struct QueueOptions {
     size: usize,
@@ -386,8 +398,7 @@ impl Gossip {
     /// The connection should be an accepted, server-side connection.
     /// Make sure to check the ALPN protocol yourself before passing the connection.
     ///
-    /// Gossip owns the connection from now on. It closes the connection when neither side has
-    /// had a stream on it for ten seconds.
+    /// Gossip owns the connection from now on, and retires it once it is idle.
     ///
     /// # Errors
     ///
