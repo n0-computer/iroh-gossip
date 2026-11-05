@@ -10,13 +10,15 @@ async fn close_does_not_wait_for_an_empty_queue() -> Result {
     let (conn, _peer_conn) = pair.connect_back().await?;
     let (mut actor, _to_actor) = Actor::new(
         pair.ep1.clone(),
+        ActorConfig {
+            proto: Default::default(),
+            ..Default::default()
+        },
         Default::default(),
-        Default::default(),
-        None,
         Default::default(),
     );
     conn.close(0u32.into(), b"done");
-    actor.handle_connection(conn);
+    actor.add_connection(conn);
     let (peer, conn, result) = actor
         .connection_tasks
         .join_next()
@@ -38,7 +40,7 @@ async fn close_does_not_wait_for_an_empty_queue() -> Result {
     while actor.in_event_rx.len() < IN_EVENT_CAP {
         tokio::task::yield_now().await;
     }
-    actor.handle_connection_task_finished(peer, conn, result);
+    actor.on_conn_task_finished(peer, conn, result);
     assert!(
         !producer.is_finished(),
         "the close waited for an empty queue"
@@ -57,9 +59,11 @@ async fn shutdown_comes_before_a_busy_publisher() -> Result {
     for round in 0..8 {
         let (mut actor, to_actor) = Actor::new(
             pair.ep1.clone(),
+            ActorConfig {
+                proto: Default::default(),
+                ..Default::default()
+            },
             Default::default(),
-            Default::default(),
-            None,
             Default::default(),
         );
         publish_forever(&mut actor);
@@ -70,7 +74,7 @@ async fn shutdown_comes_before_a_busy_publisher() -> Result {
             .std_context("send shutdown")?;
         let mut addresses = n0_future::stream::pending();
         assert!(
-            !actor.event_loop(&mut addresses, 0).await,
+            !actor.event_loop(&mut addresses).await,
             "round {round}: the actor did not stop"
         );
         reply_rx.try_recv().std_context("no shutdown reply")?;

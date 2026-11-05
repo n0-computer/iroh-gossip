@@ -24,7 +24,7 @@ impl Dialer {
 
     /// Starts to dial a endpoint by [`EndpointId`].
     pub(super) fn queue_dial(&mut self, endpoint_id: EndpointId, alpn: Bytes) {
-        if self.is_pending(endpoint_id) {
+        if self.is_dialing(endpoint_id) {
             return;
         }
         self.pending_dials.insert(endpoint_id);
@@ -39,7 +39,7 @@ impl Dialer {
     }
 
     /// Checks if a endpoint is currently being dialed.
-    pub(super) fn is_pending(&self, endpoint: EndpointId) -> bool {
+    pub(super) fn is_dialing(&self, endpoint: EndpointId) -> bool {
         self.pending_dials.contains(&endpoint)
     }
 

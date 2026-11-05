@@ -100,8 +100,9 @@ async fn failed_retired_dial_releases_its_queue() -> Result {
         .peers
         .get_mut(&peer)
         .expect("known peer")
-        .close_queue();
-    actor.handle_dial_failed(peer);
+        .queue
+        .close();
+    actor.on_dial_failed(peer);
     assert!(is_idle(&actor.peers[&peer]));
     Ok(())
 }
@@ -118,14 +119,14 @@ async fn unused_connection_from_an_old_peer_stays() -> Result {
     let peer_id = pair.ep2.id();
     let topic: TopicId = blake3::hash(b"old_peer").into();
     let mut actor = t_actor().await?;
-    actor.handle_connection(conn);
+    actor.add_connection(conn);
     let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
     let mut buffer = Vec::new();
-    wire::write_frame(&mut stream, &topic, &mut buffer, TEST_FRAME_LIMIT)
+    wire::write_message(&mut stream, &topic, &mut buffer, TEST_FRAME_LIMIT)
         .await
         .std_context("write header")?;
     let join = join_message(topic, 0).message;
-    wire::write_frame(&mut stream, &join, &mut buffer, TEST_FRAME_LIMIT)
+    wire::write_message(&mut stream, &join, &mut buffer, TEST_FRAME_LIMIT)
         .await
         .std_context("write frame")?;
     let event = timeout(Duration::from_secs(5), actor.in_event_rx.recv())
@@ -161,7 +162,7 @@ async fn overflow_during_a_handover_keeps_the_new_connection() -> Result {
     let topic: TopicId = blake3::hash(b"overflow during a handover").into();
     let mut actor = t_actor().await?;
     actor.send_queue_size = 8 << 20;
-    actor.handle_connection(old);
+    actor.add_connection(old);
     for _ in 0..1000 {
         let message = ProtoMessage {
             topic,
@@ -171,7 +172,7 @@ async fn overflow_during_a_handover_keeps_the_new_connection() -> Result {
     }
     // Wait until flow control blocks the old writer.
     tokio::time::sleep(Duration::from_secs(1)).await;
-    actor.handle_connection(new);
+    actor.add_connection(new);
 
     // Large joins fill the queue before a writer runs again: nothing awaits.
     let data = PeerData::new(vec![0u8; 2000]);
@@ -232,7 +233,9 @@ async fn close_of_a_closed_queue_counts_as_retired() -> Result {
     for closed in [false, true] {
         let (conn, peer_conn) = pair.connect().await?;
         let mut queue = SendQueue::new(queue::MIN_QUEUE_SIZE);
-        queue.set_closing(closed);
+        if closed {
+            queue.close();
+        }
         let (in_event_tx, _in_event_rx) = mpsc::channel(16);
         let task = AbortOnDropHandle::new(spawn(connection_loop(
             pair.ep2.id(),
@@ -270,13 +273,13 @@ async fn replaced_connection_hands_over_its_queue() -> Result {
     let peer_id = pair.ep2.id();
     let topic: TopicId = blake3::hash(b"handed over").into();
     let mut actor = t_actor().await?;
-    actor.handle_connection(old);
+    actor.add_connection(old);
     // The old writer cannot take the queue before the new connection replaces it.
     let held = active_queue(&actor, peer_id)
         .try_reader()
         .std_context("the queue is locked")?;
     push_active(&actor, peer_id, join_message(topic, 1));
-    actor.handle_connection(new);
+    actor.add_connection(new);
     push_active(&actor, peer_id, join_message(topic, 2));
     drop(held);
 
@@ -287,7 +290,7 @@ async fn replaced_connection_hands_over_its_queue() -> Result {
         let mut sizes = Vec::new();
         for _ in 0..2 {
             let message: TopicMessage =
-                wire::read_frame(&mut stream, &mut buffer, TEST_FRAME_LIMIT)
+                wire::read_message(&mut stream, &mut buffer, TEST_FRAME_LIMIT)
                     .await?
                     .std_context("the stream ended")?;
             sizes.push(postcard::experimental::serialized_size(&message).anyerr()?);
@@ -324,11 +327,11 @@ async fn stuck_replaced_connection_hands_over_its_queue() -> Result {
     let topic: TopicId = blake3::hash(b"stuck").into();
     let mut actor = t_actor().await?;
     actor.send_queue_size = 64 << 20;
-    actor.handle_connection(old);
+    actor.add_connection(old);
     push_many(&actor, peer_id, topic, 3000);
     // Wait until flow control blocks the old writer.
     tokio::time::sleep(Duration::from_secs(1)).await;
-    actor.handle_connection(new);
+    actor.add_connection(new);
 
     let mut new_stream = timeout(conn::HANDOVER_LIMIT * 3, peer_new.accept_uni())
         .await
@@ -337,12 +340,12 @@ async fn stuck_replaced_connection_hands_over_its_queue() -> Result {
     let mut new_buffer = BytesMut::new();
     let header =
         wire::StreamHeader::read(&mut new_stream, &mut new_buffer, TEST_FRAME_LIMIT).await?;
-    assert_eq!(header.topic_id, topic);
+    assert_eq!(header.topic, topic);
     let last = numbered(topic, 2999).message;
     let read_new = async {
         let mut messages = Vec::new();
         while messages.last() != Some(&last) {
-            match wire::read_frame(&mut new_stream, &mut new_buffer, TEST_FRAME_LIMIT).await {
+            match wire::read_message(&mut new_stream, &mut new_buffer, TEST_FRAME_LIMIT).await {
                 Ok(Some(message)) => messages.push(message),
                 _ => break,
             }
@@ -371,7 +374,7 @@ async fn stuck_replaced_connection_hands_over_its_queue() -> Result {
         let mut messages = Vec::new();
         // The part of the handed over message ends the stream with an error.
         while let Ok(Some(message)) =
-            wire::read_frame::<TopicMessage>(&mut stream, &mut buffer, TEST_FRAME_LIMIT).await
+            wire::read_message::<TopicMessage>(&mut stream, &mut buffer, TEST_FRAME_LIMIT).await
         {
             messages.push(message);
         }
@@ -409,11 +412,11 @@ async fn aborted_peer_during_a_handover_loses_both_connections() -> Result {
     let topic: TopicId = blake3::hash(b"failed handover").into();
     let mut actor = t_actor().await?;
     actor.send_queue_size = 64 << 20;
-    actor.handle_connection(old);
+    actor.add_connection(old);
     push_many(&actor, peer_id, topic, 3000);
     // Wait until flow control blocks the old writer.
     tokio::time::sleep(Duration::from_secs(1)).await;
-    actor.handle_connection(new);
+    actor.add_connection(new);
 
     actor
         .peers
@@ -462,12 +465,12 @@ async fn replaced_connection_waiting_to_open_hands_over_at_once() -> Result {
         blake3::hash(b"second").into(),
     );
     let mut actor = t_actor().await?;
-    actor.handle_connection(old);
+    actor.add_connection(old);
     push_active(&actor, peer_id, join_message(first, 0));
     push_active(&actor, peer_id, join_message(second, 0));
     // Wait until the old writer opened the first stream and waits for the second.
     tokio::time::sleep(Duration::from_millis(500)).await;
-    actor.handle_connection(new);
+    actor.add_connection(new);
 
     let (topic, _) = timeout(Duration::from_secs(2), read_next_message(&peer_new))
         .await
@@ -487,14 +490,14 @@ async fn replaced_connection_keeps_what_it_wrote() -> Result {
     let (t_old, t_new): (TopicId, TopicId) =
         (blake3::hash(b"old").into(), blake3::hash(b"new").into());
     let mut actor = t_actor().await?;
-    actor.handle_connection(old);
+    actor.add_connection(old);
     push_active(&actor, peer_id, join_message(t_old, 0));
     let (topic, _) = timeout(Duration::from_secs(5), read_next_message(&peer_old))
         .await
         .std_context("the old connection sent nothing")??;
     assert_eq!(topic, t_old);
 
-    actor.handle_connection(new);
+    actor.add_connection(new);
     push_active(&actor, peer_id, join_message(t_new, 0));
     let (topic, _) = timeout(Duration::from_secs(5), read_next_message(&peer_new))
         .await
@@ -518,8 +521,8 @@ async fn replaced_connection_stays_while_the_peer_sends_on_it() -> Result {
     let peer_id = pair.ep2.id();
     let topic: TopicId = blake3::hash(b"replaced_connection_stays").into();
     let mut actor = t_actor().await?;
-    actor.handle_connection(first);
-    actor.handle_connection(second);
+    actor.add_connection(first);
+    actor.add_connection(second);
 
     show_that_it_handles_a_close(&peer_second, topic).await;
     let mut stream = peer_first.open_uni().await.std_context("open stream")?;
@@ -528,11 +531,11 @@ async fn replaced_connection_stays_while_the_peer_sends_on_it() -> Result {
         .await
         .std_context("write header")?;
     let join = join_message(topic, 0).message;
-    wire::write_frame(&mut stream, &join, &mut buffer, TEST_FRAME_LIMIT)
+    wire::write_message(&mut stream, &join, &mut buffer, TEST_FRAME_LIMIT)
         .await
         .std_context("write frame")?;
     tokio::time::sleep(RETIRE_GRACE + Duration::from_secs(1)).await;
-    wire::write_frame(&mut stream, &join, &mut buffer, TEST_FRAME_LIMIT)
+    wire::write_message(&mut stream, &join, &mut buffer, TEST_FRAME_LIMIT)
         .await
         .std_context("write after the grace")?;
     for _ in 0..2 {
@@ -553,7 +556,8 @@ async fn replaced_connection_stays_while_the_peer_sends_on_it() -> Result {
         .peers
         .get_mut(&peer_id)
         .expect("known peer")
-        .close_queue();
+        .queue
+        .close();
     stream.finish().std_context("finish")?;
     timeout(RETIRE_GRACE + Duration::from_secs(3), peer_first.closed())
         .await
@@ -577,13 +581,14 @@ async fn silent_late_dial_closes() -> Result {
     let topic: TopicId = blake3::hash(b"silent_late_dial").into();
     let mut actor = t_actor().await?;
 
-    actor.handle_connection(accepted);
+    actor.add_connection(accepted);
     show_that_it_handles_a_close(&peer_accepted, topic).await;
     actor
         .peers
         .get_mut(&peer_id)
         .expect("known peer")
-        .close_queue();
+        .queue
+        .close();
     let ended = timeout(
         RETIRE_GRACE + Duration::from_secs(3),
         actor.connection_tasks.join_next(),
@@ -593,8 +598,8 @@ async fn silent_late_dial_closes() -> Result {
     let (peer, conn, res) = ended.expect("one task").expect("no panic");
 
     // The test runtime runs the dial task only at the next await.
-    actor.handle_connection(dialed);
-    actor.handle_connection_task_finished(peer, conn, res);
+    actor.add_connection(dialed);
+    actor.on_conn_task_finished(peer, conn, res);
     assert!(
         actor.peers.contains_key(&peer_id),
         "the flag went while the dial holds it"
@@ -607,7 +612,7 @@ async fn silent_late_dial_closes() -> Result {
     .await
     .std_context("the dial stayed open")?;
     let (peer, conn, res) = ended.expect("one task").expect("no panic");
-    actor.handle_connection_task_finished(peer, conn, res);
+    actor.on_conn_task_finished(peer, conn, res);
     timeout(Duration::from_secs(1), peer_dialed.closed())
         .await
         .std_context("the peer did not see the close")?;
@@ -632,13 +637,14 @@ async fn silent_dial_after_the_last_connection_closes() -> Result {
     let topic: TopicId = blake3::hash(b"silent_dial_after_the_last").into();
     let mut actor = t_actor().await?;
 
-    actor.handle_connection(accepted);
+    actor.add_connection(accepted);
     show_that_it_handles_a_close(&peer_accepted, topic).await;
     actor
         .peers
         .get_mut(&peer_id)
         .expect("known peer")
-        .close_queue();
+        .queue
+        .close();
     let ended = timeout(
         RETIRE_GRACE + Duration::from_secs(3),
         actor.connection_tasks.join_next(),
@@ -646,13 +652,13 @@ async fn silent_dial_after_the_last_connection_closes() -> Result {
     .await
     .std_context("the accepted connection stayed open")?;
     let (peer, conn, res) = ended.expect("one task").expect("no panic");
-    actor.handle_connection_task_finished(peer, conn, res);
+    actor.on_conn_task_finished(peer, conn, res);
     assert!(
         actor.peers.contains_key(&peer_id),
         "the flag went with the last connection"
     );
 
-    actor.handle_connection(dialed);
+    actor.add_connection(dialed);
     let ended = timeout(
         RETIRE_GRACE + Duration::from_secs(3),
         actor.connection_tasks.join_next(),
@@ -660,7 +666,7 @@ async fn silent_dial_after_the_last_connection_closes() -> Result {
     .await
     .std_context("the dial stayed open")?;
     let (peer, conn, res) = ended.expect("one task").expect("no panic");
-    actor.handle_connection_task_finished(peer, conn, res);
+    actor.on_conn_task_finished(peer, conn, res);
     timeout(Duration::from_secs(1), peer_dialed.closed())
         .await
         .std_context("the peer did not see the close")?;
@@ -676,13 +682,13 @@ async fn peer_with_unset_close_flag_expires() -> Result {
     let peer_id = pair.ep2.id();
     let mut actor = t_actor().await?;
 
-    actor.handle_connection(conn);
+    actor.add_connection(conn);
     peer_conn.close(0u32.into(), b"done");
     let ended = timeout(Duration::from_secs(3), actor.connection_tasks.join_next())
         .await
         .std_context("the connection stayed open")?;
     let (peer, conn, res) = ended.expect("one task").expect("no panic");
-    actor.handle_connection_task_finished(peer, conn, res);
+    actor.on_conn_task_finished(peer, conn, res);
     assert!(actor.peers.contains_key(&peer_id), "retain the idle peer");
     actor.forget_peers(Instant::now() + PEER_RETENTION);
     assert!(
@@ -704,7 +710,7 @@ async fn silent_dial_stays() -> Result {
     let peer_id = pair.ep2.id();
     let mut actor = t_actor().await?;
 
-    actor.handle_connection(conn);
+    actor.add_connection(conn);
     assert!(is_idle(&actor.peers[&peer_id]), "the dial got a queue");
 
     tokio::time::sleep(RETIRE_GRACE + Duration::from_secs(1)).await;
@@ -735,11 +741,12 @@ async fn overtaken_dial_stays_while_the_peer_sends_on_it() -> Result {
         .peers
         .get_mut(&peer_id)
         .expect("known peer")
-        .close_queue();
+        .queue
+        .close();
 
     let inbound_id = inbound.stable_id();
-    actor.handle_connection(inbound);
-    actor.handle_connection(dialed);
+    actor.add_connection(inbound);
+    actor.add_connection(dialed);
     let mut stream = open_stream(&dialed_theirs, topic, &[join_message(topic, 0).message]).await?;
 
     assert!(
@@ -759,7 +766,8 @@ async fn overtaken_dial_stays_while_the_peer_sends_on_it() -> Result {
         .peers
         .get_mut(&peer_id)
         .expect("known peer")
-        .close_queue();
+        .queue
+        .close();
     stream.finish().std_context("finish")?;
     timeout(
         RETIRE_GRACE + Duration::from_secs(3),
@@ -796,12 +804,12 @@ async fn disconnected_pending_dial_flushes_then_closes() -> Result {
             .await
             .expect("header");
         let message: Option<proto::topic::Message<PublicKey>> =
-            wire::read_frame(&mut stream, &mut buf, 1024)
+            wire::read_message(&mut stream, &mut buf, 1024)
                 .await
                 .expect("frame");
-        show_that_it_handles_a_close(&conn, header.topic_id).await;
+        show_that_it_handles_a_close(&conn, header.topic).await;
         conn.closed().await;
-        (header.topic_id, message.is_some())
+        (header.topic, message.is_some())
     });
     let peer = AbortOnDropHandle::new(peer);
 
@@ -817,8 +825,9 @@ async fn disconnected_pending_dial_flushes_then_closes() -> Result {
         .peers
         .get_mut(&ep2_id)
         .expect("known peer")
-        .close_queue();
-    actor.handle_connection(conn);
+        .queue
+        .close();
+    actor.add_connection(conn);
     assert!(
         matches!(send_state(&actor, ep2_id), Some((Some(_), true))),
         "the connection became the peer's active one"
@@ -885,10 +894,10 @@ async fn shuffle_reply_connection_closes() -> Result {
             .await
             .expect("header");
         let reply: Option<proto::topic::Message<PublicKey>> =
-            wire::read_frame(&mut stream, &mut buf, 1024)
+            wire::read_message(&mut stream, &mut buf, 1024)
                 .await
                 .expect("frame");
-        show_that_it_handles_a_close(&conn, header.topic_id).await;
+        show_that_it_handles_a_close(&conn, header.topic).await;
         conn.closed().await;
         reply.is_some()
     }));
@@ -905,7 +914,7 @@ async fn shuffle_reply_connection_closes() -> Result {
         .await
         .std_context("header")?;
     let shuffle = proto::topic::Message::test_shuffle(origin_id, 0);
-    wire::write_frame(&mut stream, &shuffle, &mut buf, 1024)
+    wire::write_message(&mut stream, &shuffle, &mut buf, 1024)
         .await
         .std_context("frame")?;
 
