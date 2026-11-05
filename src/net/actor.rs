@@ -522,7 +522,7 @@ impl Actor {
             debug!(?event, "handle in_event");
         };
         if let InEvent::RecvMessage(_from, message) = &event {
-            let len = message.size().ok();
+            let len = super::wire::message_len(&message.message).ok();
             track_message(message, len, false, &self.metrics);
         }
         let may_change_wants = event.may_change_wants();
@@ -577,7 +577,7 @@ impl IO<PublicKey> for ActorIO<'_> {
     fn send(&mut self, peer_id: PublicKey, message: ProtoMessage) -> Option<ProtoMessage> {
         let state = &mut *self.state;
         debug!(peer = %peer_id.fmt_short(), ?message, "send");
-        let len = message.size().ok();
+        let len = super::wire::message_len(&message.message).ok();
         track_message(&message, len, true, &state.metrics);
         if state.overflowed_peers.contains(&peer_id) {
             return None;

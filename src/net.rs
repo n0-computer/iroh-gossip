@@ -33,7 +33,7 @@ mod subscriptions;
 mod wire;
 
 /// ALPN protocol name
-pub const GOSSIP_ALPN: &[u8] = b"iroh-gossip/2-canary.0";
+pub const GOSSIP_ALPN: &[u8] = b"iroh-gossip/2-canary.1";
 
 type ProtoEvent = proto::Event<PublicKey>;
 type ProtoCommand = proto::Command<PublicKey>;
@@ -127,7 +127,7 @@ impl Builder {
     /// Sets the maximum message size in bytes.
     ///
     /// By default this is `4096` bytes. The limit applies to the encoded message,
-    /// which is about 10 bytes longer than its content, 9 at the default size.
+    /// which is about 7 bytes longer than its content, 6 at the default size.
     /// [`GossipSender::broadcast`] refuses a message over the limit.
     ///
     /// Use the same limit on every node of a swarm. A node drops a message over

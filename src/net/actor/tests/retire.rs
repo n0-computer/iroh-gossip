@@ -109,45 +109,6 @@ async fn failed_retired_dial_releases_its_queue() -> Result {
     Ok(())
 }
 
-/// An unused connection to a peer whose header has no flags stays open.
-///
-/// Nodes up to 0.101 send the topic alone. Such a node would lose its later
-/// messages to us if we closed a connection that is no neighbor link of it.
-#[tokio::test]
-#[traced_test]
-async fn unused_connection_from_an_old_peer_stays() -> Result {
-    let pair = TestPair::new(1).await?;
-    let (conn, peer_conn) = pair.connect_back().await?;
-    let peer_id = pair.ep2.id();
-    let topic: TopicId = blake3::hash(b"old_peer").into();
-    let mut actor = t_actor().await?;
-    actor.add_connection(conn);
-    let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
-    let mut buffer = Vec::new();
-    wire::write_message(&mut stream, &topic, &mut buffer, TEST_FRAME_LIMIT)
-        .await
-        .std_context("write header")?;
-    let join = join_message(topic, 0).message;
-    wire::write_message(&mut stream, &join, &mut buffer, TEST_FRAME_LIMIT)
-        .await
-        .std_context("write frame")?;
-    let event = timeout(Duration::from_secs(5), actor.in_event_rx.recv())
-        .await
-        .std_context("the message did not arrive")?;
-    assert!(
-        matches!(event, Some(InEvent::RecvMessage(peer, _)) if peer == peer_id),
-        "{event:?}"
-    );
-
-    tokio::time::sleep(RETIRE_GRACE + Duration::from_secs(1)).await;
-    assert!(
-        actor.connection_tasks.try_join_next().is_none(),
-        "the connection closed"
-    );
-    assert!(peer_conn.close_reason().is_none(), "the connection closed");
-    Ok(())
-}
-
 /// A control overflow during a handover closes the stuck old connection, not the new one (a cost of the design).
 ///
 /// The old connection does not read, so its writer keeps the queue for up
@@ -291,7 +252,7 @@ async fn replaced_connection_hands_over_its_queue() -> Result {
 
     let read = async {
         let mut stream = peer_new.accept_uni().await.std_context("accept")?;
-        let mut buffer = BytesMut::new();
+        let mut buffer = Vec::new();
         wire::StreamHeader::read(&mut stream, &mut buffer, TEST_FRAME_LIMIT).await?;
         let mut sizes = Vec::new();
         for _ in 0..2 {
@@ -299,7 +260,7 @@ async fn replaced_connection_hands_over_its_queue() -> Result {
                 wire::read_message(&mut stream, &mut buffer, TEST_FRAME_LIMIT)
                     .await?
                     .std_context("the stream ended")?;
-            sizes.push(postcard::experimental::serialized_size(&message).anyerr()?);
+            sizes.push(wire::message_len(&message).anyerr()?);
         }
         Ok::<_, AnyError>(sizes)
     };
@@ -343,7 +304,7 @@ async fn stuck_replaced_connection_hands_over_its_queue() -> Result {
         .await
         .std_context("the new connection sent nothing")?
         .std_context("accept")?;
-    let mut new_buffer = BytesMut::new();
+    let mut new_buffer = Vec::new();
     let header =
         wire::StreamHeader::read(&mut new_stream, &mut new_buffer, TEST_FRAME_LIMIT).await?;
     assert_eq!(header.topic, topic);
@@ -374,13 +335,13 @@ async fn stuck_replaced_connection_hands_over_its_queue() -> Result {
     );
 
     let mut stream = peer_old.accept_uni().await.std_context("accept")?;
-    let mut buffer = BytesMut::new();
+    let mut buffer = Vec::new();
     wire::StreamHeader::read(&mut stream, &mut buffer, TEST_FRAME_LIMIT).await?;
     let read = async {
         let mut messages = Vec::new();
         // The part of the handed over message ends the stream with an error.
         while let Ok(Some(message)) =
-            wire::read_message::<TopicMessage>(&mut stream, &mut buffer, TEST_FRAME_LIMIT).await
+            wire::read_message(&mut stream, &mut buffer, TEST_FRAME_LIMIT).await
         {
             messages.push(message);
         }
@@ -713,8 +674,7 @@ async fn peer_with_unset_close_flag_expires() -> Result {
 
 /// A dial on which neither side sends a header stays open.
 ///
-/// Neither side learns that the other handles a close, see
-/// [`wire::StreamHeader::handles_close`].
+/// Neither side opens a stream, so neither learns that the other handles a close.
 #[tokio::test]
 #[traced_test]
 async fn silent_dial_stays() -> Result {
@@ -817,7 +777,7 @@ async fn disconnected_pending_dial_flushes_then_closes() -> Result {
         let incoming = ep2.accept().await.expect("endpoint closed");
         let conn = incoming.await.expect("accept failed");
         let mut stream = conn.accept_uni().await.expect("accept_uni");
-        let mut buf = bytes::BytesMut::new();
+        let mut buf = Vec::new();
         let header = wire::StreamHeader::read(&mut stream, &mut buf, 1024)
             .await
             .expect("header");
@@ -909,7 +869,7 @@ async fn shuffle_reply_connection_closes() -> Result {
         let incoming = origin.accept().await.expect("endpoint closed");
         let conn = incoming.await.expect("accept failed");
         let mut stream = conn.accept_uni().await.expect("accept_uni");
-        let mut buf = bytes::BytesMut::new();
+        let mut buf = Vec::new();
         let header = wire::StreamHeader::read(&mut stream, &mut buf, 1024)
             .await
             .expect("header");
@@ -953,5 +913,41 @@ async fn shuffle_reply_connection_closes() -> Result {
         actor.state.peers.get(&origin_id).is_none_or(is_idle),
         "the origin's queue was kept"
     );
+    Ok(())
+}
+
+/// A peer that opens streams and sends nothing loses them after the header deadline.
+#[tokio::test]
+#[traced_test]
+async fn silent_streams_do_not_block_accept() -> Result {
+    let pair = TestPair::new(1).await?;
+    let (conn, peer_conn) = pair.connect().await?;
+    let (in_event_tx, mut in_event_rx) = mpsc::channel(4);
+    let mut recv_loop = RecvLoop::new(
+        peer_conn.remote_id(),
+        conn,
+        in_event_tx,
+        1024,
+        unset_flag(),
+        unset_flag(),
+    );
+    let _recv = AbortOnDropHandle::new(spawn(async move { recv_loop.run().await }));
+
+    let mut silent = Vec::new();
+    for _ in 0..conn::MAX_PENDING_HEADERS {
+        let mut stream = peer_conn.open_uni().await.std_context("open stream")?;
+        // A stream opens for the peer once it sends a byte.
+        stream.write_all(&[0x23]).await.std_context("write")?;
+        silent.push(stream);
+    }
+    let topic: TopicId = [1; 32].into();
+    let _stream = open_stream(&peer_conn, topic, &[join_message(topic, 0).message]).await?;
+    let event = timeout(
+        wire::HEADER_TIMEOUT + Duration::from_secs(3),
+        in_event_rx.recv(),
+    )
+    .await
+    .std_context("the silent streams still hold the accept loop")?;
+    assert!(matches!(event, Some(InEvent::RecvMessage(..))), "{event:?}");
     Ok(())
 }

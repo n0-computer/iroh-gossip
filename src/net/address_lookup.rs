@@ -28,21 +28,11 @@ use crate::proto::PeerData;
 /// whose addresses keep changing grows its entry without limit.
 const MAX_ADDRS: usize = 32;
 
-struct RetentionOpts {
-    /// How long to keep received endpoint info records alive before pruning them
-    retention: Duration,
-    /// How often to check for expired entries
-    evict_interval: Duration,
-}
+/// How long we keep received endpoint info records before we prune them.
+const RETENTION: Duration = Duration::from_secs(60 * 5);
 
-impl Default for RetentionOpts {
-    fn default() -> Self {
-        Self {
-            retention: Duration::from_secs(60 * 5),
-            evict_interval: Duration::from_secs(30),
-        }
-    }
-}
+/// How often we check for expired records.
+const EVICT_INTERVAL: Duration = Duration::from_secs(30);
 
 /// An address lookup service that expires endpoints after some time.
 ///
@@ -64,24 +54,19 @@ struct StoredEndpointInfo {
 
 impl Default for GossipAddressLookup {
     fn default() -> Self {
-        Self::new()
+        Self::with_times(RETENTION, EVICT_INTERVAL)
     }
 }
 
 impl GossipAddressLookup {
     const PROVENANCE: &'static str = "gossip";
 
-    /// Creates a new gossip address lookup instance.
-    fn new() -> Self {
-        Self::with_opts(Default::default())
-    }
-
-    fn with_opts(opts: RetentionOpts) -> Self {
+    fn with_times(retention: Duration, evict_interval: Duration) -> Self {
         let endpoints: NodeMap = Default::default();
         let task = {
             let endpoints = Arc::downgrade(&endpoints);
             n0_future::task::spawn(async move {
-                let mut interval = n0_future::time::interval(opts.evict_interval);
+                let mut interval = n0_future::time::interval(evict_interval);
                 loop {
                     interval.tick().await;
                     let Some(endpoints) = endpoints.upgrade() else {
@@ -90,7 +75,7 @@ impl GossipAddressLookup {
                     let now = SystemTime::now();
                     endpoints.write().expect("poisoned").retain(|_k, v| {
                         let age = now.duration_since(v.last_updated).unwrap_or(Duration::MAX);
-                        age <= opts.retention
+                        age <= retention
                     });
                 }
             })
@@ -166,7 +151,8 @@ pub(super) fn encode_peer_data(info: &AddrInfo) -> PeerData {
 
 pub(super) fn decode_peer_data(peer_data: &PeerData) -> Result<AddrInfo, postcard::Error> {
     let bytes = peer_data.as_bytes();
-    if bytes.is_empty() {
+    // Data of another kind has no addresses for us, so the peer is its id only.
+    if peer_data.kind() != PeerData::KIND_ADDRESSES || bytes.is_empty() {
         return Ok(AddrInfo::default());
     }
     let info = postcard::from_bytes(bytes)?;
@@ -181,15 +167,68 @@ mod tests {
     use n0_future::StreamExt;
     use rand::{RngExt, SeedableRng};
 
-    use super::{GossipAddressLookup, RetentionOpts, MAX_ADDRS};
+    use super::{decode_peer_data, encode_peer_data, AddrInfo, GossipAddressLookup, MAX_ADDRS};
+    use crate::proto::PeerData;
+
+    #[test]
+    fn peer_data_kinds() {
+        let info = AddrInfo {
+            relay_url: None,
+            direct_addresses: ["1.2.3.4:5".parse().unwrap()].into(),
+        };
+        let data = encode_peer_data(&info);
+        assert_eq!(data.kind(), PeerData::KIND_ADDRESSES);
+        assert_eq!(
+            decode_peer_data(&data).unwrap().direct_addresses,
+            info.direct_addresses
+        );
+        // Another kind reads as a peer with no addresses.
+        let other = PeerData::with_kind(7, data.as_bytes().to_vec());
+        assert!(decode_peer_data(&other)
+            .unwrap()
+            .direct_addresses
+            .is_empty());
+    }
+
+    /// Pins the wire bytes of peer data of the addresses kind.
+    ///
+    /// The bytes are the kind, the length, and the postcard `AddrInfo`. A change of the
+    /// serde of `RelayUrl` or `SocketAddr` would change them.
+    #[test]
+    fn peer_data_vectors() {
+        let encode = |relay: Option<&str>, addrs: &[&str]| {
+            let info = AddrInfo {
+                relay_url: relay.map(|url| url.parse().unwrap()),
+                direct_addresses: addrs.iter().map(|addr| addr.parse().unwrap()).collect(),
+            };
+            hex::encode(postcard::to_stdvec(&encode_peer_data(&info)).unwrap())
+        };
+        // No relay, no address.
+        assert_eq!(encode(None, &[]), "00020000");
+        // No relay, one address: variant 0 (V4), the 4 bytes of the IP, the port as a varint.
+        assert_eq!(
+            encode(None, &["127.0.0.1:4433"]),
+            concat!("0009", "00", "01", "00", "7f000001", "d122")
+        );
+        // The relay as a string, and variant 1 (V6) with the 16 bytes of the IP.
+        assert_eq!(
+            encode(Some("https://relay.example/"), &["[::1]:7"]),
+            concat!(
+                "002b",
+                "0116",
+                "68747470733a2f2f72656c61792e6578616d706c652f",
+                "01",
+                "01",
+                "00000000000000000000000000000001",
+                "07"
+            )
+        );
+    }
 
     #[tokio::test]
     async fn test_retention() {
-        let opts = RetentionOpts {
-            evict_interval: Duration::from_millis(100),
-            retention: Duration::from_millis(500),
-        };
-        let disco = GossipAddressLookup::with_opts(opts);
+        let disco =
+            GossipAddressLookup::with_times(Duration::from_millis(500), Duration::from_millis(100));
 
         let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
         let k1 = SecretKey::from_bytes(&rng.random());
@@ -217,7 +256,7 @@ mod tests {
     /// A peer whose address keeps changing has its newest addresses kept, up to the cap.
     #[tokio::test]
     async fn changing_addresses_stay_capped() {
-        let disco = GossipAddressLookup::new();
+        let disco = GossipAddressLookup::default();
         let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
         let id = SecretKey::from_bytes(&rng.random()).public();
         let addr = |port| SocketAddr::from(([10, 0, 0, 1], port));
