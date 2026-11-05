@@ -509,9 +509,9 @@ mod tests {
         run(state, event);
     }
 
-    /// A message for a topic that we are not on gets a `Disconnect`, and uses no peer.
+    /// A message for a topic that we are not on gets a `Close`, and makes no topic want the peer.
     ///
-    /// A `Disconnect` and a Plumtree message get no answer.
+    /// A `Close` and a Plumtree message get no answer.
     #[test]
     fn message_for_an_unknown_topic_gets_a_disconnect() {
         let mut state = State::new(
@@ -533,7 +533,7 @@ mod tests {
                 true,
             ),
             (
-                topic::Message::Swarm(hyparview::Message::test_disconnect()),
+                topic::Message::Swarm(hyparview::Message::test_close()),
                 false,
             ),
             (topic::Message::Swarm(hyparview::Message::left()), false),

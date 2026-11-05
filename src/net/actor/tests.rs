@@ -319,11 +319,11 @@ async fn read_next_stream(conn: &Connection) -> Result<(TopicId, Vec<TopicMessag
     Ok((header.topic, messages))
 }
 
-/// Returns a `Disconnect` for `topic`.
+/// Returns a `Close` for `topic`.
 fn disconnect_message(topic: TopicId) -> ProtoMessage {
     ProtoMessage {
         topic,
-        message: TopicMessage::test_disconnect(),
+        message: TopicMessage::test_close(),
     }
 }
 

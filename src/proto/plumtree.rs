@@ -116,8 +116,10 @@ pub struct Round(u16);
 
 impl Round {
     /// Returns the round to forward a message with, one hop higher.
+    ///
+    /// The round stops at its maximum. A peer can send any round.
     pub fn next(&self) -> Round {
-        Round(self.0 + 1)
+        Round(self.0.saturating_add(1))
     }
 }
 
@@ -168,18 +170,39 @@ impl Message {
 }
 
 /// Payload messages transmitted by the protocol.
-#[derive(Serialize, Deserialize, Clone, derive_more::Debug, PartialEq, Eq)]
+///
+/// The id is not on the wire. A receiver hashes the content, see [`Gossip::new`].
+#[derive(Clone, derive_more::Debug, PartialEq, Eq)]
 pub struct Gossip {
-    /// Id of the message.
-    id: MessageId,
+    /// Id of the message, the hash of its content.
+    pub(crate) id: MessageId,
     /// Message contents.
     #[debug("<{}b>", content.len())]
-    content: Bytes,
+    pub(crate) content: Bytes,
     /// Scope to broadcast to.
-    scope: DeliveryScope,
+    pub(crate) scope: DeliveryScope,
+}
+
+impl Serialize for Gossip {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        (&self.content, &self.scope).serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for Gossip {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let (content, scope) = Deserialize::deserialize(d)?;
+        Ok(Self::new(content, scope))
+    }
 }
 
 impl Gossip {
+    /// Returns a message with `content`, and its id as the hash of the content.
+    pub(crate) fn new(content: Bytes, scope: DeliveryScope) -> Self {
+        let id = MessageId::from_content(&content);
+        Self { id, content, scope }
+    }
+
     fn round(&self) -> Option<Round> {
         match self.scope {
             DeliveryScope::Swarm(round) => Some(round),
@@ -222,11 +245,7 @@ pub(crate) fn max_gossip_size(content_len: usize, scope: Scope) -> usize {
         Scope::Swarm => DeliveryScope::Swarm(Round(u16::MAX)),
         Scope::Neighbors => DeliveryScope::Neighbors,
     };
-    let empty = Message::Gossip(Gossip {
-        id: MessageId([0; 32]),
-        content: Bytes::new(),
-        scope,
-    });
+    let empty = Message::Gossip(Gossip::new(Bytes::new(), scope));
     let empty_size = postcard::experimental::serialized_size(&empty).expect("encodes");
     // The content adds its bytes, and its length prefix grows from one byte.
     let prefix_size = (usize::BITS - content_len.leading_zeros())
@@ -257,12 +276,6 @@ impl Gossip {
             }),
         }
     }
-
-    /// Validate that the message id is the blake3 hash of the message content.
-    pub fn validate(&self) -> bool {
-        let expected = MessageId::from_content(&self.content);
-        expected == self.id
-    }
 }
 
 /// Control message to inform peers we have a message without transmitting the whole payload.
@@ -280,9 +293,7 @@ pub struct IHave {
 pub struct Graft {
     /// Message id that triggers the graft, if any.
     /// On receiving a graft, the payload message must be sent in reply if a message id is set.
-    id: Option<MessageId>,
-    /// Delivery round of the [`Message::IHave`] that triggered this Graft message.
-    round: Round,
+    pub(crate) id: Option<MessageId>,
 }
 
 /// Configuration for the gossip broadcast layer.
@@ -600,12 +611,12 @@ impl<PI: PeerIdentity> State<PI> {
             warn!(max = self.max_message_size, "broadcast too large, dropped");
             return;
         }
-        let id = MessageId::from_content(&content);
         let scope = match scope {
             Scope::Neighbors => DeliveryScope::Neighbors,
             Scope::Swarm => DeliveryScope::Swarm(Round(0)),
         };
-        let message = Gossip { id, content, scope };
+        let message = Gossip::new(content, scope);
+        let id = message.id;
         let me = self.me;
         if let DeliveryScope::Swarm(_) = scope {
             self.received_messages
@@ -630,17 +641,6 @@ impl<PI: PeerIdentity> State<PI> {
         now: Instant,
         io: &mut impl IO<PI>,
     ) {
-        // Validate that the message id is the blake3 hash of the message content.
-        if !message.validate() {
-            // TODO: Do we want to take any measures against the sender if we received a message
-            // with a spoofed message id?
-            warn!(
-                peer = ?sender,
-                "Received a message with spoofed message id ({})", message.id
-            );
-            return;
-        }
-
         // if we already received this message: move peer to lazy set
         // and notify peer about this.
         if self.received_messages.contains_key(&message.id) {
@@ -771,10 +771,7 @@ impl<PI: PeerIdentity> State<PI> {
             {
                 // Graft the sender of the IHave, but only if it's not already eager.
                 if !self.eager_push_peers.contains(&ihave_peer) {
-                    let message = Message::Graft(Graft {
-                        id: None,
-                        round: ihave_round,
-                    });
+                    let message = Message::Graft(Graft { id: None });
                     self.add_eager(ihave_peer);
                     io.send(ihave_peer, message);
                 }
@@ -854,10 +851,7 @@ impl<PI: PeerIdentity> State<PI> {
                     self.grafted.insert(id, grafts, expires);
                 }
             }
-            let message = Message::Graft(Graft {
-                id: Some(id),
-                round,
-            });
+            let message = Message::Graft(Graft { id: Some(id) });
             io.send(peer, message);
 
             // "when a GRAFT message is sent, another timer is started to expire after a certain timeout,
@@ -1062,6 +1056,21 @@ mod test {
         assert!(!state.lazy_push_peers.contains(&2));
     }
 
+    /// A round at its maximum from a peer goes out at its maximum.
+    #[test]
+    fn round_from_a_peer_does_not_overflow() {
+        let mut state = State::new(1u32, Config::default(), 1024);
+        state.on_neighbor_up(2);
+        state.on_neighbor_up(3);
+        let mut io = VecDeque::new();
+        let message = Message::Gossip(gossip(b"x", u16::MAX));
+        state.handle(InEvent::RecvMessage(2, message), Instant::now(), &mut io);
+        let Some(Message::Gossip(out)) = pushed_to(&io, 3) else {
+            panic!("no payload to 3");
+        };
+        assert_eq!(out.round(), Some(Round(u16::MAX)));
+    }
+
     /// Returns a swarm-scope payload with `content`, as received after `round` hops.
     fn gossip(content: &'static [u8], round: u16) -> Gossip {
         let content = Bytes::from_static(content);
@@ -1093,10 +1102,7 @@ mod test {
         state.on_neighbor_down(2);
         let unknown = MessageId::from_content(b"unknown");
         let late = [
-            Message::Graft(Graft {
-                id: Some(seen.id),
-                round: Round(1),
-            }),
+            Message::Graft(Graft { id: Some(seen.id) }),
             Message::IHave(vec![IHave {
                 id: unknown,
                 round: Round(1),
@@ -1329,10 +1335,7 @@ mod test {
 
         // A graft for it gets the payload from the cache, and the queue drops it.
         let mut io = Dropping::new(Drops::Pushes);
-        let graft = Message::Graft(Graft {
-            id: Some(id),
-            round: Round(1),
-        });
+        let graft = Message::Graft(Graft { id: Some(id) });
         state.handle(InEvent::RecvMessage(2, graft), now, &mut io);
         pushed_to(&io.out, 2).expect("the graft got no payload");
 
@@ -1920,13 +1923,7 @@ mod test {
             // this time we expect the Graft and Prune messages to be sent, performing the
             // optimization step
             let mut io = VecDeque::new();
-            io.send(
-                2,
-                Message::Graft(Graft {
-                    id: None,
-                    round: Round(2),
-                }),
-            );
+            io.send(2, Message::Graft(Graft { id: None }));
             io.send(3, Message::Prune);
             io.emit(Event::Received(GossipEvent {
                 content,
@@ -1935,47 +1932,6 @@ mod test {
             }));
             io
         };
-        assert_eq!(io, expected);
-    }
-
-    #[test]
-    fn spoofed_messages_are_ignored() {
-        let config: Config = Default::default();
-        let mut state = State::new(1, config.clone(), 1024);
-        let now = Instant::now();
-
-        // we recv a correct gossip message and expect the Received event to be emitted
-        let content: Bytes = b"hello1".to_vec().into();
-        let message = Message::Gossip(Gossip {
-            content: content.clone(),
-            id: MessageId::from_content(&content),
-            scope: DeliveryScope::Swarm(Round(1)),
-        });
-        let mut io = VecDeque::new();
-        state.handle(InEvent::RecvMessage(2, message), now, &mut io);
-        let expected = {
-            let mut io = VecDeque::new();
-            io.schedule(config.cache_evict_interval, Timer::EvictCache);
-            io.schedule(config.dispatch_timeout, Timer::DispatchLazyPush);
-            io.emit(Event::Received(GossipEvent {
-                content,
-                delivered_from: 2,
-                scope: DeliveryScope::Swarm(Round(1)),
-            }));
-            io
-        };
-        assert_eq!(io, expected);
-
-        // now we recv with a spoofed id and expect no event to be emitted
-        let content: Bytes = b"hello2".to_vec().into();
-        let message = Message::Gossip(Gossip {
-            content,
-            id: MessageId::from_content(b"foo"),
-            scope: DeliveryScope::Swarm(Round(1)),
-        });
-        let mut io = VecDeque::new();
-        state.handle(InEvent::RecvMessage(2, message), now, &mut io);
-        let expected = VecDeque::new();
         assert_eq!(io, expected);
     }
 
@@ -2052,11 +2008,7 @@ mod test {
     #[test]
     fn max_gossip_size_covers_every_round() {
         let size = |content: &Bytes, scope| {
-            let message = Message::Gossip(Gossip {
-                id: MessageId::from_content(content),
-                content: content.clone(),
-                scope,
-            });
+            let message = Message::Gossip(Gossip::new(content.clone(), scope));
             postcard::experimental::serialized_size(&message).expect("encodes")
         };
         for len in [0, 127, 128, 4000, 20_000] {
