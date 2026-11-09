@@ -378,76 +378,75 @@
 <a href=#378 id=378 data-nosnippet>378</a>    }
 <a href=#379 id=379 data-nosnippet>379</a>
 <a href=#380 id=380 data-nosnippet>380</a>    <span class="doccomment">/// Returns whether the topic wants a connection to `peer`, see [`hyparview::State::wants`].
-<a href=#381 id=381 data-nosnippet>381</a>    </span><span class="attr">#[cfg(any(test, feature = <span class="string">"net"</span>, feature = <span class="string">"test-utils"</span>))]
-<a href=#382 id=382 data-nosnippet>382</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>wants(<span class="kw-2">&amp;</span><span class="self">self</span>, peer: <span class="kw-2">&amp;</span>PI) -&gt; bool {
-<a href=#383 id=383 data-nosnippet>383</a>        <span class="self">self</span>.swarm.wants(peer)
-<a href=#384 id=384 data-nosnippet>384</a>    }
-<a href=#385 id=385 data-nosnippet>385</a>
-<a href=#386 id=386 data-nosnippet>386</a>    <span class="doccomment">/// Check if this topic has any active (connected) peers.
-<a href=#387 id=387 data-nosnippet>387</a>    </span><span class="kw">pub fn </span>has_active_peers(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
-<a href=#388 id=388 data-nosnippet>388</a>        !<span class="self">self</span>.swarm.active_view.is_empty()
-<a href=#389 id=389 data-nosnippet>389</a>    }
-<a href=#390 id=390 data-nosnippet>390</a>}
-<a href=#391 id=391 data-nosnippet>391</a>
-<a href=#392 id=392 data-nosnippet>392</a><span class="doccomment">/// The IO of the membership layer: its neighbor changes reach the broadcast layer first.
-<a href=#393 id=393 data-nosnippet>393</a></span><span class="kw">struct </span>SwarmIO&lt;<span class="lifetime">'a</span>, PI, E&gt; {
-<a href=#394 id=394 data-nosnippet>394</a>    io: <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="kw-2">mut </span>E,
-<a href=#395 id=395 data-nosnippet>395</a>    gossip: <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="kw-2">mut </span>plumtree::State&lt;PI&gt;,
-<a href=#396 id=396 data-nosnippet>396</a>}
-<a href=#397 id=397 data-nosnippet>397</a>
-<a href=#398 id=398 data-nosnippet>398</a><span class="kw">impl</span>&lt;PI: PeerIdentity, E: IO&lt;PI&gt;&gt; IO&lt;PI&gt; <span class="kw">for </span>SwarmIO&lt;<span class="lifetime">'_</span>, PI, E&gt; {
-<a href=#399 id=399 data-nosnippet>399</a>    <span class="kw">fn </span>send(<span class="kw-2">&amp;mut </span><span class="self">self</span>, peer: PI, message: <span class="kw">impl </span>Into&lt;Message&lt;PI&gt;&gt;) -&gt; <span class="prelude-ty">Option</span>&lt;Message&lt;PI&gt;&gt; {
-<a href=#400 id=400 data-nosnippet>400</a>        <span class="self">self</span>.io.send(peer, message)
-<a href=#401 id=401 data-nosnippet>401</a>    }
-<a href=#402 id=402 data-nosnippet>402</a>
-<a href=#403 id=403 data-nosnippet>403</a>    <span class="kw">fn </span>emit(<span class="kw-2">&amp;mut </span><span class="self">self</span>, event: Event&lt;PI&gt;) {
-<a href=#404 id=404 data-nosnippet>404</a>        <span class="kw">match </span><span class="kw-2">&amp;</span>event {
-<a href=#405 id=405 data-nosnippet>405</a>            Event::NeighborUp(peer) =&gt; <span class="self">self</span>.gossip.on_neighbor_up(<span class="kw-2">*</span>peer),
-<a href=#406 id=406 data-nosnippet>406</a>            Event::NeighborDown(peer) =&gt; <span class="self">self</span>.gossip.on_neighbor_down(<span class="kw-2">*</span>peer),
-<a href=#407 id=407 data-nosnippet>407</a>            <span class="kw">_ </span>=&gt; {}
-<a href=#408 id=408 data-nosnippet>408</a>        }
-<a href=#409 id=409 data-nosnippet>409</a>        <span class="self">self</span>.io.emit(event);
-<a href=#410 id=410 data-nosnippet>410</a>    }
-<a href=#411 id=411 data-nosnippet>411</a>
-<a href=#412 id=412 data-nosnippet>412</a>    <span class="kw">fn </span>schedule(<span class="kw-2">&amp;mut </span><span class="self">self</span>, delay: Duration, timer: <span class="kw">impl </span>Into&lt;Timer&lt;PI&gt;&gt;) {
-<a href=#413 id=413 data-nosnippet>413</a>        <span class="self">self</span>.io.schedule(delay, timer);
-<a href=#414 id=414 data-nosnippet>414</a>    }
-<a href=#415 id=415 data-nosnippet>415</a>
-<a href=#416 id=416 data-nosnippet>416</a>    <span class="kw">fn </span>peer_data(<span class="kw-2">&amp;mut </span><span class="self">self</span>, peer: PI, data: PeerData) {
-<a href=#417 id=417 data-nosnippet>417</a>        <span class="self">self</span>.io.peer_data(peer, data);
-<a href=#418 id=418 data-nosnippet>418</a>    }
-<a href=#419 id=419 data-nosnippet>419</a>}
-<a href=#420 id=420 data-nosnippet>420</a>
-<a href=#421 id=421 data-nosnippet>421</a><span class="attr">#[cfg(test)]
-<a href=#422 id=422 data-nosnippet>422</a></span><span class="kw">mod </span>tests {
-<a href=#423 id=423 data-nosnippet>423</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
-<a href=#424 id=424 data-nosnippet>424</a>
-<a href=#425 id=425 data-nosnippet>425</a>    <span class="doccomment">/// A broadcast goes out if its frame fits the limit at every round, and not otherwise.
-<a href=#426 id=426 data-nosnippet>426</a>    </span><span class="attr">#[test]
-<a href=#427 id=427 data-nosnippet>427</a>    </span><span class="kw">fn </span>broadcast_fits_the_frame_limit_at_every_round() {
-<a href=#428 id=428 data-nosnippet>428</a>        <span class="kw">let </span>content = Bytes::from(<span class="macro">vec!</span>[<span class="number">1</span>; <span class="number">1024</span>]);
-<a href=#429 id=429 data-nosnippet>429</a>        <span class="kw">let </span>goes_out = |max_message_size: usize| {
-<a href=#430 id=430 data-nosnippet>430</a>            <span class="kw">let </span>now = Instant::now();
-<a href=#431 id=431 data-nosnippet>431</a>            <span class="kw">let </span>config = Config {
-<a href=#432 id=432 data-nosnippet>432</a>                max_message_size,
-<a href=#433 id=433 data-nosnippet>433</a>                ..Config::default()
-<a href=#434 id=434 data-nosnippet>434</a>            };
-<a href=#435 id=435 data-nosnippet>435</a>            <span class="kw">let </span><span class="kw-2">mut </span>state = State::with_rng(<span class="number">0u32</span>, <span class="prelude-val">None</span>, config, rand::rng());
-<a href=#436 id=436 data-nosnippet>436</a>            <span class="kw">let </span>join = InEvent::RecvMessage(<span class="number">1</span>, Message::Swarm(hyparview::Message::Join(<span class="prelude-val">None</span>)));
-<a href=#437 id=437 data-nosnippet>437</a>            state.handle(join, now, <span class="kw-2">&amp;mut </span>VecDeque::new());
-<a href=#438 id=438 data-nosnippet>438</a>            <span class="kw">let </span>broadcast = InEvent::Command(Command::Broadcast(content.clone(), Scope::Swarm));
-<a href=#439 id=439 data-nosnippet>439</a>            <span class="kw">let </span><span class="kw-2">mut </span>out = VecDeque::new();
-<a href=#440 id=440 data-nosnippet>440</a>            state.handle(broadcast, now, <span class="kw-2">&amp;mut </span>out);
-<a href=#441 id=441 data-nosnippet>441</a>            out.iter().any(|event| {
-<a href=#442 id=442 data-nosnippet>442</a>                <span class="macro">matches!</span>(
-<a href=#443 id=443 data-nosnippet>443</a>                    event,
-<a href=#444 id=444 data-nosnippet>444</a>                    OutEvent::SendMessage(<span class="number">1</span>, Message::Gossip(plumtree::Message::Gossip(<span class="kw">_</span>)))
-<a href=#445 id=445 data-nosnippet>445</a>                )
-<a href=#446 id=446 data-nosnippet>446</a>            })
-<a href=#447 id=447 data-nosnippet>447</a>        };
-<a href=#448 id=448 data-nosnippet>448</a>        <span class="comment">// The frame holds the enum tag of the topic message, and must be shorter than the limit.
-<a href=#449 id=449 data-nosnippet>449</a>        </span><span class="kw">let </span>limit = plumtree::max_gossip_size(content.len(), Scope::Swarm) + <span class="number">2</span>;
-<a href=#450 id=450 data-nosnippet>450</a>        <span class="macro">assert!</span>(goes_out(limit));
-<a href=#451 id=451 data-nosnippet>451</a>        <span class="macro">assert!</span>(!goes_out(limit - <span class="number">1</span>));
-<a href=#452 id=452 data-nosnippet>452</a>    }
-<a href=#453 id=453 data-nosnippet>453</a>}</code></pre></div></section></main></body></html>
+<a href=#381 id=381 data-nosnippet>381</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>wants(<span class="kw-2">&amp;</span><span class="self">self</span>, peer: <span class="kw-2">&amp;</span>PI) -&gt; bool {
+<a href=#382 id=382 data-nosnippet>382</a>        <span class="self">self</span>.swarm.wants(peer)
+<a href=#383 id=383 data-nosnippet>383</a>    }
+<a href=#384 id=384 data-nosnippet>384</a>
+<a href=#385 id=385 data-nosnippet>385</a>    <span class="doccomment">/// Check if this topic has any active (connected) peers.
+<a href=#386 id=386 data-nosnippet>386</a>    </span><span class="kw">pub fn </span>has_active_peers(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
+<a href=#387 id=387 data-nosnippet>387</a>        !<span class="self">self</span>.swarm.active_view.is_empty()
+<a href=#388 id=388 data-nosnippet>388</a>    }
+<a href=#389 id=389 data-nosnippet>389</a>}
+<a href=#390 id=390 data-nosnippet>390</a>
+<a href=#391 id=391 data-nosnippet>391</a><span class="doccomment">/// The IO of the membership layer: its neighbor changes reach the broadcast layer first.
+<a href=#392 id=392 data-nosnippet>392</a></span><span class="kw">struct </span>SwarmIO&lt;<span class="lifetime">'a</span>, PI, E&gt; {
+<a href=#393 id=393 data-nosnippet>393</a>    io: <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="kw-2">mut </span>E,
+<a href=#394 id=394 data-nosnippet>394</a>    gossip: <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="kw-2">mut </span>plumtree::State&lt;PI&gt;,
+<a href=#395 id=395 data-nosnippet>395</a>}
+<a href=#396 id=396 data-nosnippet>396</a>
+<a href=#397 id=397 data-nosnippet>397</a><span class="kw">impl</span>&lt;PI: PeerIdentity, E: IO&lt;PI&gt;&gt; IO&lt;PI&gt; <span class="kw">for </span>SwarmIO&lt;<span class="lifetime">'_</span>, PI, E&gt; {
+<a href=#398 id=398 data-nosnippet>398</a>    <span class="kw">fn </span>send(<span class="kw-2">&amp;mut </span><span class="self">self</span>, peer: PI, message: <span class="kw">impl </span>Into&lt;Message&lt;PI&gt;&gt;) -&gt; <span class="prelude-ty">Option</span>&lt;Message&lt;PI&gt;&gt; {
+<a href=#399 id=399 data-nosnippet>399</a>        <span class="self">self</span>.io.send(peer, message)
+<a href=#400 id=400 data-nosnippet>400</a>    }
+<a href=#401 id=401 data-nosnippet>401</a>
+<a href=#402 id=402 data-nosnippet>402</a>    <span class="kw">fn </span>emit(<span class="kw-2">&amp;mut </span><span class="self">self</span>, event: Event&lt;PI&gt;) {
+<a href=#403 id=403 data-nosnippet>403</a>        <span class="kw">match </span><span class="kw-2">&amp;</span>event {
+<a href=#404 id=404 data-nosnippet>404</a>            Event::NeighborUp(peer) =&gt; <span class="self">self</span>.gossip.on_neighbor_up(<span class="kw-2">*</span>peer),
+<a href=#405 id=405 data-nosnippet>405</a>            Event::NeighborDown(peer) =&gt; <span class="self">self</span>.gossip.on_neighbor_down(<span class="kw-2">*</span>peer),
+<a href=#406 id=406 data-nosnippet>406</a>            <span class="kw">_ </span>=&gt; {}
+<a href=#407 id=407 data-nosnippet>407</a>        }
+<a href=#408 id=408 data-nosnippet>408</a>        <span class="self">self</span>.io.emit(event);
+<a href=#409 id=409 data-nosnippet>409</a>    }
+<a href=#410 id=410 data-nosnippet>410</a>
+<a href=#411 id=411 data-nosnippet>411</a>    <span class="kw">fn </span>schedule(<span class="kw-2">&amp;mut </span><span class="self">self</span>, delay: Duration, timer: <span class="kw">impl </span>Into&lt;Timer&lt;PI&gt;&gt;) {
+<a href=#412 id=412 data-nosnippet>412</a>        <span class="self">self</span>.io.schedule(delay, timer);
+<a href=#413 id=413 data-nosnippet>413</a>    }
+<a href=#414 id=414 data-nosnippet>414</a>
+<a href=#415 id=415 data-nosnippet>415</a>    <span class="kw">fn </span>peer_data(<span class="kw-2">&amp;mut </span><span class="self">self</span>, peer: PI, data: PeerData) {
+<a href=#416 id=416 data-nosnippet>416</a>        <span class="self">self</span>.io.peer_data(peer, data);
+<a href=#417 id=417 data-nosnippet>417</a>    }
+<a href=#418 id=418 data-nosnippet>418</a>}
+<a href=#419 id=419 data-nosnippet>419</a>
+<a href=#420 id=420 data-nosnippet>420</a><span class="attr">#[cfg(test)]
+<a href=#421 id=421 data-nosnippet>421</a></span><span class="kw">mod </span>tests {
+<a href=#422 id=422 data-nosnippet>422</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#423 id=423 data-nosnippet>423</a>
+<a href=#424 id=424 data-nosnippet>424</a>    <span class="doccomment">/// A broadcast goes out if its frame fits the limit at every round, and not otherwise.
+<a href=#425 id=425 data-nosnippet>425</a>    </span><span class="attr">#[test]
+<a href=#426 id=426 data-nosnippet>426</a>    </span><span class="kw">fn </span>broadcast_fits_the_frame_limit_at_every_round() {
+<a href=#427 id=427 data-nosnippet>427</a>        <span class="kw">let </span>content = Bytes::from(<span class="macro">vec!</span>[<span class="number">1</span>; <span class="number">1024</span>]);
+<a href=#428 id=428 data-nosnippet>428</a>        <span class="kw">let </span>goes_out = |max_message_size: usize| {
+<a href=#429 id=429 data-nosnippet>429</a>            <span class="kw">let </span>now = Instant::now();
+<a href=#430 id=430 data-nosnippet>430</a>            <span class="kw">let </span>config = Config {
+<a href=#431 id=431 data-nosnippet>431</a>                max_message_size,
+<a href=#432 id=432 data-nosnippet>432</a>                ..Config::default()
+<a href=#433 id=433 data-nosnippet>433</a>            };
+<a href=#434 id=434 data-nosnippet>434</a>            <span class="kw">let </span><span class="kw-2">mut </span>state = State::with_rng(<span class="number">0u32</span>, <span class="prelude-val">None</span>, config, rand::rng());
+<a href=#435 id=435 data-nosnippet>435</a>            <span class="kw">let </span>join = InEvent::RecvMessage(<span class="number">1</span>, Message::Swarm(hyparview::Message::Join(<span class="prelude-val">None</span>)));
+<a href=#436 id=436 data-nosnippet>436</a>            state.handle(join, now, <span class="kw-2">&amp;mut </span>VecDeque::new());
+<a href=#437 id=437 data-nosnippet>437</a>            <span class="kw">let </span>broadcast = InEvent::Command(Command::Broadcast(content.clone(), Scope::Swarm));
+<a href=#438 id=438 data-nosnippet>438</a>            <span class="kw">let </span><span class="kw-2">mut </span>out = VecDeque::new();
+<a href=#439 id=439 data-nosnippet>439</a>            state.handle(broadcast, now, <span class="kw-2">&amp;mut </span>out);
+<a href=#440 id=440 data-nosnippet>440</a>            out.iter().any(|event| {
+<a href=#441 id=441 data-nosnippet>441</a>                <span class="macro">matches!</span>(
+<a href=#442 id=442 data-nosnippet>442</a>                    event,
+<a href=#443 id=443 data-nosnippet>443</a>                    OutEvent::SendMessage(<span class="number">1</span>, Message::Gossip(plumtree::Message::Gossip(<span class="kw">_</span>)))
+<a href=#444 id=444 data-nosnippet>444</a>                )
+<a href=#445 id=445 data-nosnippet>445</a>            })
+<a href=#446 id=446 data-nosnippet>446</a>        };
+<a href=#447 id=447 data-nosnippet>447</a>        <span class="comment">// The frame holds the enum tag of the topic message, and must be shorter than the limit.
+<a href=#448 id=448 data-nosnippet>448</a>        </span><span class="kw">let </span>limit = plumtree::max_gossip_size(content.len(), Scope::Swarm) + <span class="number">2</span>;
+<a href=#449 id=449 data-nosnippet>449</a>        <span class="macro">assert!</span>(goes_out(limit));
+<a href=#450 id=450 data-nosnippet>450</a>        <span class="macro">assert!</span>(!goes_out(limit - <span class="number">1</span>));
+<a href=#451 id=451 data-nosnippet>451</a>    }
+<a href=#452 id=452 data-nosnippet>452</a>}</code></pre></div></section></main></body></html>
