@@ -503,7 +503,7 @@ async fn peer_wanted_again_during_the_dial_keeps_its_queue() -> Result {
 /// A peer that we close and reopen keeps its queue, and the next connection writes the old messages first.
 ///
 /// The old connection does not read, so its writer still has the queue,
-/// which ends with a `Disconnect`. This checks the order of our writes
+/// which ends with a `Close`. This checks the order of our writes
 /// only: the peer reads each stream on its own.
 #[tokio::test]
 #[traced_test]
@@ -538,7 +538,7 @@ async fn dropped_peer_wanted_again_gets_the_old_queue_first() -> Result {
         .await
         .std_context("the old queue did not go out")??;
     assert_eq!(topic, left, "the new queue went first");
-    assert_eq!(messages.last(), Some(&TopicMessage::test_disconnect()));
+    assert_eq!(messages.last(), Some(&TopicMessage::test_close()));
     let (topic, _) = timeout(Duration::from_secs(5), read_next_message(&peer_new))
         .await
         .std_context("the new queue did not go out")??;
