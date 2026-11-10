@@ -1,12 +1,16 @@
 //! An address lookup service to gather addressing info collected from gossip Join and ForwardJoin messages.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
+    net::SocketAddr,
     sync::{Arc, RwLock},
     time::Duration,
 };
 
-use iroh::address_lookup::{self, AddressLookup, EndpointData, EndpointInfo};
+use iroh::{
+    address_lookup::{self, AddressLookup, EndpointData, EndpointInfo},
+    EndpointAddr, RelayUrl,
+};
 use iroh_base::EndpointId;
 use n0_future::{
     boxed::BoxStream,
@@ -14,6 +18,9 @@ use n0_future::{
     task::AbortOnDropHandle,
     time::SystemTime,
 };
+use serde::{Deserialize, Serialize};
+
+use crate::proto::PeerData;
 
 /// The most addresses we keep for an endpoint.
 ///
@@ -21,7 +28,7 @@ use n0_future::{
 /// whose addresses keep changing grows its entry without limit.
 const MAX_ADDRS: usize = 32;
 
-pub(crate) struct RetentionOpts {
+struct RetentionOpts {
     /// How long to keep received endpoint info records alive before pruning them
     retention: Duration,
     /// How often to check for expired entries
@@ -42,7 +49,7 @@ impl Default for RetentionOpts {
 /// It is added to the endpoint when constructing a gossip instance, and the gossip actor
 /// then adds endpoint addresses as received with Join or ForwardJoin messages.
 #[derive(Debug, Clone)]
-pub(crate) struct GossipAddressLookup {
+pub(super) struct GossipAddressLookup {
     endpoints: NodeMap,
     _task_handle: Arc<AbortOnDropHandle<()>>,
 }
@@ -65,11 +72,11 @@ impl GossipAddressLookup {
     const PROVENANCE: &'static str = "gossip";
 
     /// Creates a new gossip address lookup instance.
-    pub(crate) fn new() -> Self {
+    fn new() -> Self {
         Self::with_opts(Default::default())
     }
 
-    pub(crate) fn with_opts(opts: RetentionOpts) -> Self {
+    fn with_opts(opts: RetentionOpts) -> Self {
         let endpoints: NodeMap = Default::default();
         let task = {
             let endpoints = Arc::downgrade(&endpoints);
@@ -98,7 +105,7 @@ impl GossipAddressLookup {
     ///
     /// The provided addresses come first, then the ones already stored, up to
     /// [`MAX_ADDRS`]. The user data is overwritten.
-    pub(crate) fn add(&self, endpoint_info: impl Into<EndpointInfo>) {
+    pub(super) fn add(&self, endpoint_info: impl Into<EndpointInfo>) {
         let last_updated = SystemTime::now();
         let EndpointInfo { endpoint_id, data } = endpoint_info.into();
         let mut guard = self.endpoints.write().expect("poisoned");
@@ -135,6 +142,35 @@ impl AddressLookup for GossipAddressLookup {
         );
         Some(stream::iter(Some(Ok(item))).boxed())
     }
+}
+
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub(super) struct AddrInfo {
+    pub(super) relay_url: Option<RelayUrl>,
+    pub(super) direct_addresses: BTreeSet<SocketAddr>,
+}
+
+impl From<EndpointAddr> for AddrInfo {
+    fn from(endpoint_addr: EndpointAddr) -> Self {
+        Self {
+            relay_url: endpoint_addr.relay_urls().next().cloned(),
+            direct_addresses: endpoint_addr.ip_addrs().cloned().collect(),
+        }
+    }
+}
+
+pub(super) fn encode_peer_data(info: &AddrInfo) -> PeerData {
+    let bytes = postcard::to_stdvec(info).expect("serializing AddrInfo may not fail");
+    PeerData::new(bytes)
+}
+
+pub(super) fn decode_peer_data(peer_data: &PeerData) -> Result<AddrInfo, postcard::Error> {
+    let bytes = peer_data.as_bytes();
+    if bytes.is_empty() {
+        return Ok(AddrInfo::default());
+    }
+    let info = postcard::from_bytes(bytes)?;
+    Ok(info)
 }
 
 #[cfg(test)]
