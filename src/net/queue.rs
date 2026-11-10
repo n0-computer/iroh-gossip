@@ -17,8 +17,7 @@ use std::{
     },
 };
 
-use tokio::sync::{mpsc, watch, OwnedMutexGuard};
-use tokio_util::sync::CancellationToken;
+use tokio::sync::{mpsc, watch};
 
 use super::ProtoMessage;
 use crate::proto::state::MessageKind;
@@ -129,23 +128,16 @@ impl Limit {
     }
 
     /// Takes `size` bytes, and returns `false` if they do not fit.
+    ///
+    /// Only the actor reserves, so a take that goes over the maximum and gives back
+    /// cannot make another reservation fail that would fit.
     fn reserve(&self, size: usize) -> bool {
-        // The counter guards no other data, so relaxed ordering suffices. A loop of
-        // its own, as `fetch_update` is deprecated on new and `try_update` missing on
-        // old toolchains.
-        let mut used = self.used.load(Ordering::Relaxed);
-        loop {
-            let Some(next) = used.checked_add(size).filter(|&next| next <= self.max) else {
-                return false;
-            };
-            match self
-                .used
-                .compare_exchange_weak(used, next, Ordering::Relaxed, Ordering::Relaxed)
-            {
-                Ok(_) => return true,
-                Err(actual) => used = actual,
-            }
+        // The counter guards no other data, so relaxed ordering suffices.
+        let fits = self.used.fetch_add(size, Ordering::Relaxed) + size <= self.max;
+        if !fits {
+            self.release(size);
         }
+        fits
     }
 
     fn release(&self, size: usize) {
@@ -217,19 +209,12 @@ impl Drop for Reservation {
 ///   default. Over that limit, an open waits
 ///   [`OPEN_TIMEOUT`](super::wire::OPEN_TIMEOUT) and closes the connection,
 ///   again after each rejoin.
-/// - A handover keeps the order: the new connection waits for the old one to
-///   finish its message. A control overflow meanwhile aborts the peer, and
-///   closes the new connection too.
 /// - The queue bounds bytes, not time. It fills only once QUIC buffered all
 ///   it can for the peer, so a burst larger than both loses messages before
 ///   anyone waits. Under sustained overload, data at a peer on a 1 Mbit/s
 ///   link can arrive up to 30 to 40 s late, as it did in tests. Most of it
 ///   waits in the send buffer of QUIC, which the flow control window of the
 ///   peer sizes, not in our queue.
-/// - Busy queues to all eager peers may mean that our uplink is the limit.
-///   They may also mean that all eager peers are slow,
-///   or that relayed traffic and other topics fill the queues. A waiting
-///   broadcast passes after [`BROADCAST_WAIT_LIMIT`](super::subscriptions::BROADCAST_WAIT_LIMIT) in any case.
 /// - Repair is capped, at 256 ids per peer, 4096 per topic, and 64 per peer
 ///   and second. It works only while the message is cached, and never for
 ///   neighbor scope.
@@ -240,31 +225,32 @@ pub(super) struct SendQueue {
     tx: mpsc::UnboundedSender<QueuedMessage>,
     capacity: Arc<Capacity>,
     closed: watch::Sender<bool>,
-    reader: SharedReader,
-    /// Revokes the lease of the connection that writes the queue now.
-    revoke: CancellationToken,
 }
 
 impl SendQueue {
-    /// Creates a queue of `size` bytes, of which data may fill 3/4 and announcements 1/8.
-    pub(super) fn new(size: usize) -> Self {
+    /// Creates an open queue of `size` bytes, of which data may fill 3/4 and announcements 1/8.
+    ///
+    /// Returns the queue and its only reader.
+    pub(super) fn new(size: usize) -> (Self, QueueReader) {
         let (tx, rx) = mpsc::unbounded_channel();
         let capacity = Arc::new(Capacity {
             total: Limit::new(size),
             data: Limit::new(size / 4 * 3),
             announcements: Limit::new(size / 8),
         });
+        let closed = watch::Sender::new(false);
         let reader = QueueReader {
             rx,
             unfinished: None,
+            closed: closed.subscribe(),
+            capacity: capacity.clone(),
         };
-        Self {
+        let queue = Self {
             tx,
             capacity,
-            closed: watch::Sender::new(false),
-            reader: Arc::new(tokio::sync::Mutex::new(reader)),
-            revoke: CancellationToken::new(),
-        }
+            closed,
+        };
+        (queue, reader)
     }
 
     /// Queues `message` of the test, with its encoded size.
@@ -290,12 +276,6 @@ impl SendQueue {
         let sent = self.tx.send(item);
         debug_assert!(sent.is_ok(), "the queue keeps its reader");
         Pushed::Queued
-    }
-
-    /// Returns whether data fills at least half of its section.
-    pub(super) fn is_busy(&self) -> bool {
-        let data = &self.capacity.data;
-        data.used.load(Ordering::Relaxed) >= data.max / 2
     }
 
     /// Closes the queue.
@@ -330,90 +310,31 @@ impl SendQueue {
     pub(super) fn size(&self) -> usize {
         self.capacity.total.max
     }
-
-    /// Revokes the lease of the connection that writes the queue, and returns one for the next.
-    pub(super) fn lease(&mut self) -> QueueLease {
-        self.revoke.cancel();
-        self.revoke = CancellationToken::new();
-        QueueLease {
-            reader: self.reader.clone(),
-            revoked: self.revoke.clone(),
-            closing: self.closed.subscribe(),
-        }
-    }
-
-    /// Returns the reader of the queue, if no writer reads it.
-    #[cfg(test)]
-    pub(super) fn try_reader(&self) -> Option<OwnedMutexGuard<QueueReader>> {
-        self.reader.clone().try_lock_owned().ok()
-    }
 }
-
-/// The lease of a connection on the queue to its peer.
-///
-/// The actor revokes it when a new connection replaces this one. The writer
-/// then lets go of the queue after its current message, and the writer of the
-/// new connection takes it. An abort of the peer closes the connection, which
-/// ends the writer without a revoke.
-#[derive(Debug)]
-pub(super) struct QueueLease {
-    reader: SharedReader,
-    revoked: CancellationToken,
-    closing: watch::Receiver<bool>,
-}
-
-impl QueueLease {
-    /// Waits until no other writer reads the queue, and returns its reader.
-    ///
-    /// Waits only at a handover, see [`SharedReader`].
-    pub(super) async fn lock(&self) -> OwnedMutexGuard<QueueReader> {
-        self.reader.clone().lock_owned().await
-    }
-
-    /// Returns the token that ends the lease at a handover.
-    pub(super) fn revoked(&self) -> &CancellationToken {
-        &self.revoked
-    }
-
-    /// Returns a receiver that tells whether the queue is closed. See [`SendQueue::close`].
-    pub(super) fn closing(&self) -> watch::Receiver<bool> {
-        self.closing.clone()
-    }
-}
-
-/// The reader of the queue to a peer, which its connections take in turn.
-///
-/// The writer of a connection locks it once, and keeps the lock for as long as
-/// it writes: across all its messages, not per message. So the lock is free of
-/// contention while a peer has one connection. Only the actor pushes, and it
-/// never locks.
-///
-/// Two writers contend only at a handover, when a new connection replaces the
-/// active one. The new writer waits in [`QueueLease::lock`], and the old writer
-/// unlocks after its current message. Waiters get the lock in order, and a
-/// writer that stops while it waits leaves the line. We thus write the
-/// messages in the order of the queue. The peer may still handle them in
-/// another order, see what the design gives up in [`SendQueue`].
-///
-/// A writer must not keep the lock without bound, or the next connection waits
-/// forever. Every way out of the loop of a writer unlocks: the end of the
-/// queue, a stop, a closed connection, an error, and a drop of its future. A
-/// stopped writer gets [`HANDOVER_LIMIT`](super::conn::HANDOVER_LIMIT) for its
-/// current message. Then it stops the write, and the next connection writes
-/// the message again.
-type SharedReader = Arc<tokio::sync::Mutex<QueueReader>>;
 
 /// Reads a queue, and keeps the message that a writer has not finished.
 ///
-/// A writer that stops in the middle of a message leaves it here, so the next
-/// connection writes it first.
+/// The connections of a peer take the reader in turn, and move it between
+/// them. A message that one writer did not finish stays in the reader, so the
+/// next writer writes it first.
 #[derive(Debug)]
 pub(super) struct QueueReader {
     rx: mpsc::UnboundedReceiver<QueuedMessage>,
     unfinished: Option<QueuedMessage>,
+    /// Tells whether the queue is closed, see [`SendQueue::close`].
+    pub(super) closed: watch::Receiver<bool>,
+    /// The capacity of the queue. The reader uses it only to identify the queue.
+    capacity: Arc<Capacity>,
 }
 
 impl QueueReader {
+    /// Returns whether this is the reader of `queue`.
+    ///
+    /// A reader that comes back from a writer may belong to a discarded queue.
+    pub(super) fn reads(&self, queue: &SendQueue) -> bool {
+        Arc::ptr_eq(&self.capacity, &queue.capacity)
+    }
+
     /// Waits for a message to write, and returns `false` once the queue was dropped.
     ///
     /// The actor drops the [`SendQueue`] when it replaces it with a new one,
@@ -438,7 +359,6 @@ impl QueueReader {
     }
 
     /// Returns whether no message waits to be written.
-    #[cfg(test)]
     pub(super) fn is_empty(&self) -> bool {
         self.unfinished.is_none() && self.rx.is_empty()
     }
@@ -502,12 +422,11 @@ mod tests {
     /// The reader gets data, control, and a `Close` in the order of the pushes.
     #[test]
     fn messages_keep_their_order() {
-        let queue = SendQueue::new(MIN_QUEUE_SIZE);
+        let (queue, mut reader) = SendQueue::new(MIN_QUEUE_SIZE);
         let pushed = [data(10), shuffle(), ihave(), disconnect(), data(20)];
         for message in pushed.clone() {
             assert!(matches!(queue.send(message), Pushed::Queued));
         }
-        let mut reader = queue.try_reader().unwrap();
         for message in pushed {
             let item = reader.rx.try_recv().unwrap();
             assert_eq!(item.message.message, message.message);
@@ -518,7 +437,7 @@ mod tests {
     #[test]
     fn sections_leave_room_for_control() {
         let queue_bytes = MIN_QUEUE_SIZE;
-        let queue = SendQueue::new(queue_bytes);
+        let (queue, _reader) = SendQueue::new(queue_bytes);
         let (queued, last) = fill(&queue, || data(1000));
         assert_eq!(queued, queue_bytes / 4 * 3 / size(&data(1000)));
         assert!(matches!(last, Pushed::Dropped(_)));
@@ -536,7 +455,7 @@ mod tests {
     /// A `Close` takes room like any control message, so many of them overflow the queue.
     #[test]
     fn disconnects_overflow_the_queue() {
-        let queue = SendQueue::new(MIN_QUEUE_SIZE);
+        let (queue, _reader) = SendQueue::new(MIN_QUEUE_SIZE);
         let (queued, last) = fill(&queue, disconnect);
         assert_eq!(queued, MIN_QUEUE_SIZE / size(&disconnect()));
         assert!(matches!(last, Pushed::Overflow));
@@ -545,7 +464,7 @@ mod tests {
     /// A message that fits its section but not the whole queue leaves its section as it was.
     #[test]
     fn failed_reservation_releases_its_section() {
-        let queue = SendQueue::new(MIN_QUEUE_SIZE);
+        let (queue, _reader) = SendQueue::new(MIN_QUEUE_SIZE);
         let (_, last) = fill(&queue, shuffle);
         assert!(matches!(last, Pushed::Overflow));
         assert!(matches!(queue.send(data(10)), Pushed::Dropped(_)));
@@ -555,10 +474,10 @@ mod tests {
     /// A message keeps its reservation until the writer drops it, also once it left the channel.
     #[test]
     fn message_keeps_its_reservation_until_dropped() {
-        let queue = SendQueue::new(MIN_QUEUE_SIZE);
+        let (queue, mut reader) = SendQueue::new(MIN_QUEUE_SIZE);
         let one = size(&data(1000));
         assert!(matches!(queue.send(data(1000)), Pushed::Queued));
-        let in_writing = queue.try_reader().unwrap().rx.try_recv().unwrap();
+        let in_writing = reader.rx.try_recv().unwrap();
         assert_eq!(used(&queue), (one, one));
         drop(in_writing);
         assert_eq!(used(&queue), (0, 0));
@@ -567,16 +486,15 @@ mod tests {
     /// Messages are still returned when the queue is closed, and the reader sees it close and open.
     #[tokio::test]
     async fn closed_queue_gives_its_messages() {
-        let mut queue = SendQueue::new(MIN_QUEUE_SIZE);
+        let (queue, mut reader) = SendQueue::new(MIN_QUEUE_SIZE);
         assert!(matches!(queue.send(disconnect()), Pushed::Queued));
         queue.close();
-        let closing = queue.lease().closing();
-        let mut reader = queue.try_reader().unwrap();
-        assert!(*closing.borrow(), "the reader did not see the close");
+        let closed = reader.closed.clone();
+        assert!(*closed.borrow(), "the reader did not see the close");
         assert!(reader.wait_next().await, "the queued message went");
         reader.advance();
         queue.open();
-        assert!(!*closing.borrow(), "the reader did not see the open");
+        assert!(!*closed.borrow(), "the reader did not see the open");
         assert!(matches!(queue.send(shuffle()), Pushed::Queued));
         assert!(reader.wait_next().await, "the opened queue did not go on");
     }
@@ -584,54 +502,30 @@ mod tests {
     /// A message that a writer did not finish stays first, for the next writer.
     #[tokio::test]
     async fn unfinished_message_stays_first() {
-        let mut queue = SendQueue::new(MIN_QUEUE_SIZE);
+        let (queue, reader) = SendQueue::new(MIN_QUEUE_SIZE);
         assert!(matches!(queue.send(data(10)), Pushed::Queued));
         assert!(matches!(queue.send(data(20)), Pushed::Queued));
-        let first = |queue_lease: QueueLease, len| async move {
-            let mut reader = queue_lease.lock().await;
+        let first = |mut reader: QueueReader, len| async move {
             assert!(reader.wait_next().await);
             let current = &reader.current().unwrap().message.message;
             assert_eq!(current, &data(len).message);
             reader
         };
-        // The first writer stops without `advance`.
-        drop(first(queue.lease(), 10).await);
-        let mut reader = first(queue.lease(), 10).await;
+        // The first writer stops without `advance`, and the reader moves on.
+        let reader = first(reader, 10).await;
+        let mut reader = first(reader, 10).await;
         reader.advance();
-        drop(reader);
-        first(queue.lease(), 20).await.advance();
+        first(reader, 20).await.advance();
         assert_eq!(used(&queue), (0, 0));
     }
 
-    /// A writer revoked while it waits for the lock leaves the line to the next writer.
-    ///
-    /// The next writer gets the unfinished message first, and only once.
-    #[tokio::test]
-    async fn revoked_waiter_leaves_the_unfinished_message_to_the_next() {
-        let mut queue = SendQueue::new(MIN_QUEUE_SIZE);
-        assert!(matches!(queue.send(data(10)), Pushed::Queued));
-        assert!(matches!(queue.send(data(20)), Pushed::Queued));
-        let first = queue.lease();
-        let mut reader = first.lock().await;
-        assert!(reader.wait_next().await);
-
-        let second = queue.lease();
-        let mut waiting = Box::pin(second.lock());
-        assert!(n0_future::future::poll_once(&mut waiting).await.is_none());
-        let third = queue.lease();
-        assert!(second.revoked().is_cancelled());
-        assert!(!third.revoked().is_cancelled());
-        // The second writer stops waiting once revoked, and the first one stops without `advance`.
-        drop(waiting);
-        drop(reader);
-
-        let mut reader = third.lock().await;
-        for len in [10, 20] {
-            assert!(reader.wait_next().await);
-            assert_eq!(reader.current().unwrap().message.message, data(len).message);
-            reader.advance();
-        }
-        assert_eq!(used(&queue), (0, 0));
+    /// A reader knows its own queue, and not a queue that replaced it.
+    #[test]
+    fn reader_knows_its_queue() {
+        let (queue, reader) = SendQueue::new(MIN_QUEUE_SIZE);
+        let (next, _next_reader) = SendQueue::new(MIN_QUEUE_SIZE);
+        assert!(reader.reads(&queue));
+        assert!(!reader.reads(&next));
     }
 
     /// The least queue fits eight messages of the largest size, so its announcements fit one.
