@@ -1,0 +1,9 @@
+(function() {
+    var implementors = Object.fromEntries([["iroh_gossip",[["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/nightly/core/hash/trait.Hash.html\" title=\"trait core::hash::Hash\">Hash</a> for <a class=\"struct\" href=\"iroh_gossip/api/struct.AuthToken.html\" title=\"struct iroh_gossip::api::AuthToken\">AuthToken</a>"],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/nightly/core/hash/trait.Hash.html\" title=\"trait core::hash::Hash\">Hash</a> for <a class=\"struct\" href=\"iroh_gossip/proto/state/struct.TopicId.html\" title=\"struct iroh_gossip::proto::state::TopicId\">TopicId</a>"],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/nightly/core/hash/trait.Hash.html\" title=\"trait core::hash::Hash\">Hash</a> for <a class=\"struct\" href=\"iroh_gossip/proto/struct.MessageId.html\" title=\"struct iroh_gossip::proto::MessageId\">MessageId</a>"],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/nightly/core/hash/trait.Hash.html\" title=\"trait core::hash::Hash\">Hash</a> for <a class=\"struct\" href=\"iroh_gossip/proto/struct.Round.html\" title=\"struct iroh_gossip::proto::Round\">Round</a>"],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/nightly/core/hash/trait.Hash.html\" title=\"trait core::hash::Hash\">Hash</a> for <a class=\"struct\" href=\"iroh_gossip/proto/struct.TreeId.html\" title=\"struct iroh_gossip::proto::TreeId\">TreeId</a>"]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":57,"fragment_lengths":[1364]}
