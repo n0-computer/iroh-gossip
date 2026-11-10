@@ -140,20 +140,25 @@ pub enum Message {
     IHave(Vec<IHave>),
 }
 
-#[cfg(all(test, feature = "net"))]
+#[cfg(test)]
 impl Message {
-    /// Returns a payload of `len` bytes, as an eager push sends it, for the network tests.
-    pub(crate) fn test_gossip(len: usize) -> Self {
-        Self::test_payload(Bytes::from(vec![7u8; len]))
-    }
-
-    /// Returns a payload with `content`, as its publisher sends it, for the network tests.
+    /// Returns a payload with `content`, as its publisher sends it.
+    ///
+    /// The network and simulator tests use it.
     pub(crate) fn test_payload(content: Bytes) -> Self {
         Message::Gossip(Gossip {
             id: MessageId::from_content(&content),
             content,
             scope: DeliveryScope::Swarm(Round(0)),
         })
+    }
+}
+
+#[cfg(all(test, feature = "net"))]
+impl Message {
+    /// Returns a payload of `len` bytes, as an eager push sends it, for the network tests.
+    pub(crate) fn test_gossip(len: usize) -> Self {
+        Self::test_payload(Bytes::from(vec![7u8; len]))
     }
 
     /// Returns an `IHave` of one message, for the network tests.
@@ -1301,10 +1306,6 @@ mod test {
 
         fn peer_data(&mut self, peer: u32, data: crate::proto::PeerData) {
             self.out.peer_data(peer, data);
-        }
-
-        fn disconnect(&mut self, peer: u32) {
-            self.out.disconnect(peer);
         }
     }
 
