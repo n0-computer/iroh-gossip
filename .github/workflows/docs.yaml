@@ -49,6 +49,14 @@ jobs:
       env:
         RUSTDOCFLAGS: --cfg iroh_docsrs
 
+    - name: Add the Wire Spec
+      run: |
+        if [ -f docs/wire-spec.html ]; then
+          mkdir -p target/doc/spec
+          cp docs/wire-spec.html target/doc/spec/index.html
+          echo "SPEC_LINE=The wire spec of this PR is available at: https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/${PREVIEW_PATH}/spec/" >> "$GITHUB_ENV"
+        fi
+
     - name: Deploy Docs to Preview Branch
       uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 # v4.1.0
       with:
@@ -76,6 +84,8 @@ jobs:
         comment-id: ${{ steps.fc.outputs.comment-id }}
         body: |
           Documentation for this PR has been generated and is available at: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/${{ env.PREVIEW_PATH }}/iroh_gossip/
+
+          ${{ env.SPEC_LINE }}
 
           Last updated: ${{ env.TIMESTAMP }}
         edit-mode: replace
