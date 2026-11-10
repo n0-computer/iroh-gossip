@@ -9,7 +9,7 @@ use bytes::Bytes;
 use iroh::{endpoint::Connection, Endpoint, EndpointAddr, EndpointId, PublicKey, Watcher};
 use n0_future::{
     task::JoinSet,
-    time::{self, sleep_until, Instant, Interval, MissedTickBehavior},
+    time::{self, Instant, Interval, MissedTickBehavior},
     Stream, StreamExt as _,
 };
 use rand::{rngs::StdRng, SeedableRng};
@@ -23,9 +23,9 @@ use super::{
     peers::{Finished, PeerState, PEER_RETENTION},
     queue::{self, Pushed},
     subscriptions::{
-        all_eager_peers_busy, topic_subscriber_loop, SubscriptionCommands, TopicState,
+        all_eager_peers_busy, topic_subscriber_loop, SubscriptionCommands, TopicHandles,
     },
-    InEvent, Join, OutEvent, ProtoCommand, Timer, ToActor, GOSSIP_ALPN,
+    InEvent, Join, OutEvent, ProtoCommand, QueueOptions, Timer, ToActor, GOSSIP_ALPN,
 };
 use crate::{
     api::Command,
@@ -36,15 +36,33 @@ use crate::{
 #[cfg(test)]
 mod tests;
 
+/// The settings that the [`Builder`](super::Builder) passes to the actor.
+#[derive(Debug, Clone)]
+pub(super) struct ActorConfig {
+    pub(super) proto: proto::Config,
+    pub(super) alpn: Bytes,
+    pub(super) send_queue: QueueOptions,
+}
+
+impl Default for ActorConfig {
+    fn default() -> Self {
+        Self {
+            proto: Default::default(),
+            alpn: GOSSIP_ALPN.to_vec().into(),
+            send_queue: Default::default(),
+        }
+    }
+}
+
 /// The capacity of the channel from the [`Gossip`](super::Gossip) handle to the actor.
 const TO_ACTOR_CAP: usize = 64;
 /// The capacity of the channel from the connection tasks to the actor.
 const IN_EVENT_CAP: usize = 1024;
 
-/// Actor that sends and handles messages between the connection and main state loops
+/// The actor that owns the protocol state and the peers, and runs the connection tasks.
 pub(super) struct Actor {
     alpn: Bytes,
-    /// Protocol state
+    /// The state of the gossip protocol.
     state: proto::State<PublicKey, StdRng>,
     /// The endpoint through which we dial peers
     endpoint: Endpoint,
@@ -57,9 +75,9 @@ pub(super) struct Actor {
     /// Input events to the state (emitted from the connection loops)
     in_event_rx: mpsc::Receiver<InEvent>,
     /// Queued timers
-    timers: Timers<Timer>,
+    timers: TimerMap<Timer>,
     /// Map of topics to their state.
-    topics: HashMap<TopicId, TopicState>,
+    topics: HashMap<TopicId, TopicHandles>,
     /// Map of peers to their state.
     peers: HashMap<EndpointId, PeerState>,
     /// Sweeps idle peers after their retention period.
@@ -74,7 +92,7 @@ pub(super) struct Actor {
     topic_event_forwarders: JoinSet<TopicId>,
     address_lookup: GossipAddressLookup,
     /// The size of the queue to each peer, see [`QueueOptions::size`].
-    pub(super) send_queue_size: usize,
+    send_queue_size: usize,
     /// Events that the handling of an event caused, handled after it.
     follow_ups: VecDeque<InEvent>,
     /// Scratch buffer for use in [`Self::handle_proto_event`].
@@ -86,34 +104,38 @@ pub(super) struct Actor {
 impl Actor {
     pub(super) fn new(
         endpoint: Endpoint,
-        config: proto::Config,
+        config: ActorConfig,
         metrics: Arc<Metrics>,
-        alpn: Option<Bytes>,
         address_lookup: GossipAddressLookup,
     ) -> (Self, mpsc::Sender<ToActor>) {
+        let ActorConfig {
+            proto: proto_config,
+            alpn,
+            send_queue,
+        } = config;
         let peer_id = endpoint.id();
         let dialer = Dialer::new(endpoint.clone());
         let state = proto::State::new(
             peer_id,
             Default::default(),
-            config,
+            proto_config,
             rand::rngs::StdRng::from_rng(&mut rand::rng()),
         );
-        let send_queue_size = queue::queue_size(queue::QUEUE_SIZE, state.max_message_size());
+        let send_queue_size = queue::queue_size(send_queue.size, state.max_message_size());
         let (to_actor_tx, to_actor_rx) = mpsc::channel(TO_ACTOR_CAP);
         let (in_event_tx, in_event_rx) = mpsc::channel(IN_EVENT_CAP);
         let mut peer_cleanup = time::interval(PEER_RETENTION);
         peer_cleanup.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         let actor = Actor {
-            alpn: alpn.unwrap_or_else(|| GOSSIP_ALPN.to_vec().into()),
+            alpn,
             endpoint,
             state,
             dialer,
             to_actor_rx,
             in_event_rx,
             in_event_tx,
-            timers: Timers::new(),
+            timers: TimerMap::new(),
             command_rx: SubscriptionCommands::default(),
             peers: Default::default(),
             peer_cleanup,
@@ -135,10 +157,7 @@ impl Actor {
     pub(super) async fn run(mut self) {
         let mut addr_update_stream = self.setup();
 
-        let mut i = 0;
-        while self.event_loop(&mut addr_update_stream, i).await {
-            i += 1;
-        }
+        while self.event_loop(&mut addr_update_stream).await {}
     }
 
     /// Handles a message from the [`Gossip`](super::Gossip) handle, and returns `false` to stop the actor.
@@ -152,7 +171,7 @@ impl Actor {
                 true
             }
             Some(ToActor::Connection(conn)) => {
-                self.handle_connection(conn);
+                self.add_connection(conn);
                 true
             }
             Some(ToActor::Shutdown { reply }) => {
@@ -177,7 +196,7 @@ impl Actor {
     fn setup(&mut self) -> impl Stream<Item = EndpointAddr> + Send + Unpin + use<> {
         let addr_update_stream = self.endpoint.watch_addr().stream();
         let initial_addr = self.endpoint.addr();
-        self.handle_addr_update(initial_addr);
+        self.on_addr_update(initial_addr);
         addr_update_stream
     }
 
@@ -187,7 +206,6 @@ impl Actor {
     async fn event_loop(
         &mut self,
         addr_updates: &mut (impl Stream<Item = EndpointAddr> + Send + Unpin),
-        i: usize,
     ) -> bool {
         self.metrics.actor_tick_main.inc();
         // A shutdown skips the other branches. It waits only for the messages of the
@@ -202,7 +220,6 @@ impl Actor {
         // branches after it, such as received messages, timers and closed connections.
         tokio::select! {
             msg = self.to_actor_rx.recv() => {
-                trace!(?i, "tick: to_actor_rx");
                 if !self.on_message(msg) {
                     return false;
                 }
@@ -210,41 +227,41 @@ impl Actor {
             Some((topic, command)) = self.command_rx.next(|topic| {
                 all_eager_peers_busy(&self.state, &self.peers, topic)
             }), if !self.command_rx.is_empty() => {
-                trace!(?i, "tick: command_rx");
-                self.handle_command(topic, command);
+                self.on_command(topic, command);
             },
             _ = self.peer_cleanup.tick(), if !self.peers.is_empty() => {
                 self.forget_peers(Instant::now());
             },
             Some(new_address) = addr_updates.next() => {
-                trace!(?i, "tick: new_address");
                 self.metrics.actor_tick_endpoint.inc();
-                self.handle_addr_update(new_address);
+                self.on_addr_update(new_address);
             }
             (peer_id, res) = self.dialer.next_conn() => {
-                trace!(?i, "tick: dialer");
                 self.metrics.actor_tick_dialer.inc();
                 match res {
                     Ok(conn) => {
                         debug!(peer = %peer_id.fmt_short(), "dial successful");
                         self.metrics.actor_tick_dialer_success.inc();
-                        self.handle_connection(conn);
+                        self.add_connection(conn);
                     }
                     Err(err) => {
                         warn!(peer = %peer_id.fmt_short(), "dial failed: {err}");
                         self.metrics.actor_tick_dialer_failure.inc();
-                        self.handle_dial_failed(peer_id);
+                        self.on_dial_failed(peer_id);
                     }
                 }
             }
             event = self.in_event_rx.recv() => {
-                trace!(?i, "tick: in_event_rx");
                 self.metrics.actor_tick_in_event_rx.inc();
                 let event = event.expect("unreachable: in_event_tx is never dropped before receiver");
                 self.handle_in_event(event, Instant::now());
             }
-            _ = self.timers.wait_next() => {
-                trace!(?i, "tick: timers");
+            _ = async {
+                match self.timers.first() {
+                    Some(instant) => time::sleep_until(*instant).await,
+                    None => std::future::pending().await,
+                }
+            } => {
                 self.metrics.actor_tick_timers.inc();
                 let now = Instant::now();
                 while let Some((_instant, timer)) = self.timers.pop_before(now) {
@@ -252,20 +269,19 @@ impl Actor {
                 }
             }
             Some(res) = self.connection_tasks.join_next(), if !self.connection_tasks.is_empty() => {
-                trace!(?i, "tick: connection_tasks");
                 let Some((peer_id, conn, result)) = task_output(res) else {
                     debug!("connection task cancelled, the runtime shuts down");
                     return false;
                 };
-                self.handle_connection_task_finished(peer_id, conn, result);
+                self.on_conn_task_finished(peer_id, conn, result);
             }
             Some(res) = self.topic_event_forwarders.join_next(), if !self.topic_event_forwarders.is_empty() => {
                 let Some(topic_id) = task_output(res) else {
                     debug!("topic task cancelled, the runtime shuts down");
                     return false;
                 };
-                if let Some(state) = self.topics.get_mut(&topic_id) {
-                    if !state.still_needed() {
+                if let Some(handles) = self.topics.get_mut(&topic_id) {
+                    if handles.is_empty() {
                         self.quit_queue.push_back(topic_id);
                         self.process_quit_queue();
                     }
@@ -276,16 +292,14 @@ impl Actor {
         true
     }
 
-    fn handle_addr_update(&mut self, endpoint_addr: EndpointAddr) {
-        // let peer_data = our_peer_data(&self.endpoint, current_addresses);
+    fn on_addr_update(&mut self, endpoint_addr: EndpointAddr) {
         let peer_data = encode_peer_data(&endpoint_addr.into());
         self.handle_in_event(InEvent::UpdatePeerData(peer_data), Instant::now());
     }
 
-    fn handle_command(&mut self, topic: TopicId, command: Option<Command>) {
+    fn on_command(&mut self, topic: TopicId, command: Option<Command>) {
         debug!(?topic, ?command, "handle command");
-        let Some(state) = self.topics.get_mut(&topic) else {
-            // TODO: unreachable?
+        let Some(handles) = self.topics.get_mut(&topic) else {
             warn!("received command for unknown topic");
             return;
         };
@@ -301,11 +315,11 @@ impl Actor {
                 self.handle_in_event(proto::InEvent::Command(topic, command), Instant::now());
             }
             None => {
-                state.command_receiver_count = state
-                    .command_receiver_count
+                handles.command_receivers = handles
+                    .command_receivers
                     .checked_sub(1)
                     .expect("finished command receiver must have been registered");
-                if !state.still_needed() {
+                if handles.is_empty() {
                     self.quit_queue.push_back(topic);
                     self.process_quit_queue();
                 }
@@ -313,7 +327,7 @@ impl Actor {
         }
     }
 
-    fn handle_connection(&mut self, conn: Connection) {
+    fn add_connection(&mut self, conn: Connection) {
         let peer_id = conn.remote_id();
         let side = conn.side();
         let size = self.send_queue_size;
@@ -356,7 +370,7 @@ impl Actor {
         );
     }
 
-    fn handle_dial_failed(&mut self, peer_id: EndpointId) {
+    fn on_dial_failed(&mut self, peer_id: EndpointId) {
         // A connection writes the queue, so the failed dial loses nothing.
         if !self
             .peers
@@ -371,11 +385,11 @@ impl Actor {
     fn forget_peers(&mut self, now: Instant) {
         // A pending dial may still need the capability learned on an earlier connection.
         self.peers
-            .retain(|id, peer| self.dialer.is_pending(*id) || !peer.can_forget(now));
+            .retain(|id, peer| self.dialer.is_dialing(*id) || !peer.can_forget(now));
     }
 
     #[tracing::instrument(name = "conn", skip_all, fields(peer = %peer_id.fmt_short()))]
-    fn handle_connection_task_finished(
+    fn on_conn_task_finished(
         &mut self,
         peer_id: EndpointId,
         conn: Connection,
@@ -423,22 +437,22 @@ impl Actor {
             commands_rx,
             registered,
         } = join;
-        let TopicState {
-            event_sender,
-            command_receiver_count,
+        let TopicHandles {
+            events,
+            command_receivers,
         } = self.topics.entry(topic_id).or_default();
         // The new subscriber first gets the current neighbors. The snapshot and the
         // subscription to live events happen in one step, so no event falls between them.
         let neighbors = self.state.neighbors(&topic_id).copied().collect();
-        let subscriber_fut = topic_subscriber_loop(events_tx, neighbors, event_sender.subscribe());
-        let fut = async move {
-            subscriber_fut.await;
+        let subscriber = topic_subscriber_loop(events_tx, neighbors, events.subscribe());
+        let forwarder = async move {
+            subscriber.await;
             topic_id
         };
         self.topic_event_forwarders
-            .spawn(fut.instrument(tracing::Span::current()));
+            .spawn(forwarder.instrument(tracing::Span::current()));
         self.command_rx.insert(topic_id, commands_rx);
-        *command_receiver_count += 1;
+        *command_receivers += 1;
 
         self.handle_in_event(
             InEvent::Command(
@@ -452,13 +466,13 @@ impl Actor {
     }
 
     fn handle_in_event(&mut self, event: InEvent, now: Instant) {
-        self.handle_in_event_inner(event, now);
+        self.handle_with_follow_ups(event, now);
         self.process_quit_queue();
     }
 
     fn process_quit_queue(&mut self) {
         while let Some(topic_id) = self.quit_queue.pop_front() {
-            self.handle_in_event_inner(
+            self.handle_with_follow_ups(
                 InEvent::Command(topic_id, ProtoCommand::Quit),
                 Instant::now(),
             );
@@ -468,7 +482,7 @@ impl Actor {
         }
     }
 
-    fn handle_in_event_inner(&mut self, event: InEvent, now: Instant) {
+    fn handle_with_follow_ups(&mut self, event: InEvent, now: Instant) {
         self.handle_proto_event(event, now);
         while let Some(event) = self.follow_ups.pop_front() {
             self.handle_proto_event(event, now);
@@ -534,7 +548,7 @@ impl Actor {
                         }
                     }
                     // Also after a dropped message, which can reopen a full closed queue.
-                    if peer.needs_dial() && !self.dialer.is_pending(peer_id) {
+                    if peer.needs_dial() && !self.dialer.is_dialing(peer_id) {
                         debug!(peer = %peer_id.fmt_short(), "start to dial");
                         self.dialer.queue_dial(peer_id, self.alpn.clone());
                     }
@@ -542,20 +556,18 @@ impl Actor {
                     // supplies the writer, or its failure disconnects the peer.
                     debug_assert!(
                         peer.writer.is_some()
-                            || peer.queue.is_closing()
-                            || self.dialer.is_pending(peer_id),
+                            || peer.queue.is_closed()
+                            || self.dialer.is_dialing(peer_id),
                         "open queue without a writer or a dial"
                     );
                 }
                 OutEvent::EmitEvent(topic_id, event) => {
-                    let Some(state) = self.topics.get_mut(&topic_id) else {
-                        // TODO: unreachable?
+                    let Some(handles) = self.topics.get_mut(&topic_id) else {
                         warn!(?topic_id, "gossip state emitted event for unknown topic");
                         continue;
                     };
-                    let TopicState { event_sender, .. } = state;
-                    event_sender.send(event).ok();
-                    if !state.still_needed() {
+                    handles.events.send(event).ok();
+                    if handles.is_empty() {
                         self.quit_queue.push_back(topic_id);
                     }
                 }
@@ -568,13 +580,13 @@ impl Actor {
                 }
                 OutEvent::PeerData(endpoint_id, data) => match decode_peer_data(&data) {
                     Err(err) => warn!("Failed to decode {data:?} from {endpoint_id}: {err}"),
-                    Ok(info) => {
-                        debug!(peer = ?endpoint_id, "add known addrs: {info:?}");
+                    Ok(addr_info) => {
+                        debug!(peer = ?endpoint_id, "add known addrs: {addr_info:?}");
                         let mut endpoint_addr = EndpointAddr::new(endpoint_id);
-                        for addr in info.direct_addresses {
+                        for addr in addr_info.direct_addresses {
                             endpoint_addr = endpoint_addr.with_ip_addr(addr);
                         }
-                        if let Some(relay_url) = info.relay_url {
+                        if let Some(relay_url) = addr_info.relay_url {
                             endpoint_addr = endpoint_addr.with_relay_url(relay_url);
                         }
 
@@ -586,7 +598,7 @@ impl Actor {
         for peer in touched.drain(..) {
             if let Some(state) = self.peers.get_mut(&peer) {
                 if !self.state.uses_peer(&peer) {
-                    state.close_queue();
+                    state.queue.close();
                 }
             }
         }
@@ -595,47 +607,5 @@ impl Actor {
     #[cfg(test)]
     fn joined(&self, topic: &TopicId) -> bool {
         self.state.neighbors(topic).next().is_some()
-    }
-}
-
-/// A [`TimerMap`] with an async method to wait for the next timer expiration.
-#[derive(Debug)]
-struct Timers<T> {
-    map: TimerMap<T>,
-}
-
-impl<T> Default for Timers<T> {
-    fn default() -> Self {
-        Self {
-            map: TimerMap::default(),
-        }
-    }
-}
-
-impl<T> Timers<T> {
-    /// Creates a new timer map.
-    fn new() -> Self {
-        Self::default()
-    }
-
-    /// Inserts a new entry at the specified instant
-    fn insert(&mut self, instant: Instant, item: T) {
-        self.map.insert(instant, item);
-    }
-
-    /// Waits for the next timer to elapse.
-    async fn wait_next(&mut self) -> Instant {
-        match self.map.first() {
-            None => std::future::pending::<Instant>().await,
-            Some(instant) => {
-                sleep_until(*instant).await;
-                *instant
-            }
-        }
-    }
-
-    /// Pops the earliest timer that expires at or before `now`.
-    fn pop_before(&mut self, now: Instant) -> Option<(Instant, T)> {
-        self.map.pop_before(now)
     }
 }

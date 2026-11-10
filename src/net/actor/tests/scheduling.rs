@@ -13,14 +13,16 @@ async fn message_before_a_close_is_handled_first() -> Result {
     let peer = conn.remote_id();
     let (mut actor, _to_actor) = Actor::new(
         pair.ep1.clone(),
+        ActorConfig {
+            proto: Default::default(),
+            ..Default::default()
+        },
         Default::default(),
-        Default::default(),
-        None,
         Default::default(),
     );
     let topic = [1; 32].into();
-    let state = TopicState::default();
-    let mut events = state.event_sender.subscribe();
+    let state = TopicHandles::default();
+    let mut events = state.events.subscribe();
     actor.topics.insert(topic, state);
     actor.handle_in_event(
         InEvent::Command(topic, ProtoCommand::Join(vec![])),
@@ -32,14 +34,14 @@ async fn message_before_a_close_is_handled_first() -> Result {
         .await
         .std_context("queue join")?;
     conn.close(0u32.into(), b"done");
-    actor.handle_connection(conn);
+    actor.add_connection(conn);
     let (peer, conn, result) = actor
         .connection_tasks
         .join_next()
         .await
         .expect("one task")
         .expect("no panic");
-    actor.handle_connection_task_finished(peer, conn, result);
+    actor.on_conn_task_finished(peer, conn, result);
 
     assert!(
         !actor.state.has_active_peers(&topic),
@@ -230,9 +232,9 @@ async fn admission_follows_current_eager_peers() -> Result {
     let topic: TopicId = blake3::hash(b"eager").into();
     let mut actor = t_actor().await?;
     actor.send_queue_size = queue::MIN_QUEUE_SIZE;
-    actor.topics.insert(topic, TopicState::default());
+    actor.topics.insert(topic, TopicHandles::default());
     // A subscriber keeps the topic, which the actor quits otherwise.
-    let _events = actor.topics[&topic].event_sender.subscribe();
+    let _events = actor.topics[&topic].events.subscribe();
     actor.handle_in_event(
         InEvent::Command(topic, ProtoCommand::Join(vec![])),
         Instant::now(),
@@ -286,7 +288,7 @@ async fn admission_follows_current_eager_peers() -> Result {
         topic,
         commands_of(vec![Command::Broadcast(Bytes::from_static(b"first"))]),
     );
-    actor.topics.get_mut(&topic).unwrap().command_receiver_count += 1;
+    actor.topics.get_mut(&topic).unwrap().command_receivers += 1;
     assert!(
         timeout(
             BROADCAST_RECHECK_INTERVAL * 2,
@@ -330,17 +332,19 @@ async fn busy_publisher_does_not_starve_finished_connections() -> Result {
     let (conn, _peer_conn) = pair.connect_back().await?;
     let (mut actor, _to_actor) = Actor::new(
         pair.ep1.clone(),
+        ActorConfig {
+            proto: Default::default(),
+            ..Default::default()
+        },
         Default::default(),
-        Default::default(),
-        None,
         Default::default(),
     );
     publish_forever(&mut actor);
     conn.close(0u32.into(), b"done");
-    actor.handle_connection(conn);
+    actor.add_connection(conn);
     let mut addresses = n0_future::stream::pending();
-    for i in 0..256 {
-        actor.event_loop(&mut addresses, i).await;
+    for _ in 0..256 {
+        actor.event_loop(&mut addresses).await;
         tokio::task::yield_now().await;
         if actor.connection_tasks.is_empty() {
             return Ok(());
