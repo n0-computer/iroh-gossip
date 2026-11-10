@@ -70,7 +70,8 @@ async fn shuffle_reply_connection_retires() -> Result {
         (reply.is_some(), sent, reason)
     }));
 
-    // A third node forwards the shuffle to us with its walk at an end.
+    // A third node joins us, and then forwards the shuffle to us with its walk at an end.
+    // We take a shuffle only from a neighbor.
     let ep3 = create_endpoint(rng, relay_map, None).await?;
     let conn = ep3
         .connect(ep1_addr, GOSSIP_ALPN)
@@ -82,10 +83,13 @@ async fn shuffle_reply_connection_retires() -> Result {
     wire::StreamHeader::write(topic, None, &mut stream, &mut buf)
         .await
         .std_context("header")?;
+    let join = proto::topic::Message::Swarm(proto::hyparview::Message::Join(None));
     let shuffle = proto::topic::Message::test_shuffle(origin_id, 0);
-    wire::write_message(&mut stream, &shuffle, &mut buf, 1024)
-        .await
-        .std_context("frame")?;
+    for message in [join, shuffle] {
+        wire::write_message(&mut stream, &message, &mut buf, 1024)
+            .await
+            .std_context("frame")?;
+    }
 
     let (replied, sent, reason) = timeout(Duration::from_secs(10), async {
         loop {

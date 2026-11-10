@@ -417,8 +417,17 @@ impl Gossip {
 
     /// Joins a gossip topic with the default options, and waits for the first neighbor.
     ///
-    /// This call has no timeout. If no peer becomes a neighbor, it waits forever. This happens
-    /// when all bootstrap peers are offline. Wrap the call in a timeout to stop the wait.
+    /// With an empty `bootstrap` list, or one that holds only our own id, the call waits until
+    /// a peer joins us. It has no timeout for that wait.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::JoinFailed`] if the join got no neighbor from its bootstrap peers, see
+    ///   [`GossipReceiver::joined`]. The call then drops the topic handle. Thus the node leaves
+    ///   the topic, unless another handle for the topic exists.
+    /// - [`Error::Closed`] if the gossip actor stopped.
+    ///
+    /// [`GossipReceiver::joined`]: crate::api::GossipReceiver::joined
     pub async fn subscribe_and_join(
         &self,
         topic_id: TopicId,
