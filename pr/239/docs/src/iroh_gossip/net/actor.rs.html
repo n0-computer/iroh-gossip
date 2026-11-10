@@ -108,10 +108,10 @@
 <a href=#108 id=108 data-nosnippet>108</a><span class="doccomment">/// The actor that owns the protocol state and the peers, and runs the connection tasks.
 <a href=#109 id=109 data-nosnippet>109</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">struct </span>Actor {
 <a href=#110 id=110 data-nosnippet>110</a>    <span class="doccomment">/// The state of the gossip protocol.
-<a href=#111 id=111 data-nosnippet>111</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) proto: proto::State&lt;PublicKey, StdRng&gt;,
+<a href=#111 id=111 data-nosnippet>111</a>    </span>proto: proto::State&lt;PublicKey, StdRng&gt;,
 <a href=#112 id=112 data-nosnippet>112</a>    state: ActorState,
 <a href=#113 id=113 data-nosnippet>113</a>    <span class="doccomment">/// The endpoint of this node.
-<a href=#114 id=114 data-nosnippet>114</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) endpoint: Endpoint,
+<a href=#114 id=114 data-nosnippet>114</a>    </span>endpoint: Endpoint,
 <a href=#115 id=115 data-nosnippet>115</a>    <span class="doccomment">/// Messages from the [`Gossip`](super::Gossip) handle.
 <a href=#116 id=116 data-nosnippet>116</a>    </span>to_actor_rx: mpsc::Receiver&lt;ToActor&gt;,
 <a href=#117 id=117 data-nosnippet>117</a>    <span class="doccomment">/// The inputs that every connection task shares.
@@ -373,7 +373,7 @@
 <a href=#373 id=373 data-nosnippet>373</a>                    <span class="kw">return </span><span class="bool-val">false</span>;
 <a href=#374 id=374 data-nosnippet>374</a>                };
 <a href=#375 id=375 data-nosnippet>375</a>                <span class="kw">if let </span><span class="prelude-val">Some</span>(handles) = <span class="self">self</span>.state.topics.get_mut(<span class="kw-2">&amp;</span>topic_id) {
-<a href=#376 id=376 data-nosnippet>376</a>                    <span class="kw">if </span>!handles.has_handles() {
+<a href=#376 id=376 data-nosnippet>376</a>                    <span class="kw">if </span>handles.is_empty() {
 <a href=#377 id=377 data-nosnippet>377</a>                        <span class="self">self</span>.state.quit_queue.push_back(topic_id);
 <a href=#378 id=378 data-nosnippet>378</a>                        <span class="self">self</span>.process_quit_queue();
 <a href=#379 id=379 data-nosnippet>379</a>                    }
@@ -414,7 +414,7 @@
 <a href=#414 id=414 data-nosnippet>414</a>                    .command_receivers
 <a href=#415 id=415 data-nosnippet>415</a>                    .checked_sub(<span class="number">1</span>)
 <a href=#416 id=416 data-nosnippet>416</a>                    .expect(<span class="string">"finished command receiver must have been registered"</span>);
-<a href=#417 id=417 data-nosnippet>417</a>                <span class="kw">if </span>!handles.has_handles() {
+<a href=#417 id=417 data-nosnippet>417</a>                <span class="kw">if </span>handles.is_empty() {
 <a href=#418 id=418 data-nosnippet>418</a>                    <span class="self">self</span>.state.quit_queue.push_back(topic);
 <a href=#419 id=419 data-nosnippet>419</a>                    <span class="self">self</span>.process_quit_queue();
 <a href=#420 id=420 data-nosnippet>420</a>                }
@@ -654,19 +654,19 @@
 <a href=#654 id=654 data-nosnippet>654</a>            <span class="kw">let </span>len = <span class="kw">super</span>::wire::message_len(<span class="kw-2">&amp;</span>message.message).ok();
 <a href=#655 id=655 data-nosnippet>655</a>            track_message(message.kind(), len, <span class="bool-val">false</span>, <span class="kw-2">&amp;</span><span class="self">self</span>.metrics);
 <a href=#656 id=656 data-nosnippet>656</a>        }
-<a href=#657 id=657 data-nosnippet>657</a>        <span class="kw">let </span>may_change_wants = event.may_change_wants();
+<a href=#657 id=657 data-nosnippet>657</a>        <span class="kw">let </span>may_affect_membership = event.may_affect_membership();
 <a href=#658 id=658 data-nosnippet>658</a>        <span class="kw">let </span><span class="kw-2">mut </span>io = ActorIO {
 <a href=#659 id=659 data-nosnippet>659</a>            state: <span class="kw-2">&amp;mut </span><span class="self">self</span>.state,
 <a href=#660 id=660 data-nosnippet>660</a>            now,
 <a href=#661 id=661 data-nosnippet>661</a>            opened_queue: <span class="bool-val">false</span>,
 <a href=#662 id=662 data-nosnippet>662</a>        };
 <a href=#663 id=663 data-nosnippet>663</a>        <span class="self">self</span>.proto.handle(event, now, <span class="kw-2">&amp;mut </span>io);
-<a href=#664 id=664 data-nosnippet>664</a>        <span class="comment">// A topic wants a peer only through its views and its open requests, which
-<a href=#665 id=665 data-nosnippet>665</a>        // only a membership event changes. A send also opens a closed queue. A Plumtree
-<a href=#666 id=666 data-nosnippet>666</a>        // reply to a peer that no topic wants must not leave its queue open.
-<a href=#667 id=667 data-nosnippet>667</a>        </span><span class="kw">if </span>may_change_wants || io.opened_queue {
+<a href=#664 id=664 data-nosnippet>664</a>        <span class="comment">// Close the queue of each peer that no topic wants. Only a membership event changes
+<a href=#665 id=665 data-nosnippet>665</a>        // what a topic wants. A send can reopen the queue of a peer that no topic wants, for
+<a href=#666 id=666 data-nosnippet>666</a>        // example for a Plumtree reply, so check after that too.
+<a href=#667 id=667 data-nosnippet>667</a>        </span><span class="kw">if </span>may_affect_membership || io.opened_queue {
 <a href=#668 id=668 data-nosnippet>668</a>            <span class="kw">for </span>(peer_id, peer) <span class="kw">in </span><span class="self">self</span>.state.peers.iter() {
-<a href=#669 id=669 data-nosnippet>669</a>                <span class="kw">if </span>!peer.queue.is_closed() &amp;&amp; !<span class="self">self</span>.proto.wants(peer_id) {
+<a href=#669 id=669 data-nosnippet>669</a>                <span class="kw">if </span>!peer.queue.is_closed() &amp;&amp; !<span class="self">self</span>.proto.wants_connection(peer_id) {
 <a href=#670 id=670 data-nosnippet>670</a>                    peer.queue.close();
 <a href=#671 id=671 data-nosnippet>671</a>                }
 <a href=#672 id=672 data-nosnippet>672</a>            }
@@ -789,7 +789,7 @@
 <a href=#789 id=789 data-nosnippet>789</a>            <span class="kw">return</span>;
 <a href=#790 id=790 data-nosnippet>790</a>        };
 <a href=#791 id=791 data-nosnippet>791</a>        handles.events.send(event).ok();
-<a href=#792 id=792 data-nosnippet>792</a>        <span class="kw">if </span>!handles.has_handles() {
+<a href=#792 id=792 data-nosnippet>792</a>        <span class="kw">if </span>handles.is_empty() {
 <a href=#793 id=793 data-nosnippet>793</a>            <span class="self">self</span>.state.quit_queue.push_back(topic_id);
 <a href=#794 id=794 data-nosnippet>794</a>        }
 <a href=#795 id=795 data-nosnippet>795</a>    }
