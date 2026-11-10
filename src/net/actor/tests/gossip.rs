@@ -1,5 +1,26 @@
 use super::*;
 
+/// The debug output of a join request hides its auth token.
+#[test]
+fn join_debug_hides_the_token() {
+    let (events_tx, _) = mpsc::channel(1);
+    let (_, commands_rx) = mpsc::channel(1);
+    let (registered, _) = oneshot::channel();
+    let join = Join {
+        topic_id: TopicId::from_bytes([0; 32]),
+        bootstrap: Default::default(),
+        auth_token: Some(AuthToken::new(&b"hunter2"[..])),
+        events_tx,
+        commands_rx,
+        registered,
+    };
+    let debug = format!("{join:?}");
+    assert!(
+        debug.contains("auth_token") && !debug.contains("hunter2"),
+        "{debug}"
+    );
+}
+
 /// `subscribe` returns only after the actor registered the topic.
 ///
 /// Otherwise a Join from a peer could arrive at a node that does not know the
