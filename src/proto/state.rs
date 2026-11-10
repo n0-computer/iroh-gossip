@@ -23,8 +23,7 @@ pub struct TopicId([u8; 32]);
 idbytes_impls!(TopicId, "TopicId");
 
 impl TopicId {
-    /// Convert to a hex string limited to the first 5 bytes for a friendly string
-    /// representation of the key.
+    /// Returns the first 5 bytes as hex, a short form of the key for logs.
     pub fn fmt_short(&self) -> String {
         data_encoding::HEXLOWER.encode(&self.as_bytes()[..5])
     }
@@ -48,6 +47,7 @@ impl<PI> Message<PI> {
 
 /// Whether this is a control or data message
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum MessageKind {
     /// A data message.
     Data,
@@ -118,8 +118,9 @@ pub enum OutEvent<PI> {
     SendMessage(PI, Message<PI>),
     /// Emit an event to the application.
     EmitEvent(TopicId, topic::Event<PI>),
-    /// Schedule a timer. The runtime is responsible for sending an [InEvent::TimerExpired]
-    /// after the duration.
+    /// Schedules a timer.
+    ///
+    /// The runtime sends an [InEvent::TimerExpired] after the duration.
     ScheduleTimer(Duration, Timer<PI>),
     /// Close the connection to a peer on the network level.
     DisconnectPeer(PI),

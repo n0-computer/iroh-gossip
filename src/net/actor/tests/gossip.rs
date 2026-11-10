@@ -484,8 +484,9 @@ async fn can_reconnect() -> Result {
 #[tokio::test]
 #[traced_test]
 async fn can_die_and_reconnect() -> Result {
-    /// Runs a future in a separate runtime on a separate thread, cancelling everything
-    /// abruptly once `cancel` is invoked.
+    /// Runs a future in a separate runtime on its own thread.
+    ///
+    /// Everything stops at once when `cancel` is cancelled.
     fn run_in_thread<T: Send + 'static>(
         cancel: CancellationToken,
         fut: impl std::future::Future<Output = T> + Send + 'static,

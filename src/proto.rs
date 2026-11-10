@@ -64,8 +64,9 @@ pub use plumtree::{Config as PlumtreeConfig, DeliveryScope, Round, Scope};
 pub use state::{InEvent, Message, OutEvent, State, Timer, TopicId};
 pub use topic::{Command, Config, Event, IO};
 
-/// The default maximum size in bytes for a gossip message.
-/// This is a sane but arbitrary default and can be changed in the [`Config`].
+/// The default maximum size in bytes of a gossip message.
+///
+/// The value is an arbitrary default. Change it in the [`Config`].
 pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 4096;
 
 /// The minimum allowed value for [`Config::max_message_size`].
@@ -80,8 +81,8 @@ pub const MIN_MAX_MESSAGE_SIZE: usize = 512;
 /// Note that the concrete type will be used in protocol messages. Therefore, implementations of
 /// the protocol are only compatible if the same concrete type is supplied for this trait.
 ///
-/// TODO: Rename to `PeerId`? It does not necessarily refer to a peer's address, as long as the
-/// networking layer can translate the value of its concrete type into an address.
+/// It does not need to be a peer's address, as long as the networking layer can translate
+/// the value of its concrete type into an address.
 pub trait PeerIdentity: Hash + Eq + Ord + Copy + fmt::Debug + Serialize + DeserializeOwned {}
 impl<T> PeerIdentity for T where
     T: Hash + Eq + Ord + Copy + fmt::Debug + Serialize + DeserializeOwned

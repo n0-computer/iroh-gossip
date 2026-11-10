@@ -32,9 +32,9 @@ pub(super) type ConnId = usize;
 #[derive(Debug)]
 pub(super) struct PeerState {
     pub(super) queue: SendQueue,
-    /// Closes every connection of the peer, also receive-only ones.
+    /// Closes every connection of the peer when cancelled, also the receive-only ones.
     ///
-    /// An abort cancels it, and a fresh token takes its place for later connections.
+    /// An abort cancels it, and puts a new token in its place for later connections.
     pub(super) aborted: CancellationToken,
     /// The connection that writes the queue, or `None` until a dial takes it.
     ///
@@ -174,9 +174,9 @@ impl PeerState {
         }
     }
 
-    /// Starts retention once the queue is closed and empty and all connections
-    /// finished. An open queue still needs a writer, even when empty.
-    /// A later call does not extend retention.
+    /// Starts retention once the queue is closed and empty, and all connections finished.
+    ///
+    /// An open queue still needs a writer, even when empty. A later call does not extend retention.
     fn retain_if_idle(&mut self, now: Instant) {
         if self.queue.is_closed() && self.queue.is_empty() && self.connections == 0 {
             self.forget_at.get_or_insert(now + PEER_RETENTION);

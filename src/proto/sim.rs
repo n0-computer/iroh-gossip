@@ -113,8 +113,9 @@ pub struct Network<PI, R> {
     tick: usize,
     peers: BTreeMap<PI, State<PI, R>>,
     conns: BTreeSet<ConnId<PI>>,
-    /// When each closed connection was closed, to tell messages sent over it
-    /// apart from messages that open a new one.
+    /// When each closed connection closed.
+    ///
+    /// It tells messages sent over a closed connection apart from messages that open a new one.
     closed_at: FxHashMap<ConnId<PI>, Instant>,
     events: VecDeque<(PI, TopicId, Event<PI>)>,
     latencies: FxHashMap<ConnId<PI>, Duration>,
@@ -734,8 +735,7 @@ pub enum BootstrapMode {
     /// those, see [`Simulator::bootstrap_sequential`].
     #[default]
     Single,
-    /// First `count` bootstrap peers are created and join each other,
-    /// then the remaining peers join the swarm by joining one of these first `count` peers.
+    /// `count` bootstrap peers join each other, then the other peers join through one of them.
     Set {
         /// Number of bootstrap peers to join first
         count: u64,
@@ -778,8 +778,9 @@ pub struct RoundStats {
     /// Payloads per recipient, minus 1, as in Plumtree 2.3. A round with no
     /// recipient has 0.
     pub rmr: f32,
-    /// The last delivery hop in this round: the most hops a payload took to a
-    /// recipient, counting the first link.
+    /// The last delivery hop in this round: the most hops a payload took to a recipient.
+    ///
+    /// The count includes the first link.
     pub ldh: f32,
     /// The number of undelivered messages in this round.
     pub missed: f32,

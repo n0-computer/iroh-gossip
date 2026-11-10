@@ -82,7 +82,7 @@ impl<T> From<mpsc::error::SendError<T>> for ConnectionLoopError {
 
 /// Returns a finished task's output, or `None` if the runtime cancelled the task.
 ///
-/// A task cancelled at runtime shutdown is no bug, so it must not panic the actor (#140).
+/// A task cancelled at runtime shutdown is not a bug, so it must not panic the actor (#140).
 /// A panic in the task panics the caller with the same payload.
 pub(super) fn task_output<T>(res: Result<T, task::JoinError>) -> Option<T> {
     match res {

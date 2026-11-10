@@ -131,21 +131,24 @@ pub enum Timer<PI> {
 pub enum Message<PI> {
     /// Sent to a peer if you want to join the swarm
     Join(Option<PeerData>),
-    /// When receiving Join, ForwardJoin is forwarded to the peer's ActiveView to introduce the
-    /// new member.
+    /// Introduces a new member to the receiver.
+    ///
+    /// A node that receives a `Join` sends a `ForwardJoin` to the peers of its active view.
     ForwardJoin(ForwardJoin<PI>),
-    /// A shuffle request is sent occasionally to re-shuffle the PassiveView with contacts from
-    /// other peers.
+    /// Asks a peer to exchange contacts, to refresh the passive views.
+    ///
+    /// A node sends it from time to time.
     Shuffle(Shuffle<PI>),
-    /// Peers reply to [`Message::Shuffle`] requests with a random peers from their active and
-    /// passive views.
+    /// Answers a [`Message::Shuffle`] with random peers from the active and passive views.
     ShuffleReply(ShuffleReply<PI>),
-    /// Request to add sender to an active view of recipient. If [`Neighbor::priority`] is
-    /// [`Priority::High`], the request cannot be denied.
+    /// Asks the receiver to add the sender to its active view.
+    ///
+    /// If [`Neighbor::priority`] is [`Priority::High`], the receiver cannot deny the request.
     Neighbor(Neighbor),
-    /// Request to disconnect from a peer.
-    /// If [`Disconnect::alive`] is true, the other peer is not shutting down, so it should be
-    /// added to the passive set.
+    /// Asks the receiver to drop the sender from its active view.
+    ///
+    /// If [`Disconnect::alive`] is true, the sender does not shut down, so the receiver adds it to
+    /// its passive view.
     Disconnect(Disconnect),
 }
 
@@ -224,8 +227,9 @@ pub struct ForwardJoin<PI> {
     ttl: Ttl,
 }
 
-/// Shuffle messages are sent occasionally to shuffle our passive view with peers from other peer's
-/// active and passive views.
+/// Exchanges contacts between the passive views of two peers.
+///
+/// A node sends it from time to time, with peers from its active and passive views.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct Shuffle<PI> {
     /// The peer that initiated the shuffle request.
@@ -259,8 +263,9 @@ pub enum Priority {
     Low,
 }
 
-/// A neighbor message is sent after adding a peer to our active view to inform them that we are
-/// now neighbors.
+/// Tells a peer that we added it to our active view.
+///
+/// From then on, the two peers are neighbors.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct Neighbor {
     /// The priority of the `Join` or `ForwardJoin` message that triggered this neighbor request.
@@ -283,17 +288,15 @@ pub struct Disconnect {
 /// Configuration for the swarm membership layer
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct Config {
     /// Number of peers to which active connections are maintained
     pub active_view_capacity: usize,
-    /// Number of peers for which contact information is remembered,
-    /// but to which we are not actively connected to.
+    /// Number of peers whose contact information we keep, without a connection to them.
     pub passive_view_capacity: usize,
-    /// Number of hops a `ForwardJoin` message is propagated until the new peer's info
-    /// is added to a peer's active view.
+    /// Number of hops a `ForwardJoin` travels before a peer adds the new peer to its active view.
     pub active_random_walk_length: Ttl,
-    /// Number of hops a `ForwardJoin` message is propagated until the new peer's info
-    /// is added to a peer's passive view.
+    /// Number of hops a `ForwardJoin` travels before a peer adds the new peer to its passive view.
     pub passive_random_walk_length: Ttl,
     /// Number of hops a `Shuffle` message is propagated until a peer replies to it.
     pub shuffle_random_walk_length: Ttl,
@@ -1992,8 +1995,9 @@ mod tests {
         assert!(disconnected(io, 1));
     }
 
-    /// An unrelated passive reply must not close the connection on which a
-    /// Neighbor acceptance is still due. This is the race discussed in #178.
+    /// An unrelated passive reply keeps a connection that waits for a `Neighbor` acceptance.
+    ///
+    /// This is the race of #178.
     #[test]
     fn passive_reply_keeps_a_pending_neighbor_connection() {
         let mut state = new_state();
@@ -2142,8 +2146,7 @@ mod tests {
         assert_eq!(Vec::from(state.recent_neighbors.clone()), expected);
     }
 
-    /// A node that loses its last neighbor, with an empty passive view,
-    /// rejoins through the peers the application joined.
+    /// A node without neighbors and passive peers rejoins through its bootstrap peers.
     #[test]
     fn maintenance_rejoins_when_isolated() {
         let mut state = new_state();
@@ -2729,8 +2732,7 @@ mod tests {
         assert!(requested.is_empty(), "asked {requested:?} after a refusal");
     }
 
-    /// The first shuffle comes soon after joining, and the interval backs
-    /// off to the configured one.
+    /// The first shuffle comes soon after a join, and the interval grows to the configured one.
     #[test]
     fn shuffle_interval_backs_off_to_the_configured_one() {
         let mut state = new_state();
