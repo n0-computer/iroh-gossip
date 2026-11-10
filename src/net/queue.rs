@@ -162,10 +162,9 @@ struct Reservation {
 }
 
 impl Reservation {
-    /// Reserves the room of `message` in the queue and in its section, if both have it.
-    fn new(capacity: &Arc<Capacity>, message: &ProtoMessage, section: Section) -> Option<Self> {
-        let encoded_len = postcard::experimental::serialized_size(&message.message).ok()?;
-        let encoded_len = u32::try_from(encoded_len).ok()?;
+    /// Reserves the room of a message of `encoded_len` bytes in the queue and in its section, if both have it.
+    fn new(capacity: &Arc<Capacity>, encoded_len: Option<usize>, section: Section) -> Option<Self> {
+        let encoded_len = u32::try_from(encoded_len?).ok()?;
         let size = Self::size_of(encoded_len);
         let limit = capacity.section(section);
         if !limit.is_none_or(|limit| limit.reserve(size)) {
@@ -268,10 +267,17 @@ impl SendQueue {
         }
     }
 
-    /// Queues `message` if it fits, and never waits.
-    pub(super) fn push(&self, message: ProtoMessage) -> Pushed {
+    /// Queues `message` of the test, with its encoded size.
+    #[cfg(test)]
+    pub(super) fn send(&self, message: ProtoMessage) -> Pushed {
+        let len = postcard::experimental::serialized_size(&message.message).ok();
+        self.push(message, len)
+    }
+
+    /// Queues `message` with its encoded size `len`, if known, and never waits.
+    pub(super) fn push(&self, message: ProtoMessage, len: Option<usize>) -> Pushed {
         let section = Section::of(&message);
-        let Some(reservation) = Reservation::new(&self.capacity, &message, section) else {
+        let Some(reservation) = Reservation::new(&self.capacity, len, section) else {
             return match section {
                 Section::Control => Pushed::Overflow,
                 Section::Data | Section::Announcements => Pushed::Dropped(message),
@@ -486,7 +492,7 @@ mod tests {
     fn fill(queue: &SendQueue, message: impl Fn() -> ProtoMessage) -> (usize, Pushed) {
         let mut queued = 0;
         loop {
-            match queue.push(message()) {
+            match queue.send(message()) {
                 Pushed::Queued => queued += 1,
                 other => return (queued, other),
             }
@@ -499,7 +505,7 @@ mod tests {
         let queue = SendQueue::new(MIN_QUEUE_SIZE);
         let pushed = [data(10), shuffle(), ihave(), disconnect(), data(20)];
         for message in pushed.clone() {
-            assert!(matches!(queue.push(message), Pushed::Queued));
+            assert!(matches!(queue.send(message), Pushed::Queued));
         }
         let mut reader = queue.try_reader().unwrap();
         for message in pushed {
@@ -542,7 +548,7 @@ mod tests {
         let queue = SendQueue::new(MIN_QUEUE_SIZE);
         let (_, last) = fill(&queue, shuffle);
         assert!(matches!(last, Pushed::Overflow));
-        assert!(matches!(queue.push(data(10)), Pushed::Dropped(_)));
+        assert!(matches!(queue.send(data(10)), Pushed::Dropped(_)));
         assert_eq!(used(&queue).1, 0);
     }
 
@@ -551,7 +557,7 @@ mod tests {
     fn message_keeps_its_reservation_until_dropped() {
         let queue = SendQueue::new(MIN_QUEUE_SIZE);
         let one = size(&data(1000));
-        assert!(matches!(queue.push(data(1000)), Pushed::Queued));
+        assert!(matches!(queue.send(data(1000)), Pushed::Queued));
         let in_writing = queue.try_reader().unwrap().rx.try_recv().unwrap();
         assert_eq!(used(&queue), (one, one));
         drop(in_writing);
@@ -562,7 +568,7 @@ mod tests {
     #[tokio::test]
     async fn closed_queue_gives_its_messages() {
         let mut queue = SendQueue::new(MIN_QUEUE_SIZE);
-        assert!(matches!(queue.push(disconnect()), Pushed::Queued));
+        assert!(matches!(queue.send(disconnect()), Pushed::Queued));
         queue.close();
         let closing = queue.lease().closing();
         let mut reader = queue.try_reader().unwrap();
@@ -571,7 +577,7 @@ mod tests {
         reader.advance();
         queue.open();
         assert!(!*closing.borrow(), "the reader did not see the open");
-        assert!(matches!(queue.push(shuffle()), Pushed::Queued));
+        assert!(matches!(queue.send(shuffle()), Pushed::Queued));
         assert!(reader.wait_next().await, "the opened queue did not go on");
     }
 
@@ -579,8 +585,8 @@ mod tests {
     #[tokio::test]
     async fn unfinished_message_stays_first() {
         let mut queue = SendQueue::new(MIN_QUEUE_SIZE);
-        assert!(matches!(queue.push(data(10)), Pushed::Queued));
-        assert!(matches!(queue.push(data(20)), Pushed::Queued));
+        assert!(matches!(queue.send(data(10)), Pushed::Queued));
+        assert!(matches!(queue.send(data(20)), Pushed::Queued));
         let first = |queue_lease: QueueLease, len| async move {
             let mut reader = queue_lease.lock().await;
             assert!(reader.wait_next().await);
@@ -603,8 +609,8 @@ mod tests {
     #[tokio::test]
     async fn revoked_waiter_leaves_the_unfinished_message_to_the_next() {
         let mut queue = SendQueue::new(MIN_QUEUE_SIZE);
-        assert!(matches!(queue.push(data(10)), Pushed::Queued));
-        assert!(matches!(queue.push(data(20)), Pushed::Queued));
+        assert!(matches!(queue.send(data(10)), Pushed::Queued));
+        assert!(matches!(queue.send(data(20)), Pushed::Queued));
         let first = queue.lease();
         let mut reader = first.lock().await;
         assert!(reader.wait_next().await);
