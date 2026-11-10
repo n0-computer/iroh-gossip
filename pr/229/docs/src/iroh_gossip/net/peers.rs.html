@@ -181,9 +181,9 @@
 <a href=#181 id=181 data-nosnippet>181</a>        }
 <a href=#182 id=182 data-nosnippet>182</a>    }
 <a href=#183 id=183 data-nosnippet>183</a>
-<a href=#184 id=184 data-nosnippet>184</a>    <span class="doccomment">/// Starts retention once the queue is closed and empty and all connections
-<a href=#185 id=185 data-nosnippet>185</a>    /// finished. An open queue still needs a writer, even when empty.
-<a href=#186 id=186 data-nosnippet>186</a>    /// A later call does not extend retention.
+<a href=#184 id=184 data-nosnippet>184</a>    <span class="doccomment">/// Starts retention once the queue is closed and empty, and all connections finished.
+<a href=#185 id=185 data-nosnippet>185</a>    ///
+<a href=#186 id=186 data-nosnippet>186</a>    /// An open queue still needs a writer, even when empty. A later call does not extend retention.
 <a href=#187 id=187 data-nosnippet>187</a>    </span><span class="kw">fn </span>retain_if_idle(<span class="kw-2">&amp;mut </span><span class="self">self</span>, now: Instant) {
 <a href=#188 id=188 data-nosnippet>188</a>        <span class="kw">if </span><span class="self">self</span>.queue.is_closed() &amp;&amp; <span class="self">self</span>.queue.is_empty() &amp;&amp; <span class="self">self</span>.connections == <span class="number">0 </span>{
 <a href=#189 id=189 data-nosnippet>189</a>            <span class="self">self</span>.forget_at.get_or_insert(now + PEER_RETENTION);

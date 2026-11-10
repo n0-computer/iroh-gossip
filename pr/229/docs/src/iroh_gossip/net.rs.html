@@ -193,9 +193,9 @@
 <a href=#193 id=193 data-nosnippet>193</a>        </span><span class="kw">if let </span><span class="prelude-val">Ok</span>(endpoint_addr_lookup) = endpoint.address_lookup().as_ref() {
 <a href=#194 id=194 data-nosnippet>194</a>            endpoint_addr_lookup.add(address_lookup.clone());
 <a href=#195 id=195 data-nosnippet>195</a>        }
-<a href=#196 id=196 data-nosnippet>196</a>        <span class="kw">let </span>(actor, to_actor) = Actor::new(endpoint, <span class="self">self</span>.config, metrics.clone(), address_lookup);
-<a href=#197 id=197 data-nosnippet>197</a>        <span class="kw">let </span>me = actor.endpoint.id().fmt_short();
-<a href=#198 id=198 data-nosnippet>198</a>        <span class="kw">let </span>max_message_size = actor.proto.max_message_size();
+<a href=#196 id=196 data-nosnippet>196</a>        <span class="kw">let </span>me = endpoint.id().fmt_short();
+<a href=#197 id=197 data-nosnippet>197</a>        <span class="kw">let </span>max_message_size = <span class="self">self</span>.config.proto.max_message_size;
+<a href=#198 id=198 data-nosnippet>198</a>        <span class="kw">let </span>(actor, to_actor) = Actor::new(endpoint, <span class="self">self</span>.config, metrics.clone(), address_lookup);
 <a href=#199 id=199 data-nosnippet>199</a>
 <a href=#200 id=200 data-nosnippet>200</a>        <span class="kw">let </span>actor_handle = task::spawn(actor.run().instrument(<span class="macro">error_span!</span>(<span class="string">"gossip"</span>, %me)));
 <a href=#201 id=201 data-nosnippet>201</a>
