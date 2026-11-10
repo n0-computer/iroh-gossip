@@ -16,7 +16,6 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler},
     Endpoint, EndpointAddr, EndpointId, PublicKey, RelayUrl, Watcher,
 };
-use irpc::WithChannels;
 use n0_error::{e, stack_error};
 use n0_future::{
     task::{self, AbortOnDropHandle, JoinSet},
@@ -35,9 +34,10 @@ use self::{
     util::{RecvLoop, SendLoop, Timers},
 };
 use crate::{
-    api::{self, Command, Event, GossipApi, RpcMessage},
+    api::{Command, Event, GossipTopic, JoinOptions},
     metrics::Metrics,
     proto::{self, HyparviewConfig, PeerData, PlumtreeConfig, Scope, TopicId},
+    Error,
 };
 
 mod address_lookup;
@@ -47,9 +47,9 @@ mod util;
 /// ALPN protocol name
 pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/1";
 
-/// Channel capacity for the ToActor message queue (single)
+/// The capacity of the channel from the [`Gossip`] handle to the actor.
 const TO_ACTOR_CAP: usize = 64;
-/// Channel capacity for the InEvent message queue (single)
+/// The capacity of the channel from the connection tasks to the actor.
 const IN_EVENT_CAP: usize = 1024;
 /// Channel capacity for broadcast subscriber event queue (one per topic)
 const TOPIC_EVENT_CAP: usize = 256;
@@ -78,15 +78,16 @@ const BROADCAST_RECHECK_INTERVAL: Duration = Duration::from_millis(10);
 /// This bounds admission waiting, not API channel backlog or delivery time.
 const BROADCAST_WAIT_LIMIT: Duration = Duration::from_millis(100);
 
-/// Events emitted from the gossip protocol
-pub type ProtoEvent = proto::Event<PublicKey>;
-/// Commands for the gossip protocol
-pub type ProtoCommand = proto::Command<PublicKey>;
+type ProtoEvent = proto::Event<PublicKey>;
+type ProtoCommand = proto::Command<PublicKey>;
 
 type InEvent = proto::InEvent<PublicKey>;
 type OutEvent = proto::OutEvent<PublicKey>;
 type Timer = proto::Timer<PublicKey>;
 type ProtoMessage = proto::Message<PublicKey>;
+
+/// Channel capacity for topic command send channels.
+const TOPIC_COMMANDS_CAP: usize = 64;
 
 /// Publish and subscribe on gossiping topics.
 ///
@@ -116,43 +117,32 @@ pub struct Gossip {
     pub(crate) inner: Arc<Inner>,
 }
 
-impl std::ops::Deref for Gossip {
-    type Target = GossipApi;
-    fn deref(&self) -> &Self::Target {
-        &self.inner.api
-    }
-}
-
+/// A message from the [`Gossip`] handle to the actor.
 #[derive(Debug)]
-enum LocalActorMessage {
-    HandleConnection(Connection),
+enum ToActor {
+    Join(Join),
+    Connection(Connection),
     Shutdown { reply: oneshot::Sender<()> },
 }
 
-#[allow(missing_docs)]
-#[stack_error(derive, add_meta)]
-#[non_exhaustive]
-pub enum Error {
-    ActorDropped {},
-}
-
-impl<T> From<mpsc::error::SendError<T>> for Error {
-    fn from(_value: mpsc::error::SendError<T>) -> Self {
-        e!(Error::ActorDropped)
-    }
-}
-impl From<oneshot::error::RecvError> for Error {
-    fn from(_value: oneshot::error::RecvError) -> Self {
-        e!(Error::ActorDropped)
-    }
+/// A request from [`Gossip::subscribe_with_opts`] to the actor to join a topic.
+#[derive(Debug)]
+struct Join {
+    topic_id: TopicId,
+    bootstrap: BTreeSet<EndpointId>,
+    events_tx: mpsc::Sender<Event>,
+    commands_rx: mpsc::Receiver<Command>,
+    /// The actor answers once it registered the topic and applied the join.
+    registered: oneshot::Sender<()>,
 }
 
 #[derive(Debug)]
 pub(crate) struct Inner {
-    api: GossipApi,
-    local_tx: mpsc::Sender<LocalActorMessage>,
+    to_actor: mpsc::Sender<ToActor>,
     _actor_handle: AbortOnDropHandle<()>,
     max_message_size: usize,
+    /// The largest content that a broadcast takes.
+    max_content: usize,
     metrics: Arc<Metrics>,
 }
 
@@ -249,7 +239,7 @@ impl Builder {
         if let Ok(endpoint_addr_lookup) = endpoint.address_lookup().as_ref() {
             endpoint_addr_lookup.add(address_lookup.clone());
         }
-        let (mut actor, rpc_tx, local_tx) = Actor::new(
+        let (mut actor, to_actor) = Actor::new(
             endpoint,
             self.config,
             metrics.clone(),
@@ -263,18 +253,12 @@ impl Builder {
 
         let actor_handle = task::spawn(actor.run().instrument(error_span!("gossip", %me)));
 
-        let api = GossipApi::local(rpc_tx, max_message_size);
-
-        Gossip {
-            inner: Inner {
-                api,
-                local_tx,
-                _actor_handle: AbortOnDropHandle::new(actor_handle),
-                max_message_size,
-                metrics,
-            }
-            .into(),
-        }
+        Gossip::new(
+            to_actor,
+            AbortOnDropHandle::new(actor_handle),
+            max_message_size,
+            metrics,
+        )
     }
 }
 
@@ -336,6 +320,25 @@ impl QueueOptions {
 }
 
 impl Gossip {
+    /// Creates a handle for the actor task in `actor_handle`.
+    fn new(
+        to_actor: mpsc::Sender<ToActor>,
+        actor_handle: AbortOnDropHandle<()>,
+        max_message_size: usize,
+        metrics: Arc<Metrics>,
+    ) -> Self {
+        let inner = Inner {
+            to_actor,
+            _actor_handle: actor_handle,
+            max_message_size,
+            max_content: proto::topic::max_content_size(max_message_size),
+            metrics,
+        };
+        Self {
+            inner: Arc::new(inner),
+        }
+    }
+
     /// Creates a default `Builder`, with the endpoint set.
     pub fn builder() -> Builder {
         Builder {
@@ -345,10 +348,84 @@ impl Gossip {
         }
     }
 
-    /// Listen on a noq endpoint for incoming RPC connections.
-    #[cfg(feature = "rpc")]
-    pub async fn listen(self, endpoint: noq::Endpoint) {
-        self.inner.api.listen(endpoint).await
+    /// Joins a gossip topic with options.
+    ///
+    /// Returns a [`GossipTopic`] once the node has registered the topic, so it accepts a join
+    /// from a peer from then on. It does not wait for a neighbor. To wait for the first
+    /// neighbor, await [`GossipTopic::joined`].
+    ///
+    /// See [`JoinOptions`] for available options.
+    ///
+    /// A broadcast reaches only the neighbors that exist when the node sends it. Await
+    /// [`GossipTopic::joined`] before the first broadcast. With no bootstrap peers, the node
+    /// waits until another node joins it.
+    ///
+    /// The node leaves the topic when you drop all handles of the topic.
+    ///
+    /// A [`JoinOptions::subscription_capacity`] of 0 counts as 1.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Closed`] if the gossip actor stopped.
+    pub async fn subscribe_with_opts(
+        &self,
+        topic_id: TopicId,
+        opts: JoinOptions,
+    ) -> Result<GossipTopic, Error> {
+        let (commands_tx, commands_rx) = mpsc::channel(TOPIC_COMMANDS_CAP);
+        let (events_tx, events_rx) = mpsc::channel(opts.subscription_capacity.max(1));
+        let (registered_tx, registered_rx) = oneshot::channel();
+        self.inner
+            .to_actor
+            .send(ToActor::Join(Join {
+                topic_id,
+                bootstrap: opts.bootstrap,
+                events_tx,
+                commands_rx,
+                registered: registered_tx,
+            }))
+            .await
+            .map_err(|_| e!(Error::Closed))?;
+        registered_rx.await.map_err(|_| e!(Error::Closed))?;
+        Ok(GossipTopic::new(
+            commands_tx,
+            events_rx,
+            self.inner.max_content,
+        ))
+    }
+
+    /// Joins a gossip topic with the default options, and waits for the first neighbor.
+    ///
+    /// This call has no timeout. If no peer becomes a neighbor, it waits forever. This happens
+    /// when all bootstrap peers are offline. Wrap the call in a timeout to stop the wait.
+    pub async fn subscribe_and_join(
+        &self,
+        topic_id: TopicId,
+        bootstrap: Vec<EndpointId>,
+    ) -> Result<GossipTopic, Error> {
+        let mut sub = self
+            .subscribe_with_opts(topic_id, JoinOptions::with_bootstrap(bootstrap))
+            .await?;
+        sub.joined().await?;
+        Ok(sub)
+    }
+
+    /// Joins a gossip topic with the default options.
+    ///
+    /// Note that this will not wait for any bootstrap endpoint to be available.
+    /// To ensure the topic is connected to at least one endpoint, use [`GossipTopic::joined`]
+    /// or [`Self::subscribe_and_join`]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Closed`] if the gossip actor stopped.
+    pub async fn subscribe(
+        &self,
+        topic_id: TopicId,
+        bootstrap: Vec<EndpointId>,
+    ) -> Result<GossipTopic, Error> {
+        self.subscribe_with_opts(topic_id, JoinOptions::with_bootstrap(bootstrap))
+            .await
     }
 
     /// Get the maximum message size configured for this gossip actor.
@@ -361,18 +438,23 @@ impl Gossip {
         self.inner.max_message_size
     }
 
-    /// Handle an incoming [`Connection`].
+    /// Handles an incoming [`Connection`].
     ///
     /// The connection should be an accepted, server-side connection.
     /// Make sure to check the ALPN protocol yourself before passing the connection.
     ///
     /// Gossip owns the connection from now on. It closes the connection when neither side has
-    /// had a stream on it for ten seconds. Returns an error if the gossip actor stopped.
+    /// had a stream on it for ten seconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Closed`] if the gossip actor stopped.
     pub async fn handle_connection(&self, conn: Connection) -> Result<(), Error> {
         self.inner
-            .local_tx
-            .send(LocalActorMessage::HandleConnection(conn))
-            .await?;
+            .to_actor
+            .send(ToActor::Connection(conn))
+            .await
+            .map_err(|_| e!(Error::Closed))?;
         Ok(())
     }
 
@@ -383,9 +465,9 @@ impl Gossip {
     /// instance that is shut down already, or shutting down, returns `Ok` too.
     pub async fn shutdown(&self) -> Result<(), Error> {
         let (reply, reply_rx) = oneshot::channel();
-        let shutdown = LocalActorMessage::Shutdown { reply };
+        let shutdown = ToActor::Shutdown { reply };
         // The actor is gone or about to go, which is what the caller asks for.
-        if self.inner.local_tx.send(shutdown).await.is_ok() {
+        if self.inner.to_actor.send(shutdown).await.is_ok() {
             reply_rx.await.ok();
         }
         Ok(())
@@ -406,9 +488,8 @@ struct Actor {
     endpoint: Endpoint,
     /// Dial machine to connect to peers
     dialer: Dialer,
-    /// Input messages to the actor
-    rpc_rx: mpsc::Receiver<RpcMessage>,
-    local_rx: mpsc::Receiver<LocalActorMessage>,
+    /// Messages from the [`Gossip`] handle.
+    to_actor_rx: mpsc::Receiver<ToActor>,
     /// Sender for the state input (cloned into the connection loops)
     in_event_tx: mpsc::Sender<InEvent>,
     /// Input events to the state (emitted from the connection loops)
@@ -447,11 +528,7 @@ impl Actor {
         metrics: Arc<Metrics>,
         alpn: Option<Bytes>,
         address_lookup: GossipAddressLookup,
-    ) -> (
-        Self,
-        mpsc::Sender<RpcMessage>,
-        mpsc::Sender<LocalActorMessage>,
-    ) {
+    ) -> (Self, mpsc::Sender<ToActor>) {
         let peer_id = endpoint.id();
         let dialer = Dialer::new(endpoint.clone());
         let state = proto::State::new(
@@ -461,8 +538,7 @@ impl Actor {
             rand::rngs::StdRng::from_rng(&mut rand::rng()),
         );
         let send_queue_size = queue::queue_size(queue::QUEUE_SIZE, state.max_message_size());
-        let (rpc_tx, rpc_rx) = mpsc::channel(TO_ACTOR_CAP);
-        let (local_tx, local_rx) = mpsc::channel(16);
+        let (to_actor_tx, to_actor_rx) = mpsc::channel(TO_ACTOR_CAP);
         let (in_event_tx, in_event_rx) = mpsc::channel(IN_EVENT_CAP);
         let mut peer_cleanup = time::interval(PEER_RETENTION);
         peer_cleanup.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -472,7 +548,7 @@ impl Actor {
             endpoint,
             state,
             dialer,
-            rpc_rx,
+            to_actor_rx,
             in_event_rx,
             in_event_tx,
             timers: Timers::new(),
@@ -483,7 +559,6 @@ impl Actor {
             quit_queue: Default::default(),
             connection_tasks: Default::default(),
             metrics,
-            local_rx,
             topic_event_forwarders: Default::default(),
             address_lookup,
             send_queue_size,
@@ -492,7 +567,7 @@ impl Actor {
             scratch_aborted_peers: Vec::new(),
         };
 
-        (actor, rpc_tx, local_tx)
+        (actor, to_actor_tx)
     }
 
     pub(crate) async fn run(mut self) {
@@ -505,19 +580,26 @@ impl Actor {
     }
 
     /// Handles a message from the [`Gossip`] handle, and returns `false` to stop the actor.
-    fn handle_local_message(&mut self, msg: Option<LocalActorMessage>) -> bool {
+    fn on_message(&mut self, msg: Option<ToActor>) -> bool {
+        if msg.is_some() {
+            self.metrics.actor_tick_rx.inc();
+        }
         match msg {
-            Some(LocalActorMessage::Shutdown { reply }) => {
+            Some(ToActor::Join(join)) => {
+                self.on_join(join, Instant::now());
+                true
+            }
+            Some(ToActor::Connection(conn)) => {
+                self.handle_connection(conn);
+                true
+            }
+            Some(ToActor::Shutdown { reply }) => {
                 debug!("received shutdown message, quit all topics");
                 self.quit_queue.extend(self.topics.keys().copied());
                 self.process_quit_queue();
                 debug!("all topics quit, stop gossip actor");
                 reply.send(()).ok();
                 false
-            }
-            Some(LocalActorMessage::HandleConnection(conn)) => {
-                self.handle_connection(conn);
-                true
             }
             None => {
                 debug!("all gossip handles dropped, stop gossip actor");
@@ -546,35 +628,23 @@ impl Actor {
         i: usize,
     ) -> bool {
         self.metrics.actor_tick_main.inc();
-        // A shutdown skips the other branches. It waits only for the local messages
-        // queued before it. Each tick still runs the select below, so local messages
-        // starve no other branch.
-        if let Ok(msg) = self.local_rx.try_recv() {
-            if !self.handle_local_message(Some(msg)) {
+        // A shutdown skips the other branches. It waits only for the messages of the
+        // handle queued before it. Each tick still runs the select below, so these
+        // messages starve no other branch.
+        if let Ok(msg) = self.to_actor_rx.try_recv() {
+            if !self.on_message(Some(msg)) {
                 return false;
             }
         }
         // Not biased: a publisher that always has a command ready would starve the
         // branches after it, such as received messages, timers and closed connections.
         tokio::select! {
-            msg = self.local_rx.recv() => {
-                if !self.handle_local_message(msg) {
+            msg = self.to_actor_rx.recv() => {
+                trace!(?i, "tick: to_actor_rx");
+                if !self.on_message(msg) {
                     return false;
                 }
             }
-            msg = self.rpc_rx.recv() => {
-                trace!(?i, "tick: to_actor_rx");
-                self.metrics.actor_tick_rx.inc();
-                match msg {
-                    Some(msg) => {
-                        self.handle_rpc_msg(msg, Instant::now()).await;
-                    }
-                    None => {
-                        debug!("all gossip handles dropped, stop gossip actor");
-                        return false;
-                    }
-                }
-            },
             Some((topic, command)) = self.command_rx.next(|topic| {
                 all_eager_peers_busy(&self.state, &self.peers, topic)
             }), if !self.command_rx.is_empty() => {
@@ -781,59 +851,42 @@ impl Actor {
         }
     }
 
-    async fn handle_rpc_msg(&mut self, msg: RpcMessage, now: Instant) {
-        trace!("handle to_actor  {msg:?}");
-        match msg {
-            RpcMessage::Join(msg) => {
-                let WithChannels {
-                    inner,
-                    rx,
-                    tx,
-                    // TODO(frando): make use of span?
-                    span: _,
-                } = msg;
-                let api::JoinRequest {
-                    topic_id,
-                    bootstrap,
-                } = inner;
-                let TopicState {
-                    event_sender,
-                    command_receiver_count,
-                } = self.topics.entry(topic_id).or_default();
-                let mut sender_dead = false;
-                for neighbor in self.state.neighbors(&topic_id) {
-                    if let Err(_err) = tx.try_send(Event::NeighborUp(*neighbor)).await {
-                        sender_dead = true;
-                        break;
-                    }
-                }
+    /// Registers the topic of a join, and starts the join.
+    fn on_join(&mut self, join: Join, now: Instant) {
+        trace!(?join, "handle join");
+        let Join {
+            topic_id,
+            bootstrap,
+            events_tx,
+            commands_rx,
+            registered,
+        } = join;
+        let TopicState {
+            event_sender,
+            command_receiver_count,
+        } = self.topics.entry(topic_id).or_default();
+        // The new subscriber first gets the current neighbors. The snapshot and the
+        // subscription to live events happen in one step, so no event falls between them.
+        let neighbors = self.state.neighbors(&topic_id).copied().collect();
+        let subscriber_fut = topic_subscriber_loop(events_tx, neighbors, event_sender.subscribe());
+        let fut = async move {
+            subscriber_fut.await;
+            topic_id
+        };
+        self.topic_event_forwarders
+            .spawn(fut.instrument(tracing::Span::current()));
+        self.command_rx.insert(topic_id, commands_rx);
+        *command_receiver_count += 1;
 
-                if !sender_dead {
-                    let subscriber_fut = topic_subscriber_loop(tx, event_sender.subscribe());
-                    let fut = async move {
-                        subscriber_fut.await;
-                        topic_id
-                    };
-                    self.topic_event_forwarders
-                        .spawn(fut.instrument(tracing::Span::current()));
-                }
-                self.command_rx.insert(topic_id, rx.into_stream());
-                *command_receiver_count += 1;
-
-                self.handle_in_event(
-                    InEvent::Command(
-                        topic_id,
-                        ProtoCommand::Join(bootstrap.into_iter().collect()),
-                    ),
-                    now,
-                );
-            }
-            RpcMessage::MaxContentSize(msg) => {
-                let max_message_size = self.state.max_message_size();
-                let max_content = proto::topic::max_content_size(max_message_size);
-                msg.tx.send(max_content).await.ok();
-            }
-        }
+        self.handle_in_event(
+            InEvent::Command(
+                topic_id,
+                ProtoCommand::Join(bootstrap.into_iter().collect()),
+            ),
+            now,
+        );
+        // The caller may be gone already.
+        registered.send(()).ok();
     }
 
     fn handle_in_event(&mut self, event: InEvent, now: Instant) {
@@ -1388,10 +1441,26 @@ fn decode_peer_data(peer_data: &PeerData) -> Result<AddrInfo, postcard::Error> {
     Ok(info)
 }
 
+/// Forwards the events of a topic to a subscriber.
+///
+/// First sends a [`Event::NeighborUp`] for each of the `neighbors`, then the live events.
+/// The live events wait in `topic_events` meanwhile. If the subscriber falls behind there, it
+/// gets [`Event::Lagged`].
 async fn topic_subscriber_loop(
-    sender: irpc::channel::mpsc::Sender<Event>,
+    sender: mpsc::Sender<Event>,
+    neighbors: Vec<EndpointId>,
     mut topic_events: broadcast::Receiver<ProtoEvent>,
 ) {
+    for neighbor in neighbors {
+        tokio::select! {
+            sent = sender.send(Event::NeighborUp(neighbor)) => {
+                if sent.is_err() {
+                    return;
+                }
+            }
+            _ = sender.closed() => return,
+        }
+    }
     loop {
         tokio::select! {
            biased;
@@ -1422,14 +1491,10 @@ struct SubscriptionCommands {
 
 impl SubscriptionCommands {
     /// Registers a subscription's command receiver.
-    fn insert(
-        &mut self,
-        topic: TopicId,
-        stream: impl Stream<Item = Result<Command, irpc::channel::mpsc::RecvError>> + Send + 'static,
-    ) {
+    fn insert(&mut self, topic: TopicId, commands: mpsc::Receiver<Command>) {
         let receiver = CommandReceiver {
             topic,
-            stream: Box::pin(stream),
+            commands,
             wait: None,
         };
         self.pending.push(receiver.recv_next());
@@ -1476,8 +1541,7 @@ impl SubscriptionCommands {
 #[derive(derive_more::Debug)]
 struct CommandReceiver {
     topic: TopicId,
-    #[debug("CommandStream")]
-    stream: n0_future::stream::Boxed<Result<Command, irpc::channel::mpsc::RecvError>>,
+    commands: mpsc::Receiver<Command>,
     wait: Option<(Instant, Pin<Box<Sleep>>, Option<Command>)>,
 }
 
@@ -1523,7 +1587,7 @@ impl Future for RecvFut {
             ready!(timer.as_mut().poll(cx));
             item.take()
         } else {
-            ready!(receiver.stream.as_mut().poll_next(cx)).and_then(Result::ok)
+            ready!(receiver.commands.poll_recv(cx))
         };
         let receiver = this.0.take().expect("checked above");
         Poll::Ready((receiver, item))
@@ -1618,7 +1682,7 @@ pub(crate) mod tests {
     use tracing::{info, instrument};
 
     use super::*;
-    use crate::api::{ApiError, GossipReceiver, GossipSender};
+    use crate::api::{self, GossipReceiver, GossipSender};
 
     struct ManualActorLoop {
         actor: Actor,
@@ -1698,21 +1762,12 @@ pub(crate) mod tests {
                 .expect("endpoint is not closed")
                 .add(address_lookup.clone());
 
-            let (actor, to_actor_tx, conn_tx) =
+            let (actor, to_actor) =
                 Actor::new(endpoint, config, metrics.clone(), None, address_lookup);
             let max_message_size = actor.state.max_message_size();
 
-            let _actor_handle = AbortOnDropHandle::new(task::spawn(n0_future::future::pending()));
-            let gossip = Self {
-                inner: Inner {
-                    api: GossipApi::local(to_actor_tx, max_message_size),
-                    local_tx: conn_tx,
-                    _actor_handle,
-                    max_message_size,
-                    metrics,
-                }
-                .into(),
-            };
+            let actor_handle = AbortOnDropHandle::new(task::spawn(n0_future::future::pending()));
+            let gossip = Self::new(to_actor, actor_handle, max_message_size, metrics);
 
             let endpoint_task = task::spawn(endpoint_loop(
                 actor.endpoint.clone(),
@@ -1792,6 +1847,44 @@ pub(crate) mod tests {
             }
         }
         Ok(())
+    }
+
+    /// `subscribe` returns only after the actor registered the topic.
+    ///
+    /// Otherwise a Join from a peer could arrive at a node that does not know the
+    /// topic yet, and the node would refuse it.
+    #[tokio::test]
+    #[traced_test]
+    async fn subscribe_returns_after_the_topic_is_registered() {
+        let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(1);
+        let (relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+        let cancel = CancellationToken::new();
+        let (gossip, actor, _ep_task) =
+            Gossip::t_new_with_actor(&mut rng, Default::default(), relay_map, &cancel)
+                .await
+                .unwrap();
+        let mut actor = ManualActorLoop::new(actor).await;
+        let topic: TopicId = blake3::hash(b"registered").into();
+
+        let subscribe = gossip.subscribe(topic, vec![]);
+        tokio::pin!(subscribe);
+        // The actor does not run, so the call must wait for it.
+        assert!(timeout(Duration::from_millis(100), &mut subscribe)
+            .await
+            .is_err());
+        let result = loop {
+            tokio::select! {
+                result = &mut subscribe => break result,
+                _ = actor.step() => {}
+            }
+        };
+        let _topic = result.unwrap();
+        assert!(
+            actor.state.state(&topic).is_some(),
+            "topic is not registered"
+        );
+        assert!(actor.topics.contains_key(&topic));
+        cancel.cancel();
     }
 
     #[tokio::test]
@@ -2235,7 +2328,7 @@ pub(crate) mod tests {
             .bind()
             .await?;
         let metrics = Arc::new(Metrics::default());
-        let (actor, _rpc_tx, _local_tx) = Actor::new(
+        let (actor, _to_actor) = Actor::new(
             endpoint,
             Default::default(),
             metrics,
@@ -2630,7 +2723,7 @@ pub(crate) mod tests {
             .await?;
         let metrics = Arc::new(Metrics::default());
         // The senders keep the event loop running.
-        let (mut actor, _rpc_tx, _local_tx) = Actor::new(
+        let (mut actor, _to_actor) = Actor::new(
             endpoint,
             Default::default(),
             metrics.clone(),
@@ -4749,7 +4842,7 @@ pub(crate) mod tests {
     async fn close_does_not_wait_for_an_empty_queue() -> Result {
         let pair = TestPair::new(1).await?;
         let (conn, _peer_conn) = pair.connect_back().await?;
-        let (mut actor, _rpc_tx, _local_tx) = Actor::new(
+        let (mut actor, _to_actor) = Actor::new(
             pair.ep1.clone(),
             Default::default(),
             Default::default(),
@@ -4809,13 +4902,13 @@ pub(crate) mod tests {
         sender.broadcast(vec![0; fits].into()).await?;
         let refused = sender.broadcast(vec![0; fits + 1].into()).await;
         assert!(
-            matches!(refused, Err(ApiError::TooLarge { size, max_content, .. }) if size == fits + 1 && max_content == fits),
+            matches!(refused, Err(Error::TooLarge { size, max_content, .. }) if size == fits + 1 && max_content == fits),
             "{refused:?}"
         );
         sender.broadcast_neighbors(vec![0; fits].into()).await?;
         let refused = sender.broadcast_neighbors(vec![0; fits + 1].into()).await;
         assert!(
-            matches!(refused, Err(ApiError::TooLarge { .. })),
+            matches!(refused, Err(Error::TooLarge { .. })),
             "{refused:?}"
         );
         Ok(())
@@ -4875,7 +4968,7 @@ pub(crate) mod tests {
 
             ct2.cancelled().await;
 
-            Ok::<_, ApiError>(())
+            Ok::<_, Error>(())
         }
         .instrument(tracing::debug_span!("endpoint_2", %endpoint_id2));
         let go2_handle = task::spawn(go2_task);
@@ -5273,7 +5366,7 @@ pub(crate) mod tests {
         let pair = TestPair::new(1).await?;
         let (conn, _peer_conn) = pair.connect_back().await?;
         let peer = conn.remote_id();
-        let (mut actor, _rpc_tx, _local_tx) = Actor::new(
+        let (mut actor, _to_actor) = Actor::new(
             pair.ep1.clone(),
             Default::default(),
             Default::default(),
@@ -5352,6 +5445,15 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// Returns a receiver that yields `commands`, then ends.
+    fn commands_of(commands: Vec<Command>) -> mpsc::Receiver<Command> {
+        let (tx, rx) = mpsc::channel(commands.len().max(1));
+        for command in commands {
+            tx.try_send(command).expect("fits the capacity");
+        }
+        rx
+    }
+
     /// Holds a broadcast without letting subsequent commands pass it.
     ///
     /// Other commands and EOF do not consult pressure. Cancelling `next`
@@ -5362,11 +5464,11 @@ pub(crate) mod tests {
         let mut commands = SubscriptionCommands::default();
         commands.insert(
             topic,
-            n0_future::stream::iter(vec![
-                Ok(Command::JoinPeers(vec![])),
-                Ok(Command::Broadcast(Bytes::from_static(b"held"))),
-                Ok(Command::JoinPeers(vec![])),
-                Ok(Command::BroadcastNeighbors(Bytes::from_static(b"bounded"))),
+            commands_of(vec![
+                Command::JoinPeers(vec![]),
+                Command::Broadcast(Bytes::from_static(b"held")),
+                Command::JoinPeers(vec![]),
+                Command::BroadcastNeighbors(Bytes::from_static(b"bounded")),
             ]),
         );
         let next = commands
@@ -5410,7 +5512,7 @@ pub(crate) mod tests {
         let mut commands = SubscriptionCommands::default();
         commands.insert(
             [1; 32].into(),
-            n0_future::stream::iter(vec![Ok(Command::Broadcast(Bytes::from_static(b"bounded")))]),
+            commands_of(vec![Command::Broadcast(Bytes::from_static(b"bounded"))]),
         );
         let start = Instant::now();
         for _ in 0..3 {
@@ -5434,7 +5536,7 @@ pub(crate) mod tests {
         for name in [b"first".as_slice(), b"second".as_slice()] {
             commands.insert(
                 topic,
-                n0_future::stream::iter(vec![Ok(Command::Broadcast(Bytes::copy_from_slice(name)))]),
+                commands_of(vec![Command::Broadcast(Bytes::copy_from_slice(name))]),
             );
         }
         assert!(timeout(BROADCAST_WAIT_LIMIT / 2, commands.next(|_| true))
@@ -5465,9 +5567,7 @@ pub(crate) mod tests {
         for _ in 0..2 {
             commands.insert(
                 topic,
-                n0_future::stream::iter(vec![Ok(Command::Broadcast(Bytes::from_static(
-                    b"waiting",
-                )))]),
+                commands_of(vec![Command::Broadcast(Bytes::from_static(b"waiting"))]),
             );
         }
         let start = Instant::now();
@@ -5498,13 +5598,13 @@ pub(crate) mod tests {
         let mut commands = SubscriptionCommands::default();
         commands.insert(
             blocked,
-            n0_future::stream::iter(vec![Ok(Command::Broadcast(Bytes::from_static(b"waiting")))]),
+            commands_of(vec![Command::Broadcast(Bytes::from_static(b"waiting"))]),
         );
         commands.insert(
             healthy,
-            n0_future::stream::iter(vec![
-                Ok(Command::JoinPeers(vec![])),
-                Ok(Command::Broadcast(Bytes::from_static(b"ready"))),
+            commands_of(vec![
+                Command::JoinPeers(vec![]),
+                Command::Broadcast(Bytes::from_static(b"ready")),
             ]),
         );
         let start = Instant::now();
@@ -5580,7 +5680,7 @@ pub(crate) mod tests {
 
         actor.command_rx.insert(
             topic,
-            n0_future::stream::iter(vec![Ok(Command::Broadcast(Bytes::from_static(b"first")))]),
+            commands_of(vec![Command::Broadcast(Bytes::from_static(b"first"))]),
         );
         actor.topics.get_mut(&topic).unwrap().command_receiver_count += 1;
         assert!(
@@ -5626,9 +5726,7 @@ pub(crate) mod tests {
             InEvent::Command(topic, ProtoCommand::Join(vec![])),
             Instant::now(),
         );
-        let commands = n0_future::stream::iter(std::iter::repeat_with(|| {
-            Ok(Command::Broadcast(Bytes::new()))
-        }));
+        let commands = commands_of(vec![Command::Broadcast(Bytes::new()); 4096]);
         actor.command_rx.insert(topic, commands);
         actor
             .topics
@@ -5643,7 +5741,7 @@ pub(crate) mod tests {
     async fn busy_publisher_does_not_starve_finished_connections() -> Result {
         let pair = TestPair::new(1).await?;
         let (conn, _peer_conn) = pair.connect_back().await?;
-        let (mut actor, _rpc_tx, _local_tx) = Actor::new(
+        let (mut actor, _to_actor) = Actor::new(
             pair.ep1.clone(),
             Default::default(),
             Default::default(),
@@ -5673,7 +5771,7 @@ pub(crate) mod tests {
     async fn shutdown_comes_before_a_busy_publisher() -> Result {
         let pair = TestPair::new(1).await?;
         for round in 0..8 {
-            let (mut actor, _rpc_tx, local_tx) = Actor::new(
+            let (mut actor, to_actor) = Actor::new(
                 pair.ep1.clone(),
                 Default::default(),
                 Default::default(),
@@ -5682,8 +5780,8 @@ pub(crate) mod tests {
             );
             publish_forever(&mut actor);
             let (reply, mut reply_rx) = oneshot::channel();
-            local_tx
-                .send(LocalActorMessage::Shutdown { reply })
+            to_actor
+                .send(ToActor::Shutdown { reply })
                 .await
                 .std_context("send shutdown")?;
             let mut addresses = n0_future::stream::pending();
