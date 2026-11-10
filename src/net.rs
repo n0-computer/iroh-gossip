@@ -41,15 +41,16 @@ pub const GOSSIP_ALPN: &[u8] = b"iroh-gossip/2-canary.4";
 type ProtoEvent = proto::Event<PublicKey>;
 type ProtoCommand = proto::Command<PublicKey>;
 
-/// The decision of a verifier about a stream of a peer, see [`Builder::topic_auth`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Verdict {
-    /// The node reads the stream.
-    Accept,
-    /// The node stops the stream, and reads nothing from it.
-    Reject,
-}
+/// A received message, as a [`Builder::message_filter`] sees it.
+pub type FilterContext<'a> = proto::FilterContext<'a, PublicKey>;
+pub use proto::Verdict;
+
+type FilterFn = dyn Fn(FilterContext<'_>) -> Verdict + Send + Sync;
+
+/// The filter of received messages that the application set.
+#[derive(Clone, derive_more::Debug)]
+#[debug("MessageFilter")]
+struct MessageFilter(Arc<FilterFn>);
 
 type InEvent = proto::InEvent<PublicKey>;
 type Timer = proto::Timer<PublicKey>;
@@ -193,6 +194,64 @@ impl Builder {
     /// Sets the options of the queue of messages to each peer.
     pub fn send_queue(mut self, options: QueueOptions) -> Self {
         self.config.send_queue = options;
+        self
+    }
+
+    /// Sets a filter that decides whether each received message is delivered and forwarded.
+    ///
+    /// The filter applies to all topics of this [`Gossip`]. It returns a [`Verdict`]:
+    /// [`Verdict::Accept`] delivers the message to the local subscribers and forwards it
+    /// to peers, as without a filter. [`Verdict::Reject`] does neither, so the message does
+    /// not spread beyond this node. Use it to drop messages that are invalid, obsolete, or
+    /// expired before they cost the swarm bandwidth.
+    ///
+    /// - The filter runs once per message id and topic, also if several peers send the
+    ///   message. A rejected message counts as seen for the
+    ///   [message id retention], so the filter does not run on a later copy. The node does
+    ///   not cache a rejected message, so a peer that asks this node for it with a graft gets
+    ///   nothing.
+    /// - The node does not forward a message that a peer sent to its neighbors only. For
+    ///   such a message, the filter decides only the delivery. A later copy gets the first
+    ///   verdict.
+    /// - Messages that this node broadcasts do not pass the filter.
+    /// - The filter runs on the task of the gossip actor and delays all topics while it
+    ///   runs. Keep it short and do not block. Check the cheap things first. If it needs
+    ///   state, keep it behind a lock.
+    /// - A rejection is final for this node: it does not deliver or forward the message
+    ///   later, also if the filter would now accept it.
+    /// - A later copy gets the verdict of the first copy, also when another peer sends it.
+    ///   So base the verdict on the topic and the content only. A verdict that depends on
+    ///   [`FilterContext::delivered_from`] applies to the copies of other peers too.
+    ///
+    /// Gossip does not authenticate the message content. A filter that checks authorship has to
+    /// verify a signature in the content.
+    ///
+    /// # Example
+    ///
+    /// A filter that accepts only messages in version 1 of an application format:
+    ///
+    /// ```
+    /// use iroh_gossip::net::{Gossip, Verdict};
+    ///
+    /// /// The first byte of the content holds the version of the format.
+    /// const VERSION: u8 = 1;
+    ///
+    /// let builder = Gossip::builder().message_filter(|message| {
+    ///     // The verdict depends only on the content, so it holds for every copy.
+    ///     match message.content().first() {
+    ///         Some(&VERSION) => Verdict::Accept,
+    ///         _ => Verdict::Reject,
+    ///     }
+    /// });
+    /// # drop(builder);
+    /// ```
+    ///
+    /// [message id retention]: PlumtreeConfig::message_id_retention
+    pub fn message_filter(
+        mut self,
+        filter: impl Fn(FilterContext<'_>) -> Verdict + Send + Sync + 'static,
+    ) -> Self {
+        self.config.filter = Some(MessageFilter(Arc::new(filter)));
         self
     }
 

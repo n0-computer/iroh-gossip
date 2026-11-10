@@ -33,8 +33,8 @@ use super::{
     queue::{self, Pushed},
     subscriptions::{topic_subscriber_loop, TopicHandles},
     wire::{CloseCode, Session},
-    InEvent, Join, ProtoCommand, ProtoEvent, ProtoMessage, QueueOptions, Timer, ToActor,
-    GOSSIP_ALPN,
+    InEvent, Join, MessageFilter, ProtoCommand, ProtoEvent, ProtoMessage, QueueOptions, Timer,
+    ToActor, GOSSIP_ALPN,
 };
 use crate::{
     api::{AuthToken, Command},
@@ -54,6 +54,8 @@ pub(super) struct ActorConfig {
     pub(super) proto: proto::Config,
     pub(super) alpn: Bytes,
     pub(super) send_queue: QueueOptions,
+    /// The application's filter of received messages, if any.
+    pub(super) filter: Option<MessageFilter>,
     pub(super) topic_auth: TopicAuth,
     /// How long an idle connection waits before it retires.
     pub(super) retire_after: Duration,
@@ -65,6 +67,7 @@ impl Default for ActorConfig {
             proto: Default::default(),
             alpn: GOSSIP_ALPN.to_vec().into(),
             send_queue: Default::default(),
+            filter: None,
             topic_auth: Default::default(),
             retire_after: DEFAULT_RETIRE_AFTER,
         }
@@ -143,6 +146,8 @@ struct ActorState {
     follow_ups: VecDeque<InEvent>,
     /// Queued timers
     timers: TimerMap<Timer>,
+    /// The application's filter of received messages, if any.
+    filter: Option<MessageFilter>,
     address_lookup: GossipAddressLookup,
     metrics: Arc<Metrics>,
     /// The peers that overflowed in the current call of [`Actor::run_proto`].
@@ -160,6 +165,7 @@ impl Actor {
             proto: proto_config,
             alpn,
             send_queue,
+            filter,
             topic_auth,
             retire_after,
         } = config;
@@ -189,6 +195,7 @@ impl Actor {
             quit_queue: Default::default(),
             follow_ups: Default::default(),
             timers: TimerMap::new(),
+            filter,
             address_lookup,
             metrics: metrics.clone(),
             overflowed_peers: Vec::new(),
@@ -808,5 +815,9 @@ impl IO<PublicKey> for ActorIO<'_> {
                 self.state.address_lookup.add(endpoint_addr);
             }
         }
+    }
+
+    fn filter(&mut self, message: proto::FilterContext<'_, PublicKey>) -> Option<proto::Verdict> {
+        self.state.filter.as_ref().map(|filter| (filter.0)(message))
     }
 }

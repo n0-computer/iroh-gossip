@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     hyparview::{self, InEvent as SwarmIn},
-    plumtree::{self, GossipEvent, InEvent as GossipIn, Scope},
+    plumtree::{self, Gossip, GossipEvent, InEvent as GossipIn, Scope},
     state::MessageKind,
-    PeerData, PeerIdentity, DEFAULT_MAX_MESSAGE_SIZE,
+    PeerData, PeerIdentity, Verdict, DEFAULT_MAX_MESSAGE_SIZE,
 };
 use crate::proto::MIN_MAX_MESSAGE_SIZE;
 
@@ -70,6 +70,13 @@ pub trait IO<PI> {
     /// message goes out at once, or with [`InEvent::PeerDisconnected`] if it fails. The topic
     /// wants the connection until it drops the peer or the peer is connected.
     fn connect(&mut self, peer: PI);
+
+    /// Asks the application whether to accept `message`, which `delivered_from` sent.
+    ///
+    /// Returns `None` if there is no filter.
+    fn filter(&mut self, _message: &Gossip, _delivered_from: PI) -> Option<Verdict> {
+        None
+    }
 }
 
 /// Returns the largest content that a broadcast takes, so that it fits a frame at every hop.
@@ -412,6 +419,10 @@ impl<PI: PeerIdentity, E: IO<PI>> IO<PI> for SwarmIO<'_, PI, E> {
 
     fn connect(&mut self, peer: PI) {
         self.io.connect(peer);
+    }
+
+    fn filter(&mut self, message: &Gossip, delivered_from: PI) -> Option<Verdict> {
+        self.io.filter(message, delivered_from)
     }
 }
 
