@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["InEvent","MessageKind","OutEvent"],"struct":["Message","State","Timer","TopicId"]};
+window.SIDEBAR_ITEMS = {"enum":["InEvent","MessageKind"],"struct":["Message","State","Timer","TopicId"],"trait":["IO"]};
