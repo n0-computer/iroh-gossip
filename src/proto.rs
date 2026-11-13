@@ -1,7 +1,8 @@
 //! Implementation of the iroh-gossip protocol, as an IO-less state machine
 //!
-//! This module implements the iroh-gossip protocol. The entry point is [`State`], which contains
-//! the protocol state for a node.
+//! This module implements the iroh-gossip protocol. The entry point is `State`, which contains
+//! the protocol state for a node. `State` and the other parts of the state machine are public
+//! only with the `experimental-proto-internals` feature. Their API may change in any release.
 //!
 //! The iroh-gossip protocol is made up from two parts: A swarm membership protocol, based on
 //! [HyParView][hyparview], and a gossip broadcasting protocol, based on [PlumTree][plumtree].
@@ -45,75 +46,73 @@
 //! [hyparview]: https://asc.di.fct.unl.pt/~jleitao/pdf/dsn07-leitao.pdf
 //! [plumtree]: https://asc.di.fct.unl.pt/~jleitao/pdf/srds07-leitao.pdf
 
-use std::{fmt, hash::Hash};
+// Without the feature, parts of the API of the internals have no caller.
+#![cfg_attr(not(feature = "experimental-proto-internals"), allow(dead_code))]
 
-use bytes::Bytes;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
+
+/// Makes an item public with the `experimental-proto-internals` feature, and
+/// crate-public without it.
+macro_rules! internal {
+    (pub use $($item:tt)*) => {
+        #[cfg(feature = "experimental-proto-internals")]
+        pub use $($item)*
+        #[cfg(not(feature = "experimental-proto-internals"))]
+        #[allow(unused_imports, reason = "some builds use only part of the internals")]
+        pub(crate) use $($item)*
+    };
+    ($(#[$meta:meta])* pub $($item:tt)*) => {
+        #[cfg(feature = "experimental-proto-internals")]
+        $(#[$meta])* pub $($item)*
+        #[cfg(not(feature = "experimental-proto-internals"))]
+        $(#[$meta])* pub(crate) $($item)*
+    };
+}
 
 pub(crate) mod hyparview;
+mod peer;
 pub(crate) mod plumtree;
-pub mod state;
-pub mod topic;
-pub mod util;
+internal!(
+    pub mod state;
+);
+internal!(
+    pub mod topic;
+);
+internal!(
+    pub mod util;
+);
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod sim;
 
 pub use hyparview::{Config as HyparviewConfig, Ttl};
-pub use plumtree::{Config as PlumtreeConfig, DeliveryScope, Round, Scope};
-pub use state::{InEvent, Message, State, Timer, TopicId, IO};
-pub use topic::{Command, Config, Event};
+pub use plumtree::{Config as PlumtreeConfig, DeliveryScope, Round};
+pub use state::TopicId;
 pub use util::ParseIdError;
+internal!(
+    pub use peer::{PeerData, PeerIdentity};
+);
+internal!(
+    pub use plumtree::Scope;
+);
+internal!(
+    pub use state::{InEvent, Message, State, Timer, IO};
+);
+internal!(
+    pub use topic::{Command, Config, Event};
+);
 
 /// The default maximum size in bytes of a gossip message.
 ///
-/// The value is an arbitrary default. Change it in the [`Config`].
+/// The value is an arbitrary default. Change it with [`Builder::max_message_size`].
+///
+/// [`Builder::max_message_size`]: crate::net::Builder::max_message_size
 pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 4096;
 
-/// The minimum allowed value for [`Config::max_message_size`].
+/// The minimum allowed value for [`Builder::max_message_size`].
+///
+/// [`Builder::max_message_size`]: crate::net::Builder::max_message_size
 pub const MIN_MAX_MESSAGE_SIZE: usize = 512;
-
-/// The identifier for a peer.
-///
-/// The protocol implementation is generic over this trait. When implementing the protocol,
-/// a concrete type must be chosen that will then be used throughout the implementation to identify
-/// and index individual peers.
-///
-/// Note that the concrete type will be used in protocol messages. Therefore, implementations of
-/// the protocol are only compatible if the same concrete type is supplied for this trait.
-///
-/// It does not need to be a peer's address, as long as the networking layer can translate
-/// the value of its concrete type into an address.
-pub trait PeerIdentity: Hash + Eq + Ord + Copy + fmt::Debug + Serialize + DeserializeOwned {}
-impl<T> PeerIdentity for T where
-    T: Hash + Eq + Ord + Copy + fmt::Debug + Serialize + DeserializeOwned
-{
-}
-
-/// Opaque binary data that is transmitted on messages that introduce new peers.
-///
-/// Implementations may use these bytes to supply addresses or other information needed to connect
-/// to a peer that is not included in the peer's [`PeerIdentity`].
-#[derive(derive_more::Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
-#[debug("PeerData({}b)", self.0.len())]
-pub struct PeerData(Bytes);
-
-impl PeerData {
-    /// Create a new [`PeerData`] from a byte buffer.
-    pub fn new(data: impl Into<Bytes>) -> Self {
-        Self(data.into())
-    }
-
-    /// Get a reference to the contained [`bytes::Bytes`].
-    pub fn inner(&self) -> &bytes::Bytes {
-        &self.0
-    }
-
-    /// Get the peer data as a byte slice.
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-}
 
 /// PeerInfo contains a peer's identifier and the opaque peer data as provided by the implementer.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]

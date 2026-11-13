@@ -746,7 +746,7 @@ where
             if self.peer_data.get(&peer_info.id) == Some(&data) {
                 return;
             }
-            if !data.0.is_empty() {
+            if !data.as_bytes().is_empty() {
                 io.peer_data(peer_info.id, data.clone());
             }
             self.peer_data.insert(peer_info.id, data);

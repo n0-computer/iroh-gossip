@@ -111,7 +111,9 @@ net = [
     "dep:tokio",
     "dep:tokio-util",
 ]
-test-utils = ["rand/chacha", "dep:humantime-serde"]
+# Makes the protocol state machine public. Its API may change in any release.
+experimental-proto-internals = []
+test-utils = ["experimental-proto-internals", "rand/chacha", "dep:humantime-serde"]
 simulator = [
     "test-utils",
     "dep:tracing-subscriber",
