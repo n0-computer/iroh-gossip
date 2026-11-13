@@ -204,11 +204,7 @@ async fn queued_message_comes_before_the_initial_topics() -> Result {
         let incoming = theirs.accept().await.std_context("endpoint closed")?;
         incoming.await.std_context("accept")
     };
-    let dial = async {
-        ours.connect(theirs.id(), GOSSIP_ALPN)
-            .await
-            .std_context("connect")
-    };
+    let dial = async { ours.connect(theirs.id(), ALPN).await.std_context("connect") };
     let (peer_conn, conn) = (accept, dial).try_join().await?;
     let (queued, initial): (TopicId, TopicId) = (
         blake3::hash(b"queued").into(),

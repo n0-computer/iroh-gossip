@@ -45,10 +45,10 @@ macro_rules! idbytes_impls {
         }
 
         impl ::std::str::FromStr for $ty {
-            type Err = ::hex::FromHexError;
+            type Err = $crate::proto::util::ParseIdError;
             fn from_str(s: &str) -> ::std::result::Result<Self, Self::Err> {
                 let mut bytes = [0u8; 32];
-                ::hex::decode_to_slice(s, &mut bytes)?;
+                ::hex::decode_to_slice(s, &mut bytes).map_err($crate::proto::util::ParseIdError)?;
                 Ok(Self::from_bytes(bytes))
             }
         }
@@ -69,10 +69,27 @@ macro_rules! idbytes_impls {
 
 pub(crate) use idbytes_impls;
 
+/// The error of parsing a 32 byte identifier, such as a [`TopicId`], from a hex string.
+///
+/// [`TopicId`]: crate::TopicId
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParseIdError(pub(crate) hex::FromHexError);
+
+impl std::fmt::Display for ParseIdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid identifier: {}", self.0)
+    }
+}
+
+impl std::error::Error for ParseIdError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
 /// A hash set whose iteration order does not depend on the hash values.
 ///
-/// This is wrapper around [indexmap::IndexSet] which couple of utility methods
-/// to randomly select elements from the set.
+/// It wraps [`indexmap::IndexSet`] and adds methods that select random elements.
 #[derive(Default, Debug, Clone, derive_more::Deref)]
 pub(crate) struct IndexSet<T> {
     inner: indexmap::IndexSet<T>,
@@ -124,7 +141,7 @@ impl<T: Hash + Eq + PartialEq> IndexSet<T> {
     /// Remove an element from the set.
     ///
     /// NOTE: the value is removed by swapping it with the last element of the set and popping it off.
-    /// **This modifies the order of element by moving the last element**
+    /// **This modifies the order of the elements by moving the last element**
     pub fn remove(&mut self, value: &T) -> Option<T> {
         self.inner.swap_remove_full(value).map(|(_i, v)| v)
     }
@@ -132,12 +149,12 @@ impl<T: Hash + Eq + PartialEq> IndexSet<T> {
     /// Remove an element from the set by its index.
     ///
     /// NOTE: the value is removed by swapping it with the last element of the set and popping it off.
-    /// **This modifies the order of element by moving the last element**
+    /// **This modifies the order of the elements by moving the last element**
     pub fn remove_index(&mut self, index: usize) -> Option<T> {
         self.inner.swap_remove_index(index)
     }
 
-    /// Returns an iterator over the set in the order of insertion, without the element `without`.
+    /// Returns an iterator over the set in the order of insertion, without the element `value`.
     pub fn iter_without<'a>(&'a self, value: &'a T) -> impl Iterator<Item = &'a T> {
         self.iter().filter(move |x| *x != value)
     }
@@ -223,11 +240,6 @@ impl<T> Default for TimerMap<T> {
 }
 
 impl<T> TimerMap<T> {
-    /// Create a new, empty TimerMap.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Insert a new entry at the specified instant.
     pub fn insert(&mut self, instant: Instant, item: T) {
         let seq = self.seq;
@@ -258,6 +270,7 @@ impl<T> TimerMap<T> {
     }
 
     /// Get a reference to the earliest entry in the `TimerMap`.
+    #[cfg(any(test, feature = "net"))]
     pub fn first(&self) -> Option<&Instant> {
         self.heap.peek().map(|x| &x.time)
     }
@@ -346,13 +359,9 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> TimeBoundCache<K, V, S> {
     }
 
     /// Get the number of entries in the cache.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.map.len()
-    }
-
-    /// Returns `true` if the map contains no elements.
-    pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
     }
 
     /// Get an item from the cache.
@@ -371,13 +380,9 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> TimeBoundCache<K, V, S> {
     }
 
     /// Get the expiration time for an item.
+    #[cfg(test)]
     pub fn expires(&self, key: &K) -> Option<&Instant> {
         self.map.get(key).map(|(expires, _value)| expires)
-    }
-
-    /// Iterate over all items in the cache.
-    pub fn iter(&self) -> impl Iterator<Item = (&K, &V, &Instant)> {
-        self.map.iter().map(|(k, (expires, v))| (k, v, expires))
     }
 
     /// Remove all entries with an expiry instant lower or equal to `instant`.
@@ -448,7 +453,7 @@ mod test {
 
     #[test]
     fn timer_map() {
-        let mut map = TimerMap::new();
+        let mut map = TimerMap::default();
         let now = Instant::now();
 
         let times = [
@@ -512,6 +517,9 @@ mod test {
             "Id(0101010101010101010101010101010101010101010101010101010101010101)"
         );
         assert_eq!(id.as_bytes(), &[1u8; 32]);
+        let err = Id::from_str("01").unwrap_err();
+        assert_eq!(err.0, hex::FromHexError::InvalidStringLength);
+        assert!(std::error::Error::source(&err).is_some());
     }
 
     #[test]

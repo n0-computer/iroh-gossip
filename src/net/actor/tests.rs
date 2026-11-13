@@ -108,7 +108,7 @@ impl Gossip {
     /// Creates a testing gossip instance and its actor without spawning it.
     ///
     /// This creates the endpoint and spawns the endpoint loop as well. The handle for the
-    /// endpoing task is returned along the gossip instance and actor. Since the actor is not
+    /// endpoint task is returned with the gossip instance and actor. Since the actor is not
     /// actually spawned as [`Builder::spawn`] would, the gossip instance will have a
     /// handle to a dummy task instead.
     async fn t_new_with_actor(
@@ -148,7 +148,7 @@ impl Gossip {
         Ok((gossip, actor, endpoint_task))
     }
 
-    /// Crates a new testing gossip instance with the normal actor loop.
+    /// Creates a new testing gossip instance with the normal actor loop.
     async fn t_new(
         rng: &mut rand::rngs::ChaCha12Rng,
         config: proto::Config,
@@ -172,7 +172,7 @@ pub(crate) async fn create_endpoint(
     let ep = Endpoint::builder(presets::Minimal)
         .relay_mode(RelayMode::Custom(relay_map))
         .secret_key(SecretKey::from_bytes(&rng.random()))
-        .alpns(vec![GOSSIP_ALPN.to_vec()])
+        .alpns(vec![ALPN.to_vec()])
         .ca_tls_config(CaTlsConfig::insecure_skip_verify())
         .bind()
         .await?;
@@ -256,7 +256,7 @@ impl TestPair {
     async fn connect(&self) -> Result<(Connection, Connection)> {
         let ours = async {
             self.ep1
-                .connect(self.ep2_addr.clone(), GOSSIP_ALPN)
+                .connect(self.ep2_addr.clone(), ALPN)
                 .await
                 .std_context("connect")
         };
@@ -275,7 +275,7 @@ impl TestPair {
         };
         let theirs = async {
             self.ep2
-                .connect(self.ep1_addr.clone(), GOSSIP_ALPN)
+                .connect(self.ep1_addr.clone(), ALPN)
                 .await
                 .std_context("connect")
         };
@@ -518,7 +518,7 @@ async fn direct_endpoint(
 ) -> Result<Endpoint> {
     let endpoint = Endpoint::builder(presets::Minimal)
         .relay_mode(RelayMode::Disabled)
-        .alpns(vec![GOSSIP_ALPN.to_vec()])
+        .alpns(vec![ALPN.to_vec()])
         .transport_config(transport)
         .bind()
         .await?;

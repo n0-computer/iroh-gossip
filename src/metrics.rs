@@ -2,7 +2,7 @@
 
 use iroh_metrics::{Counter, MetricsGroup};
 
-/// Enum of metrics for the module
+/// The counters of a gossip instance.
 #[derive(Debug, Default, MetricsGroup)]
 #[non_exhaustive]
 #[metrics(name = "gossip")]

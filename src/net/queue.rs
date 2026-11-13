@@ -32,7 +32,9 @@ const MESSAGE_OVERHEAD: usize = mem::size_of::<QueuedMessage>() + 4;
 /// The least size of a queue, whatever its options.
 pub(super) const MIN_QUEUE_SIZE: usize = 64 * 1024;
 
-/// The size of a queue by default, see [`QueueOptions::size`](super::QueueOptions::size).
+/// The size of a queue by default, see [`QueueOptions::size`].
+///
+/// [`QueueOptions::size`]: super::QueueOptions::size
 pub(super) const QUEUE_SIZE: usize = 1024 * 1024;
 
 /// Returns the size of a queue for `size` of the options and `max_message_size`.
@@ -214,9 +216,8 @@ impl Drop for Reservation {
 /// - Each topic has one stream to a peer, and we write it in order. The peer
 ///   reads each stream on its own, so it may handle a `Join` before an
 ///   earlier `Disconnect`. The peer also limits its streams, to 100 by
-///   default. Over that limit, an open waits
-///   [`OPEN_TIMEOUT`](super::wire::OPEN_TIMEOUT) and closes the connection,
-///   again after each rejoin.
+///   default. Over that limit, an open waits [`OPEN_TIMEOUT`] and closes the
+///   connection, again after each rejoin.
 /// - A handover keeps the order: the new connection waits for the old one to
 ///   finish its message. A control overflow meanwhile aborts the peer, and
 ///   closes the new connection too.
@@ -229,12 +230,15 @@ impl Drop for Reservation {
 /// - Busy queues to all eager peers may mean that our uplink is the limit.
 ///   They may also mean that all eager peers are slow,
 ///   or that relayed traffic and other topics fill the queues. A waiting
-///   broadcast passes after [`BROADCAST_WAIT_LIMIT`](super::subscriptions::BROADCAST_WAIT_LIMIT) in any case.
+///   broadcast passes after [`BROADCAST_WAIT_LIMIT`] in any case.
 /// - Repair is capped, at 256 ids per peer, 4096 per topic, and 64 per peer
 ///   and second. It works only while the message is cached, and never for
 ///   neighbor scope.
 /// - All topics share the queue to a peer. A busy topic crowds out another,
 ///   and control waits behind the data queued before it.
+///
+/// [`OPEN_TIMEOUT`]: super::wire::OPEN_TIMEOUT
+/// [`BROADCAST_WAIT_LIMIT`]: super::subscriptions::BROADCAST_WAIT_LIMIT
 #[derive(Debug)]
 pub(super) struct SendQueue {
     tx: mpsc::UnboundedSender<QueuedMessage>,
@@ -398,9 +402,10 @@ impl QueueLease {
 /// A writer must not keep the lock without bound, or the next connection waits
 /// forever. Every way out of the loop of a writer unlocks: the end of the
 /// queue, a stop, a closed connection, an error, and a drop of its future. A
-/// stopped writer gets [`HANDOVER_LIMIT`](super::conn::HANDOVER_LIMIT) for its
-/// current message. Then it stops the write, and the next connection writes
-/// the message again.
+/// stopped writer gets [`HANDOVER_LIMIT`] for its current message. Then it
+/// stops the write, and the next connection writes the message again.
+///
+/// [`HANDOVER_LIMIT`]: super::conn::HANDOVER_LIMIT
 type SharedReader = Arc<tokio::sync::Mutex<QueueReader>>;
 
 /// Reads a queue, and keeps the message that a writer has not finished.

@@ -452,12 +452,7 @@ async fn replaced_connection_waiting_to_open_hands_over_at_once() -> Result {
     // The peer dials us, so the connection we keep is the server side and
     // takes the queue. The peer still limits the streams we open to it.
     let connect = || async {
-        let dial = async {
-            theirs
-                .connect(ours.id(), GOSSIP_ALPN)
-                .await
-                .std_context("connect")
-        };
+        let dial = async { theirs.connect(ours.id(), ALPN).await.std_context("connect") };
         let accept = async {
             let incoming = ours.accept().await.std_context("endpoint closed")?;
             incoming.await.std_context("accept")
@@ -833,7 +828,7 @@ async fn disconnected_pending_dial_flushes_then_closes() -> Result {
 
     let conn = actor
         .endpoint
-        .connect(ep2_addr, GOSSIP_ALPN)
+        .connect(ep2_addr, ALPN)
         .await
         .std_context("connect")?;
     actor
@@ -924,10 +919,7 @@ async fn shuffle_reply_connection_closes() -> Result {
 
     // A third node forwards the shuffle to us with its walk at an end.
     let ep3 = create_endpoint(rng, relay_map, None).await?;
-    let conn = ep3
-        .connect(ep1_addr, GOSSIP_ALPN)
-        .await
-        .std_context("connect")?;
+    let conn = ep3.connect(ep1_addr, ALPN).await.std_context("connect")?;
     let mut stream = conn.open_uni().await.std_context("open_uni")?;
     let mut buf = Vec::new();
     wire::StreamHeader::write(topic, &mut stream, &mut buf, 1024)

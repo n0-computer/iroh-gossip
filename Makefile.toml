@@ -26,3 +26,14 @@ args = [
      "--config",
      "imports_granularity=Crate,group_imports=StdExternalCrate,reorder_imports=true",
 ]
+
+[tasks.check-external-types]
+description = "Run cargo check-external-types on workspace crates"
+workspace = true
+# cargo check-external-types needs a specific nightly toolchain,
+# see https://github.com/awslabs/cargo-check-external-types#how-to-use
+toolchain = "${TOOLCHAIN:nightly-2026-03-20}"
+command = "cargo"
+install_crate = false
+# Default features only: test-utils and simulator are not part of the stable API.
+args = ["check-external-types"]

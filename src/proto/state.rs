@@ -45,6 +45,7 @@ impl<PI> Message<PI> {
     ///
     /// This holds for a payload and for an announcement of payloads. The state announces
     /// a dropped payload again, and the peer can request it.
+    #[cfg(any(test, feature = "experimental-proto-internals"))]
     pub fn is_droppable(&self) -> bool {
         matches!(
             self.message,
@@ -65,13 +66,6 @@ pub enum MessageKind {
     Control,
 }
 
-impl<PI: Serialize> Message<PI> {
-    /// Get the encoded size of this message
-    pub fn size(&self) -> postcard::Result<usize> {
-        postcard::experimental::serialized_size(&self)
-    }
-}
-
 /// A timer that the runtime arms for the protocol state.
 ///
 /// The state is IO-less, so it arms timers through [`IO::schedule`] with a
@@ -87,7 +81,7 @@ pub struct Timer<PI> {
 
 impl<PI> Timer<PI> {
     /// Returns whether this timer runs a periodic membership task.
-    #[cfg(any(test, feature = "test-utils"))]
+    #[cfg(feature = "test-utils")]
     pub(crate) fn is_membership_cycle(&self) -> bool {
         matches!(
             self.timer,
@@ -140,7 +134,7 @@ impl<PI> InEvent<PI> {
 pub trait IO<PI> {
     /// Sends `message` to `peer`. Returns the message if the queue dropped it.
     ///
-    /// A queue may drop a message for which [`Message::is_droppable`] holds: a payload
+    /// A queue may drop a message for which `Message::is_droppable` holds: a payload
     /// or an announcement, to a slow peer that stays connected. The state then
     /// announces the message to the peer, which can request it once it has room. It
     /// returns `None` if the message is queued, or if the peer is gone.
@@ -233,6 +227,7 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
     }
 
     /// Get a reference to the node's [`PeerIdentity`]
+    #[cfg(feature = "experimental-proto-internals")]
     pub fn me(&self) -> &PI {
         &self.me
     }
@@ -243,18 +238,15 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
     }
 
     /// Resets the tracked stats for a topic.
+    #[cfg(feature = "experimental-proto-internals")]
     pub fn reset_stats(&mut self, topic: &TopicId) {
         if let Some(state) = self.states.get_mut(topic) {
             state.reset_stats();
         }
     }
 
-    /// Get an iterator of all joined topics.
-    pub fn topics(&self) -> impl Iterator<Item = &TopicId> {
-        self.states.keys()
-    }
-
     /// Get an iterator for the states of all joined topics.
+    #[cfg(feature = "experimental-proto-internals")]
     pub fn states(&self) -> impl Iterator<Item = (&TopicId, &topic::State<PI, R>)> {
         self.states.iter()
     }
@@ -292,7 +284,7 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
             .flat_map(|state| state.gossip.eager_push_peers.iter())
     }
 
-    /// Returns the peers to which `topic` pushes its payloads.
+    /// Returns the neighbors of `topic`, its active view.
     #[cfg(feature = "net")]
     pub(crate) fn neighbors(&self, topic: &TopicId) -> impl Iterator<Item = &PI> {
         self.state(topic)
@@ -301,6 +293,7 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
     }
 
     /// Check if a topic has any active (connected) peers.
+    #[cfg(any(test, feature = "experimental-proto-internals"))]
     pub fn has_active_peers(&self, topic: &TopicId) -> bool {
         self.state(topic)
             .map(|s| s.has_active_peers())

@@ -13,7 +13,7 @@ use n0_future::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::{proto::DeliveryScope, Error};
+use crate::{proto, Error};
 
 /// Default channel capacity for topic subscription channels (one per topic)
 const TOPIC_EVENTS_DEFAULT_CAP: usize = 2048;
@@ -32,7 +32,7 @@ const TOPIC_EVENTS_DEFAULT_CAP: usize = 2048;
 ///
 /// See [`QueueOptions`] for what this means for your app.
 ///
-/// [`QueueOptions`]: crate::net::QueueOptions
+/// [`QueueOptions`]: crate::QueueOptions
 #[derive(Debug, Clone)]
 pub struct GossipSender {
     sender: mpsc::Sender<Command>,
@@ -52,7 +52,7 @@ impl GossipSender {
     /// It is [`Builder::max_message_size`] less the encoding, about 40 bytes,
     /// and holds for [`Self::broadcast_neighbors`] too.
     ///
-    /// [`Builder::max_message_size`]: crate::net::Builder::max_message_size
+    /// [`Builder::max_message_size`]: crate::Builder::max_message_size
     pub fn max_content_size(&self) -> usize {
         self.max_content
     }
@@ -75,7 +75,7 @@ impl GossipSender {
     /// Your own broadcast does not come back as [`Event::Received`].
     ///
     /// A peer ignores a message with the same content as one that it saw in the last 90 seconds
-    /// (the default of [`PlumtreeConfig::message_id_retention`]). To send the same payload twice,
+    /// (the default of [`BroadcastConfig::message_id_retention`]). To send the same payload twice,
     /// add a nonce or a sequence number to the content.
     ///
     /// # Errors
@@ -83,7 +83,7 @@ impl GossipSender {
     /// Returns [`Error::TooLarge`] if the content is over [`Self::max_content_size`],
     /// and [`Error::Closed`] if the gossip actor stopped.
     ///
-    /// [`PlumtreeConfig::message_id_retention`]: crate::proto::PlumtreeConfig::message_id_retention
+    /// [`BroadcastConfig::message_id_retention`]: crate::BroadcastConfig::message_id_retention
     pub async fn broadcast(&self, message: Bytes) -> Result<(), Error> {
         self.check_size(&message)?;
         self.send(Command::Broadcast(message)).await?;
@@ -283,7 +283,7 @@ impl Stream for GossipReceiver {
 pub enum Event {
     /// We have a new, direct neighbor in the swarm membership layer for this topic.
     NeighborUp(EndpointId),
-    /// We dropped direct neighbor in the swarm membership layer for this topic.
+    /// We dropped a direct neighbor in the swarm membership layer for this topic.
     NeighborDown(EndpointId),
     /// We received a gossip message for this topic.
     Received(Message),
@@ -295,6 +295,32 @@ pub enum Event {
     Lagged,
 }
 
+/// The scope through which a message reached us.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum DeliveryScope {
+    /// The message comes from the swarm, with the number of hops from the broadcaster.
+    Swarm(u16),
+    /// The message comes from a direct neighbor that sent it to its neighbors only.
+    Neighbors,
+}
+
+impl DeliveryScope {
+    /// Returns whether the message comes directly from its broadcaster.
+    pub fn is_direct(&self) -> bool {
+        matches!(self, Self::Neighbors | Self::Swarm(0))
+    }
+}
+
+impl From<proto::DeliveryScope> for DeliveryScope {
+    fn from(scope: proto::DeliveryScope) -> Self {
+        match scope {
+            proto::DeliveryScope::Swarm(round) => Self::Swarm(round.hops()),
+            proto::DeliveryScope::Neighbors => Self::Neighbors,
+        }
+    }
+}
+
 impl From<crate::proto::Event<EndpointId>> for Event {
     fn from(event: crate::proto::Event<EndpointId>) -> Self {
         match event {
@@ -302,7 +328,7 @@ impl From<crate::proto::Event<EndpointId>> for Event {
             crate::proto::Event::NeighborDown(endpoint_id) => Self::NeighborDown(endpoint_id),
             crate::proto::Event::Received(message) => Self::Received(Message {
                 content: message.content,
-                scope: message.scope,
+                scope: message.scope.into(),
                 delivered_from: message.delivered_from,
             }),
         }
@@ -391,7 +417,7 @@ impl JoinOptions {
 
 #[cfg(test)]
 mod tests {
-    use crate::api::GossipTopic;
+    use crate::GossipTopic;
 
     #[test]
     fn ensure_gossip_topic_is_sync() {

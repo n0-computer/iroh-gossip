@@ -11,11 +11,7 @@ use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, EndpointAddr, PublicKey,
     RelayMode, RelayUrl, SecretKey,
 };
-use iroh_gossip::{
-    api::{Event, GossipReceiver, GossipSender},
-    net::{Gossip, GOSSIP_ALPN},
-    proto::TopicId,
-};
+use iroh_gossip::{Event, Gossip, GossipReceiver, GossipSender, TopicId, ALPN};
 use n0_error::{bail_any, AnyError, Result, StdResultExt};
 use n0_future::{task, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -31,7 +27,7 @@ use serde_byte_array::ByteArray;
 ///
 /// By default, the relay server run by n0 is used. To use a local relay server, run
 ///     cargo run --bin iroh-relay --features iroh-relay -- --dev
-/// in another terminal and then set the `-d http://localhost:3340` flag on this example.
+/// in another terminal and then set the `-r http://localhost:3340` flag on this example.
 #[derive(Parser, Debug)]
 struct Args {
     /// secret key to derive our endpoint id from.
@@ -59,7 +55,7 @@ enum Command {
     ///
     /// If no topic is provided, a new topic will be created.
     Open {
-        /// Optionally set the topic id (64 bytes, as hex string).
+        /// Optionally set the topic id (32 bytes, as a hex string).
         topic: Option<TopicId>,
     },
     /// Join a chat room from a ticket.
@@ -138,7 +134,7 @@ async fn main() -> Result<()> {
 
     // setup router
     let router = iroh::protocol::Router::builder(endpoint.clone())
-        .accept(GOSSIP_ALPN, gossip.clone())
+        .accept(ALPN, gossip.clone())
         .spawn();
 
     // join the gossip topic by connecting to known peers, if any

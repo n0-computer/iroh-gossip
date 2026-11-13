@@ -19,7 +19,7 @@ impl DirectNode {
         let endpoint = direct_endpoint(lookup, transport).await?;
         let gossip = builder.spawn(endpoint.clone());
         let router = Router::builder(endpoint)
-            .accept(GOSSIP_ALPN, gossip.clone())
+            .accept(ALPN, gossip.clone())
             .spawn();
         Ok(Self { router, gossip })
     }
@@ -121,7 +121,7 @@ async fn publisher_waits_while_all_neighbors_are_full() -> Result {
 
     // B joins on its own connection, and then reads nothing.
     let b = direct_endpoint(&lookup, small_windows(16 * 1024)).await?;
-    let conn = b.connect(a.id(), GOSSIP_ALPN).await?;
+    let conn = b.connect(a.id(), ALPN).await?;
     let _join = open_stream(&conn, topic, &[join_message(topic, 0).message]).await?;
     neighbor_up(&mut a_rx, b.id()).await?;
 
@@ -199,7 +199,7 @@ async fn relayed_traffic_does_not_starve_the_publisher() -> Result {
 
     // B joins both topics on its own connection, and reads slowly.
     let b = direct_endpoint(&lookup, small_windows(16 * 1024)).await?;
-    let conn = b.connect(a.id(), GOSSIP_ALPN).await?;
+    let conn = b.connect(a.id(), ALPN).await?;
     let _join1 = open_stream(&conn, t1, &[join_message(t1, 0).message]).await?;
     let _join2 = open_stream(&conn, t2, &[join_message(t2, 0).message]).await?;
     neighbor_up(&mut a1_rx, b.id()).await?;
@@ -270,7 +270,7 @@ async fn blocked_peer_does_not_stall_the_others() -> Result {
 
     // B joins on its own connection, and then reads nothing.
     let b = direct_endpoint(&lookup, small_windows(16 * 1024)).await?;
-    let conn = b.connect(a.id(), GOSSIP_ALPN).await?;
+    let conn = b.connect(a.id(), ALPN).await?;
     let _join = open_stream(&conn, t1, &[join_message(t1, 0).message]).await?;
     neighbor_up(&mut a1_rx, b.id()).await?;
 
@@ -336,7 +336,7 @@ async fn slow_peer_gets_the_dropped_messages() -> Result {
 
     // C publishes on its own connection, and reads every stream of A at once.
     let c = direct_endpoint(&lookup, default()).await?;
-    let c_conn = c.connect(a.id(), GOSSIP_ALPN).await?;
+    let c_conn = c.connect(a.id(), ALPN).await?;
     let mut publish = open_stream(&c_conn, topic, &[join_message(topic, 0).message]).await?;
     let reader = c_conn.clone();
     let _read = AbortOnDropHandle::new(spawn(async move {

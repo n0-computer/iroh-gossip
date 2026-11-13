@@ -273,6 +273,11 @@ jobs:
       - name: iroh-gossip docs
         run: cargo docs-rs --locked
 
+      # docs.rs builds only the stable API. Check that the docs of the
+      # internals also build without the networking code.
+      - name: iroh-gossip docs (internals, no net)
+        run: cargo doc --locked --no-default-features --features experimental-proto-internals --no-deps
+
   clippy_check:
     timeout-minutes: 30
     runs-on: ubuntu-latest

@@ -13,7 +13,7 @@ resolver = "2"
 rust-version = "1.91"
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["lib", "cdylib"]
 
 [lints.rust]
 missing_debug_implementations = "warn"
@@ -111,7 +111,9 @@ net = [
     "dep:tokio",
     "dep:tokio-util",
 ]
-test-utils = ["rand/chacha", "dep:humantime-serde"]
+# Makes the protocol state machine public. Its API may change in any release.
+experimental-proto-internals = []
+test-utils = ["experimental-proto-internals", "rand/chacha", "dep:humantime-serde"]
 simulator = [
     "test-utils",
     "dep:tracing-subscriber",
@@ -152,7 +154,9 @@ name = "setup"
 required-features = ["examples"]
 
 [package.metadata.docs.rs]
-all-features = true
+# The docs show the stable API only: no test-utils, simulator or experimental-proto-internals.
+# The docs preview workflow builds with this list too, through `cargo docs-rs`.
+features = ["net", "metrics"]
 rustdoc-args = ["--cfg", "iroh_docsrs"]
 
 [profile.bench]
@@ -161,3 +165,16 @@ debug = true
 [profile.release]
 debug = true
 
+[package.metadata.cargo_check_external_types]
+allowed_external_types = [
+    # crates owned by us that are 1.0
+    "iroh::*",
+    "iroh_base::*",
+    "iroh_metrics::*",
+    "n0_error::*",
+    # 1.0 crates that we deem fine to be part of the public API
+    "bytes::*",
+    "serde_core::*",
+    # non-1.0 crates that we decided to accept in the public API
+    "futures_core::stream::Stream",
+]

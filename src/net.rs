@@ -19,7 +19,7 @@ use self::{
 use crate::{
     api::{Command, Event, GossipTopic, JoinOptions},
     metrics::Metrics,
-    proto::{self, HyparviewConfig, PlumtreeConfig, TopicId},
+    proto::{self, BroadcastConfig, MembershipConfig, TopicId},
     Error,
 };
 
@@ -33,7 +33,7 @@ mod subscriptions;
 mod wire;
 
 /// ALPN protocol name
-pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/1";
+pub const ALPN: &[u8] = b"/iroh-gossip/1";
 
 type ProtoEvent = proto::Event<PublicKey>;
 type ProtoCommand = proto::Command<PublicKey>;
@@ -57,9 +57,9 @@ const TOPIC_COMMANDS_CAP: usize = 64;
 ///
 /// With the default settings, a node has up to 5 active neighbors per topic (the default active view).
 ///
-/// Even though the [`Gossip`] is created from a [`Endpoint`], it does not accept connections
+/// Even though the [`Gossip`] is created from an [`Endpoint`], it does not accept connections
 /// itself. You should run an accept loop on the [`Endpoint`] yourself, check the ALPN protocol of incoming
-/// connections, and if the ALPN protocol equals [`GOSSIP_ALPN`], forward the connection to the
+/// connections, and if the ALPN protocol equals [`ALPN`], forward the connection to the
 /// gossip actor through [Self::handle_connection].
 ///
 /// The gossip actor will, however, initiate new connections to other peers by itself.
@@ -133,7 +133,7 @@ impl Builder {
     /// Use the same limit on every node of a swarm. A node drops a message over
     /// its own limit, and the peers that sent it do not learn of it.
     ///
-    /// [`GossipSender::broadcast`]: crate::api::GossipSender::broadcast
+    /// [`GossipSender::broadcast`]: crate::GossipSender::broadcast
     pub fn max_message_size(mut self, size: usize) -> Self {
         self.config.proto.max_message_size = size;
         self
@@ -144,7 +144,7 @@ impl Builder {
     /// The defaults suit most apps. Use the same values on every node of a swarm.
     /// We have not tested how a swarm behaves with different values, so test your setup
     /// first if you mix them.
-    pub fn membership_config(mut self, config: HyparviewConfig) -> Self {
+    pub fn membership_config(mut self, config: MembershipConfig) -> Self {
         self.config.proto.membership = config;
         self
     }
@@ -154,7 +154,7 @@ impl Builder {
     /// The defaults suit most apps. Use the same values on every node of a swarm.
     /// We have not tested how a swarm behaves with different values, so test your setup
     /// first if you mix them.
-    pub fn broadcast_config(mut self, config: PlumtreeConfig) -> Self {
+    pub fn broadcast_config(mut self, config: BroadcastConfig) -> Self {
         self.config.proto.broadcast = config;
         self
     }
@@ -237,7 +237,7 @@ impl Builder {
 ///   that shares more topics with this node than its stream limit allows,
 ///   100 by default.
 ///
-/// [`GossipSender::broadcast`]: crate::api::GossipSender::broadcast
+/// [`GossipSender::broadcast`]: crate::GossipSender::broadcast
 #[derive(Debug, Clone, Copy)]
 pub struct QueueOptions {
     size: usize,
@@ -376,7 +376,7 @@ impl Gossip {
     /// This is the size of the encoded message. For the largest content that you can broadcast,
     /// see [`GossipSender::max_content_size`].
     ///
-    /// [`GossipSender::max_content_size`]: crate::api::GossipSender::max_content_size
+    /// [`GossipSender::max_content_size`]: crate::GossipSender::max_content_size
     pub fn max_message_size(&self) -> usize {
         self.inner.max_message_size
     }

@@ -1,5 +1,5 @@
 use iroh::{endpoint::presets, protocol::Router, Endpoint};
-use iroh_gossip::{net::Gossip, ALPN};
+use iroh_gossip::{Gossip, ALPN};
 use n0_error::{Result, StdResultExt};
 
 #[tokio::main]

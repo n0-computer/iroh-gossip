@@ -25,8 +25,7 @@ use super::{
     subscriptions::{
         all_eager_peers_busy, topic_subscriber_loop, SubscriptionCommands, TopicHandles,
     },
-    InEvent, Join, ProtoCommand, ProtoEvent, ProtoMessage, QueueOptions, Timer, ToActor,
-    GOSSIP_ALPN,
+    InEvent, Join, ProtoCommand, ProtoEvent, ProtoMessage, QueueOptions, Timer, ToActor, ALPN,
 };
 use crate::{
     api::Command,
@@ -37,7 +36,9 @@ use crate::{
 #[cfg(test)]
 mod tests;
 
-/// The settings that the [`Builder`](super::Builder) passes to the actor.
+/// The settings that the [`Builder`] passes to the actor.
+///
+/// [`Builder`]: super::Builder
 #[derive(Debug, Clone)]
 pub(super) struct ActorConfig {
     pub(super) proto: proto::Config,
@@ -49,13 +50,15 @@ impl Default for ActorConfig {
     fn default() -> Self {
         Self {
             proto: Default::default(),
-            alpn: GOSSIP_ALPN.to_vec().into(),
+            alpn: ALPN.to_vec().into(),
             send_queue: Default::default(),
         }
     }
 }
 
-/// The capacity of the channel from the [`Gossip`](super::Gossip) handle to the actor.
+/// The capacity of the channel from the [`Gossip`] handle to the actor.
+///
+/// [`Gossip`]: super::Gossip
 const TO_ACTOR_CAP: usize = 64;
 /// The capacity of the channel from the connection tasks to the actor.
 const IN_EVENT_CAP: usize = 1024;
@@ -67,7 +70,9 @@ pub(super) struct Actor {
     state: ActorState,
     /// The endpoint of this node.
     endpoint: Endpoint,
-    /// Messages from the [`Gossip`](super::Gossip) handle.
+    /// Messages from the [`Gossip`] handle.
+    ///
+    /// [`Gossip`]: super::Gossip
     to_actor_rx: mpsc::Receiver<ToActor>,
     /// Sender for the state input (cloned into the connection loops)
     in_event_tx: mpsc::Sender<InEvent>,
@@ -137,7 +142,7 @@ impl Actor {
             topics: Default::default(),
             quit_queue: Default::default(),
             follow_ups: Default::default(),
-            timers: TimerMap::new(),
+            timers: TimerMap::default(),
             address_lookup,
             metrics: metrics.clone(),
             overflowed_peers: Vec::new(),
@@ -166,7 +171,9 @@ impl Actor {
         while self.event_loop(&mut addr_update_stream).await {}
     }
 
-    /// Handles a message from the [`Gossip`](super::Gossip) handle, and returns `false` to stop the actor.
+    /// Handles a message from the [`Gossip`] handle, and returns `false` to stop the actor.
+    ///
+    /// [`Gossip`]: super::Gossip
     fn on_message(&mut self, msg: Option<ToActor>) -> bool {
         if msg.is_some() {
             self.metrics.actor_tick_rx.inc();
@@ -199,8 +206,8 @@ impl Actor {
 
     /// Performs the initial actor setup to run the [`Actor::event_loop`].
     ///
-    /// This updates our current address and return it. It also returns the home relay stream and
-    /// direct addr stream.
+    /// Passes our current address to the protocol state as our peer data, and returns the stream
+    /// of address updates.
     fn setup(&mut self) -> impl Stream<Item = EndpointAddr> + Send + Unpin + use<> {
         let addr_update_stream = self.endpoint.watch_addr().stream();
         let initial_addr = self.endpoint.addr();

@@ -154,7 +154,7 @@ impl<PI> Message<PI> {
 pub enum Event<PI> {
     /// We have a new, direct neighbor in the swarm membership layer for this topic
     NeighborUp(PI),
-    /// We dropped direct neighbor in the swarm membership layer for this topic
+    /// We dropped a direct neighbor in the swarm membership layer for this topic
     NeighborDown(PI),
     /// A gossip message was received for this topic
     Received(GossipEvent<PI>),
@@ -220,27 +220,8 @@ impl Default for Config {
 /// The topic state maintains the swarm membership and broadcast tree for a particular topic.
 #[derive(Debug)]
 pub struct State<PI, R> {
-    me: PI,
     pub(crate) swarm: hyparview::State<PI, R>,
     pub(crate) gossip: plumtree::State<PI>,
-}
-
-impl<PI: PeerIdentity> State<PI, rand::rngs::ThreadRng> {
-    /// Initialize the local state with the default random number generator.
-    ///
-    /// ## Panics
-    ///
-    /// Panics if [`Config::max_message_size`] is below [`MIN_MAX_MESSAGE_SIZE`].
-    pub fn new(me: PI, me_data: Option<PeerData>, config: Config) -> Self {
-        Self::with_rng(me, me_data, config, rand::rng())
-    }
-}
-
-impl<PI, R> State<PI, R> {
-    /// The address of your local endpoint.
-    pub fn endpoint(&self) -> &PI {
-        &self.me
-    }
 }
 
 impl<PI: PeerIdentity, R: Rng> State<PI, R> {
@@ -261,7 +242,6 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
                 config.broadcast,
                 max_plumtree_size(config.max_message_size),
             ),
-            me,
         }
     }
 
@@ -330,6 +310,7 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
     }
 
     /// Reset all statistics.
+    #[cfg(feature = "experimental-proto-internals")]
     pub fn reset_stats(&mut self) {
         self.gossip.stats = Default::default();
     }
@@ -337,6 +318,7 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
     /// Get statistics for the gossip broadcast state
     ///
     /// TODO: Remove/replace with metrics?
+    #[cfg(feature = "experimental-proto-internals")]
     pub fn gossip_stats(&self) -> &plumtree::Stats {
         self.gossip.stats()
     }
@@ -349,6 +331,7 @@ impl<PI: PeerIdentity, R: Rng> State<PI, R> {
     }
 
     /// Check if this topic has any active (connected) peers.
+    #[cfg(any(test, feature = "experimental-proto-internals"))]
     pub fn has_active_peers(&self) -> bool {
         !self.swarm.active_view.is_empty()
     }
