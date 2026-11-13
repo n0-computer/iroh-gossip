@@ -1,9 +1,9 @@
 (function() {
-    var implementors = Object.fromEntries([["iroh_gossip",[["impl Iterable for <a class=\"struct\" href=\"iroh_gossip/metrics/struct.Metrics.html\" title=\"struct iroh_gossip::metrics::Metrics\">Metrics</a>"]]]]);
+    var implementors = Object.fromEntries([["iroh_gossip",[["impl <a class=\"trait\" href=\"https://docs.rs/iroh-metrics/1.0.2/iroh_metrics/iterable/trait.Iterable.html\" title=\"trait iroh_metrics::iterable::Iterable\">Iterable</a> for <a class=\"struct\" href=\"iroh_gossip/struct.Metrics.html\" title=\"struct iroh_gossip::Metrics\">Metrics</a>"]]]]);
     if (window.register_implementors) {
         window.register_implementors(implementors);
     } else {
         window.pending_implementors = implementors;
     }
 })()
-//{"start":57,"fragment_lengths":[167]}
+//{"start":57,"fragment_lengths":[308]}

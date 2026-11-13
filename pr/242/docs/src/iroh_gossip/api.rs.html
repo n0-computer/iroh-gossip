@@ -13,7 +13,7 @@
 <a href=#13 id=13 data-nosnippet>13</a><span class="kw">use </span>serde::{Deserialize, Serialize};
 <a href=#14 id=14 data-nosnippet>14</a><span class="kw">use </span>tokio::sync::mpsc;
 <a href=#15 id=15 data-nosnippet>15</a>
-<a href=#16 id=16 data-nosnippet>16</a><span class="kw">use crate</span>::{proto::DeliveryScope, Error};
+<a href=#16 id=16 data-nosnippet>16</a><span class="kw">use crate</span>::{proto, Error};
 <a href=#17 id=17 data-nosnippet>17</a>
 <a href=#18 id=18 data-nosnippet>18</a><span class="doccomment">/// Default channel capacity for topic subscription channels (one per topic)
 <a href=#19 id=19 data-nosnippet>19</a></span><span class="kw">const </span>TOPIC_EVENTS_DEFAULT_CAP: usize = <span class="number">2048</span>;
@@ -32,7 +32,7 @@
 <a href=#32 id=32 data-nosnippet>32</a>///
 <a href=#33 id=33 data-nosnippet>33</a>/// See [`QueueOptions`] for what this means for your app.
 <a href=#34 id=34 data-nosnippet>34</a>///
-<a href=#35 id=35 data-nosnippet>35</a>/// [`QueueOptions`]: crate::net::QueueOptions
+<a href=#35 id=35 data-nosnippet>35</a>/// [`QueueOptions`]: crate::QueueOptions
 <a href=#36 id=36 data-nosnippet>36</a></span><span class="attr">#[derive(Debug, Clone)]
 <a href=#37 id=37 data-nosnippet>37</a></span><span class="kw">pub struct </span>GossipSender {
 <a href=#38 id=38 data-nosnippet>38</a>    sender: mpsc::Sender&lt;Command&gt;,
@@ -52,7 +52,7 @@
 <a href=#52 id=52 data-nosnippet>52</a>    /// It is [`Builder::max_message_size`] less the encoding, about 40 bytes,
 <a href=#53 id=53 data-nosnippet>53</a>    /// and holds for [`Self::broadcast_neighbors`] too.
 <a href=#54 id=54 data-nosnippet>54</a>    ///
-<a href=#55 id=55 data-nosnippet>55</a>    /// [`Builder::max_message_size`]: crate::net::Builder::max_message_size
+<a href=#55 id=55 data-nosnippet>55</a>    /// [`Builder::max_message_size`]: crate::Builder::max_message_size
 <a href=#56 id=56 data-nosnippet>56</a>    </span><span class="kw">pub fn </span>max_content_size(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
 <a href=#57 id=57 data-nosnippet>57</a>        <span class="self">self</span>.max_content
 <a href=#58 id=58 data-nosnippet>58</a>    }
@@ -75,7 +75,7 @@
 <a href=#75 id=75 data-nosnippet>75</a>    /// Your own broadcast does not come back as [`Event::Received`].
 <a href=#76 id=76 data-nosnippet>76</a>    ///
 <a href=#77 id=77 data-nosnippet>77</a>    /// A peer ignores a message with the same content as one that it saw in the last 90 seconds
-<a href=#78 id=78 data-nosnippet>78</a>    /// (the default of [`PlumtreeConfig::message_id_retention`]). To send the same payload twice,
+<a href=#78 id=78 data-nosnippet>78</a>    /// (the default of [`BroadcastConfig::message_id_retention`]). To send the same payload twice,
 <a href=#79 id=79 data-nosnippet>79</a>    /// add a nonce or a sequence number to the content.
 <a href=#80 id=80 data-nosnippet>80</a>    ///
 <a href=#81 id=81 data-nosnippet>81</a>    /// # Errors
@@ -83,7 +83,7 @@
 <a href=#83 id=83 data-nosnippet>83</a>    /// Returns [`Error::TooLarge`] if the content is over [`Self::max_content_size`],
 <a href=#84 id=84 data-nosnippet>84</a>    /// and [`Error::Closed`] if the gossip actor stopped.
 <a href=#85 id=85 data-nosnippet>85</a>    ///
-<a href=#86 id=86 data-nosnippet>86</a>    /// [`PlumtreeConfig::message_id_retention`]: crate::proto::PlumtreeConfig::message_id_retention
+<a href=#86 id=86 data-nosnippet>86</a>    /// [`BroadcastConfig::message_id_retention`]: crate::BroadcastConfig::message_id_retention
 <a href=#87 id=87 data-nosnippet>87</a>    </span><span class="kw">pub async fn </span>broadcast(<span class="kw-2">&amp;</span><span class="self">self</span>, message: Bytes) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
 <a href=#88 id=88 data-nosnippet>88</a>        <span class="self">self</span>.check_size(<span class="kw-2">&amp;</span>message)<span class="question-mark">?</span>;
 <a href=#89 id=89 data-nosnippet>89</a>        <span class="self">self</span>.send(Command::Broadcast(message)).<span class="kw">await</span><span class="question-mark">?</span>;
@@ -283,7 +283,7 @@
 <a href=#283 id=283 data-nosnippet>283</a></span><span class="kw">pub enum </span>Event {
 <a href=#284 id=284 data-nosnippet>284</a>    <span class="doccomment">/// We have a new, direct neighbor in the swarm membership layer for this topic.
 <a href=#285 id=285 data-nosnippet>285</a>    </span>NeighborUp(EndpointId),
-<a href=#286 id=286 data-nosnippet>286</a>    <span class="doccomment">/// We dropped direct neighbor in the swarm membership layer for this topic.
+<a href=#286 id=286 data-nosnippet>286</a>    <span class="doccomment">/// We dropped a direct neighbor in the swarm membership layer for this topic.
 <a href=#287 id=287 data-nosnippet>287</a>    </span>NeighborDown(EndpointId),
 <a href=#288 id=288 data-nosnippet>288</a>    <span class="doccomment">/// We received a gossip message for this topic.
 <a href=#289 id=289 data-nosnippet>289</a>    </span>Received(Message),
@@ -295,115 +295,141 @@
 <a href=#295 id=295 data-nosnippet>295</a>    </span>Lagged,
 <a href=#296 id=296 data-nosnippet>296</a>}
 <a href=#297 id=297 data-nosnippet>297</a>
-<a href=#298 id=298 data-nosnippet>298</a><span class="kw">impl </span>From&lt;<span class="kw">crate</span>::proto::Event&lt;EndpointId&gt;&gt; <span class="kw">for </span>Event {
-<a href=#299 id=299 data-nosnippet>299</a>    <span class="kw">fn </span>from(event: <span class="kw">crate</span>::proto::Event&lt;EndpointId&gt;) -&gt; <span class="self">Self </span>{
-<a href=#300 id=300 data-nosnippet>300</a>        <span class="kw">match </span>event {
-<a href=#301 id=301 data-nosnippet>301</a>            <span class="kw">crate</span>::proto::Event::NeighborUp(endpoint_id) =&gt; <span class="self">Self</span>::NeighborUp(endpoint_id),
-<a href=#302 id=302 data-nosnippet>302</a>            <span class="kw">crate</span>::proto::Event::NeighborDown(endpoint_id) =&gt; <span class="self">Self</span>::NeighborDown(endpoint_id),
-<a href=#303 id=303 data-nosnippet>303</a>            <span class="kw">crate</span>::proto::Event::Received(message) =&gt; <span class="self">Self</span>::Received(Message {
-<a href=#304 id=304 data-nosnippet>304</a>                content: message.content,
-<a href=#305 id=305 data-nosnippet>305</a>                scope: message.scope,
-<a href=#306 id=306 data-nosnippet>306</a>                delivered_from: message.delivered_from,
-<a href=#307 id=307 data-nosnippet>307</a>            }),
-<a href=#308 id=308 data-nosnippet>308</a>        }
-<a href=#309 id=309 data-nosnippet>309</a>    }
-<a href=#310 id=310 data-nosnippet>310</a>}
-<a href=#311 id=311 data-nosnippet>311</a>
-<a href=#312 id=312 data-nosnippet>312</a><span class="doccomment">/// A gossip message
-<a href=#313 id=313 data-nosnippet>313</a></span><span class="attr">#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, derive_more::Debug, Serialize, Deserialize)]
-<a href=#314 id=314 data-nosnippet>314</a>#[non_exhaustive]
-<a href=#315 id=315 data-nosnippet>315</a></span><span class="kw">pub struct </span>Message {
-<a href=#316 id=316 data-nosnippet>316</a>    <span class="doccomment">/// The content of the message
-<a href=#317 id=317 data-nosnippet>317</a>    </span><span class="attr">#[debug(<span class="string">"Bytes({})"</span>, <span class="self">self</span>.content.len())]
-<a href=#318 id=318 data-nosnippet>318</a>    </span><span class="kw">pub </span>content: Bytes,
-<a href=#319 id=319 data-nosnippet>319</a>    <span class="doccomment">/// The scope of the message.
-<a href=#320 id=320 data-nosnippet>320</a>    ///
-<a href=#321 id=321 data-nosnippet>321</a>    /// It tells whether a direct neighbor sent the message to its neighbors, or the swarm gossiped
-<a href=#322 id=322 data-nosnippet>322</a>    /// it.
-<a href=#323 id=323 data-nosnippet>323</a>    </span><span class="kw">pub </span>scope: DeliveryScope,
-<a href=#324 id=324 data-nosnippet>324</a>    <span class="doccomment">/// The endpoint that delivered the message. This is not the same as the original author.
-<a href=#325 id=325 data-nosnippet>325</a>    ///
-<a href=#326 id=326 data-nosnippet>326</a>    /// A gossip message has no author field, and the content is not signed. If you need to know
-<a href=#327 id=327 data-nosnippet>327</a>    /// the author, or need to trust the content, sign it in your app.
-<a href=#328 id=328 data-nosnippet>328</a>    </span><span class="kw">pub </span>delivered_from: EndpointId,
-<a href=#329 id=329 data-nosnippet>329</a>}
-<a href=#330 id=330 data-nosnippet>330</a>
-<a href=#331 id=331 data-nosnippet>331</a><span class="doccomment">/// Command for a gossip topic.
-<a href=#332 id=332 data-nosnippet>332</a></span><span class="attr">#[derive(derive_more::Debug, Clone)]
-<a href=#333 id=333 data-nosnippet>333</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">enum </span>Command {
-<a href=#334 id=334 data-nosnippet>334</a>    <span class="doccomment">/// Broadcasts a message to all endpoints in the swarm.
-<a href=#335 id=335 data-nosnippet>335</a>    </span>Broadcast(<span class="attr">#[debug(<span class="string">"Bytes({})"</span>, _0.len())] </span>Bytes),
-<a href=#336 id=336 data-nosnippet>336</a>    <span class="doccomment">/// Broadcasts a message to all direct neighbors.
-<a href=#337 id=337 data-nosnippet>337</a>    </span>BroadcastNeighbors(<span class="attr">#[debug(<span class="string">"Bytes({})"</span>, _0.len())] </span>Bytes),
-<a href=#338 id=338 data-nosnippet>338</a>    <span class="doccomment">/// Connects to a set of peers.
-<a href=#339 id=339 data-nosnippet>339</a>    </span>JoinPeers(Vec&lt;EndpointId&gt;),
-<a href=#340 id=340 data-nosnippet>340</a>}
-<a href=#341 id=341 data-nosnippet>341</a>
-<a href=#342 id=342 data-nosnippet>342</a><span class="kw">impl </span>Command {
-<a href=#343 id=343 data-nosnippet>343</a>    <span class="doccomment">/// Returns whether this command publishes a message.
-<a href=#344 id=344 data-nosnippet>344</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>is_broadcast(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
-<a href=#345 id=345 data-nosnippet>345</a>        <span class="macro">matches!</span>(<span class="self">self</span>, <span class="self">Self</span>::Broadcast(<span class="kw">_</span>) | <span class="self">Self</span>::BroadcastNeighbors(<span class="kw">_</span>))
-<a href=#346 id=346 data-nosnippet>346</a>    }
-<a href=#347 id=347 data-nosnippet>347</a>}
-<a href=#348 id=348 data-nosnippet>348</a>
-<a href=#349 id=349 data-nosnippet>349</a><span class="doccomment">/// Options for joining a gossip topic.
-<a href=#350 id=350 data-nosnippet>350</a>///
-<a href=#351 id=351 data-nosnippet>351</a>/// Build it with [`Self::with_bootstrap`] or [`Default`], and the methods that set an option.
-<a href=#352 id=352 data-nosnippet>352</a>/// New options can come in a minor version, so you cannot construct it with a struct literal.
-<a href=#353 id=353 data-nosnippet>353</a></span><span class="attr">#[derive(Debug)]
-<a href=#354 id=354 data-nosnippet>354</a>#[non_exhaustive]
-<a href=#355 id=355 data-nosnippet>355</a></span><span class="kw">pub struct </span>JoinOptions {
-<a href=#356 id=356 data-nosnippet>356</a>    <span class="doccomment">/// The initial bootstrap endpoints.
-<a href=#357 id=357 data-nosnippet>357</a>    </span><span class="kw">pub </span>bootstrap: BTreeSet&lt;EndpointId&gt;,
-<a href=#358 id=358 data-nosnippet>358</a>    <span class="doccomment">/// The number of events that a subscription buffers for a reader that falls behind.
-<a href=#359 id=359 data-nosnippet>359</a>    ///
-<a href=#360 id=360 data-nosnippet>360</a>    /// A slow reader never blocks the gossip actor. When the buffer is full, the node drops
-<a href=#361 id=361 data-nosnippet>361</a>    /// the oldest events and the reader receives a [`Event::Lagged`]. The
-<a href=#362 id=362 data-nosnippet>362</a>    /// subscription stays open. 0 counts as 1.
-<a href=#363 id=363 data-nosnippet>363</a>    ///
-<a href=#364 id=364 data-nosnippet>364</a>    /// After a `Lagged`, the neighbors that [`GossipReceiver::neighbors`] reports can be wrong.
-<a href=#365 id=365 data-nosnippet>365</a>    /// If you need the exact state, subscribe again.
-<a href=#366 id=366 data-nosnippet>366</a>    </span><span class="kw">pub </span>subscription_capacity: usize,
-<a href=#367 id=367 data-nosnippet>367</a>}
-<a href=#368 id=368 data-nosnippet>368</a>
-<a href=#369 id=369 data-nosnippet>369</a><span class="kw">impl </span>Default <span class="kw">for </span>JoinOptions {
-<a href=#370 id=370 data-nosnippet>370</a>    <span class="doccomment">/// Returns options with no bootstrap peers and the default subscription capacity.
-<a href=#371 id=371 data-nosnippet>371</a>    </span><span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
-<a href=#372 id=372 data-nosnippet>372</a>        <span class="self">Self</span>::with_bootstrap([])
-<a href=#373 id=373 data-nosnippet>373</a>    }
-<a href=#374 id=374 data-nosnippet>374</a>}
-<a href=#375 id=375 data-nosnippet>375</a>
-<a href=#376 id=376 data-nosnippet>376</a><span class="kw">impl </span>JoinOptions {
-<a href=#377 id=377 data-nosnippet>377</a>    <span class="doccomment">/// Creates [`JoinOptions`] with `endpoints` as bootstrap peers.
-<a href=#378 id=378 data-nosnippet>378</a>    </span><span class="kw">pub fn </span>with_bootstrap(endpoints: <span class="kw">impl </span>IntoIterator&lt;Item = EndpointId&gt;) -&gt; <span class="self">Self </span>{
-<a href=#379 id=379 data-nosnippet>379</a>        <span class="self">Self </span>{
-<a href=#380 id=380 data-nosnippet>380</a>            bootstrap: endpoints.into_iter().collect(),
-<a href=#381 id=381 data-nosnippet>381</a>            subscription_capacity: TOPIC_EVENTS_DEFAULT_CAP,
-<a href=#382 id=382 data-nosnippet>382</a>        }
-<a href=#383 id=383 data-nosnippet>383</a>    }
-<a href=#384 id=384 data-nosnippet>384</a>
-<a href=#385 id=385 data-nosnippet>385</a>    <span class="doccomment">/// Sets the number of events that a subscription buffers, see [`Self::subscription_capacity`].
-<a href=#386 id=386 data-nosnippet>386</a>    </span><span class="kw">pub fn </span>with_subscription_capacity(<span class="kw-2">mut </span><span class="self">self</span>, capacity: usize) -&gt; <span class="self">Self </span>{
-<a href=#387 id=387 data-nosnippet>387</a>        <span class="self">self</span>.subscription_capacity = capacity;
-<a href=#388 id=388 data-nosnippet>388</a>        <span class="self">self
-<a href=#389 id=389 data-nosnippet>389</a>    </span>}
-<a href=#390 id=390 data-nosnippet>390</a>}
-<a href=#391 id=391 data-nosnippet>391</a>
-<a href=#392 id=392 data-nosnippet>392</a><span class="attr">#[cfg(test)]
-<a href=#393 id=393 data-nosnippet>393</a></span><span class="kw">mod </span>tests {
-<a href=#394 id=394 data-nosnippet>394</a>    <span class="kw">use </span><span class="kw">crate</span>::api::GossipTopic;
-<a href=#395 id=395 data-nosnippet>395</a>
-<a href=#396 id=396 data-nosnippet>396</a>    <span class="attr">#[test]
-<a href=#397 id=397 data-nosnippet>397</a>    </span><span class="kw">fn </span>ensure_gossip_topic_is_sync() {
-<a href=#398 id=398 data-nosnippet>398</a>        <span class="attr">#[allow(unused)]
-<a href=#399 id=399 data-nosnippet>399</a>        </span><span class="kw">fn </span>get() -&gt; GossipTopic {
-<a href=#400 id=400 data-nosnippet>400</a>            <span class="macro">unimplemented!</span>()
-<a href=#401 id=401 data-nosnippet>401</a>        }
-<a href=#402 id=402 data-nosnippet>402</a>        <span class="attr">#[allow(unused)]
-<a href=#403 id=403 data-nosnippet>403</a>        </span><span class="kw">fn </span>check(_t: <span class="kw">impl </span>Sync) {}
-<a href=#404 id=404 data-nosnippet>404</a>        <span class="attr">#[allow(unused)]
-<a href=#405 id=405 data-nosnippet>405</a>        </span><span class="kw">fn </span>foo() {
-<a href=#406 id=406 data-nosnippet>406</a>            check(get());
-<a href=#407 id=407 data-nosnippet>407</a>        }
-<a href=#408 id=408 data-nosnippet>408</a>    }
-<a href=#409 id=409 data-nosnippet>409</a>}</code></pre></div></section></main></body></html>
+<a href=#298 id=298 data-nosnippet>298</a><span class="doccomment">/// The scope through which a message reached us.
+<a href=#299 id=299 data-nosnippet>299</a></span><span class="attr">#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+<a href=#300 id=300 data-nosnippet>300</a>#[non_exhaustive]
+<a href=#301 id=301 data-nosnippet>301</a></span><span class="kw">pub enum </span>DeliveryScope {
+<a href=#302 id=302 data-nosnippet>302</a>    <span class="doccomment">/// The message comes from the swarm, with the number of hops from the broadcaster.
+<a href=#303 id=303 data-nosnippet>303</a>    </span>Swarm(u16),
+<a href=#304 id=304 data-nosnippet>304</a>    <span class="doccomment">/// The message comes from a direct neighbor that sent it to its neighbors only.
+<a href=#305 id=305 data-nosnippet>305</a>    </span>Neighbors,
+<a href=#306 id=306 data-nosnippet>306</a>}
+<a href=#307 id=307 data-nosnippet>307</a>
+<a href=#308 id=308 data-nosnippet>308</a><span class="kw">impl </span>DeliveryScope {
+<a href=#309 id=309 data-nosnippet>309</a>    <span class="doccomment">/// Returns whether the message comes directly from its broadcaster.
+<a href=#310 id=310 data-nosnippet>310</a>    </span><span class="kw">pub fn </span>is_direct(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
+<a href=#311 id=311 data-nosnippet>311</a>        <span class="macro">matches!</span>(<span class="self">self</span>, <span class="self">Self</span>::Neighbors | <span class="self">Self</span>::Swarm(<span class="number">0</span>))
+<a href=#312 id=312 data-nosnippet>312</a>    }
+<a href=#313 id=313 data-nosnippet>313</a>}
+<a href=#314 id=314 data-nosnippet>314</a>
+<a href=#315 id=315 data-nosnippet>315</a><span class="kw">impl </span>From&lt;proto::DeliveryScope&gt; <span class="kw">for </span>DeliveryScope {
+<a href=#316 id=316 data-nosnippet>316</a>    <span class="kw">fn </span>from(scope: proto::DeliveryScope) -&gt; <span class="self">Self </span>{
+<a href=#317 id=317 data-nosnippet>317</a>        <span class="kw">match </span>scope {
+<a href=#318 id=318 data-nosnippet>318</a>            proto::DeliveryScope::Swarm(round) =&gt; <span class="self">Self</span>::Swarm(round.hops()),
+<a href=#319 id=319 data-nosnippet>319</a>            proto::DeliveryScope::Neighbors =&gt; <span class="self">Self</span>::Neighbors,
+<a href=#320 id=320 data-nosnippet>320</a>        }
+<a href=#321 id=321 data-nosnippet>321</a>    }
+<a href=#322 id=322 data-nosnippet>322</a>}
+<a href=#323 id=323 data-nosnippet>323</a>
+<a href=#324 id=324 data-nosnippet>324</a><span class="kw">impl </span>From&lt;<span class="kw">crate</span>::proto::Event&lt;EndpointId&gt;&gt; <span class="kw">for </span>Event {
+<a href=#325 id=325 data-nosnippet>325</a>    <span class="kw">fn </span>from(event: <span class="kw">crate</span>::proto::Event&lt;EndpointId&gt;) -&gt; <span class="self">Self </span>{
+<a href=#326 id=326 data-nosnippet>326</a>        <span class="kw">match </span>event {
+<a href=#327 id=327 data-nosnippet>327</a>            <span class="kw">crate</span>::proto::Event::NeighborUp(endpoint_id) =&gt; <span class="self">Self</span>::NeighborUp(endpoint_id),
+<a href=#328 id=328 data-nosnippet>328</a>            <span class="kw">crate</span>::proto::Event::NeighborDown(endpoint_id) =&gt; <span class="self">Self</span>::NeighborDown(endpoint_id),
+<a href=#329 id=329 data-nosnippet>329</a>            <span class="kw">crate</span>::proto::Event::Received(message) =&gt; <span class="self">Self</span>::Received(Message {
+<a href=#330 id=330 data-nosnippet>330</a>                content: message.content,
+<a href=#331 id=331 data-nosnippet>331</a>                scope: message.scope.into(),
+<a href=#332 id=332 data-nosnippet>332</a>                delivered_from: message.delivered_from,
+<a href=#333 id=333 data-nosnippet>333</a>            }),
+<a href=#334 id=334 data-nosnippet>334</a>        }
+<a href=#335 id=335 data-nosnippet>335</a>    }
+<a href=#336 id=336 data-nosnippet>336</a>}
+<a href=#337 id=337 data-nosnippet>337</a>
+<a href=#338 id=338 data-nosnippet>338</a><span class="doccomment">/// A gossip message
+<a href=#339 id=339 data-nosnippet>339</a></span><span class="attr">#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, derive_more::Debug, Serialize, Deserialize)]
+<a href=#340 id=340 data-nosnippet>340</a>#[non_exhaustive]
+<a href=#341 id=341 data-nosnippet>341</a></span><span class="kw">pub struct </span>Message {
+<a href=#342 id=342 data-nosnippet>342</a>    <span class="doccomment">/// The content of the message
+<a href=#343 id=343 data-nosnippet>343</a>    </span><span class="attr">#[debug(<span class="string">"Bytes({})"</span>, <span class="self">self</span>.content.len())]
+<a href=#344 id=344 data-nosnippet>344</a>    </span><span class="kw">pub </span>content: Bytes,
+<a href=#345 id=345 data-nosnippet>345</a>    <span class="doccomment">/// The scope of the message.
+<a href=#346 id=346 data-nosnippet>346</a>    ///
+<a href=#347 id=347 data-nosnippet>347</a>    /// It tells whether a direct neighbor sent the message to its neighbors, or the swarm gossiped
+<a href=#348 id=348 data-nosnippet>348</a>    /// it.
+<a href=#349 id=349 data-nosnippet>349</a>    </span><span class="kw">pub </span>scope: DeliveryScope,
+<a href=#350 id=350 data-nosnippet>350</a>    <span class="doccomment">/// The endpoint that delivered the message. This is not the same as the original author.
+<a href=#351 id=351 data-nosnippet>351</a>    ///
+<a href=#352 id=352 data-nosnippet>352</a>    /// A gossip message has no author field, and the content is not signed. If you need to know
+<a href=#353 id=353 data-nosnippet>353</a>    /// the author, or need to trust the content, sign it in your app.
+<a href=#354 id=354 data-nosnippet>354</a>    </span><span class="kw">pub </span>delivered_from: EndpointId,
+<a href=#355 id=355 data-nosnippet>355</a>}
+<a href=#356 id=356 data-nosnippet>356</a>
+<a href=#357 id=357 data-nosnippet>357</a><span class="doccomment">/// Command for a gossip topic.
+<a href=#358 id=358 data-nosnippet>358</a></span><span class="attr">#[derive(derive_more::Debug, Clone)]
+<a href=#359 id=359 data-nosnippet>359</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">enum </span>Command {
+<a href=#360 id=360 data-nosnippet>360</a>    <span class="doccomment">/// Broadcasts a message to all endpoints in the swarm.
+<a href=#361 id=361 data-nosnippet>361</a>    </span>Broadcast(<span class="attr">#[debug(<span class="string">"Bytes({})"</span>, _0.len())] </span>Bytes),
+<a href=#362 id=362 data-nosnippet>362</a>    <span class="doccomment">/// Broadcasts a message to all direct neighbors.
+<a href=#363 id=363 data-nosnippet>363</a>    </span>BroadcastNeighbors(<span class="attr">#[debug(<span class="string">"Bytes({})"</span>, _0.len())] </span>Bytes),
+<a href=#364 id=364 data-nosnippet>364</a>    <span class="doccomment">/// Connects to a set of peers.
+<a href=#365 id=365 data-nosnippet>365</a>    </span>JoinPeers(Vec&lt;EndpointId&gt;),
+<a href=#366 id=366 data-nosnippet>366</a>}
+<a href=#367 id=367 data-nosnippet>367</a>
+<a href=#368 id=368 data-nosnippet>368</a><span class="kw">impl </span>Command {
+<a href=#369 id=369 data-nosnippet>369</a>    <span class="doccomment">/// Returns whether this command publishes a message.
+<a href=#370 id=370 data-nosnippet>370</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>is_broadcast(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
+<a href=#371 id=371 data-nosnippet>371</a>        <span class="macro">matches!</span>(<span class="self">self</span>, <span class="self">Self</span>::Broadcast(<span class="kw">_</span>) | <span class="self">Self</span>::BroadcastNeighbors(<span class="kw">_</span>))
+<a href=#372 id=372 data-nosnippet>372</a>    }
+<a href=#373 id=373 data-nosnippet>373</a>}
+<a href=#374 id=374 data-nosnippet>374</a>
+<a href=#375 id=375 data-nosnippet>375</a><span class="doccomment">/// Options for joining a gossip topic.
+<a href=#376 id=376 data-nosnippet>376</a>///
+<a href=#377 id=377 data-nosnippet>377</a>/// Build it with [`Self::with_bootstrap`] or [`Default`], and the methods that set an option.
+<a href=#378 id=378 data-nosnippet>378</a>/// New options can come in a minor version, so you cannot construct it with a struct literal.
+<a href=#379 id=379 data-nosnippet>379</a></span><span class="attr">#[derive(Debug)]
+<a href=#380 id=380 data-nosnippet>380</a>#[non_exhaustive]
+<a href=#381 id=381 data-nosnippet>381</a></span><span class="kw">pub struct </span>JoinOptions {
+<a href=#382 id=382 data-nosnippet>382</a>    <span class="doccomment">/// The initial bootstrap endpoints.
+<a href=#383 id=383 data-nosnippet>383</a>    </span><span class="kw">pub </span>bootstrap: BTreeSet&lt;EndpointId&gt;,
+<a href=#384 id=384 data-nosnippet>384</a>    <span class="doccomment">/// The number of events that a subscription buffers for a reader that falls behind.
+<a href=#385 id=385 data-nosnippet>385</a>    ///
+<a href=#386 id=386 data-nosnippet>386</a>    /// A slow reader never blocks the gossip actor. When the buffer is full, the node drops
+<a href=#387 id=387 data-nosnippet>387</a>    /// the oldest events and the reader receives a [`Event::Lagged`]. The
+<a href=#388 id=388 data-nosnippet>388</a>    /// subscription stays open. 0 counts as 1.
+<a href=#389 id=389 data-nosnippet>389</a>    ///
+<a href=#390 id=390 data-nosnippet>390</a>    /// After a `Lagged`, the neighbors that [`GossipReceiver::neighbors`] reports can be wrong.
+<a href=#391 id=391 data-nosnippet>391</a>    /// If you need the exact state, subscribe again.
+<a href=#392 id=392 data-nosnippet>392</a>    </span><span class="kw">pub </span>subscription_capacity: usize,
+<a href=#393 id=393 data-nosnippet>393</a>}
+<a href=#394 id=394 data-nosnippet>394</a>
+<a href=#395 id=395 data-nosnippet>395</a><span class="kw">impl </span>Default <span class="kw">for </span>JoinOptions {
+<a href=#396 id=396 data-nosnippet>396</a>    <span class="doccomment">/// Returns options with no bootstrap peers and the default subscription capacity.
+<a href=#397 id=397 data-nosnippet>397</a>    </span><span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
+<a href=#398 id=398 data-nosnippet>398</a>        <span class="self">Self</span>::with_bootstrap([])
+<a href=#399 id=399 data-nosnippet>399</a>    }
+<a href=#400 id=400 data-nosnippet>400</a>}
+<a href=#401 id=401 data-nosnippet>401</a>
+<a href=#402 id=402 data-nosnippet>402</a><span class="kw">impl </span>JoinOptions {
+<a href=#403 id=403 data-nosnippet>403</a>    <span class="doccomment">/// Creates [`JoinOptions`] with `endpoints` as bootstrap peers.
+<a href=#404 id=404 data-nosnippet>404</a>    </span><span class="kw">pub fn </span>with_bootstrap(endpoints: <span class="kw">impl </span>IntoIterator&lt;Item = EndpointId&gt;) -&gt; <span class="self">Self </span>{
+<a href=#405 id=405 data-nosnippet>405</a>        <span class="self">Self </span>{
+<a href=#406 id=406 data-nosnippet>406</a>            bootstrap: endpoints.into_iter().collect(),
+<a href=#407 id=407 data-nosnippet>407</a>            subscription_capacity: TOPIC_EVENTS_DEFAULT_CAP,
+<a href=#408 id=408 data-nosnippet>408</a>        }
+<a href=#409 id=409 data-nosnippet>409</a>    }
+<a href=#410 id=410 data-nosnippet>410</a>
+<a href=#411 id=411 data-nosnippet>411</a>    <span class="doccomment">/// Sets the number of events that a subscription buffers, see [`Self::subscription_capacity`].
+<a href=#412 id=412 data-nosnippet>412</a>    </span><span class="kw">pub fn </span>with_subscription_capacity(<span class="kw-2">mut </span><span class="self">self</span>, capacity: usize) -&gt; <span class="self">Self </span>{
+<a href=#413 id=413 data-nosnippet>413</a>        <span class="self">self</span>.subscription_capacity = capacity;
+<a href=#414 id=414 data-nosnippet>414</a>        <span class="self">self
+<a href=#415 id=415 data-nosnippet>415</a>    </span>}
+<a href=#416 id=416 data-nosnippet>416</a>}
+<a href=#417 id=417 data-nosnippet>417</a>
+<a href=#418 id=418 data-nosnippet>418</a><span class="attr">#[cfg(test)]
+<a href=#419 id=419 data-nosnippet>419</a></span><span class="kw">mod </span>tests {
+<a href=#420 id=420 data-nosnippet>420</a>    <span class="kw">use </span><span class="kw">crate</span>::GossipTopic;
+<a href=#421 id=421 data-nosnippet>421</a>
+<a href=#422 id=422 data-nosnippet>422</a>    <span class="attr">#[test]
+<a href=#423 id=423 data-nosnippet>423</a>    </span><span class="kw">fn </span>ensure_gossip_topic_is_sync() {
+<a href=#424 id=424 data-nosnippet>424</a>        <span class="attr">#[allow(unused)]
+<a href=#425 id=425 data-nosnippet>425</a>        </span><span class="kw">fn </span>get() -&gt; GossipTopic {
+<a href=#426 id=426 data-nosnippet>426</a>            <span class="macro">unimplemented!</span>()
+<a href=#427 id=427 data-nosnippet>427</a>        }
+<a href=#428 id=428 data-nosnippet>428</a>        <span class="attr">#[allow(unused)]
+<a href=#429 id=429 data-nosnippet>429</a>        </span><span class="kw">fn </span>check(_t: <span class="kw">impl </span>Sync) {}
+<a href=#430 id=430 data-nosnippet>430</a>        <span class="attr">#[allow(unused)]
+<a href=#431 id=431 data-nosnippet>431</a>        </span><span class="kw">fn </span>foo() {
+<a href=#432 id=432 data-nosnippet>432</a>            check(get());
+<a href=#433 id=433 data-nosnippet>433</a>        }
+<a href=#434 id=434 data-nosnippet>434</a>    }
+<a href=#435 id=435 data-nosnippet>435</a>}</code></pre></div></section></main></body></html>
