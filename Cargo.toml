@@ -33,9 +33,9 @@ unused-async = "warn"
 
 [dependencies]
 blake3 = "1.8"
-bytes = { version = "1.7", features = ["serde"] }
-data-encoding = "2.6.0"
-derive_more = { version = "2.0.1", features = [
+bytes = { version = "1.12", features = ["serde"] }
+data-encoding = "2.11.1"
+derive_more = { version = "2.1.1", features = [
     "add",
     "debug",
     "deref",
@@ -45,8 +45,8 @@ derive_more = { version = "2.0.1", features = [
     "into",
 ] }
 hex = "0.4.3"
-indexmap = "2.0"
-iroh-metrics = { version = "1.0.1", default-features = false }
+indexmap = "2.14"
+iroh-metrics = { version = "1.0.2", default-features = false }
 iroh-base = { version = "1", default-features = false, features = ["key"] }
 n0-future = "0.3"
 postcard = { version = "1", default-features = false, features = [
@@ -54,14 +54,14 @@ postcard = { version = "1", default-features = false, features = [
     "use-std",
     "experimental-derive",
 ] }
-rand = { version = "0.10.1", features = ["std_rng"] }
+rand = { version = "0.10.3", features = ["std_rng"] }
 rustc-hash = "2.1"
-serde = { version = "1.0.164", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
 
 # net dependencies (optional)
-iroh = { version = "1", default-features = false, optional = true }
-tokio = { version = "1", optional = true, features = ["io-util", "sync"] }
-tokio-util = { version = "0.7.12", optional = true, features = ["codec"] }
+iroh = { version = "1.4", default-features = false, optional = true }
+tokio = { version = "1.54", optional = true, features = ["io-util", "sync"] }
+tokio-util = { version = "0.7.20", optional = true, features = ["codec"] }
 tracing = "0.1"
 n0-error = { version = "1", features = ["anyhow"] }
 
@@ -70,13 +70,13 @@ humantime-serde = { version = "1.1.1", optional = true }
 
 # simulator dependencies (optional)
 clap = { version = "4", features = ["derive"], optional = true }
-toml = { version = "1.1.2", optional = true }
+toml = { version = "1.2.1", optional = true }
 tracing-subscriber = { version = "0.3", features = [
     "env-filter",
 ], optional = true }
 serde_json = { version = "1", optional = true }
-rayon = { version = "1.10.0", optional = true }
-comfy-table = { version = "7.1.4", optional = true }
+rayon = { version = "1.12.0", optional = true }
+comfy-table = { version = "7.2.2", optional = true }
 
 
 [dev-dependencies]
@@ -90,17 +90,17 @@ tokio = { version = "1", features = [
     "test-util",
 ] }
 clap = { version = "4", features = ["derive"] }
-futures-concurrency = "7.6.1"
+futures-concurrency = "7.7.1"
 humantime-serde = { version = "1.1.1" }
 iroh = { version = "1", default-features = false, features = [
     "metrics",
     "test-utils",
     "tls-ring"
 ] }
-testresult = "0.4.1"
-tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+testresult = "0.4.2"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 n0-tracing-test = "0.3"
-url = "2.4.0"
+url = "2.5.8"
 serde-byte-array = "0.1.2"
 rand = { version = "0.10", features = ["chacha"] }
 
