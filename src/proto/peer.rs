@@ -36,11 +36,6 @@ impl PeerData {
         Self(data.into())
     }
 
-    /// Get a reference to the contained [`bytes::Bytes`].
-    pub fn inner(&self) -> &bytes::Bytes {
-        &self.0
-    }
-
     /// Get the peer data as a byte slice.
     pub fn as_bytes(&self) -> &[u8] {
         &self.0

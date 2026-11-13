@@ -240,11 +240,6 @@ impl<T> Default for TimerMap<T> {
 }
 
 impl<T> TimerMap<T> {
-    /// Create a new, empty TimerMap.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Insert a new entry at the specified instant.
     pub fn insert(&mut self, instant: Instant, item: T) {
         let seq = self.seq;
@@ -275,6 +270,7 @@ impl<T> TimerMap<T> {
     }
 
     /// Get a reference to the earliest entry in the `TimerMap`.
+    #[cfg(any(test, feature = "net"))]
     pub fn first(&self) -> Option<&Instant> {
         self.heap.peek().map(|x| &x.time)
     }
@@ -363,13 +359,9 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> TimeBoundCache<K, V, S> {
     }
 
     /// Get the number of entries in the cache.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.map.len()
-    }
-
-    /// Returns `true` if the map contains no elements.
-    pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
     }
 
     /// Get an item from the cache.
@@ -388,13 +380,9 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> TimeBoundCache<K, V, S> {
     }
 
     /// Get the expiration time for an item.
+    #[cfg(test)]
     pub fn expires(&self, key: &K) -> Option<&Instant> {
         self.map.get(key).map(|(expires, _value)| expires)
-    }
-
-    /// Iterate over all items in the cache.
-    pub fn iter(&self) -> impl Iterator<Item = (&K, &V, &Instant)> {
-        self.map.iter().map(|(k, (expires, v))| (k, v, expires))
     }
 
     /// Remove all entries with an expiry instant lower or equal to `instant`.
@@ -465,7 +453,7 @@ mod test {
 
     #[test]
     fn timer_map() {
-        let mut map = TimerMap::new();
+        let mut map = TimerMap::default();
         let now = Instant::now();
 
         let times = [

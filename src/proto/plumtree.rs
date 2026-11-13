@@ -122,6 +122,7 @@ impl Round {
     }
 
     /// Returns the number of hops.
+    #[cfg(feature = "net")]
     pub(crate) fn hops(&self) -> u16 {
         self.0
     }
@@ -145,7 +146,7 @@ pub enum Message {
     IHave(Vec<IHave>),
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "net", feature = "test-utils")))]
 impl Message {
     /// Returns a payload with `content`, as its publisher sends it.
     ///
@@ -559,6 +560,7 @@ impl<PI: PeerIdentity> State<PI> {
     }
 
     /// Get access to the [`Stats`] of the plumtree.
+    #[cfg(feature = "experimental-proto-internals")]
     pub fn stats(&self) -> &Stats {
         &self.stats
     }

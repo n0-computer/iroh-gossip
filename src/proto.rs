@@ -48,9 +48,6 @@
 //! [hyparview]: https://asc.di.fct.unl.pt/~jleitao/pdf/dsn07-leitao.pdf
 //! [plumtree]: https://asc.di.fct.unl.pt/~jleitao/pdf/srds07-leitao.pdf
 
-// Without the feature, the module is private, and parts of its API have no caller.
-#![cfg_attr(not(feature = "experimental-proto-internals"), allow(dead_code))]
-
 use serde::{Deserialize, Serialize};
 
 pub(crate) mod hyparview;
@@ -58,23 +55,21 @@ mod peer;
 pub(crate) mod plumtree;
 pub mod state;
 pub mod topic;
-pub mod util;
+pub(crate) mod util;
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(feature = "test-utils")]
 pub mod sim;
 
-#[cfg_attr(
-    not(feature = "experimental-proto-internals"),
-    allow(unused_imports, reason = "only the crate root uses some of them")
-)]
 pub use self::{
-    hyparview::{Config as MembershipConfig, Ttl},
+    hyparview::Config as MembershipConfig,
     peer::{PeerData, PeerIdentity},
-    plumtree::{Config as BroadcastConfig, DeliveryScope, Round, Scope},
+    plumtree::{Config as BroadcastConfig, DeliveryScope, Scope},
     state::{InEvent, Message, State, Timer, TopicId, IO},
     topic::{Command, Config, Event},
     util::ParseIdError,
 };
+#[cfg(feature = "experimental-proto-internals")]
+pub use self::{hyparview::Ttl, plumtree::Round};
 
 /// The default maximum size in bytes of a gossip message.
 ///
@@ -101,7 +96,7 @@ impl<PI> From<(PI, Option<PeerData>)> for PeerInfo<PI> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-utils"))]
 mod test {
     use std::{collections::HashSet, env, fmt, str::FromStr};
 

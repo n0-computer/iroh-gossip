@@ -19,19 +19,19 @@ mod metrics;
 mod net;
 #[cfg(feature = "experimental-proto-internals")]
 pub mod proto;
-#[cfg(not(feature = "experimental-proto-internals"))]
+// Without the feature, only the networking code uses the protocol.
+#[cfg(all(feature = "net", not(feature = "experimental-proto-internals")))]
 mod proto;
 
+pub use self::metrics::Metrics;
+#[cfg(any(feature = "net", feature = "experimental-proto-internals"))]
+pub use self::proto::{
+    BroadcastConfig, MembershipConfig, ParseIdError, TopicId, DEFAULT_MAX_MESSAGE_SIZE,
+    MIN_MAX_MESSAGE_SIZE,
+};
 #[cfg(feature = "net")]
 pub use self::{
     api::{DeliveryScope, Event, GossipReceiver, GossipSender, GossipTopic, JoinOptions, Message},
     error::Error,
     net::{Builder, Gossip, QueueOptions, ALPN},
-};
-pub use self::{
-    metrics::Metrics,
-    proto::{
-        BroadcastConfig, MembershipConfig, ParseIdError, TopicId, DEFAULT_MAX_MESSAGE_SIZE,
-        MIN_MAX_MESSAGE_SIZE,
-    },
 };

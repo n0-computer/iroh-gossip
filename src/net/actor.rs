@@ -142,7 +142,7 @@ impl Actor {
             topics: Default::default(),
             quit_queue: Default::default(),
             follow_ups: Default::default(),
-            timers: TimerMap::new(),
+            timers: TimerMap::default(),
             address_lookup,
             metrics: metrics.clone(),
             overflowed_peers: Vec::new(),
