@@ -32,7 +32,7 @@ const TOPIC_EVENTS_DEFAULT_CAP: usize = 2048;
 ///
 /// See [`QueueOptions`] for what this means for your app.
 ///
-/// [`QueueOptions`]: crate::net::QueueOptions
+/// [`QueueOptions`]: crate::QueueOptions
 #[derive(Debug, Clone)]
 pub struct GossipSender {
     sender: mpsc::Sender<Command>,
@@ -52,7 +52,7 @@ impl GossipSender {
     /// It is [`Builder::max_message_size`] less the encoding, about 40 bytes,
     /// and holds for [`Self::broadcast_neighbors`] too.
     ///
-    /// [`Builder::max_message_size`]: crate::net::Builder::max_message_size
+    /// [`Builder::max_message_size`]: crate::Builder::max_message_size
     pub fn max_content_size(&self) -> usize {
         self.max_content
     }
@@ -75,7 +75,7 @@ impl GossipSender {
     /// Your own broadcast does not come back as [`Event::Received`].
     ///
     /// A peer ignores a message with the same content as one that it saw in the last 90 seconds
-    /// (the default of [`PlumtreeConfig::message_id_retention`]). To send the same payload twice,
+    /// (the default of [`BroadcastConfig::message_id_retention`]). To send the same payload twice,
     /// add a nonce or a sequence number to the content.
     ///
     /// # Errors
@@ -83,7 +83,7 @@ impl GossipSender {
     /// Returns [`Error::TooLarge`] if the content is over [`Self::max_content_size`],
     /// and [`Error::Closed`] if the gossip actor stopped.
     ///
-    /// [`PlumtreeConfig::message_id_retention`]: crate::proto::PlumtreeConfig::message_id_retention
+    /// [`BroadcastConfig::message_id_retention`]: crate::proto::BroadcastConfig::message_id_retention
     pub async fn broadcast(&self, message: Bytes) -> Result<(), Error> {
         self.check_size(&message)?;
         self.send(Command::Broadcast(message)).await?;
@@ -391,7 +391,7 @@ impl JoinOptions {
 
 #[cfg(test)]
 mod tests {
-    use crate::api::GossipTopic;
+    use crate::GossipTopic;
 
     #[test]
     fn ensure_gossip_topic_is_sync() {

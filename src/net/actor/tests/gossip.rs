@@ -513,9 +513,7 @@ async fn can_die_and_reconnect() -> Result {
             .bind()
             .await?;
         let gossip = Gossip::builder().spawn(ep.clone());
-        let router = Router::builder(ep)
-            .accept(GOSSIP_ALPN, gossip.clone())
-            .spawn();
+        let router = Router::builder(ep).accept(ALPN, gossip.clone()).spawn();
         Ok((router, gossip))
     }
 
@@ -680,9 +678,7 @@ async fn gossip_rely_on_gossip_address_lookup() -> n0_error::Result<()> {
             .await?;
         let endpoint_id = ep.id();
         let gossip = Gossip::builder().spawn(ep.clone());
-        let router = Router::builder(ep)
-            .accept(GOSSIP_ALPN, gossip.clone())
-            .spawn();
+        let router = Router::builder(ep).accept(ALPN, gossip.clone()).spawn();
         let topic = gossip.subscribe(topic_id, vec![]).await?;
         let (sender, receiver) = topic.split();
         Ok((endpoint_id, router, gossip, sender, receiver))

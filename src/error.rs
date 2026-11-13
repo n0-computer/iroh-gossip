@@ -1,9 +1,9 @@
 //! The error type of the crate.
 
-/// An error of [`Gossip`] and of the topic handles in [`api`].
+/// An error of [`Gossip`] and of the topic handles, such as [`GossipTopic`].
 ///
 /// [`Gossip`]: crate::Gossip
-/// [`api`]: crate::api
+/// [`GossipTopic`]: crate::GossipTopic
 #[n0_error::stack_error(derive, add_meta)]
 #[non_exhaustive]
 pub enum Error {
@@ -18,7 +18,7 @@ pub enum Error {
     Closed,
     /// The message content is over the limit, see [`GossipSender::max_content_size`].
     ///
-    /// [`GossipSender::max_content_size`]: crate::api::GossipSender::max_content_size
+    /// [`GossipSender::max_content_size`]: crate::GossipSender::max_content_size
     #[error("message of {size} bytes is over the limit of {max_content} bytes")]
     TooLarge {
         /// The size of the content.

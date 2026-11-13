@@ -1,8 +1,10 @@
 //! Implementation of the iroh-gossip protocol, as an IO-less state machine
 //!
-//! This module implements the iroh-gossip protocol. The entry point is `State`, which contains
-//! the protocol state for a node. `State` and the other parts of the state machine are public
-//! only with the `experimental-proto-internals` feature. Their API may change in any release.
+//! This module implements the iroh-gossip protocol. The entry point is [`State`], which contains
+//! the protocol state for a node.
+//!
+//! The module is public only with the `experimental-proto-internals` feature. Its API may change
+//! in any release.
 //!
 //! The iroh-gossip protocol is made up from two parts: A swarm membership protocol, based on
 //! [HyParView][hyparview], and a gossip broadcasting protocol, based on [PlumTree][plumtree].
@@ -46,72 +48,44 @@
 //! [hyparview]: https://asc.di.fct.unl.pt/~jleitao/pdf/dsn07-leitao.pdf
 //! [plumtree]: https://asc.di.fct.unl.pt/~jleitao/pdf/srds07-leitao.pdf
 
-// Without the feature, parts of the API of the internals have no caller.
+// Without the feature, the module is private, and parts of its API have no caller.
 #![cfg_attr(not(feature = "experimental-proto-internals"), allow(dead_code))]
 
 use serde::{Deserialize, Serialize};
 
-/// Makes an item public with the `experimental-proto-internals` feature, and
-/// crate-public without it.
-macro_rules! internal {
-    (pub use $($item:tt)*) => {
-        #[cfg(feature = "experimental-proto-internals")]
-        pub use $($item)*
-        #[cfg(not(feature = "experimental-proto-internals"))]
-        #[allow(unused_imports, reason = "some builds use only part of the internals")]
-        pub(crate) use $($item)*
-    };
-    ($(#[$meta:meta])* pub $($item:tt)*) => {
-        #[cfg(feature = "experimental-proto-internals")]
-        $(#[$meta])* pub $($item)*
-        #[cfg(not(feature = "experimental-proto-internals"))]
-        $(#[$meta])* pub(crate) $($item)*
-    };
-}
-
 pub(crate) mod hyparview;
 mod peer;
 pub(crate) mod plumtree;
-internal!(
-    pub mod state;
-);
-internal!(
-    pub mod topic;
-);
-internal!(
-    pub mod util;
-);
+pub mod state;
+pub mod topic;
+pub mod util;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod sim;
 
-pub use hyparview::{Config as HyparviewConfig, Ttl};
-pub use plumtree::{Config as PlumtreeConfig, DeliveryScope, Round};
-pub use state::TopicId;
-pub use util::ParseIdError;
-internal!(
-    pub use peer::{PeerData, PeerIdentity};
-);
-internal!(
-    pub use plumtree::Scope;
-);
-internal!(
-    pub use state::{InEvent, Message, State, Timer, IO};
-);
-internal!(
-    pub use topic::{Command, Config, Event};
-);
+#[cfg_attr(
+    not(feature = "experimental-proto-internals"),
+    allow(unused_imports, reason = "only the crate root uses some of them")
+)]
+pub use self::{
+    hyparview::{Config as MembershipConfig, Ttl},
+    peer::{PeerData, PeerIdentity},
+    plumtree::{Config as BroadcastConfig, DeliveryScope, Round, Scope},
+    state::{InEvent, Message, State, Timer, TopicId, IO},
+    topic::{Command, Config, Event},
+    util::ParseIdError,
+};
 
 /// The default maximum size in bytes of a gossip message.
 ///
 /// The value is an arbitrary default. Change it with [`Builder::max_message_size`].
 ///
-/// [`Builder::max_message_size`]: crate::net::Builder::max_message_size
+/// [`Builder::max_message_size`]: crate::Builder::max_message_size
 pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 4096;
 
 /// The minimum allowed value for [`Builder::max_message_size`].
 ///
-/// [`Builder::max_message_size`]: crate::net::Builder::max_message_size
+/// [`Builder::max_message_size`]: crate::Builder::max_message_size
 pub const MIN_MAX_MESSAGE_SIZE: usize = 512;
 
 /// PeerInfo contains a peer's identifier and the opaque peer data as provided by the implementer.

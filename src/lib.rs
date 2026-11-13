@@ -2,28 +2,36 @@
 //! Broadcast messages to peers subscribed to a topic
 //!
 //! The crate runs on an [iroh] endpoint with the `net` feature, through [`Gossip`].
-//! The [`proto`] module has the protocol as an IO-less state machine, which you can
-//! use standalone.
+//!
+//! The protocol itself is an IO-less state machine. The `experimental-proto-internals`
+//! feature makes it public in the `proto` module. Its API may change in any release.
 //!
 //! [iroh]: https://docs.rs/iroh
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 #![cfg_attr(iroh_docsrs, feature(doc_cfg))]
 
 #[cfg(feature = "net")]
-pub use net::Gossip;
-#[cfg(feature = "net")]
-#[doc(inline)]
-pub use net::GOSSIP_ALPN as ALPN;
-
-#[cfg(feature = "net")]
-pub mod api;
+mod api;
 #[cfg(feature = "net")]
 mod error;
-pub mod metrics;
+mod metrics;
 #[cfg(feature = "net")]
-pub mod net;
+mod net;
+#[cfg(feature = "experimental-proto-internals")]
 pub mod proto;
+#[cfg(not(feature = "experimental-proto-internals"))]
+mod proto;
 
 #[cfg(feature = "net")]
-pub use error::Error;
-pub use proto::TopicId;
+pub use self::{
+    api::{Event, GossipReceiver, GossipSender, GossipTopic, JoinOptions, Message},
+    error::Error,
+    net::{Builder, Gossip, QueueOptions, ALPN},
+};
+pub use self::{
+    metrics::Metrics,
+    proto::{
+        BroadcastConfig, DeliveryScope, MembershipConfig, ParseIdError, Round, TopicId, Ttl,
+        DEFAULT_MAX_MESSAGE_SIZE, MIN_MAX_MESSAGE_SIZE,
+    },
+};

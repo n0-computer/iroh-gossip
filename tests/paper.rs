@@ -1100,7 +1100,7 @@ fn plumtree_graft_timeout_below_the_eager_path_leaves_little_redundancy() {
 #[test]
 fn every_tuning_knob_is_reachable() {
     let peers = swarm_size(PEERS);
-    use iroh_gossip::proto::{Round, Ttl};
+    use iroh_gossip::{Round, Ttl};
 
     let mut config = Config::default();
 

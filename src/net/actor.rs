@@ -25,8 +25,7 @@ use super::{
     subscriptions::{
         all_eager_peers_busy, topic_subscriber_loop, SubscriptionCommands, TopicHandles,
     },
-    InEvent, Join, ProtoCommand, ProtoEvent, ProtoMessage, QueueOptions, Timer, ToActor,
-    GOSSIP_ALPN,
+    InEvent, Join, ProtoCommand, ProtoEvent, ProtoMessage, QueueOptions, Timer, ToActor, ALPN,
 };
 use crate::{
     api::Command,
@@ -49,7 +48,7 @@ impl Default for ActorConfig {
     fn default() -> Self {
         Self {
             proto: Default::default(),
-            alpn: GOSSIP_ALPN.to_vec().into(),
+            alpn: ALPN.to_vec().into(),
             send_queue: Default::default(),
         }
     }

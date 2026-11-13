@@ -172,7 +172,7 @@ pub(crate) async fn create_endpoint(
     let ep = Endpoint::builder(presets::Minimal)
         .relay_mode(RelayMode::Custom(relay_map))
         .secret_key(SecretKey::from_bytes(&rng.random()))
-        .alpns(vec![GOSSIP_ALPN.to_vec()])
+        .alpns(vec![ALPN.to_vec()])
         .ca_tls_config(CaTlsConfig::insecure_skip_verify())
         .bind()
         .await?;
@@ -256,7 +256,7 @@ impl TestPair {
     async fn connect(&self) -> Result<(Connection, Connection)> {
         let ours = async {
             self.ep1
-                .connect(self.ep2_addr.clone(), GOSSIP_ALPN)
+                .connect(self.ep2_addr.clone(), ALPN)
                 .await
                 .std_context("connect")
         };
@@ -275,7 +275,7 @@ impl TestPair {
         };
         let theirs = async {
             self.ep2
-                .connect(self.ep1_addr.clone(), GOSSIP_ALPN)
+                .connect(self.ep1_addr.clone(), ALPN)
                 .await
                 .std_context("connect")
         };
@@ -518,7 +518,7 @@ async fn direct_endpoint(
 ) -> Result<Endpoint> {
     let endpoint = Endpoint::builder(presets::Minimal)
         .relay_mode(RelayMode::Disabled)
-        .alpns(vec![GOSSIP_ALPN.to_vec()])
+        .alpns(vec![ALPN.to_vec()])
         .transport_config(transport)
         .bind()
         .await?;

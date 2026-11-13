@@ -11,11 +11,7 @@ use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, EndpointAddr, PublicKey,
     RelayMode, RelayUrl, SecretKey,
 };
-use iroh_gossip::{
-    api::{Event, GossipReceiver, GossipSender},
-    net::{Gossip, GOSSIP_ALPN},
-    proto::TopicId,
-};
+use iroh_gossip::{Event, Gossip, GossipReceiver, GossipSender, TopicId, ALPN};
 use n0_error::{bail_any, AnyError, Result, StdResultExt};
 use n0_future::{task, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -138,7 +134,7 @@ async fn main() -> Result<()> {
 
     // setup router
     let router = iroh::protocol::Router::builder(endpoint.clone())
-        .accept(GOSSIP_ALPN, gossip.clone())
+        .accept(ALPN, gossip.clone())
         .spawn();
 
     // join the gossip topic by connecting to known peers, if any

@@ -22,9 +22,7 @@ use iroh::{
     Endpoint, EndpointId, RelayMode, SecretKey,
 };
 use iroh_gossip::{
-    api::{Event, GossipReceiver, GossipSender, JoinOptions},
-    net::{Builder, Gossip, GOSSIP_ALPN},
-    proto::TopicId,
+    Builder, Event, Gossip, GossipReceiver, GossipSender, JoinOptions, TopicId, ALPN,
 };
 use n0_error::{bail_any, Result, StdResultExt};
 use n0_future::{task::AbortOnDropHandle, StreamExt};
@@ -89,7 +87,7 @@ impl Node {
         let endpoint = Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Disabled)
             .secret_key(secret.clone())
-            .alpns(vec![GOSSIP_ALPN.to_vec()])
+            .alpns(vec![ALPN.to_vec()])
             .transport_config(transport)
             .bind()
             .await
@@ -1107,7 +1105,7 @@ async fn slow_peer_does_not_block_shutdown() -> Result {
     let mut sa = Sub::new(&a, t, vec![]).await?;
     let conn = b
         .endpoint
-        .connect(a.endpoint.addr(), GOSSIP_ALPN)
+        .connect(a.endpoint.addr(), ALPN)
         .await
         .std_context("connect")?;
     let mut stream = conn.open_uni().await.std_context("open raw stream")?;
