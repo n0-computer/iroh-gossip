@@ -111,6 +111,64 @@ async fn max_peer_streams_keeps_topics_over_the_endpoint_limit() -> Result {
     Ok(())
 }
 
+/// A topic that the peer left finishes its stream, while another topic keeps the peer.
+///
+/// The endpoints allow 3 streams. A and B keep one topic, and join and leave four
+/// more in turn. If A kept the streams of the left topics, the third would stall.
+#[tokio::test(flavor = "multi_thread")]
+#[traced_test]
+async fn left_topics_finish_their_streams() -> Result {
+    let lookup = MemoryLookup::new();
+    let limited = || {
+        QuicTransportConfig::builder()
+            .max_concurrent_uni_streams(VarInt::from_u32(3))
+            .build()
+    };
+    let a = DirectNode::spawn(&lookup, Gossip::builder(), limited()).await?;
+    let b = DirectNode::spawn(&lookup, Gossip::builder(), limited()).await?;
+    let kept: TopicId = blake3::hash(b"kept").into();
+    let (_a_kept_tx, mut a_kept) = a.gossip.subscribe(kept, vec![]).await?.split();
+    let (b_kept_tx, mut b_kept) = b.gossip.subscribe(kept, vec![a.id()]).await?.split();
+    neighbor_up(&mut a_kept, b.id()).await?;
+    neighbor_up(&mut b_kept, a.id()).await?;
+
+    for i in 0..4u32 {
+        let topic: TopicId = blake3::hash(&i.to_be_bytes()).into();
+        let (a_tx, mut a_rx) = a.gossip.subscribe(topic, vec![]).await?.split();
+        let (b_tx, mut b_rx) = b.gossip.subscribe(topic, vec![a.id()]).await?.split();
+        // Less than the open timeout, so a stalled open fails the test.
+        let prompt = wire::OPEN_TIMEOUT / 2;
+        timeout(prompt, neighbor_up(&mut a_rx, b.id()))
+            .await
+            .std_context("a did not get b as a neighbor in time")??;
+        timeout(prompt, neighbor_up(&mut b_rx, a.id()))
+            .await
+            .std_context("b did not get a as a neighbor in time")??;
+        // B leaves the topic. A gets its `Disconnect`, and no longer wants B for it.
+        drop((b_tx, b_rx));
+        timeout(PROMPT, async {
+            while let Some(event) = a_rx.try_next().await? {
+                if matches!(event, api::Event::NeighborDown(down) if down == b.id()) {
+                    return Ok(());
+                }
+            }
+            Err(n0_error::anyerr!("the subscription ended"))
+        })
+        .await
+        .std_context("a did not see b leave")??;
+        drop((a_tx, a_rx));
+    }
+
+    // The kept topic still works, and never lost its neighbor.
+    b_kept_tx.broadcast("still here".into()).await?;
+    timeout(PROMPT, receive_until(&mut a_kept, b"still here"))
+        .await
+        .std_context("a did not get the message")??;
+    let down = a.gossip.metrics().neighbor_down.get();
+    assert_eq!(down, 4, "a lost a neighbor of the kept topic");
+    Ok(())
+}
+
 /// A publisher whose every eager peer has a full queue waits, loses nothing, and goes on later.
 ///
 /// The only neighbor, an eager peer, reads nothing, as when our own uplink

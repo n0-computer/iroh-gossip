@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error_span, warn, Instrument};
 
 use super::{
-    queue::{set_if_changed, QueueLease, QueuedMessage},
+    queue::{set_if_changed, QueueItem, QueueLease, QueuedMessage},
     wire::{read_message, write_sized_message, ReadError, StreamHeader, WriteError, OPEN_TIMEOUT},
     InEvent, ProtoMessage,
 };
@@ -475,7 +475,20 @@ impl SendLoop {
                     // The actor dropped the queue.
                     break;
                 }
-                let item = queue.current().expect("next returned a message");
+                let item = match queue.current().expect("next returned an item") {
+                    QueueItem::Message(item) => item,
+                    QueueItem::Finish(topic) => {
+                        let topic = *topic;
+                        // Dropping a stream finishes it. A later message opens a new one,
+                        // see `SendQueue` for the order in which the peer reads them.
+                        if self.streams.remove(&topic).is_some() {
+                            debug!(topic = %topic.fmt_short(), "the topic no longer uses the peer, finish its stream");
+                        }
+                        self.initial_topics.retain(|initial| *initial != topic);
+                        queue.advance();
+                        continue;
+                    }
+                };
                 match self.open_stream(item.message.topic, &revoked).await {
                     Ok(true) => {}
                     // The lease ended before the stream opened. The message stays

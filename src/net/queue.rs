@@ -21,7 +21,7 @@ use tokio::sync::{mpsc, watch, OwnedMutexGuard};
 use tokio_util::sync::CancellationToken;
 
 use super::ProtoMessage;
-use crate::proto::state::MessageKind;
+use crate::proto::{state::MessageKind, TopicId};
 
 /// The bytes that a queued message takes on top of its encoded size.
 ///
@@ -74,6 +74,17 @@ impl QueuedMessage {
     pub(super) fn encoded_len(&self) -> usize {
         self.reservation.encoded_len as usize
     }
+}
+
+/// An item of the queue: a message, or the end of the stream of a topic.
+#[derive(Debug)]
+pub(super) enum QueueItem {
+    /// A message to write.
+    Message(QueuedMessage),
+    /// Finishes the stream of the topic, after the messages queued before it.
+    ///
+    /// It takes no room in the queue, so it never fails.
+    Finish(TopicId),
 }
 
 /// The section of a queue that a message counts against, besides the whole queue.
@@ -213,9 +224,10 @@ impl Drop for Reservation {
 /// - We never wait on a peer. A full queue drops data, and a control message
 ///   that does not fit aborts the peer. What was queued for an aborted peer is
 ///   lost.
-/// - Each topic has one stream to a peer, and we write it in order. The peer
-///   reads each stream on its own, so it may handle a `Join` before an
-///   earlier `Disconnect`.
+/// - Each topic has one stream at a time to a peer, and we write it in
+///   order. The peer reads each stream on its own, so it may handle a `Join`
+///   before an earlier `Disconnect`, and a node up to 0.101 may read the
+///   next stream of a topic before the last one.
 /// - With topics near the stream limit of the peer, see
 ///   [`Builder::max_peer_streams`], an open waits [`OPEN_TIMEOUT`] and closes
 ///   the connection, again after each rejoin.
@@ -243,7 +255,7 @@ impl Drop for Reservation {
 /// [`BROADCAST_WAIT_LIMIT`]: super::subscriptions::BROADCAST_WAIT_LIMIT
 #[derive(Debug)]
 pub(super) struct SendQueue {
-    tx: mpsc::UnboundedSender<QueuedMessage>,
+    tx: mpsc::UnboundedSender<QueueItem>,
     capacity: Arc<Capacity>,
     closed: watch::Sender<bool>,
     reader: SharedReader,
@@ -293,9 +305,15 @@ impl SendQueue {
             message,
             reservation,
         };
-        let sent = self.tx.send(item);
+        let sent = self.tx.send(QueueItem::Message(item));
         debug_assert!(sent.is_ok(), "the queue keeps its reader");
         Pushed::Queued
+    }
+
+    /// Queues the end of the stream of `topic`, without opening the queue.
+    pub(super) fn finish_stream(&self, topic: TopicId) {
+        let sent = self.tx.send(QueueItem::Finish(topic));
+        debug_assert!(sent.is_ok(), "the queue keeps its reader");
     }
 
     /// Returns whether data fills at least half of its section.
@@ -416,8 +434,8 @@ type SharedReader = Arc<tokio::sync::Mutex<QueueReader>>;
 /// connection writes it first.
 #[derive(Debug)]
 pub(super) struct QueueReader {
-    rx: mpsc::UnboundedReceiver<QueuedMessage>,
-    unfinished: Option<QueuedMessage>,
+    rx: mpsc::UnboundedReceiver<QueueItem>,
+    unfinished: Option<QueueItem>,
 }
 
 impl QueueReader {
@@ -434,9 +452,18 @@ impl QueueReader {
         self.unfinished.is_some()
     }
 
-    /// Returns the message that [`Self::wait_next`] waited for.
-    pub(super) fn current(&self) -> Option<&QueuedMessage> {
+    /// Returns the item that [`Self::wait_next`] waited for.
+    pub(super) fn current(&self) -> Option<&QueueItem> {
         self.unfinished.as_ref()
+    }
+
+    /// Returns the current item if it is a message.
+    #[cfg(test)]
+    pub(super) fn current_message(&self) -> Option<&QueuedMessage> {
+        match self.unfinished.as_ref()? {
+            QueueItem::Message(message) => Some(message),
+            QueueItem::Finish(_) => None,
+        }
     }
 
     /// Ends the current message, written or dropped, which releases its reservation.
@@ -516,9 +543,30 @@ mod tests {
         }
         let mut reader = queue.try_reader().unwrap();
         for message in pushed {
-            let item = reader.rx.try_recv().unwrap();
+            let QueueItem::Message(item) = reader.rx.try_recv().unwrap() else {
+                panic!("the queue returned no message");
+            };
             assert_eq!(item.message.message, message.message);
         }
+    }
+
+    /// The end of a stream comes after the messages queued before it, takes no room, and keeps the queue closed.
+    #[test]
+    fn finish_keeps_its_place_and_takes_no_room() {
+        let queue = SendQueue::new(MIN_QUEUE_SIZE);
+        let first = data(10);
+        let topic = first.topic;
+        assert!(matches!(queue.send(first.clone()), Pushed::Queued));
+        queue.close();
+        queue.finish_stream(topic);
+        assert!(queue.is_closed(), "the end of a stream opened the queue");
+        assert_eq!(used(&queue).0, size(&first));
+        let mut reader = queue.try_reader().unwrap();
+        let QueueItem::Message(item) = reader.rx.try_recv().unwrap() else {
+            panic!("the message did not come first");
+        };
+        assert_eq!(item.message.message, first.message);
+        assert!(matches!(reader.rx.try_recv().unwrap(), QueueItem::Finish(t) if t == topic));
     }
 
     /// Data and announcements fill only their section, and leave room for control.
@@ -597,7 +645,7 @@ mod tests {
         let first = |queue_lease: QueueLease, len| async move {
             let mut reader = queue_lease.lock().await;
             assert!(reader.wait_next().await);
-            let current = &reader.current().unwrap().message.message;
+            let current = &reader.current_message().unwrap().message.message;
             assert_eq!(current, &data(len).message);
             reader
         };
@@ -635,7 +683,10 @@ mod tests {
         let mut reader = third.lock().await;
         for len in [10, 20] {
             assert!(reader.wait_next().await);
-            assert_eq!(reader.current().unwrap().message.message, data(len).message);
+            assert_eq!(
+                reader.current_message().unwrap().message.message,
+                data(len).message
+            );
             reader.advance();
         }
         assert_eq!(used(&queue), (0, 0));

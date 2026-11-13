@@ -259,12 +259,20 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
     /// peer that it has a connection to. It closes the connection to a peer that no
     /// topic wants, once the messages queued for the peer went out. Other events do not
     /// change what a topic wants. But they can send to a peer that no topic wants, such as
-    /// a Plumtree reply to a former neighbor. So the runtime also asks this for a peer
-    /// that it sent to after such an event.
+    /// a Plumtree reply to a former neighbor. So the runtime also asks this after a send
+    /// that opened the queue of such a peer.
     pub fn wants_connection(&self, peer: &PI) -> bool {
         self.states
             .values()
             .any(|state| state.wants_connection(peer))
+    }
+
+    /// Returns whether `topic` wants a connection to `peer`, see [`Self::wants_connection`].
+    #[cfg(feature = "net")]
+    pub(crate) fn topic_wants_connection(&self, topic: &TopicId, peer: &PI) -> bool {
+        self.states
+            .get(topic)
+            .is_some_and(|state| state.wants_connection(peer))
     }
 
     /// Returns the topics that want a connection to `peer`.

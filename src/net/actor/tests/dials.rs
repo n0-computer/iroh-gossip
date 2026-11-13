@@ -15,7 +15,10 @@ async fn reopened_queue_keeps_the_waiting_writer() {
     assert!(!lease.revoked().is_cancelled());
     assert!(!peer.needs_dial(), "the waiting writer takes the queue");
     assert!(reader.wait_next().await);
-    assert_eq!(reader.current().unwrap().message.message, message.message);
+    assert_eq!(
+        reader.current_message().unwrap().message.message,
+        message.message
+    );
 }
 
 /// A completed dial writes only a queue that has no writer.
@@ -77,7 +80,10 @@ async fn discarded_queue_goes_out_on_its_writer() {
 
     let mut reader = lease.lock().await;
     assert!(reader.wait_next().await);
-    assert_eq!(reader.current().unwrap().message.message, message.message);
+    assert_eq!(
+        reader.current_message().unwrap().message.message,
+        message.message
+    );
     reader.advance();
     assert!(!reader.wait_next().await, "the old queue must end");
 }
