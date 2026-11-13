@@ -13,7 +13,7 @@ resolver = "2"
 rust-version = "1.91"
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["lib", "cdylib"]
 
 [lints.rust]
 missing_debug_implementations = "warn"
@@ -161,3 +161,19 @@ debug = true
 [profile.release]
 debug = true
 
+[package.metadata.cargo_check_external_types]
+allowed_external_types = [
+    # crates owned by us that are 1.0
+    "iroh::*",
+    "iroh_base::*",
+    "iroh_metrics::*",
+    "n0_error::*",
+    # 1.0 crates that we deem fine to be part of the public API
+    "bytes::*",
+    "postcard::*",
+    "serde_core::*",
+    "tokio::*",
+    # non-1.0 crates that we decided to accept in the public API
+    "futures_core::stream::Stream",
+    "rand_core::*",
+]
