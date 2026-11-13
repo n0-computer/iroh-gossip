@@ -1,0 +1,9 @@
+(function() {
+    var implementors = Object.fromEntries([["iroh_gossip",[["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/nightly/core/default/trait.Default.html\" title=\"trait core::default::Default\">Default</a> for <a class=\"struct\" href=\"iroh_gossip/struct.BroadcastConfig.html\" title=\"struct iroh_gossip::BroadcastConfig\">Config</a>"],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/nightly/core/default/trait.Default.html\" title=\"trait core::default::Default\">Default</a> for <a class=\"struct\" href=\"iroh_gossip/struct.JoinOptions.html\" title=\"struct iroh_gossip::JoinOptions\">JoinOptions</a>"],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/nightly/core/default/trait.Default.html\" title=\"trait core::default::Default\">Default</a> for <a class=\"struct\" href=\"iroh_gossip/struct.MembershipConfig.html\" title=\"struct iroh_gossip::MembershipConfig\">Config</a>"],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/nightly/core/default/trait.Default.html\" title=\"trait core::default::Default\">Default</a> for <a class=\"struct\" href=\"iroh_gossip/struct.Metrics.html\" title=\"struct iroh_gossip::Metrics\">Metrics</a>"],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/nightly/core/default/trait.Default.html\" title=\"trait core::default::Default\">Default</a> for <a class=\"struct\" href=\"iroh_gossip/struct.QueueOptions.html\" title=\"struct iroh_gossip::QueueOptions\">QueueOptions</a>"]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":57,"fragment_lengths":[1421]}
