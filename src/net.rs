@@ -177,6 +177,38 @@ impl Builder {
         self
     }
 
+    /// Sets how many streams a peer may have open to us on a gossip connection.
+    ///
+    /// Each topic that uses a peer keeps a stream open in each direction, so
+    /// this limit caps the topics that we share with a peer. Over the limit, a
+    /// peer cannot open the stream of the next topic. It closes the connection
+    /// after 15 s, and the topics rejoin and fail again.
+    ///
+    /// By default, gossip keeps the `max_concurrent_uni_streams` of the
+    /// endpoint, which is 100 unless you change it. Set a higher value if you
+    /// share more topics with a peer, for example 1024. The peer must set it
+    /// too, for the streams that we open to it.
+    ///
+    /// The value replaces the one of the endpoint on gossip connections:
+    ///
+    /// - QUIC tells the peer of a raise only if it adds more than an eighth of
+    ///   the new limit. Set at least 8/7 of the limit of the endpoint, so 115
+    ///   or more for the default of 100. A smaller raise does not reach the
+    ///   peer.
+    /// - A value below the limit of the endpoint applies only after the peer
+    ///   used the streams that the endpoint allowed it. Do not set fewer
+    ///   streams than the topics that you share with a peer.
+    /// - QUIC gives back the slots of ended streams once more than an eighth
+    ///   of the limit ended. Leave room for topics that come and go.
+    ///
+    /// The limit itself allocates nothing. Each open stream can buffer up to
+    /// the `stream_receive_window` of the endpoint, and all streams of a
+    /// connection together up to its `receive_window`.
+    pub fn max_peer_streams(mut self, max: u32) -> Self {
+        self.config.max_peer_streams = Some(max);
+        self
+    }
+
     /// Spawns a gossip actor, and returns its handle.
     ///
     /// This has to run inside a tokio runtime. The actor stops when you drop the last clone of
@@ -235,7 +267,7 @@ impl Builder {
 ///   and QUIC buffers more on top.
 /// - A peer that takes no data for 60 s loses its connection, as does one
 ///   that shares more topics with this node than its stream limit allows,
-///   100 by default.
+///   100 by default, see [`Builder::max_peer_streams`].
 ///
 /// [`GossipSender::broadcast`]: crate::GossipSender::broadcast
 #[derive(Debug, Clone, Copy)]
