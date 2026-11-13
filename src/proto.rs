@@ -73,14 +73,28 @@ pub use self::{hyparview::Ttl, plumtree::Round};
 
 /// The default maximum size in bytes of a gossip message.
 ///
-/// The value is an arbitrary default. Change it with [`Builder::max_message_size`].
+/// The value is an arbitrary default. Change it with [`max_message_size`].
 ///
-/// [`Builder::max_message_size`]: crate::Builder::max_message_size
+#[cfg_attr(
+    feature = "net",
+    doc = "[`max_message_size`]: crate::Builder::max_message_size"
+)]
+#[cfg_attr(
+    not(feature = "net"),
+    doc = "[`max_message_size`]: crate::proto::Config::max_message_size"
+)]
 pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 4096;
 
-/// The minimum allowed value for [`Builder::max_message_size`].
+/// The minimum allowed value for [`max_message_size`].
 ///
-/// [`Builder::max_message_size`]: crate::Builder::max_message_size
+#[cfg_attr(
+    feature = "net",
+    doc = "[`max_message_size`]: crate::Builder::max_message_size"
+)]
+#[cfg_attr(
+    not(feature = "net"),
+    doc = "[`max_message_size`]: crate::proto::Config::max_message_size"
+)]
 pub const MIN_MAX_MESSAGE_SIZE: usize = 512;
 
 /// PeerInfo contains a peer's identifier and the opaque peer data as provided by the implementer.

@@ -1,7 +1,9 @@
 #![cfg_attr(feature = "net", doc = include_str!("../README.md"))]
 //! Broadcast messages to peers subscribed to a topic
 //!
-//! The crate runs on an [iroh] endpoint with the `net` feature, through [`Gossip`].
+//! The crate runs on an [iroh] endpoint with the `net` feature, through
+#![cfg_attr(feature = "net", doc = "[`Gossip`].")]
+#![cfg_attr(not(feature = "net"), doc = "`Gossip`.")]
 //!
 //! The protocol itself is an IO-less state machine. The `experimental-proto-internals`
 //! feature makes it public in the `proto` module. Its API may change in any release.
