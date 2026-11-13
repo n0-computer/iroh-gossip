@@ -66,39 +66,48 @@ async fn receive_until(receiver: &mut GossipReceiver, content: &[u8]) -> Result<
     Err(n0_error::anyerr!("the subscription ended"))
 }
 
-/// A healthy peer that shares more topics with us than its stream limit keeps its neighbors (a cost of the design).
+/// Peers that share more topics than the stream limit of their endpoints keep their neighbors with a higher `max_peer_streams` (#223).
 ///
-/// v1 keeps a stream per topic open while the topic uses the peer. Over the
-/// peer's limit of concurrent streams, the open of the next stream waits for
-/// good, and the open timeout closes the connection. The topics rejoin, and
-/// it closes again. The limit of iroh is 100 streams by default.
+/// Each topic that uses a peer keeps a stream to it open. The endpoints here
+/// allow 4 streams, and gossip raises that to 16 on its connections. 8 topics
+/// send in both directions, and every message arrives.
 #[tokio::test(flavor = "multi_thread")]
 #[traced_test]
-#[ignore = "a cost of the design: one stream per topic, see SendQueue"]
-async fn topics_over_the_stream_limit_keep_their_neighbors() -> Result {
+async fn max_peer_streams_keeps_topics_over_the_endpoint_limit() -> Result {
     let lookup = MemoryLookup::new();
     let limited = || {
         QuicTransportConfig::builder()
             .max_concurrent_uni_streams(VarInt::from_u32(4))
             .build()
     };
-    let a = DirectNode::spawn(&lookup, Gossip::builder(), limited()).await?;
-    let b = DirectNode::spawn(&lookup, Gossip::builder(), limited()).await?;
+    let builder = || Gossip::builder().max_peer_streams(16);
+    let a = DirectNode::spawn(&lookup, builder(), limited()).await?;
+    let b = DirectNode::spawn(&lookup, builder(), limited()).await?;
     let mut topics = Vec::new();
     for i in 0..8u32 {
         let topic: TopicId = blake3::hash(&i.to_be_bytes()).into();
-        topics.push(a.gossip.subscribe(topic, vec![]).await?);
-        topics.push(b.gossip.subscribe(topic, vec![a.id()]).await?);
+        let (a_tx, a_rx) = a.gossip.subscribe(topic, vec![]).await?.split();
+        let (b_tx, b_rx) = b.gossip.subscribe(topic, vec![a.id()]).await?.split();
+        topics.push((a_tx, a_rx, b_tx, b_rx));
     }
-    let joined = async {
-        for topic in topics.iter_mut() {
-            topic.joined().await?;
+    for (_, a_rx, _, b_rx) in topics.iter_mut() {
+        neighbor_up(a_rx, b.id()).await?;
+        neighbor_up(b_rx, a.id()).await?;
+    }
+    for round in 0..3 {
+        for (i, (a_tx, a_rx, b_tx, b_rx)) in topics.iter_mut().enumerate() {
+            let content = format!("from a, topic {i}, round {round}");
+            a_tx.broadcast(content.clone().into()).await?;
+            timeout(PROMPT, receive_until(b_rx, content.as_bytes()))
+                .await
+                .std_context("b did not get the message")??;
+            let content = format!("from b, topic {i}, round {round}");
+            b_tx.broadcast(content.clone().into()).await?;
+            timeout(PROMPT, receive_until(a_rx, content.as_bytes()))
+                .await
+                .std_context("a did not get the message")??;
         }
-        Ok::<_, AnyError>(())
-    };
-    timeout(PROMPT, joined)
-        .await
-        .std_context("the topics did not join")??;
+    }
     // Long enough for the open timeout of a stream over the limit.
     tokio::time::sleep(wire::OPEN_TIMEOUT + Duration::from_secs(2)).await;
     let down = a.gossip.metrics().neighbor_down.get() + b.gossip.metrics().neighbor_down.get();

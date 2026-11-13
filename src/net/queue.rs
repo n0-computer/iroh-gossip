@@ -216,8 +216,9 @@ impl Drop for Reservation {
 /// - Each topic has one stream to a peer, and we write it in order. The peer
 ///   reads each stream on its own, so it may handle a `Join` before an
 ///   earlier `Disconnect`. The peer also limits its streams, to 100 by
-///   default. Over that limit, an open waits [`OPEN_TIMEOUT`] and closes the
-///   connection, again after each rejoin.
+///   default, see [`Builder::max_peer_streams`]. Over that limit, an open
+///   waits [`OPEN_TIMEOUT`] and closes the connection, again after each
+///   rejoin.
 /// - A handover keeps the order: the new connection waits for the old one to
 ///   finish its message. A control overflow meanwhile aborts the peer, and
 ///   closes the new connection too.
@@ -238,6 +239,7 @@ impl Drop for Reservation {
 ///   and control waits behind the data queued before it.
 ///
 /// [`OPEN_TIMEOUT`]: super::wire::OPEN_TIMEOUT
+/// [`Builder::max_peer_streams`]: crate::Builder::max_peer_streams
 /// [`BROADCAST_WAIT_LIMIT`]: super::subscriptions::BROADCAST_WAIT_LIMIT
 #[derive(Debug)]
 pub(super) struct SendQueue {
