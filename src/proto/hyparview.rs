@@ -137,7 +137,7 @@ pub enum Message<PI> {
 /// Each time a message is forwarded, the `Ttl` is decreased by 1. If the `Ttl` reaches 0, it
 /// should not be forwarded further.
 #[derive(From, Sub, Eq, PartialEq, Clone, Debug, Copy, Serialize, Deserialize)]
-pub struct Ttl(pub u16);
+pub struct Ttl(pub(crate) u16);
 impl Ttl {
     /// Returns `true` once the message may not be forwarded any further.
     pub fn expired(&self) -> bool {
@@ -275,11 +275,11 @@ pub struct Config {
     /// Number of peers whose contact information we keep, without a connection to them.
     pub passive_view_capacity: usize,
     /// Number of hops a `ForwardJoin` travels before a peer adds the new peer to its active view.
-    pub active_random_walk_length: Ttl,
+    pub active_random_walk_length: u16,
     /// Number of hops a `ForwardJoin` travels before a peer adds the new peer to its passive view.
-    pub passive_random_walk_length: Ttl,
+    pub passive_random_walk_length: u16,
     /// Number of hops a `Shuffle` message is propagated until a peer replies to it.
-    pub shuffle_random_walk_length: Ttl,
+    pub shuffle_random_walk_length: u16,
     /// Number of active peers to be included in a `Shuffle` request.
     pub shuffle_active_view_count: usize,
     /// Number of passive peers to be included in a `Shuffle` request.
@@ -295,6 +295,23 @@ pub struct Config {
     /// on a slow network. A dial that fails ends the request earlier.
     pub neighbor_request_timeout: Duration,
 }
+impl Config {
+    /// Returns the [`Ttl`] that a `ForwardJoin` starts with.
+    fn active_walk_ttl(&self) -> Ttl {
+        Ttl(self.active_random_walk_length)
+    }
+
+    /// Returns the [`Ttl`] at which a `ForwardJoin` adds the new peer to the passive view.
+    fn passive_walk_ttl(&self) -> Ttl {
+        Ttl(self.passive_random_walk_length)
+    }
+
+    /// Returns the [`Ttl`] that a `Shuffle` starts with.
+    fn shuffle_walk_ttl(&self) -> Ttl {
+        Ttl(self.shuffle_random_walk_length)
+    }
+}
+
 impl Default for Config {
     /// Default values for the HyParView layer
     fn default() -> Self {
@@ -304,11 +321,11 @@ impl Default for Config {
             // From the paper (p9)
             passive_view_capacity: 30,
             // From the paper (p9)
-            active_random_walk_length: Ttl(6),
+            active_random_walk_length: 6,
             // From the paper (p9)
-            passive_random_walk_length: Ttl(3),
+            passive_random_walk_length: 3,
             // From the paper (p9)
-            shuffle_random_walk_length: Ttl(6),
+            shuffle_random_walk_length: 6,
             // From the paper (p9)
             shuffle_active_view_count: 3,
             // From the paper (p9)
@@ -659,7 +676,7 @@ where
         // and Passive Random Walk Length (PRWL), that specifies at which point in the walk the node
         // is inserted in a passive view. To use these parameters, the ForwardJoin request carries
         // a “time to live” field that is initially set to ARWL and decreased at every hop. (7)"
-        let ttl = self.config.active_random_walk_length;
+        let ttl = self.config.active_walk_ttl();
         let peer_info = PeerInfo { id: peer, data };
         for node in self.active_view.iter_without(&peer) {
             let message = Message::ForwardJoin(ForwardJoin {
@@ -688,7 +705,7 @@ where
             self.send_neighbor(peer_id, Priority::High, io);
         } else {
             // "ii) If the time to live is equal to PRWL, p will insert the new node into its passive view"
-            if message.ttl == self.config.passive_random_walk_length {
+            if message.ttl == self.config.passive_walk_ttl() {
                 self.add_passive(peer_id, message.peer.data.clone(), io);
             }
             // "iii) The time to live field is decremented."
@@ -844,7 +861,7 @@ where
             let message = Shuffle {
                 origin: self.me,
                 nodes: nodes.collect(),
-                ttl: self.config.shuffle_random_walk_length,
+                ttl: self.config.shuffle_walk_ttl(),
             };
             io.send(*node, Message::Shuffle(message));
         }

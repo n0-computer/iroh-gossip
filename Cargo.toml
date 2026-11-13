@@ -172,7 +172,6 @@ allowed_external_types = [
     "n0_error::*",
     # 1.0 crates that we deem fine to be part of the public API
     "bytes::*",
-    "postcard::*",
     "serde_core::*",
     # non-1.0 crates that we decided to accept in the public API
     "futures_core::stream::Stream",

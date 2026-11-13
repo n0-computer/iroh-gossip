@@ -24,14 +24,14 @@ mod proto;
 
 #[cfg(feature = "net")]
 pub use self::{
-    api::{Event, GossipReceiver, GossipSender, GossipTopic, JoinOptions, Message},
+    api::{DeliveryScope, Event, GossipReceiver, GossipSender, GossipTopic, JoinOptions, Message},
     error::Error,
     net::{Builder, Gossip, QueueOptions, ALPN},
 };
 pub use self::{
     metrics::Metrics,
     proto::{
-        BroadcastConfig, DeliveryScope, MembershipConfig, ParseIdError, Round, TopicId, Ttl,
-        DEFAULT_MAX_MESSAGE_SIZE, MIN_MAX_MESSAGE_SIZE,
+        BroadcastConfig, MembershipConfig, ParseIdError, TopicId, DEFAULT_MAX_MESSAGE_SIZE,
+        MIN_MAX_MESSAGE_SIZE,
     },
 };

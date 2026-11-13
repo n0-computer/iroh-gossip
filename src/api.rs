@@ -13,7 +13,7 @@ use n0_future::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::{proto::DeliveryScope, Error};
+use crate::{proto, Error};
 
 /// Default channel capacity for topic subscription channels (one per topic)
 const TOPIC_EVENTS_DEFAULT_CAP: usize = 2048;
@@ -295,6 +295,32 @@ pub enum Event {
     Lagged,
 }
 
+/// The scope through which a message reached us.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum DeliveryScope {
+    /// The message comes from the swarm, with the number of hops from the broadcaster.
+    Swarm(u16),
+    /// The message comes from a direct neighbor that sent it to its neighbors only.
+    Neighbors,
+}
+
+impl DeliveryScope {
+    /// Returns whether the message comes directly from its broadcaster.
+    pub fn is_direct(&self) -> bool {
+        matches!(self, Self::Neighbors | Self::Swarm(0))
+    }
+}
+
+impl From<proto::DeliveryScope> for DeliveryScope {
+    fn from(scope: proto::DeliveryScope) -> Self {
+        match scope {
+            proto::DeliveryScope::Swarm(round) => Self::Swarm(round.hops()),
+            proto::DeliveryScope::Neighbors => Self::Neighbors,
+        }
+    }
+}
+
 impl From<crate::proto::Event<EndpointId>> for Event {
     fn from(event: crate::proto::Event<EndpointId>) -> Self {
         match event {
@@ -302,7 +328,7 @@ impl From<crate::proto::Event<EndpointId>> for Event {
             crate::proto::Event::NeighborDown(endpoint_id) => Self::NeighborDown(endpoint_id),
             crate::proto::Event::Received(message) => Self::Received(Message {
                 content: message.content,
-                scope: message.scope,
+                scope: message.scope.into(),
                 delivered_from: message.delivered_from,
             }),
         }

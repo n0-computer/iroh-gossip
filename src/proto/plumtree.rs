@@ -120,6 +120,11 @@ impl Round {
     pub fn next(&self) -> Round {
         Round(self.0 + 1)
     }
+
+    /// Returns the number of hops.
+    pub(crate) fn hops(&self) -> u16 {
+        self.0
+    }
 }
 
 /// Messages that we can send and receive from peers within the topic.
@@ -202,7 +207,7 @@ impl Gossip {
     }
 }
 
-/// The scope to deliver the message to.
+/// The scope through which a message reached us.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Ord, PartialOrd, Copy)]
 #[non_exhaustive]
 pub enum DeliveryScope {
@@ -324,7 +329,7 @@ pub struct Config {
     ///
     /// The protocol promotes a lazy peer to eager if its `Message::IHave` messages come with fewer
     /// hops from the origin than the messages of our eager peers.
-    pub optimization_threshold: Round,
+    pub optimization_threshold: u16,
 
     /// Duration for which to keep gossip messages in the internal message cache.
     ///
@@ -343,6 +348,13 @@ pub struct Config {
 
     /// How often the internal caches will be checked for expired items.
     pub cache_evict_interval: Duration,
+}
+
+impl Config {
+    /// Returns the [`Round`] distance at which a lazy peer replaces an eager peer.
+    fn optimization_round(&self) -> Round {
+        Round(self.optimization_threshold)
+    }
 }
 
 impl Default for Config {
@@ -369,7 +381,7 @@ impl Default for Config {
             dispatch_timeout: Duration::from_millis(5),
 
             // This number comes from experiment settings the plumtree paper (p. 12)
-            optimization_threshold: Round(7),
+            optimization_threshold: 7,
 
             // This is a certainly-high-enough value for usual operation.
             message_cache_retention: Duration::from_secs(30),
@@ -775,8 +787,7 @@ impl<PI: PeerIdentity> State<PI> {
             .copied();
 
         if let Some((ihave_peer, ihave_round)) = best_ihave {
-            if (ihave_round < round) && (round - ihave_round) >= self.config.optimization_threshold
-            {
+            if (ihave_round < round) && (round - ihave_round) >= self.config.optimization_round() {
                 // Graft the sender of the IHave, but only if it's not already eager.
                 if !self.eager_push_peers.contains(&ihave_peer) {
                     let message = Message::Graft(Graft {

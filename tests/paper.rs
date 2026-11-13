@@ -1095,20 +1095,19 @@ fn plumtree_graft_timeout_below_the_eager_path_leaves_little_redundancy() {
 
 /// Every protocol parameter is settable from outside the crate.
 ///
-/// `optimization_threshold` and the three random walk lengths have types that
-/// lived in private modules, so code downstream could not name them.
+/// `optimization_threshold` and the three random walk lengths are plain numbers,
+/// so code downstream can set them.
 #[test]
 fn every_tuning_knob_is_reachable() {
     let peers = swarm_size(PEERS);
-    use iroh_gossip::{Round, Ttl};
 
     let mut config = Config::default();
 
     config.membership.active_view_capacity = 6;
     config.membership.passive_view_capacity = 40;
-    config.membership.active_random_walk_length = Ttl(5);
-    config.membership.passive_random_walk_length = Ttl(2);
-    config.membership.shuffle_random_walk_length = Ttl(5);
+    config.membership.active_random_walk_length = 5;
+    config.membership.passive_random_walk_length = 2;
+    config.membership.shuffle_random_walk_length = 5;
     config.membership.shuffle_active_view_count = 2;
     config.membership.shuffle_passive_view_count = 3;
     config.membership.shuffle_interval = Duration::from_secs(30);
@@ -1117,7 +1116,7 @@ fn every_tuning_knob_is_reachable() {
     config.broadcast.graft_timeout_1 = Duration::from_millis(300);
     config.broadcast.graft_timeout_2 = Duration::from_millis(100);
     config.broadcast.dispatch_timeout = Duration::from_millis(10);
-    config.broadcast.optimization_threshold = Round::from(3u16);
+    config.broadcast.optimization_threshold = 3;
     config.broadcast.message_cache_retention = Duration::from_secs(60);
     config.broadcast.message_id_retention = Duration::from_secs(120);
     config.broadcast.cache_evict_interval = Duration::from_secs(2);
