@@ -398,9 +398,10 @@ impl QueueLease {
 /// A writer must not keep the lock without bound, or the next connection waits
 /// forever. Every way out of the loop of a writer unlocks: the end of the
 /// queue, a stop, a closed connection, an error, and a drop of its future. A
-/// stopped writer gets [`HANDOVER_LIMIT`](super::conn::HANDOVER_LIMIT) for its
-/// current message. Then it stops the write, and the next connection writes
-/// the message again.
+/// stopped writer gets [`HANDOVER_LIMIT`] for its current message. Then it
+/// stops the write, and the next connection writes the message again.
+///
+/// [`HANDOVER_LIMIT`]: super::conn::HANDOVER_LIMIT
 type SharedReader = Arc<tokio::sync::Mutex<QueueReader>>;
 
 /// Reads a queue, and keeps the message that a writer has not finished.

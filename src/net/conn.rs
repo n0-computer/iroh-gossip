@@ -39,7 +39,7 @@ pub(super) const RETIRE_GRACE: Duration = Duration::from_secs(5);
 /// in order. A stream header that started is written in full first. Only
 /// the write timeout bounds it, which counts the time without progress.
 #[cfg(not(test))]
-const HANDOVER_LIMIT: Duration = Duration::from_secs(5);
+pub(super) const HANDOVER_LIMIT: Duration = Duration::from_secs(5);
 #[cfg(test)]
 pub(super) const HANDOVER_LIMIT: Duration = Duration::from_secs(1);
 
@@ -49,7 +49,7 @@ pub(super) const CLOSE_QUEUE_FULL: u32 = 2;
 /// The code of a close for a write or a stream open that made no progress in time.
 pub(super) const CLOSE_STALLED: u32 = 3;
 
-/// The code of a close for a connection without streams, see [`RETIRE_GRACE`](super::RETIRE_GRACE).
+/// The code of a close for a connection without streams, see [`RETIRE_GRACE`].
 pub(super) const CLOSE_RETIRED: u32 = 4;
 
 /// The maximum number of stream headers that a [`RecvLoop`] reads at the same time.

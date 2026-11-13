@@ -19,6 +19,8 @@ use super::{
 pub(super) const PEER_RETENTION: Duration = Duration::from_secs(20);
 
 /// The [`Connection::stable_id`] of a connection.
+///
+/// [`Connection::stable_id`]: iroh::endpoint::Connection::stable_id
 pub(super) type ConnId = usize;
 
 /// What we know of a peer: its queue, and its connections.
@@ -44,11 +46,15 @@ pub(super) struct PeerState {
     /// Connection tasks that the actor has not yet seen finish.
     pub(super) connections: usize,
     /// When [`Actor::forget_peers`] may remove the idle peer.
+    ///
+    /// [`Actor::forget_peers`]: super::actor::Actor::forget_peers
     forget_at: Option<Instant>,
     /// Whether the peer sent [`StreamHeader::handles_close`].
     ///
     /// It belongs to the peer, not to one connection. So a connection on which
     /// neither side sends closes too, as after two dials cross.
+    ///
+    /// [`StreamHeader::handles_close`]: super::wire::StreamHeader::handles_close
     pub(super) handles_close: watch::Sender<bool>,
 }
 
@@ -83,18 +89,18 @@ impl PeerState {
         &self.queue
     }
 
-    /// Queues a message without waiting, and opens the queue.
-    ///
-    /// Waiting for room would stop the actor, and with it every topic, for as
-    /// long as this one peer does not read. On [`Pushed::Overflow`], the caller
-    /// aborts the peer.
+    /// Like [`Self::push`], and computes the encoded size of the message.
     #[cfg(test)]
     pub(super) fn send(&mut self, message: ProtoMessage) -> Pushed {
         let len = postcard::experimental::serialized_size(&message.message).ok();
         self.push(message, len)
     }
 
-    /// Like [`Self::send`], with the encoded size of the message if it has one.
+    /// Queues a message without waiting, and opens the queue.
+    ///
+    /// `len` is the encoded size of the message if it has one. Waiting for room
+    /// would stop the actor, and with it every topic, for as long as this one
+    /// peer does not read. On [`Pushed::Overflow`], the caller aborts the peer.
     pub(super) fn push(&mut self, message: ProtoMessage, len: Option<usize>) -> Pushed {
         self.open_queue().push(message, len)
     }
