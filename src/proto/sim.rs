@@ -49,7 +49,7 @@ impl From<Config> for NetworkConfig {
 pub enum LatencyConfig {
     /// Use the same latency, always.
     Static(#[serde(with = "humantime_serde")] Duration),
-    /// Chose a random latency for each connection within the specified bounds.
+    /// Chooses a random latency for each connection within the specified bounds.
     Dynamic {
         /// The lower bound for the latency between two peers.
         #[serde(with = "humantime_serde")]
@@ -490,7 +490,7 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
 
     /// Breaks the connection between two peers.
     ///
-    /// The `to` peer will received a [`InEvent::PeerDisconnected`] after a latency interval.
+    /// The `to` peer receives an [`InEvent::PeerDisconnected`] after a latency interval.
     fn kill_connection(&mut self, from: PI, to: PI) {
         let conn = ConnId::from((from, to));
         if self.conns.remove(&conn) {
@@ -515,7 +515,7 @@ impl<PI: PeerIdentity + fmt::Display, R: Rng + SeedableRng> Network<PI, R> {
     /// - that all active view members (neighbors) have X listed as a neighbor as well
     /// - that all eager peers have X listed as eager as well
     ///
-    /// Returns `true` if this is holds, otherwise returns `false`.
+    /// Returns `true` if this holds, otherwise returns `false`.
     ///
     /// Logs, at debug level, the cases where the above doesn't hold.
     pub fn check_synchronicity(&self) -> bool {
@@ -976,7 +976,7 @@ pub struct RoundStatsAvg {
 pub struct RoundStatsAvgDiff {
     /// The difference, as factors, in the minimums.
     pub min: RoundStatsDiff,
-    /// The difference, as factors, in the maximumx.
+    /// The difference, as factors, in the maximums.
     pub max: RoundStatsDiff,
     /// The difference, as factors, in the mean values.
     pub mean: RoundStatsDiff,
@@ -1117,7 +1117,7 @@ impl Simulator {
         }
     }
 
-    /// Creates a new random number generator, derived from the simuator's RNG.
+    /// Creates a new random number generator, derived from the simulator's RNG.
     pub fn rng(&mut self) -> ChaCha12Rng {
         ChaCha12Rng::from_rng(&mut self.network.rng)
     }

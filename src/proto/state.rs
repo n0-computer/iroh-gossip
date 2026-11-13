@@ -292,7 +292,7 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
             .flat_map(|state| state.gossip.eager_push_peers.iter())
     }
 
-    /// Returns the peers to which `topic` pushes its payloads.
+    /// Returns the neighbors of `topic`, its active view.
     #[cfg(feature = "net")]
     pub(crate) fn neighbors(&self, topic: &TopicId) -> impl Iterator<Item = &PI> {
         self.state(topic)

@@ -83,7 +83,7 @@ impl GossipSender {
     /// Returns [`Error::TooLarge`] if the content is over [`Self::max_content_size`],
     /// and [`Error::Closed`] if the gossip actor stopped.
     ///
-    /// [`BroadcastConfig::message_id_retention`]: crate::proto::BroadcastConfig::message_id_retention
+    /// [`BroadcastConfig::message_id_retention`]: crate::BroadcastConfig::message_id_retention
     pub async fn broadcast(&self, message: Bytes) -> Result<(), Error> {
         self.check_size(&message)?;
         self.send(Command::Broadcast(message)).await?;
@@ -283,7 +283,7 @@ impl Stream for GossipReceiver {
 pub enum Event {
     /// We have a new, direct neighbor in the swarm membership layer for this topic.
     NeighborUp(EndpointId),
-    /// We dropped direct neighbor in the swarm membership layer for this topic.
+    /// We dropped a direct neighbor in the swarm membership layer for this topic.
     NeighborDown(EndpointId),
     /// We received a gossip message for this topic.
     Received(Message),

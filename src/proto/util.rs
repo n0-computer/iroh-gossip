@@ -89,8 +89,7 @@ impl std::error::Error for ParseIdError {
 
 /// A hash set whose iteration order does not depend on the hash values.
 ///
-/// This is wrapper around [indexmap::IndexSet] which couple of utility methods
-/// to randomly select elements from the set.
+/// It wraps [`indexmap::IndexSet`] and adds methods that select random elements.
 #[derive(Default, Debug, Clone, derive_more::Deref)]
 pub(crate) struct IndexSet<T> {
     inner: indexmap::IndexSet<T>,
@@ -142,7 +141,7 @@ impl<T: Hash + Eq + PartialEq> IndexSet<T> {
     /// Remove an element from the set.
     ///
     /// NOTE: the value is removed by swapping it with the last element of the set and popping it off.
-    /// **This modifies the order of element by moving the last element**
+    /// **This modifies the order of the elements by moving the last element**
     pub fn remove(&mut self, value: &T) -> Option<T> {
         self.inner.swap_remove_full(value).map(|(_i, v)| v)
     }
@@ -150,12 +149,12 @@ impl<T: Hash + Eq + PartialEq> IndexSet<T> {
     /// Remove an element from the set by its index.
     ///
     /// NOTE: the value is removed by swapping it with the last element of the set and popping it off.
-    /// **This modifies the order of element by moving the last element**
+    /// **This modifies the order of the elements by moving the last element**
     pub fn remove_index(&mut self, index: usize) -> Option<T> {
         self.inner.swap_remove_index(index)
     }
 
-    /// Returns an iterator over the set in the order of insertion, without the element `without`.
+    /// Returns an iterator over the set in the order of insertion, without the element `value`.
     pub fn iter_without<'a>(&'a self, value: &'a T) -> impl Iterator<Item = &'a T> {
         self.iter().filter(move |x| *x != value)
     }

@@ -517,7 +517,7 @@ async fn can_die_and_reconnect() -> Result {
         Ok((router, gossip))
     }
 
-    /// Spawns a gossip endpoint, and broadcasts a single message, then sleep until cancelled externally.
+    /// Spawns a gossip endpoint, and broadcasts a single message, then sleeps until cancelled externally.
     async fn broadcast_once(
         secret_key: SecretKey,
         relay_map: RelayMap,

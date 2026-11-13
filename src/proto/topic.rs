@@ -154,7 +154,7 @@ impl<PI> Message<PI> {
 pub enum Event<PI> {
     /// We have a new, direct neighbor in the swarm membership layer for this topic
     NeighborUp(PI),
-    /// We dropped direct neighbor in the swarm membership layer for this topic
+    /// We dropped a direct neighbor in the swarm membership layer for this topic
     NeighborDown(PI),
     /// A gossip message was received for this topic
     Received(GossipEvent<PI>),

@@ -16,7 +16,7 @@ Its API may change in any release.
 
 The `iroh-gossip` protocol was designed to be used in conjunction with `iroh`. [Iroh](https://docs.rs/iroh) is a networking library for making direct connections, these connections are how gossip messages are sent.
 
-Iroh provides a [`Router`](https://docs.rs/iroh/latest/iroh/protocol/struct.Router.html) that takes an [`Endpoint`](https://docs.rs/iroh/latest/iroh/endpoint/struct.Endpoint.html) and any protocols needed for the application. Similar to a router in webserver library, it runs a loop accepting incoming connections and routes them to the specific protocol handler, based on `ALPN`.
+Iroh provides a [`Router`](https://docs.rs/iroh/latest/iroh/protocol/struct.Router.html) that takes an [`Endpoint`](https://docs.rs/iroh/latest/iroh/endpoint/struct.Endpoint.html) and any protocols needed for the application. Like the router of a web server library, it runs a loop accepting incoming connections and routes them to the specific protocol handler, based on `ALPN`.
 
 Here is a basic example of how to set up `iroh-gossip` with `iroh`:
 ```rust,no_run
@@ -27,7 +27,7 @@ use n0_future::StreamExt;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // create an iroh endpoint that includes the standard discovery mechanisms
+    // create an iroh endpoint that includes the standard address lookup mechanisms
     // we've built at number0
     let endpoint = Endpoint::bind(presets::N0).await?;
 

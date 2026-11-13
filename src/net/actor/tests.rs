@@ -108,7 +108,7 @@ impl Gossip {
     /// Creates a testing gossip instance and its actor without spawning it.
     ///
     /// This creates the endpoint and spawns the endpoint loop as well. The handle for the
-    /// endpoing task is returned along the gossip instance and actor. Since the actor is not
+    /// endpoint task is returned with the gossip instance and actor. Since the actor is not
     /// actually spawned as [`Builder::spawn`] would, the gossip instance will have a
     /// handle to a dummy task instead.
     async fn t_new_with_actor(
@@ -148,7 +148,7 @@ impl Gossip {
         Ok((gossip, actor, endpoint_task))
     }
 
-    /// Crates a new testing gossip instance with the normal actor loop.
+    /// Creates a new testing gossip instance with the normal actor loop.
     async fn t_new(
         rng: &mut rand::rngs::ChaCha12Rng,
         config: proto::Config,

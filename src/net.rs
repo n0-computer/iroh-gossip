@@ -57,7 +57,7 @@ const TOPIC_COMMANDS_CAP: usize = 64;
 ///
 /// With the default settings, a node has up to 5 active neighbors per topic (the default active view).
 ///
-/// Even though the [`Gossip`] is created from a [`Endpoint`], it does not accept connections
+/// Even though the [`Gossip`] is created from an [`Endpoint`], it does not accept connections
 /// itself. You should run an accept loop on the [`Endpoint`] yourself, check the ALPN protocol of incoming
 /// connections, and if the ALPN protocol equals [`ALPN`], forward the connection to the
 /// gossip actor through [Self::handle_connection].

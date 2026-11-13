@@ -1,6 +1,6 @@
 //! Implementation of the Plumtree epidemic broadcast tree protocol
 //!
-//! The implementation is based on [this paper][paper] by Joao Leitao, Jose Pereira, Luıs Rodrigues
+//! The implementation is based on [this paper][paper] by Joao Leitao, Jose Pereira, Luís Rodrigues
 //! and the [example implementation][impl] by Bartosz Sypytkowski
 //!
 //! [paper]: https://asc.di.fct.unl.pt/~jleitao/pdf/srds07-leitao.pdf
@@ -32,7 +32,7 @@ pub struct MessageId([u8; 32]);
 idbytes_impls!(MessageId, "MessageId");
 
 impl MessageId {
-    /// Create a `[MessageId]` by hashing the message content.
+    /// Creates a [`MessageId`] by hashing the message content.
     ///
     /// This hashes the input with [`blake3::hash`].
     pub fn from_content(message: &[u8]) -> Self {
@@ -825,7 +825,7 @@ impl<PI: PeerIdentity> State<PI> {
         }
     }
 
-    /// A scheduled [`Timer::SendGraft`] has reached it's deadline.
+    /// A scheduled [`Timer::SendGraft`] has reached its deadline.
     fn on_send_graft_timer(&mut self, id: MessageId, now: Instant, io: &mut impl IO<PI>) {
         self.graft_timer_scheduled.remove(&id);
         // if the message was received before the timer ran out, there is no need to request it

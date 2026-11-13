@@ -1,6 +1,6 @@
 //! Implementation of the HyParView membership protocol
 //!
-//! The implementation is based on [this paper][paper] by Joao Leitao, Jose Pereira, Luıs Rodrigues
+//! The implementation is based on [this paper][paper] by Joao Leitao, Jose Pereira, Luís Rodrigues
 //! and the [example implementation][impl] by Bartosz Sypytkowski
 //!
 //! [paper]: https://asc.di.fct.unl.pt/~jleitao/pdf/dsn07-leitao.pdf
@@ -24,7 +24,7 @@ use super::{
 ///
 /// The interval doubles after each shuffle up to [`Config::shuffle_interval`].
 /// A join leaves the passive view small and lopsided: it holds only the peers
-/// that `ForwardJoin` walks passed by. The first shuffles fill it. The HyParView
+/// that `ForwardJoin` walks passed through. The first shuffles fill it. The HyParView
 /// paper shuffles at a fixed period, without jitter.
 const INITIAL_SHUFFLE_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -220,7 +220,7 @@ pub struct Shuffle<PI> {
     ttl: Ttl,
 }
 
-/// Once a shuffle messages reaches a [`Ttl`] of 0, a peer replies with a `ShuffleReply`.
+/// Once a shuffle message reaches a [`Ttl`] of 0, a peer replies with a `ShuffleReply`.
 ///
 /// The reply is sent to the peer that initiated the shuffle and contains a subset of the active
 /// and passive views of the peer at the end of the random walk.
@@ -230,7 +230,7 @@ pub struct ShuffleReply<PI> {
     nodes: Vec<PeerInfo<PI>>,
 }
 
-/// The priority of a `Join` message
+/// The priority of a `Neighbor` request.
 ///
 /// This is `High` if the sender does not have any active peers, and `Low` otherwise.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -1113,11 +1113,11 @@ where
         }
     }
 
-    /// Add a peer to the active view.
+    /// Adds a peer to the active view, and returns whether the peer is in it.
     ///
-    /// If the active view is currently full, a random peer will be removed first.
-    /// Sends a Neighbor message to the peer. If high_priority is true, the peer
-    /// may not deny the Neighbor request.
+    /// If the active view is full, a high priority request removes a random
+    /// peer first, and a low priority request fails. Sends a `Neighbor` to the
+    /// peer if `reply` is true.
     fn add_active(
         &mut self,
         peer: PI,
