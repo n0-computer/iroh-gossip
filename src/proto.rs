@@ -63,6 +63,7 @@ pub use hyparview::{Config as HyparviewConfig, Ttl};
 pub use plumtree::{Config as PlumtreeConfig, DeliveryScope, Round, Scope};
 pub use state::{InEvent, Message, State, Timer, TopicId, IO};
 pub use topic::{Command, Config, Event};
+pub use util::ParseIdError;
 
 /// The default maximum size in bytes of a gossip message.
 ///

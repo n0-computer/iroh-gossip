@@ -45,10 +45,10 @@ macro_rules! idbytes_impls {
         }
 
         impl ::std::str::FromStr for $ty {
-            type Err = ::hex::FromHexError;
+            type Err = $crate::proto::util::ParseIdError;
             fn from_str(s: &str) -> ::std::result::Result<Self, Self::Err> {
                 let mut bytes = [0u8; 32];
-                ::hex::decode_to_slice(s, &mut bytes)?;
+                ::hex::decode_to_slice(s, &mut bytes).map_err($crate::proto::util::ParseIdError)?;
                 Ok(Self::from_bytes(bytes))
             }
         }
@@ -68,6 +68,24 @@ macro_rules! idbytes_impls {
 }
 
 pub(crate) use idbytes_impls;
+
+/// The error of parsing a 32 byte identifier, such as a [`TopicId`], from a hex string.
+///
+/// [`TopicId`]: crate::TopicId
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParseIdError(pub(crate) hex::FromHexError);
+
+impl std::fmt::Display for ParseIdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid identifier: {}", self.0)
+    }
+}
+
+impl std::error::Error for ParseIdError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
 
 /// A hash set whose iteration order does not depend on the hash values.
 ///
@@ -512,6 +530,9 @@ mod test {
             "Id(0101010101010101010101010101010101010101010101010101010101010101)"
         );
         assert_eq!(id.as_bytes(), &[1u8; 32]);
+        let err = Id::from_str("01").unwrap_err();
+        assert_eq!(err.0, hex::FromHexError::InvalidStringLength);
+        assert!(std::error::Error::source(&err).is_some());
     }
 
     #[test]
