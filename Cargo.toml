@@ -154,7 +154,9 @@ name = "setup"
 required-features = ["examples"]
 
 [package.metadata.docs.rs]
-all-features = true
+# The docs show the stable API only: no test-utils, simulator or experimental-proto-internals.
+# The docs preview workflow builds with this list too, through `cargo docs-rs`.
+features = ["net", "metrics"]
 rustdoc-args = ["--cfg", "iroh_docsrs"]
 
 [profile.bench]

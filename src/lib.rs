@@ -25,6 +25,7 @@ mod proto;
 
 pub use self::metrics::Metrics;
 #[cfg(any(feature = "net", feature = "experimental-proto-internals"))]
+#[doc(inline)]
 pub use self::proto::{
     BroadcastConfig, MembershipConfig, ParseIdError, TopicId, DEFAULT_MAX_MESSAGE_SIZE,
     MIN_MAX_MESSAGE_SIZE,

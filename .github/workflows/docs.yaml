@@ -41,19 +41,20 @@ jobs:
     - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
       with:
         toolchain: nightly-2025-10-09
+    - uses: dtolnay/install@982daea0f5d846abc3c83e01a6a1d73c040047c1 # cargo-docs-rs
     - name: Install sccache
       uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
 
+    # Builds as docs.rs does, with the features and flags of
+    # `[package.metadata.docs.rs]` in Cargo.toml.
     - name: Generate Docs
-      run: cargo doc --locked --workspace --all-features --no-deps
-      env:
-        RUSTDOCFLAGS: --cfg iroh_docsrs
+      run: cargo docs-rs --locked
 
     - name: Deploy Docs to Preview Branch
       uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 # v4.1.0
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
-        publish_dir: ./target/doc/
+        publish_dir: ./target/x86_64-unknown-linux-gnu/doc/
         destination_dir: ${{ env.PREVIEW_PATH }}
         publish_branch: generated-docs-preview
 
