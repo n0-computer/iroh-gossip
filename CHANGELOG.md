@@ -2,6 +2,30 @@
 
 All notable changes to iroh-gossip will be documented in this file.
 
+## [0.103.0](https://github.com/n0-computer/iroh-gossip/compare/v0.102.0..0.103.0) - 2026-11-16
+
+### ⛰️  Features
+
+- *(net)* Add Builder::max_peer_streams for more topics per peer ([#249](https://github.com/n0-computer/iroh-gossip/issues/249)) - ([8244787](https://github.com/n0-computer/iroh-gossip/commit/8244787957f71be9fb89b78b7404b7e94db6ae62))
+
+### 🐛 Bug Fixes
+
+- *(net)* Finish the stream of a topic that no longer wants the peer ([#250](https://github.com/n0-computer/iroh-gossip/issues/250)) - ([a6c5457](https://github.com/n0-computer/iroh-gossip/commit/a6c54576ba11d0a8918ce669374e265dc1134005))
+
+### 🚜 Refactor
+
+- *(net)* Split net.rs into modules ([#225](https://github.com/n0-computer/iroh-gossip/issues/225)) - ([a0e38b6](https://github.com/n0-computer/iroh-gossip/commit/a0e38b66195f21b7f15ff6b037798034a9cd3517))
+- *(net)* Rename actor, queue and wire items, keep one ActorConfig ([#226](https://github.com/n0-computer/iroh-gossip/issues/226)) - ([b6d101a](https://github.com/n0-computer/iroh-gossip/commit/b6d101a81c0b2d6f383f4c6b1296a09f08bb2c8f))
+- *(proto)* [**breaking**] Write the output of the state into an IO trait ([#228](https://github.com/n0-computer/iroh-gossip/issues/228)) - ([dd519fa](https://github.com/n0-computer/iroh-gossip/commit/dd519faf6f8e61ad2ebe5975e1c114b79eabdd5f))
+- *(proto)* [**breaking**] Derive the peers a topic wants from HyParView ([#229](https://github.com/n0-computer/iroh-gossip/issues/229)) - ([b14c1ac](https://github.com/n0-computer/iroh-gossip/commit/b14c1acb60ebaab8f5b13da2265e923ef7997755))
+- [**breaking**] Remove the rpc feature and the irpc dependency ([#224](https://github.com/n0-computer/iroh-gossip/issues/224)) - ([1fe96b0](https://github.com/n0-computer/iroh-gossip/commit/1fe96b0a90c130be7585d090bae3b9c2227439b6))
+- [**breaking**] Mark proto configs and messages non_exhaustive, fix docs ([#227](https://github.com/n0-computer/iroh-gossip/issues/227)) - ([df0ce0c](https://github.com/n0-computer/iroh-gossip/commit/df0ce0c958193cda267965554301ce63458cced6))
+- [**breaking**] Clean up the public API surface ([#248](https://github.com/n0-computer/iroh-gossip/issues/248)) - ([22d798f](https://github.com/n0-computer/iroh-gossip/commit/22d798f9d8a7b417621b06eae38f8cce298fee32))
+
+### Deps
+
+- Bump all deps ([#247](https://github.com/n0-computer/iroh-gossip/issues/247)) - ([3aa4d42](https://github.com/n0-computer/iroh-gossip/commit/3aa4d4246c3cc7b639f8c849552b61c736ac13d7))
+
 ## [0.102.0](https://github.com/n0-computer/iroh-gossip/compare/v0.101.0..0.102.0) - 2026-11-03
 
 ### ⛰️  Features
