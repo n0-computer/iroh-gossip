@@ -180,23 +180,19 @@ impl Builder {
     /// Sets how many streams a peer may have open to us on a gossip connection.
     ///
     /// Each topic shared with a peer keeps one stream open in each direction,
-    /// so this caps the shared topics. Over the limit, the next open of the
-    /// peer stalls, and the connection closes after 15 s. A node up to 0.101
-    /// waits without end.
+    /// so this caps the shared topics. Over the limit, the peer cannot open the
+    /// stream of the next topic, and closes the connection after 15 s.
     ///
-    /// By default, gossip keeps the `max_concurrent_uni_streams` of the
-    /// endpoint, 100 unless changed. Both peers need a higher limit, for
-    /// example 256.
+    /// By default, gossip keeps the `max_concurrent_uni_streams` of the endpoint,
+    /// 100 unless changed. To share more topics with a peer, set this on both
+    /// peers.
     ///
-    /// The QUIC stack of iroh tells the sender about freed stream slots, and
-    /// about a raise, only in batches of more than an eighth of the limit. So
-    /// keep the shared topics below seven eighths of the limit, and raise it
-    /// by more than an eighth, for example from 100 to 115 or more. A value
-    /// too low for the shared topics, such as 0, makes the connections fail
-    /// again and again.
+    /// The QUIC stack of iroh gives a peer new stream slots only in batches of an
+    /// eighth of the limit. So keep the shared topics below seven eighths of the
+    /// limit.
     ///
-    /// Each open stream can buffer up to the `stream_receive_window` of the
-    /// endpoint, and all streams of a connection up to its `receive_window`.
+    /// Note that each open stream can buffer up to the `stream_receive_window` of
+    /// the endpoint, and all streams of a connection up to its `receive_window`.
     pub fn max_peer_streams(mut self, max: u32) -> Self {
         self.config.max_peer_streams = Some(max);
         self
