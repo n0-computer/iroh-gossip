@@ -44,6 +44,10 @@ pub(super) struct ActorConfig {
     pub(super) proto: proto::Config,
     pub(super) alpn: Bytes,
     pub(super) send_queue: QueueOptions,
+    /// See [`Builder::max_peer_streams`]. `None` keeps the limit of the endpoint.
+    ///
+    /// [`Builder::max_peer_streams`]: super::Builder::max_peer_streams
+    pub(super) max_peer_streams: Option<u32>,
 }
 
 impl Default for ActorConfig {
@@ -52,6 +56,7 @@ impl Default for ActorConfig {
             proto: Default::default(),
             alpn: ALPN.to_vec().into(),
             send_queue: Default::default(),
+            max_peer_streams: None,
         }
     }
 }
@@ -94,6 +99,8 @@ struct ActorState {
     peers: HashMap<EndpointId, PeerState>,
     /// The size of the queue to each peer, see [`QueueOptions::size`].
     send_queue_size: usize,
+    /// See [`ActorConfig::max_peer_streams`].
+    max_peer_streams: Option<u32>,
     /// Dial machine to connect to peers.
     dialer: Dialer,
     /// Map of topics to their state.
@@ -121,6 +128,7 @@ impl Actor {
             proto: proto_config,
             alpn,
             send_queue,
+            max_peer_streams,
         } = config;
         let peer_id = endpoint.id();
         let proto = proto::State::new(
@@ -138,6 +146,7 @@ impl Actor {
         let state = ActorState {
             peers: Default::default(),
             send_queue_size,
+            max_peer_streams,
             dialer: Dialer::new(endpoint.clone(), alpn),
             topics: Default::default(),
             quit_queue: Default::default(),
@@ -343,6 +352,9 @@ impl Actor {
     }
 
     fn add_connection(&mut self, conn: Connection) {
+        if let Some(max) = self.state.max_peer_streams {
+            conn.set_max_concurrent_uni_streams(max.into());
+        }
         let peer_id = conn.remote_id();
         let side = conn.side();
         let size = self.state.send_queue_size;

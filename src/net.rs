@@ -177,6 +177,27 @@ impl Builder {
         self
     }
 
+    /// Sets how many streams a peer may have open to us on a gossip connection.
+    ///
+    /// Each topic shared with a peer keeps one stream open in each direction,
+    /// so this caps the shared topics. Over the limit, the peer cannot open the
+    /// stream of the next topic, and closes the connection after 15 s.
+    ///
+    /// By default, gossip keeps the `max_concurrent_uni_streams` of the endpoint,
+    /// 100 unless changed. To share more topics with a peer, set this on both
+    /// peers.
+    ///
+    /// The QUIC stack of iroh gives a peer new stream slots only in batches of an
+    /// eighth of the limit. So keep the shared topics below seven eighths of the
+    /// limit.
+    ///
+    /// Note that each open stream can buffer up to the `stream_receive_window` of
+    /// the endpoint, and all streams of a connection up to its `receive_window`.
+    pub fn max_peer_streams(mut self, max: u32) -> Self {
+        self.config.max_peer_streams = Some(max);
+        self
+    }
+
     /// Spawns a gossip actor, and returns its handle.
     ///
     /// This has to run inside a tokio runtime. The actor stops when you drop the last clone of
@@ -234,8 +255,8 @@ impl Builder {
 /// - Messages to a slow peer arrive late. The queue bounds bytes, not time,
 ///   and QUIC buffers more on top.
 /// - A peer that takes no data for 60 s loses its connection, as does one
-///   that shares more topics with this node than its stream limit allows,
-///   100 by default.
+///   that shares too many topics with this node for its stream limit, see
+///   [`Builder::max_peer_streams`].
 ///
 /// [`GossipSender::broadcast`]: crate::GossipSender::broadcast
 #[derive(Debug, Clone, Copy)]
