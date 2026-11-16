@@ -364,10 +364,11 @@ impl Actor {
             .entry(peer_id)
             .or_insert_with(|| PeerState::new(size));
         let queue_lease = peer.handle_connection(side, conn.stable_id());
-        let initial_topics = match queue_lease {
+        let initial_topics: Vec<TopicId> = match queue_lease {
             Some(_) => self.proto.topics_wanting(&peer_id).collect(),
             None => Vec::new(),
         };
+        peer.add_topic_streams(&initial_topics);
 
         let aborted = peer.aborted.clone();
         let handles_close = peer.handles_close.clone();
@@ -541,15 +542,28 @@ impl Actor {
             state: &mut self.state,
             now,
             opened_queue: false,
+            new_topic_streams: Vec::new(),
         };
         self.proto.handle(event, now, &mut io);
-        // Close the queue of each peer that no topic wants. Only a membership event changes
-        // what a topic wants. A send can reopen the queue of a peer that no topic wants, for
-        // example for a Plumtree reply, so check after that too.
-        if may_affect_membership || io.opened_queue {
-            for (peer_id, peer) in self.state.peers.iter() {
-                if !peer.queue.is_closed() && !self.proto.wants_connection(peer_id) {
+        let (opened_queue, new_topic_streams) = (io.opened_queue, io.new_topic_streams);
+        let proto = &self.proto;
+        // Close the queue of each peer that no topic wants, and finish the stream of each
+        // topic that no longer wants its peer. After a membership event, any topic can stop
+        // wanting a peer, so check all of them. Other events change no wants, so only a topic
+        // with a new stream can be unwanted, as for a Plumtree reply or a shuffle.
+        if may_affect_membership || opened_queue {
+            for (peer_id, peer) in self.state.peers.iter_mut() {
+                if !peer.queue.is_closed() && !proto.wants_connection(peer_id) {
                     peer.queue.close();
+                }
+                peer.finish_unwanted_streams(|topic| proto.topic_wants_connection(topic, peer_id));
+            }
+        } else {
+            for (peer_id, topic) in new_topic_streams {
+                if let Some(peer) = self.state.peers.get_mut(&peer_id) {
+                    if !proto.topic_wants_connection(&topic, &peer_id) {
+                        peer.finish_topic_stream(topic);
+                    }
                 }
             }
         }
@@ -582,6 +596,10 @@ struct ActorIO<'a> {
     now: Instant,
     /// Whether a send opened a closed queue.
     opened_queue: bool,
+    /// The topics that send their first message to a peer in this event, so that the writer opens a new stream for them.
+    ///
+    /// It stays empty while the topics send only to peers that they already use.
+    new_topic_streams: Vec<(PublicKey, TopicId)>,
 }
 
 impl IO<PublicKey> for ActorIO<'_> {
@@ -598,10 +616,14 @@ impl IO<PublicKey> for ActorIO<'_> {
             .or_insert_with(|| PeerState::new(size));
         self.opened_queue |= peer.queue.is_closed();
         let len = postcard::experimental::serialized_size(&message.message).ok();
-        let kind = message.kind();
+        let (kind, topic) = (message.kind(), message.topic);
         let dropped = match peer.push(message, len) {
             Pushed::Queued => {
                 track_message(kind, len, true, &state.metrics);
+                // A dropped message opens no stream, so only a queued one counts.
+                if peer.add_topic_stream(topic) {
+                    self.new_topic_streams.push((peer_id, topic));
+                }
                 None
             }
             Pushed::Dropped(message) => {

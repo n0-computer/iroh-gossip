@@ -1,6 +1,6 @@
 //! The state of each peer, and the dials to peers.
 
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use iroh::endpoint::Side;
 use n0_future::time::Instant;
@@ -11,6 +11,7 @@ use super::{
     queue::{Pushed, QueueLease, SendQueue},
     ProtoMessage,
 };
+use crate::proto::TopicId;
 
 /// How long we keep the state of an idle peer.
 ///
@@ -56,6 +57,12 @@ pub(super) struct PeerState {
     ///
     /// [`StreamHeader::handles_close`]: super::wire::StreamHeader::handles_close
     pub(super) handles_close: watch::Sender<bool>,
+    /// The topics that may have an open stream to this peer.
+    ///
+    /// It holds only topics that still want the peer. When a topic stops
+    /// wanting the peer, the actor removes it, and tells the writer to close
+    /// its stream.
+    open_topic_streams: HashSet<TopicId>,
 }
 
 impl PeerState {
@@ -74,6 +81,7 @@ impl PeerState {
             connections: 0,
             forget_at: None,
             handles_close: watch::channel(false).0,
+            open_topic_streams: HashSet::new(),
         }
     }
 
@@ -105,6 +113,39 @@ impl PeerState {
         self.open_queue().push(message, len)
     }
 
+    /// Records that `topic` may have an open stream to this peer, and returns whether it is new.
+    pub(super) fn add_topic_stream(&mut self, topic: TopicId) -> bool {
+        self.open_topic_streams.insert(topic)
+    }
+
+    /// Records the initial topics of a new writer, for which it opens streams.
+    pub(super) fn add_topic_streams(&mut self, topics: &[TopicId]) {
+        self.open_topic_streams.extend(topics.iter().copied());
+    }
+
+    /// Queues the end of the stream of each topic for which `wanted` is false.
+    ///
+    /// Otherwise the stream stays open while another topic uses the peer, and
+    /// takes one of its stream slots (#223). This also runs on a closed queue,
+    /// as a topic can open it again before the writer drained it.
+    pub(super) fn finish_unwanted_streams(&mut self, wanted: impl Fn(&TopicId) -> bool) {
+        let queue = &self.queue;
+        self.open_topic_streams.retain(|topic| {
+            let keep = wanted(topic);
+            if !keep {
+                queue.finish_stream(*topic);
+            }
+            keep
+        });
+    }
+
+    /// Queues the end of the stream of `topic`, unless done since its last message.
+    pub(super) fn finish_topic_stream(&mut self, topic: TopicId) {
+        if self.open_topic_streams.remove(&topic) {
+            self.queue.finish_stream(topic);
+        }
+    }
+
     /// Puts a closed, empty queue in place of the queue.
     ///
     /// A writer of the old queue still sends what it holds, and then ends. A
@@ -112,6 +153,7 @@ impl PeerState {
     pub(super) fn discard_queue(&mut self, now: Instant) {
         self.queue = SendQueue::new(self.queue.size());
         self.queue.close();
+        self.open_topic_streams.clear();
         self.writer = None;
         self.retain_if_idle(now);
     }
@@ -211,4 +253,62 @@ pub(super) enum Finished {
     Disconnected,
     /// Dial the peer again, for the messages that a retired writer left.
     Redial,
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+
+    use super::*;
+    use crate::{
+        net::queue::{QueueItem, QueueReader, MIN_QUEUE_SIZE},
+        proto::topic::Message,
+    };
+
+    fn topic(name: &str) -> TopicId {
+        blake3::hash(name.as_bytes()).into()
+    }
+
+    fn data(topic: TopicId, len: usize) -> ProtoMessage {
+        ProtoMessage {
+            topic,
+            message: Message::test_payload(Bytes::from(vec![7u8; len])),
+        }
+    }
+
+    /// Takes the items that the queue holds, as the topic and whether it is a `Finish`.
+    async fn drain(reader: &mut QueueReader, count: usize) -> Vec<(TopicId, bool)> {
+        let mut items = Vec::new();
+        for _ in 0..count {
+            let next = tokio::time::timeout(Duration::from_secs(1), reader.wait_next());
+            assert!(
+                next.await.expect("the queue holds fewer items"),
+                "the queue ended"
+            );
+            items.push(match reader.current().expect("an item") {
+                QueueItem::Message(item) => (item.message.topic, false),
+                QueueItem::Finish(topic) => (*topic, true),
+            });
+            reader.advance();
+        }
+        assert!(reader.is_empty(), "the queue holds more items");
+        items
+    }
+
+    /// A closed queue still gets the `Finish` of an unwanted topic, as a topic can open it again before it drains.
+    #[tokio::test]
+    async fn closed_queue_still_finishes_unwanted_topics() {
+        let (left, other) = (topic("left"), topic("other"));
+        let mut peer = PeerState::new(MIN_QUEUE_SIZE);
+        assert!(matches!(peer.send(data(left, 10)), Pushed::Queued));
+        assert!(peer.add_topic_stream(left));
+        // No topic wants the peer, so the actor closes the queue.
+        peer.queue.close();
+        peer.finish_unwanted_streams(|_| false);
+        assert!(peer.queue.is_closed(), "a finish opened the queue");
+        assert!(matches!(peer.send(data(other, 10)), Pushed::Queued));
+        let mut reader = peer.queue.try_reader().expect("no writer reads the queue");
+        let items = drain(&mut reader, 3).await;
+        assert_eq!(items, vec![(left, false), (left, true), (other, false)]);
+    }
 }

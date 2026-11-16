@@ -112,6 +112,62 @@ async fn stream_limit_closes_the_connection() -> Result {
     closed_with(&peer_conn, conn::CLOSE_STALLED).await
 }
 
+/// A send to a peer that its topic does not want finishes the stream of that topic.
+///
+/// Topic `other` answers a duplicate payload from a non-neighbor with a `Prune`,
+/// which is no membership event. Topic `kept` keeps the queue open.
+#[tokio::test]
+#[traced_test]
+async fn send_to_an_unwanted_peer_finishes_its_stream() -> Result {
+    let mut actor = t_actor().await?;
+    let peer = SecretKey::generate().public();
+    let mut state = open_peer(queue::MIN_QUEUE_SIZE);
+    let _lease = state
+        .handle_connection(Side::Server, 1)
+        .expect("an accepted connection takes the lease");
+    actor.state.peers.insert(peer, state);
+    let (kept, other): (TopicId, TopicId) =
+        (blake3::hash(b"kept").into(), blake3::hash(b"other").into());
+    let now = Instant::now();
+    for topic in [kept, other] {
+        actor.handle_in_event(InEvent::Command(topic, ProtoCommand::Join(vec![])), now);
+    }
+    let join = ProtoMessage {
+        topic: kept,
+        message: TopicMessage::Swarm(hyparview::Message::Join(None)),
+    };
+    actor.handle_in_event(InEvent::RecvMessage(peer, join), now);
+    let payload = ProtoMessage {
+        topic: other,
+        message: TopicMessage::test_payload(Bytes::from_static(b"twice")),
+    };
+    actor.handle_in_event(InEvent::RecvMessage(peer, payload.clone()), now);
+    actor.handle_in_event(InEvent::RecvMessage(peer, payload), now);
+
+    let queue = &actor.state.peers.get(&peer).expect("the peer").queue;
+    let mut reader = queue.try_reader().expect("no writer reads the queue");
+    let mut items = Vec::new();
+    while !reader.is_empty() {
+        reader.wait_next().await;
+        items.push(match reader.current().expect("an item") {
+            queue::QueueItem::Message(item) => (item.message.topic, false),
+            queue::QueueItem::Finish(topic) => (*topic, true),
+        });
+        reader.advance();
+    }
+    assert_eq!(items.last(), Some(&(other, true)), "{items:?}");
+    assert_eq!(
+        items[items.len() - 2],
+        (other, false),
+        "the prune comes first"
+    );
+    assert!(
+        !items.contains(&(kept, true)),
+        "the kept topic got a finish"
+    );
+    Ok(())
+}
+
 /// The sent counters count only the messages that a send queue took.
 ///
 /// Nobody reads the queue, so a burst fills its data section. The broadcast whose
@@ -232,7 +288,11 @@ async fn dropped_payload_is_announced_later() -> Result {
 async fn announced(reader: &mut queue::QueueReader) -> Vec<plumtree::MessageId> {
     let mut ids = Vec::new();
     while let Ok(true) = timeout(Duration::from_millis(20), reader.wait_next()).await {
-        let message = &reader.current().expect("next found it").message.message;
+        let message = &reader
+            .current_message()
+            .expect("next found it")
+            .message
+            .message;
         if let TopicMessage::Gossip(plumtree::Message::IHave(ihaves)) = message {
             ids.extend(ihaves.iter().map(|ihave| ihave.id));
         }
