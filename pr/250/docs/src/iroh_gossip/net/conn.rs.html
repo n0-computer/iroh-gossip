@@ -479,162 +479,158 @@
 <a href=#479 id=479 data-nosnippet>479</a>                    QueueItem::Message(item) =&gt; item,
 <a href=#480 id=480 data-nosnippet>480</a>                    QueueItem::Finish(topic) =&gt; {
 <a href=#481 id=481 data-nosnippet>481</a>                        <span class="kw">let </span>topic = <span class="kw-2">*</span>topic;
-<a href=#482 id=482 data-nosnippet>482</a>                        <span class="comment">// Dropping a stream finishes it. The peer reads the messages
-<a href=#483 id=483 data-nosnippet>483</a>                        // before the end. A later message of the topic opens a new
-<a href=#484 id=484 data-nosnippet>484</a>                        // stream. A peer from 0.102 on reads it after this one, if it
-<a href=#485 id=485 data-nosnippet>485</a>                        // read the header of this one first. Otherwise, and on a node
-<a href=#486 id=486 data-nosnippet>486</a>                        // up to 0.101, which reads both at once, a late message of
-<a href=#487 id=487 data-nosnippet>487</a>                        // this stream can come after the first ones of the new one.
-<a href=#488 id=488 data-nosnippet>488</a>                        </span><span class="kw">if </span><span class="self">self</span>.streams.remove(<span class="kw-2">&amp;</span>topic).is_some() {
-<a href=#489 id=489 data-nosnippet>489</a>                            <span class="macro">debug!</span>(topic = %topic.fmt_short(), <span class="string">"the topic no longer uses the peer, finish its stream"</span>);
-<a href=#490 id=490 data-nosnippet>490</a>                        }
-<a href=#491 id=491 data-nosnippet>491</a>                        <span class="self">self</span>.initial_topics.retain(|initial| <span class="kw-2">*</span>initial != topic);
-<a href=#492 id=492 data-nosnippet>492</a>                        queue.advance();
-<a href=#493 id=493 data-nosnippet>493</a>                        <span class="kw">continue</span>;
-<a href=#494 id=494 data-nosnippet>494</a>                    }
-<a href=#495 id=495 data-nosnippet>495</a>                };
-<a href=#496 id=496 data-nosnippet>496</a>                <span class="kw">match </span><span class="self">self</span>.open_stream(item.message.topic, <span class="kw-2">&amp;</span>revoked).<span class="kw">await </span>{
-<a href=#497 id=497 data-nosnippet>497</a>                    <span class="prelude-val">Ok</span>(<span class="bool-val">true</span>) =&gt; {}
-<a href=#498 id=498 data-nosnippet>498</a>                    <span class="comment">// The lease ended before the stream opened. The message stays
-<a href=#499 id=499 data-nosnippet>499</a>                    // in the queue for the next connection.
-<a href=#500 id=500 data-nosnippet>500</a>                    </span><span class="prelude-val">Ok</span>(<span class="bool-val">false</span>) =&gt; <span class="kw">break</span>,
-<a href=#501 id=501 data-nosnippet>501</a>                    <span class="prelude-val">Err</span>(err) =&gt; {
-<a href=#502 id=502 data-nosnippet>502</a>                        <span class="self">self</span>.handle_error(item.message.topic, err)<span class="question-mark">?</span>;
-<a href=#503 id=503 data-nosnippet>503</a>                        queue.advance();
-<a href=#504 id=504 data-nosnippet>504</a>                        <span class="kw">continue</span>;
-<a href=#505 id=505 data-nosnippet>505</a>                    }
-<a href=#506 id=506 data-nosnippet>506</a>                }
-<a href=#507 id=507 data-nosnippet>507</a>                <span class="comment">// A stuck write would keep the queue from the connection that replaced
-<a href=#508 id=508 data-nosnippet>508</a>                // this one. A message that we stop in the middle stays in the queue,
-<a href=#509 id=509 data-nosnippet>509</a>                // and the next connection writes it first. Its stream stays, and ends
-<a href=#510 id=510 data-nosnippet>510</a>                // with the others: the peer reads the messages before it, and drops
-<a href=#511 id=511 data-nosnippet>511</a>                // the part of this one.
-<a href=#512 id=512 data-nosnippet>512</a>                </span><span class="kw">let </span>handover = <span class="kw">async </span>{
-<a href=#513 id=513 data-nosnippet>513</a>                    revoked.cancelled().<span class="kw">await</span>;
-<a href=#514 id=514 data-nosnippet>514</a>                    n0_future::time::sleep(HANDOVER_LIMIT).<span class="kw">await</span>;
-<a href=#515 id=515 data-nosnippet>515</a>                };
-<a href=#516 id=516 data-nosnippet>516</a>                <span class="macro">tokio::select!</span> {
-<a href=#517 id=517 data-nosnippet>517</a>                    biased;
-<a href=#518 id=518 data-nosnippet>518</a>                    res = <span class="self">self</span>.send(item) =&gt; res<span class="question-mark">?</span>,
-<a href=#519 id=519 data-nosnippet>519</a>                    <span class="kw">_ </span>= handover =&gt; {
-<a href=#520 id=520 data-nosnippet>520</a>                        <span class="macro">warn!</span>(<span class="string">"the replaced connection did not finish its message in time, hand it over"</span>);
-<a href=#521 id=521 data-nosnippet>521</a>                        <span class="kw">break</span>;
-<a href=#522 id=522 data-nosnippet>522</a>                    }
-<a href=#523 id=523 data-nosnippet>523</a>                }
-<a href=#524 id=524 data-nosnippet>524</a>                <span class="comment">// A topic that we just left needs no stream.
-<a href=#525 id=525 data-nosnippet>525</a>                </span><span class="kw">if </span>item.message.message.is_disconnect() {
-<a href=#526 id=526 data-nosnippet>526</a>                    <span class="self">self</span>.initial_topics
-<a href=#527 id=527 data-nosnippet>527</a>                        .retain(|topic| <span class="kw-2">*</span>topic != item.message.topic);
-<a href=#528 id=528 data-nosnippet>528</a>                }
-<a href=#529 id=529 data-nosnippet>529</a>                queue.advance();
-<a href=#530 id=530 data-nosnippet>530</a>            }
-<a href=#531 id=531 data-nosnippet>531</a>        }
-<a href=#532 id=532 data-nosnippet>532</a>        <span class="self">self</span>.streams.clear();
-<a href=#533 id=533 data-nosnippet>533</a>        <span class="kw">while </span><span class="self">self</span>.live_streams.next().<span class="kw">await</span>.is_some() {}
-<a href=#534 id=534 data-nosnippet>534</a>        set_if_changed(<span class="kw-2">&amp;</span><span class="self">self</span>.has_streams, <span class="bool-val">false</span>);
-<a href=#535 id=535 data-nosnippet>535</a>        <span class="macro">debug!</span>(<span class="string">"send loop closed"</span>);
-<a href=#536 id=536 data-nosnippet>536</a>        <span class="prelude-val">Ok</span>(())
-<a href=#537 id=537 data-nosnippet>537</a>    }
-<a href=#538 id=538 data-nosnippet>538</a>
-<a href=#539 id=539 data-nosnippet>539</a>    <span class="doccomment">/// Writes a message on the stream of its topic, and finishes the stream after a `Disconnect`.
+<a href=#482 id=482 data-nosnippet>482</a>                        <span class="comment">// Dropping a stream finishes it. A later message opens a new one,
+<a href=#483 id=483 data-nosnippet>483</a>                        // see `SendQueue` for the order in which the peer reads them.
+<a href=#484 id=484 data-nosnippet>484</a>                        </span><span class="kw">if </span><span class="self">self</span>.streams.remove(<span class="kw-2">&amp;</span>topic).is_some() {
+<a href=#485 id=485 data-nosnippet>485</a>                            <span class="macro">debug!</span>(topic = %topic.fmt_short(), <span class="string">"the topic no longer uses the peer, finish its stream"</span>);
+<a href=#486 id=486 data-nosnippet>486</a>                        }
+<a href=#487 id=487 data-nosnippet>487</a>                        <span class="self">self</span>.initial_topics.retain(|initial| <span class="kw-2">*</span>initial != topic);
+<a href=#488 id=488 data-nosnippet>488</a>                        queue.advance();
+<a href=#489 id=489 data-nosnippet>489</a>                        <span class="kw">continue</span>;
+<a href=#490 id=490 data-nosnippet>490</a>                    }
+<a href=#491 id=491 data-nosnippet>491</a>                };
+<a href=#492 id=492 data-nosnippet>492</a>                <span class="kw">match </span><span class="self">self</span>.open_stream(item.message.topic, <span class="kw-2">&amp;</span>revoked).<span class="kw">await </span>{
+<a href=#493 id=493 data-nosnippet>493</a>                    <span class="prelude-val">Ok</span>(<span class="bool-val">true</span>) =&gt; {}
+<a href=#494 id=494 data-nosnippet>494</a>                    <span class="comment">// The lease ended before the stream opened. The message stays
+<a href=#495 id=495 data-nosnippet>495</a>                    // in the queue for the next connection.
+<a href=#496 id=496 data-nosnippet>496</a>                    </span><span class="prelude-val">Ok</span>(<span class="bool-val">false</span>) =&gt; <span class="kw">break</span>,
+<a href=#497 id=497 data-nosnippet>497</a>                    <span class="prelude-val">Err</span>(err) =&gt; {
+<a href=#498 id=498 data-nosnippet>498</a>                        <span class="self">self</span>.handle_error(item.message.topic, err)<span class="question-mark">?</span>;
+<a href=#499 id=499 data-nosnippet>499</a>                        queue.advance();
+<a href=#500 id=500 data-nosnippet>500</a>                        <span class="kw">continue</span>;
+<a href=#501 id=501 data-nosnippet>501</a>                    }
+<a href=#502 id=502 data-nosnippet>502</a>                }
+<a href=#503 id=503 data-nosnippet>503</a>                <span class="comment">// A stuck write would keep the queue from the connection that replaced
+<a href=#504 id=504 data-nosnippet>504</a>                // this one. A message that we stop in the middle stays in the queue,
+<a href=#505 id=505 data-nosnippet>505</a>                // and the next connection writes it first. Its stream stays, and ends
+<a href=#506 id=506 data-nosnippet>506</a>                // with the others: the peer reads the messages before it, and drops
+<a href=#507 id=507 data-nosnippet>507</a>                // the part of this one.
+<a href=#508 id=508 data-nosnippet>508</a>                </span><span class="kw">let </span>handover = <span class="kw">async </span>{
+<a href=#509 id=509 data-nosnippet>509</a>                    revoked.cancelled().<span class="kw">await</span>;
+<a href=#510 id=510 data-nosnippet>510</a>                    n0_future::time::sleep(HANDOVER_LIMIT).<span class="kw">await</span>;
+<a href=#511 id=511 data-nosnippet>511</a>                };
+<a href=#512 id=512 data-nosnippet>512</a>                <span class="macro">tokio::select!</span> {
+<a href=#513 id=513 data-nosnippet>513</a>                    biased;
+<a href=#514 id=514 data-nosnippet>514</a>                    res = <span class="self">self</span>.send(item) =&gt; res<span class="question-mark">?</span>,
+<a href=#515 id=515 data-nosnippet>515</a>                    <span class="kw">_ </span>= handover =&gt; {
+<a href=#516 id=516 data-nosnippet>516</a>                        <span class="macro">warn!</span>(<span class="string">"the replaced connection did not finish its message in time, hand it over"</span>);
+<a href=#517 id=517 data-nosnippet>517</a>                        <span class="kw">break</span>;
+<a href=#518 id=518 data-nosnippet>518</a>                    }
+<a href=#519 id=519 data-nosnippet>519</a>                }
+<a href=#520 id=520 data-nosnippet>520</a>                <span class="comment">// A topic that we just left needs no stream.
+<a href=#521 id=521 data-nosnippet>521</a>                </span><span class="kw">if </span>item.message.message.is_disconnect() {
+<a href=#522 id=522 data-nosnippet>522</a>                    <span class="self">self</span>.initial_topics
+<a href=#523 id=523 data-nosnippet>523</a>                        .retain(|topic| <span class="kw-2">*</span>topic != item.message.topic);
+<a href=#524 id=524 data-nosnippet>524</a>                }
+<a href=#525 id=525 data-nosnippet>525</a>                queue.advance();
+<a href=#526 id=526 data-nosnippet>526</a>            }
+<a href=#527 id=527 data-nosnippet>527</a>        }
+<a href=#528 id=528 data-nosnippet>528</a>        <span class="self">self</span>.streams.clear();
+<a href=#529 id=529 data-nosnippet>529</a>        <span class="kw">while </span><span class="self">self</span>.live_streams.next().<span class="kw">await</span>.is_some() {}
+<a href=#530 id=530 data-nosnippet>530</a>        set_if_changed(<span class="kw-2">&amp;</span><span class="self">self</span>.has_streams, <span class="bool-val">false</span>);
+<a href=#531 id=531 data-nosnippet>531</a>        <span class="macro">debug!</span>(<span class="string">"send loop closed"</span>);
+<a href=#532 id=532 data-nosnippet>532</a>        <span class="prelude-val">Ok</span>(())
+<a href=#533 id=533 data-nosnippet>533</a>    }
+<a href=#534 id=534 data-nosnippet>534</a>
+<a href=#535 id=535 data-nosnippet>535</a>    <span class="doccomment">/// Writes a message on the stream of its topic, and finishes the stream after a `Disconnect`.
+<a href=#536 id=536 data-nosnippet>536</a>    ///
+<a href=#537 id=537 data-nosnippet>537</a>    /// If the write fails because the peer stopped the stream, the message is lost.
+<a href=#538 id=538 data-nosnippet>538</a>    /// Returns the error only if the connection is gone, or if the write made no
+<a href=#539 id=539 data-nosnippet>539</a>    /// progress in time, which closes the connection.
 <a href=#540 id=540 data-nosnippet>540</a>    ///
-<a href=#541 id=541 data-nosnippet>541</a>    /// If the write fails because the peer stopped the stream, the message is lost.
-<a href=#542 id=542 data-nosnippet>542</a>    /// Returns the error only if the connection is gone, or if the write made no
-<a href=#543 id=543 data-nosnippet>543</a>    /// progress in time, which closes the connection.
-<a href=#544 id=544 data-nosnippet>544</a>    ///
-<a href=#545 id=545 data-nosnippet>545</a>    /// ## Cancellation safety
-<a href=#546 id=546 data-nosnippet>546</a>    ///
-<a href=#547 id=547 data-nosnippet>547</a>    /// This function is not cancellation-safe.
-<a href=#548 id=548 data-nosnippet>548</a>    </span><span class="kw">async fn </span>send(<span class="kw-2">&amp;mut </span><span class="self">self</span>, item: <span class="kw-2">&amp;</span>QueuedMessage) -&gt; <span class="prelude-ty">Result</span>&lt;(), WriteError&gt; {
-<a href=#549 id=549 data-nosnippet>549</a>        <span class="kw">let </span>ProtoMessage { topic, message } = <span class="kw-2">&amp;</span>item.message;
-<a href=#550 id=550 data-nosnippet>550</a>        <span class="kw">let </span>stream = <span class="self">self
-<a href=#551 id=551 data-nosnippet>551</a>            </span>.streams
-<a href=#552 id=552 data-nosnippet>552</a>            .get_mut(topic)
-<a href=#553 id=553 data-nosnippet>553</a>            .expect(<span class="string">"the stream was opened before"</span>);
-<a href=#554 id=554 data-nosnippet>554</a>        <span class="kw">let </span>len = item.encoded_len();
-<a href=#555 id=555 data-nosnippet>555</a>        <span class="kw">match </span>write_sized_message(
-<a href=#556 id=556 data-nosnippet>556</a>            stream,
-<a href=#557 id=557 data-nosnippet>557</a>            message,
-<a href=#558 id=558 data-nosnippet>558</a>            len,
-<a href=#559 id=559 data-nosnippet>559</a>            <span class="kw-2">&amp;mut </span><span class="self">self</span>.buffer,
-<a href=#560 id=560 data-nosnippet>560</a>            <span class="self">self</span>.max_message_size,
-<a href=#561 id=561 data-nosnippet>561</a>        )
-<a href=#562 id=562 data-nosnippet>562</a>        .<span class="kw">await
-<a href=#563 id=563 data-nosnippet>563</a>        </span>{
-<a href=#564 id=564 data-nosnippet>564</a>            <span class="prelude-val">Ok</span>(()) =&gt; {
-<a href=#565 id=565 data-nosnippet>565</a>                <span class="kw">if </span>message.is_disconnect() {
-<a href=#566 id=566 data-nosnippet>566</a>                    <span class="comment">// Dropping a stream finishes it.
-<a href=#567 id=567 data-nosnippet>567</a>                    </span><span class="self">self</span>.streams.remove(topic);
-<a href=#568 id=568 data-nosnippet>568</a>                }
-<a href=#569 id=569 data-nosnippet>569</a>                <span class="prelude-val">Ok</span>(())
-<a href=#570 id=570 data-nosnippet>570</a>            }
-<a href=#571 id=571 data-nosnippet>571</a>            <span class="comment">// Refused before any byte went out, so the stream is intact.
-<a href=#572 id=572 data-nosnippet>572</a>            </span><span class="prelude-val">Err</span>(WriteError::TooLarge { .. }) =&gt; {
-<a href=#573 id=573 data-nosnippet>573</a>                <span class="macro">warn!</span>(max = <span class="self">self</span>.max_message_size, <span class="string">"message too large, dropped"</span>);
-<a href=#574 id=574 data-nosnippet>574</a>                <span class="prelude-val">Ok</span>(())
-<a href=#575 id=575 data-nosnippet>575</a>            }
-<a href=#576 id=576 data-nosnippet>576</a>            <span class="prelude-val">Err</span>(err) =&gt; {
-<a href=#577 id=577 data-nosnippet>577</a>                <span class="self">self</span>.handle_error(<span class="kw-2">*</span>topic, err)<span class="question-mark">?</span>;
-<a href=#578 id=578 data-nosnippet>578</a>                <span class="self">self</span>.streams.remove(topic);
-<a href=#579 id=579 data-nosnippet>579</a>                <span class="prelude-val">Ok</span>(())
-<a href=#580 id=580 data-nosnippet>580</a>            }
-<a href=#581 id=581 data-nosnippet>581</a>        }
-<a href=#582 id=582 data-nosnippet>582</a>    }
-<a href=#583 id=583 data-nosnippet>583</a>
-<a href=#584 id=584 data-nosnippet>584</a>    <span class="doccomment">/// Returns the error if the connection is gone or stalled.
-<a href=#585 id=585 data-nosnippet>585</a>    ///
-<a href=#586 id=586 data-nosnippet>586</a>    /// Otherwise only one stream failed, and the loop goes on.
-<a href=#587 id=587 data-nosnippet>587</a>    </span><span class="kw">fn </span>handle_error(<span class="kw-2">&amp;</span><span class="self">self</span>, topic: TopicId, err: WriteError) -&gt; <span class="prelude-ty">Result</span>&lt;(), WriteError&gt; {
-<a href=#588 id=588 data-nosnippet>588</a>        <span class="kw">if </span><span class="macro">matches!</span>(
-<a href=#589 id=589 data-nosnippet>589</a>            err,
-<a href=#590 id=590 data-nosnippet>590</a>            WriteError::Stalled { .. } | WriteError::OpenStalled { .. }
-<a href=#591 id=591 data-nosnippet>591</a>        ) {
-<a href=#592 id=592 data-nosnippet>592</a>            <span class="comment">// A peer that reads nothing blocks every stream, so a new stream would not help.
-<a href=#593 id=593 data-nosnippet>593</a>            </span><span class="macro">warn!</span>(<span class="string">"{err}, close the connection"</span>);
-<a href=#594 id=594 data-nosnippet>594</a>            <span class="self">self</span>.conn.close(CLOSE_STALLED.into(), <span class="string">b"write stalled"</span>);
-<a href=#595 id=595 data-nosnippet>595</a>            <span class="prelude-val">Err</span>(err)
-<a href=#596 id=596 data-nosnippet>596</a>        } <span class="kw">else if </span><span class="self">self</span>.conn.close_reason().is_some() {
-<a href=#597 id=597 data-nosnippet>597</a>            <span class="prelude-val">Err</span>(err)
-<a href=#598 id=598 data-nosnippet>598</a>        } <span class="kw">else </span>{
-<a href=#599 id=599 data-nosnippet>599</a>            <span class="macro">warn!</span>(topic = %topic.fmt_short(), <span class="string">"write failed: {err:#}"</span>);
-<a href=#600 id=600 data-nosnippet>600</a>            <span class="prelude-val">Ok</span>(())
-<a href=#601 id=601 data-nosnippet>601</a>        }
-<a href=#602 id=602 data-nosnippet>602</a>    }
-<a href=#603 id=603 data-nosnippet>603</a>
-<a href=#604 id=604 data-nosnippet>604</a>    <span class="doccomment">/// Opens the stream of `topic` and writes its header, unless it is open.
-<a href=#605 id=605 data-nosnippet>605</a>    ///
-<a href=#606 id=606 data-nosnippet>606</a>    /// Returns `false` if `revoked` ends the lease before the stream opened. A
-<a href=#607 id=607 data-nosnippet>607</a>    /// header that started is written in full, as a node up to 0.101 drops the
-<a href=#608 id=608 data-nosnippet>608</a>    /// whole connection on a partial one. An abort of the peer closes the
-<a href=#609 id=609 data-nosnippet>609</a>    /// connection anyway, and cuts the header.
-<a href=#610 id=610 data-nosnippet>610</a>    </span><span class="kw">async fn </span>open_stream(
-<a href=#611 id=611 data-nosnippet>611</a>        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
-<a href=#612 id=612 data-nosnippet>612</a>        topic: TopicId,
-<a href=#613 id=613 data-nosnippet>613</a>        revoked: <span class="kw-2">&amp;</span>CancellationToken,
-<a href=#614 id=614 data-nosnippet>614</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;bool, WriteError&gt; {
-<a href=#615 id=615 data-nosnippet>615</a>        <span class="kw">let </span>hash_map::Entry::Vacant(entry) = <span class="self">self</span>.streams.entry(topic) <span class="kw">else </span>{
-<a href=#616 id=616 data-nosnippet>616</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="bool-val">true</span>);
-<a href=#617 id=617 data-nosnippet>617</a>        };
-<a href=#618 id=618 data-nosnippet>618</a>        <span class="comment">// Before the open, which can wait at the stream limit of the peer.
-<a href=#619 id=619 data-nosnippet>619</a>        </span>set_if_changed(<span class="kw-2">&amp;</span><span class="self">self</span>.has_streams, <span class="bool-val">true</span>);
-<a href=#620 id=620 data-nosnippet>620</a>        <span class="kw">let </span><span class="kw-2">mut </span>stream = <span class="macro">tokio::select!</span> {
-<a href=#621 id=621 data-nosnippet>621</a>            biased;
-<a href=#622 id=622 data-nosnippet>622</a>            <span class="comment">// Before the open, so that a revoked lease starts no header.
-<a href=#623 id=623 data-nosnippet>623</a>            </span><span class="kw">_ </span>= revoked.cancelled() =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="bool-val">false</span>),
-<a href=#624 id=624 data-nosnippet>624</a>            open = n0_future::time::timeout(OPEN_TIMEOUT, <span class="self">self</span>.conn.open_uni()) =&gt; {
-<a href=#625 id=625 data-nosnippet>625</a>                open.map_err(|<span class="kw">_</span>| <span class="macro">e!</span>(WriteError::OpenStalled))<span class="question-mark">??
-<a href=#626 id=626 data-nosnippet>626</a>            </span>}
-<a href=#627 id=627 data-nosnippet>627</a>        };
-<a href=#628 id=628 data-nosnippet>628</a>        StreamHeader::write(topic, <span class="kw-2">&amp;mut </span>stream, <span class="kw-2">&amp;mut </span><span class="self">self</span>.buffer, <span class="self">self</span>.max_message_size).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#629 id=629 data-nosnippet>629</a>        <span class="macro">debug!</span>(topic=%topic.fmt_short(), <span class="string">"stream opened"</span>);
-<a href=#630 id=630 data-nosnippet>630</a>        <span class="comment">// The QUIC stack of the peer acknowledges data that its app did not read
-<a href=#631 id=631 data-nosnippet>631</a>        // yet, so this needs no timeout.
-<a href=#632 id=632 data-nosnippet>632</a>        </span><span class="kw">let </span>(id, stopped) = (stream.id(), stream.stopped());
-<a href=#633 id=633 data-nosnippet>633</a>        <span class="self">self</span>.live_streams.push(Box::pin(<span class="kw">async move </span>{
-<a href=#634 id=634 data-nosnippet>634</a>            stopped.<span class="kw">await</span>.ok();
-<a href=#635 id=635 data-nosnippet>635</a>            (topic, id)
-<a href=#636 id=636 data-nosnippet>636</a>        }));
-<a href=#637 id=637 data-nosnippet>637</a>        entry.insert(stream);
-<a href=#638 id=638 data-nosnippet>638</a>        <span class="prelude-val">Ok</span>(<span class="bool-val">true</span>)
-<a href=#639 id=639 data-nosnippet>639</a>    }
-<a href=#640 id=640 data-nosnippet>640</a>}</code></pre></div></section></main></body></html>
+<a href=#541 id=541 data-nosnippet>541</a>    /// ## Cancellation safety
+<a href=#542 id=542 data-nosnippet>542</a>    ///
+<a href=#543 id=543 data-nosnippet>543</a>    /// This function is not cancellation-safe.
+<a href=#544 id=544 data-nosnippet>544</a>    </span><span class="kw">async fn </span>send(<span class="kw-2">&amp;mut </span><span class="self">self</span>, item: <span class="kw-2">&amp;</span>QueuedMessage) -&gt; <span class="prelude-ty">Result</span>&lt;(), WriteError&gt; {
+<a href=#545 id=545 data-nosnippet>545</a>        <span class="kw">let </span>ProtoMessage { topic, message } = <span class="kw-2">&amp;</span>item.message;
+<a href=#546 id=546 data-nosnippet>546</a>        <span class="kw">let </span>stream = <span class="self">self
+<a href=#547 id=547 data-nosnippet>547</a>            </span>.streams
+<a href=#548 id=548 data-nosnippet>548</a>            .get_mut(topic)
+<a href=#549 id=549 data-nosnippet>549</a>            .expect(<span class="string">"the stream was opened before"</span>);
+<a href=#550 id=550 data-nosnippet>550</a>        <span class="kw">let </span>len = item.encoded_len();
+<a href=#551 id=551 data-nosnippet>551</a>        <span class="kw">match </span>write_sized_message(
+<a href=#552 id=552 data-nosnippet>552</a>            stream,
+<a href=#553 id=553 data-nosnippet>553</a>            message,
+<a href=#554 id=554 data-nosnippet>554</a>            len,
+<a href=#555 id=555 data-nosnippet>555</a>            <span class="kw-2">&amp;mut </span><span class="self">self</span>.buffer,
+<a href=#556 id=556 data-nosnippet>556</a>            <span class="self">self</span>.max_message_size,
+<a href=#557 id=557 data-nosnippet>557</a>        )
+<a href=#558 id=558 data-nosnippet>558</a>        .<span class="kw">await
+<a href=#559 id=559 data-nosnippet>559</a>        </span>{
+<a href=#560 id=560 data-nosnippet>560</a>            <span class="prelude-val">Ok</span>(()) =&gt; {
+<a href=#561 id=561 data-nosnippet>561</a>                <span class="kw">if </span>message.is_disconnect() {
+<a href=#562 id=562 data-nosnippet>562</a>                    <span class="comment">// Dropping a stream finishes it.
+<a href=#563 id=563 data-nosnippet>563</a>                    </span><span class="self">self</span>.streams.remove(topic);
+<a href=#564 id=564 data-nosnippet>564</a>                }
+<a href=#565 id=565 data-nosnippet>565</a>                <span class="prelude-val">Ok</span>(())
+<a href=#566 id=566 data-nosnippet>566</a>            }
+<a href=#567 id=567 data-nosnippet>567</a>            <span class="comment">// Refused before any byte went out, so the stream is intact.
+<a href=#568 id=568 data-nosnippet>568</a>            </span><span class="prelude-val">Err</span>(WriteError::TooLarge { .. }) =&gt; {
+<a href=#569 id=569 data-nosnippet>569</a>                <span class="macro">warn!</span>(max = <span class="self">self</span>.max_message_size, <span class="string">"message too large, dropped"</span>);
+<a href=#570 id=570 data-nosnippet>570</a>                <span class="prelude-val">Ok</span>(())
+<a href=#571 id=571 data-nosnippet>571</a>            }
+<a href=#572 id=572 data-nosnippet>572</a>            <span class="prelude-val">Err</span>(err) =&gt; {
+<a href=#573 id=573 data-nosnippet>573</a>                <span class="self">self</span>.handle_error(<span class="kw-2">*</span>topic, err)<span class="question-mark">?</span>;
+<a href=#574 id=574 data-nosnippet>574</a>                <span class="self">self</span>.streams.remove(topic);
+<a href=#575 id=575 data-nosnippet>575</a>                <span class="prelude-val">Ok</span>(())
+<a href=#576 id=576 data-nosnippet>576</a>            }
+<a href=#577 id=577 data-nosnippet>577</a>        }
+<a href=#578 id=578 data-nosnippet>578</a>    }
+<a href=#579 id=579 data-nosnippet>579</a>
+<a href=#580 id=580 data-nosnippet>580</a>    <span class="doccomment">/// Returns the error if the connection is gone or stalled.
+<a href=#581 id=581 data-nosnippet>581</a>    ///
+<a href=#582 id=582 data-nosnippet>582</a>    /// Otherwise only one stream failed, and the loop goes on.
+<a href=#583 id=583 data-nosnippet>583</a>    </span><span class="kw">fn </span>handle_error(<span class="kw-2">&amp;</span><span class="self">self</span>, topic: TopicId, err: WriteError) -&gt; <span class="prelude-ty">Result</span>&lt;(), WriteError&gt; {
+<a href=#584 id=584 data-nosnippet>584</a>        <span class="kw">if </span><span class="macro">matches!</span>(
+<a href=#585 id=585 data-nosnippet>585</a>            err,
+<a href=#586 id=586 data-nosnippet>586</a>            WriteError::Stalled { .. } | WriteError::OpenStalled { .. }
+<a href=#587 id=587 data-nosnippet>587</a>        ) {
+<a href=#588 id=588 data-nosnippet>588</a>            <span class="comment">// A peer that reads nothing blocks every stream, so a new stream would not help.
+<a href=#589 id=589 data-nosnippet>589</a>            </span><span class="macro">warn!</span>(<span class="string">"{err}, close the connection"</span>);
+<a href=#590 id=590 data-nosnippet>590</a>            <span class="self">self</span>.conn.close(CLOSE_STALLED.into(), <span class="string">b"write stalled"</span>);
+<a href=#591 id=591 data-nosnippet>591</a>            <span class="prelude-val">Err</span>(err)
+<a href=#592 id=592 data-nosnippet>592</a>        } <span class="kw">else if </span><span class="self">self</span>.conn.close_reason().is_some() {
+<a href=#593 id=593 data-nosnippet>593</a>            <span class="prelude-val">Err</span>(err)
+<a href=#594 id=594 data-nosnippet>594</a>        } <span class="kw">else </span>{
+<a href=#595 id=595 data-nosnippet>595</a>            <span class="macro">warn!</span>(topic = %topic.fmt_short(), <span class="string">"write failed: {err:#}"</span>);
+<a href=#596 id=596 data-nosnippet>596</a>            <span class="prelude-val">Ok</span>(())
+<a href=#597 id=597 data-nosnippet>597</a>        }
+<a href=#598 id=598 data-nosnippet>598</a>    }
+<a href=#599 id=599 data-nosnippet>599</a>
+<a href=#600 id=600 data-nosnippet>600</a>    <span class="doccomment">/// Opens the stream of `topic` and writes its header, unless it is open.
+<a href=#601 id=601 data-nosnippet>601</a>    ///
+<a href=#602 id=602 data-nosnippet>602</a>    /// Returns `false` if `revoked` ends the lease before the stream opened. A
+<a href=#603 id=603 data-nosnippet>603</a>    /// header that started is written in full, as a node up to 0.101 drops the
+<a href=#604 id=604 data-nosnippet>604</a>    /// whole connection on a partial one. An abort of the peer closes the
+<a href=#605 id=605 data-nosnippet>605</a>    /// connection anyway, and cuts the header.
+<a href=#606 id=606 data-nosnippet>606</a>    </span><span class="kw">async fn </span>open_stream(
+<a href=#607 id=607 data-nosnippet>607</a>        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
+<a href=#608 id=608 data-nosnippet>608</a>        topic: TopicId,
+<a href=#609 id=609 data-nosnippet>609</a>        revoked: <span class="kw-2">&amp;</span>CancellationToken,
+<a href=#610 id=610 data-nosnippet>610</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;bool, WriteError&gt; {
+<a href=#611 id=611 data-nosnippet>611</a>        <span class="kw">let </span>hash_map::Entry::Vacant(entry) = <span class="self">self</span>.streams.entry(topic) <span class="kw">else </span>{
+<a href=#612 id=612 data-nosnippet>612</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="bool-val">true</span>);
+<a href=#613 id=613 data-nosnippet>613</a>        };
+<a href=#614 id=614 data-nosnippet>614</a>        <span class="comment">// Before the open, which can wait at the stream limit of the peer.
+<a href=#615 id=615 data-nosnippet>615</a>        </span>set_if_changed(<span class="kw-2">&amp;</span><span class="self">self</span>.has_streams, <span class="bool-val">true</span>);
+<a href=#616 id=616 data-nosnippet>616</a>        <span class="kw">let </span><span class="kw-2">mut </span>stream = <span class="macro">tokio::select!</span> {
+<a href=#617 id=617 data-nosnippet>617</a>            biased;
+<a href=#618 id=618 data-nosnippet>618</a>            <span class="comment">// Before the open, so that a revoked lease starts no header.
+<a href=#619 id=619 data-nosnippet>619</a>            </span><span class="kw">_ </span>= revoked.cancelled() =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="bool-val">false</span>),
+<a href=#620 id=620 data-nosnippet>620</a>            open = n0_future::time::timeout(OPEN_TIMEOUT, <span class="self">self</span>.conn.open_uni()) =&gt; {
+<a href=#621 id=621 data-nosnippet>621</a>                open.map_err(|<span class="kw">_</span>| <span class="macro">e!</span>(WriteError::OpenStalled))<span class="question-mark">??
+<a href=#622 id=622 data-nosnippet>622</a>            </span>}
+<a href=#623 id=623 data-nosnippet>623</a>        };
+<a href=#624 id=624 data-nosnippet>624</a>        StreamHeader::write(topic, <span class="kw-2">&amp;mut </span>stream, <span class="kw-2">&amp;mut </span><span class="self">self</span>.buffer, <span class="self">self</span>.max_message_size).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#625 id=625 data-nosnippet>625</a>        <span class="macro">debug!</span>(topic=%topic.fmt_short(), <span class="string">"stream opened"</span>);
+<a href=#626 id=626 data-nosnippet>626</a>        <span class="comment">// The QUIC stack of the peer acknowledges data that its app did not read
+<a href=#627 id=627 data-nosnippet>627</a>        // yet, so this needs no timeout.
+<a href=#628 id=628 data-nosnippet>628</a>        </span><span class="kw">let </span>(id, stopped) = (stream.id(), stream.stopped());
+<a href=#629 id=629 data-nosnippet>629</a>        <span class="self">self</span>.live_streams.push(Box::pin(<span class="kw">async move </span>{
+<a href=#630 id=630 data-nosnippet>630</a>            stopped.<span class="kw">await</span>.ok();
+<a href=#631 id=631 data-nosnippet>631</a>            (topic, id)
+<a href=#632 id=632 data-nosnippet>632</a>        }));
+<a href=#633 id=633 data-nosnippet>633</a>        entry.insert(stream);
+<a href=#634 id=634 data-nosnippet>634</a>        <span class="prelude-val">Ok</span>(<span class="bool-val">true</span>)
+<a href=#635 id=635 data-nosnippet>635</a>    }
+<a href=#636 id=636 data-nosnippet>636</a>}</code></pre></div></section></main></body></html>
