@@ -215,10 +215,10 @@
 <a href=#215 id=215 data-nosnippet>215</a>///   lost.
 <a href=#216 id=216 data-nosnippet>216</a>/// - Each topic has one stream to a peer, and we write it in order. The peer
 <a href=#217 id=217 data-nosnippet>217</a>///   reads each stream on its own, so it may handle a `Join` before an
-<a href=#218 id=218 data-nosnippet>218</a>///   earlier `Disconnect`. The peer also limits its streams, to 100 by
-<a href=#219 id=219 data-nosnippet>219</a>///   default, see [`Builder::max_peer_streams`]. Over that limit, an open
-<a href=#220 id=220 data-nosnippet>220</a>///   waits [`OPEN_TIMEOUT`] and closes the connection, again after each
-<a href=#221 id=221 data-nosnippet>221</a>///   rejoin.
+<a href=#218 id=218 data-nosnippet>218</a>///   earlier `Disconnect`.
+<a href=#219 id=219 data-nosnippet>219</a>/// - With topics near the stream limit of the peer, see
+<a href=#220 id=220 data-nosnippet>220</a>///   [`Builder::max_peer_streams`], an open waits [`OPEN_TIMEOUT`] and closes
+<a href=#221 id=221 data-nosnippet>221</a>///   the connection, again after each rejoin.
 <a href=#222 id=222 data-nosnippet>222</a>/// - A handover keeps the order: the new connection waits for the old one to
 <a href=#223 id=223 data-nosnippet>223</a>///   finish its message. A control overflow meanwhile aborts the peer, and
 <a href=#224 id=224 data-nosnippet>224</a>///   closes the new connection too.
