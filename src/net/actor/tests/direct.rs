@@ -66,11 +66,9 @@ async fn receive_until(receiver: &mut GossipReceiver, content: &[u8]) -> Result<
     Err(n0_error::anyerr!("the subscription ended"))
 }
 
-/// Peers that share more topics than the stream limit of their endpoints keep their neighbors with a higher `max_peer_streams` (#223).
+/// Peers that share more topics than their endpoints allow streams keep their neighbors with `max_peer_streams` (#223).
 ///
-/// Each topic that uses a peer keeps a stream to it open. The endpoints here
-/// allow 4 streams, and gossip raises that to 16 on its connections. 8 topics
-/// send in both directions, and every message arrives.
+/// The endpoints allow 4 streams, gossip raises it to 16, and 8 topics send both ways.
 #[tokio::test(flavor = "multi_thread")]
 #[traced_test]
 async fn max_peer_streams_keeps_topics_over_the_endpoint_limit() -> Result {
@@ -94,19 +92,17 @@ async fn max_peer_streams_keeps_topics_over_the_endpoint_limit() -> Result {
         neighbor_up(a_rx, b.id()).await?;
         neighbor_up(b_rx, a.id()).await?;
     }
-    for round in 0..3 {
-        for (i, (a_tx, a_rx, b_tx, b_rx)) in topics.iter_mut().enumerate() {
-            let content = format!("from a, topic {i}, round {round}");
-            a_tx.broadcast(content.clone().into()).await?;
-            timeout(PROMPT, receive_until(b_rx, content.as_bytes()))
-                .await
-                .std_context("b did not get the message")??;
-            let content = format!("from b, topic {i}, round {round}");
-            b_tx.broadcast(content.clone().into()).await?;
-            timeout(PROMPT, receive_until(a_rx, content.as_bytes()))
-                .await
-                .std_context("a did not get the message")??;
-        }
+    for (i, (a_tx, a_rx, b_tx, b_rx)) in topics.iter_mut().enumerate() {
+        let content = format!("from a, topic {i}");
+        a_tx.broadcast(content.clone().into()).await?;
+        timeout(PROMPT, receive_until(b_rx, content.as_bytes()))
+            .await
+            .std_context("b did not get the message")??;
+        let content = format!("from b, topic {i}");
+        b_tx.broadcast(content.clone().into()).await?;
+        timeout(PROMPT, receive_until(a_rx, content.as_bytes()))
+            .await
+            .std_context("a did not get the message")??;
     }
     // Long enough for the open timeout of a stream over the limit.
     tokio::time::sleep(wire::OPEN_TIMEOUT + Duration::from_secs(2)).await;

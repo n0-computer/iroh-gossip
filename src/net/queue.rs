@@ -215,10 +215,10 @@ impl Drop for Reservation {
 ///   lost.
 /// - Each topic has one stream to a peer, and we write it in order. The peer
 ///   reads each stream on its own, so it may handle a `Join` before an
-///   earlier `Disconnect`. The peer also limits its streams, to 100 by
-///   default, see [`Builder::max_peer_streams`]. Over that limit, an open
-///   waits [`OPEN_TIMEOUT`] and closes the connection, again after each
-///   rejoin.
+///   earlier `Disconnect`.
+/// - With topics near the stream limit of the peer, see
+///   [`Builder::max_peer_streams`], an open waits [`OPEN_TIMEOUT`] and closes
+///   the connection, again after each rejoin.
 /// - A handover keeps the order: the new connection waits for the old one to
 ///   finish its message. A control overflow meanwhile aborts the peer, and
 ///   closes the new connection too.

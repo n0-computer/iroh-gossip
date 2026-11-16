@@ -18,11 +18,10 @@ pub(super) const WRITE_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 5
 
 /// How long opening a stream may wait at the stream limit of the peer before it fails the connection.
 ///
-/// The peer raises its limit only once more than an eighth of the limit of
-/// our streams ended. With as many topics as the limit, the wait does not
-/// end. The limit is the `max_concurrent_uni_streams` of the peer's endpoint,
-/// 100 by default, or the [`Builder::max_peer_streams`] of the peer. A stalled
-/// open of an initial topic only skips the other initial topics.
+/// The peer raises its limit only once enough of our streams ended, so with
+/// topics near the limit the wait does not end, see
+/// [`Builder::max_peer_streams`]. A stalled open of an initial topic only
+/// skips the other initial topics.
 ///
 /// [`Builder::max_peer_streams`]: crate::Builder::max_peer_streams
 pub(super) const OPEN_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 5 } else { 15 });
