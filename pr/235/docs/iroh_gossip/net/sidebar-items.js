@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["GOSSIP_ALPN"],"enum":["Verdict"],"struct":["AuthContext","Builder","Gossip","QueueOptions"]};
