@@ -125,6 +125,19 @@ impl<PI> InEvent<PI> {
             _ => true,
         }
     }
+
+    /// Returns the topic that handles this event, or `None` if every topic does.
+    ///
+    /// Only that topic can change what it wants, see [`State::wants_connection`].
+    #[cfg(feature = "net")]
+    pub(crate) fn topic(&self) -> Option<TopicId> {
+        match self {
+            InEvent::RecvMessage(_, message) => Some(message.topic),
+            InEvent::Command(topic, _) => Some(*topic),
+            InEvent::TimerExpired(timer) => Some(timer.topic),
+            InEvent::PeerDisconnected(_) | InEvent::UpdatePeerData(_) => None,
+        }
+    }
 }
 
 /// The receiver of the actions of the protocol state.
