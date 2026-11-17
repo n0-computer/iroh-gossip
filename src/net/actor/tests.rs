@@ -1,6 +1,6 @@
 use std::{
     any::Any,
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashSet},
     time::Duration,
 };
 
@@ -8,16 +8,18 @@ use bytes::Bytes;
 use futures_concurrency::future::TryJoin;
 use iroh::{
     address_lookup::memory::MemoryLookup,
-    endpoint::{presets, BindError, Connection, QuicTransportConfig, Side, VarInt},
+    endpoint::{
+        presets, BindError, Connection, QuicTransportConfig, RecvStream, SendStream, VarInt,
+    },
     protocol::Router,
     tls::CaTlsConfig,
     EndpointAddr, EndpointId, RelayMap, RelayMode, SecretKey,
 };
 use n0_error::{AnyError, Result, StdResultExt};
-use n0_future::{task::JoinSet, time::Instant};
+use n0_future::time::Instant;
 use n0_tracing_test::traced_test;
 use rand::{rngs::StdRng, CryptoRng, RngExt, SeedableRng};
-use tokio::{spawn, sync::watch, time::timeout};
+use tokio::{spawn, sync::oneshot, time::timeout};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument};
 
@@ -25,14 +27,15 @@ use super::*;
 use crate::{
     api::{self, Command, Event, GossipReceiver, GossipSender},
     net::{
-        conn::{self, connection_loop, retire, task_output, RecvLoop, SendLoop, RETIRE_GRACE},
-        peers::{ConnId, Finished, PeerState, PEER_RETENTION},
-        queue::{Pushed, QueueLease, SendQueue},
-        subscriptions::{
-            all_eager_peers_busy, SubscriptionCommands, TopicHandles, BROADCAST_RECHECK_INTERVAL,
-            BROADCAST_WAIT_LIMIT,
+        conn::{
+            connection_loop, task_output, ConnArgs, ConnEvent, ConnEventKind, ConnExit, ConnShared,
+            Mailbox, TakeQueue,
         },
-        wire, *,
+        peers::{ConnEnd, PeerState, MAX_ACCEPTED_PER_PEER},
+        queue::{Pushed, QueueReader, SendQueue},
+        subscriptions::TopicHandles,
+        wire::{self, CloseCode, ControlMessage, Session},
+        *,
     },
     proto::{hyparview, plumtree, PeerData, Scope, TopicId},
     Error,
@@ -291,7 +294,7 @@ async fn open_stream(
 ) -> Result<iroh::endpoint::SendStream> {
     let mut stream = conn.open_uni().await.std_context("open stream")?;
     let mut buffer = Vec::new();
-    wire::StreamHeader::write(topic, &mut stream, &mut buffer, TEST_FRAME_LIMIT)
+    wire::StreamHeader::write(topic, &mut stream, &mut buffer)
         .await
         .std_context("write header")?;
     for message in messages {
@@ -306,7 +309,7 @@ async fn open_stream(
 async fn read_next_stream(conn: &Connection) -> Result<(TopicId, Vec<TopicMessage>)> {
     let mut stream = conn.accept_uni().await.std_context("accept stream")?;
     let mut buffer = Vec::new();
-    let header = wire::StreamHeader::read(&mut stream, &mut buffer, TEST_FRAME_LIMIT)
+    let header = wire::StreamHeader::read(&mut stream, &mut buffer)
         .await
         .std_context("read header")?;
     let mut messages = Vec::new();
@@ -319,25 +322,27 @@ async fn read_next_stream(conn: &Connection) -> Result<(TopicId, Vec<TopicMessag
     Ok((header.topic, messages))
 }
 
-/// Returns a `Close` for `topic`.
-fn disconnect_message(topic: TopicId) -> ProtoMessage {
-    ProtoMessage {
-        topic,
-        message: TopicMessage::test_close(),
-    }
+/// Reads the rest of `stream` in the background.
+///
+/// A reader that drops an unfinished stream stops it, which fails the connection of the writer.
+fn drain(mut stream: RecvStream) {
+    spawn(async move {
+        stream.read_to_end(usize::MAX).await.ok();
+    });
 }
 
 /// Accepts the peer's next stream and reads its first message.
 async fn read_next_message(conn: &Connection) -> Result<(TopicId, TopicMessage)> {
     let mut stream = conn.accept_uni().await.std_context("accept stream")?;
     let mut buffer = Vec::new();
-    let header = wire::StreamHeader::read(&mut stream, &mut buffer, TEST_FRAME_LIMIT)
+    let header = wire::StreamHeader::read(&mut stream, &mut buffer)
         .await
         .std_context("read header")?;
     let message = wire::read_message(&mut stream, &mut buffer, TEST_FRAME_LIMIT)
         .await
         .std_context("read frame")?
         .std_context("the stream ended without a message")?;
+    drain(stream);
     Ok((header.topic, message))
 }
 
@@ -361,7 +366,7 @@ async fn t_actor() -> Result<Actor, BindError> {
 }
 
 /// Waits until `conn` closed, and checks that our side closed it with `code`.
-async fn closed_with(conn: &Connection, code: u32) -> Result {
+async fn closed_with(conn: &Connection, code: CloseCode) -> Result {
     let reason = timeout(Duration::from_secs(2), conn.closed())
         .await
         .std_context("the connection stayed open")?;
@@ -369,103 +374,225 @@ async fn closed_with(conn: &Connection, code: u32) -> Result {
         matches!(
             &reason,
             iroh::endpoint::ConnectionError::ApplicationClosed(close)
-                if close.error_code == VarInt::from_u32(code)
+                if close.error_code == code.code()
         ),
         "{reason:?}"
     );
     Ok(())
 }
 
-fn unset_flag() -> watch::Sender<bool> {
-    watch::channel(false).0
+/// The session id that raw test peers send.
+const PEER_SESSION: Session = Session([9; 8]);
+
+/// Opens the control stream as the dialer of `conn`, and writes the header of a raw test peer.
+async fn control_open(conn: &Connection) -> Result<(SendStream, RecvStream)> {
+    control_open_with(conn, PEER_SESSION).await
 }
 
-/// Opens a stream with our header, as a new node does on each stream.
-///
-/// The header tells the other side that the peer handles a close.
-async fn show_that_it_handles_a_close(conn: &Connection, topic: TopicId) {
-    let mut stream = conn.open_uni().await.expect("open stream");
-    wire::StreamHeader::write(topic, &mut stream, &mut Vec::new(), TEST_FRAME_LIMIT)
+async fn control_open_with(
+    conn: &Connection,
+    session: Session,
+) -> Result<(SendStream, RecvStream)> {
+    let (mut send, recv) = conn.open_bi().await.std_context("open control")?;
+    send.write_all(&session.to_frame())
         .await
-        .expect("write header");
-    stream.finish().expect("finish");
+        .std_context("write control header")?;
+    Ok((send, recv))
 }
 
-/// Joins new topics with `peer` until its queue had no room for a control message.
-fn join_until_full(actor: &mut Actor, peer: EndpointId) {
-    for i in 0..10_000u32 {
-        let topic: TopicId = blake3::hash(&i.to_be_bytes()).into();
-        let join = InEvent::Command(topic, ProtoCommand::Join(vec![peer]));
-        actor.handle_in_event(join, Instant::now());
-        if actor.state.metrics.peers_send_queue_full.get() > 0 {
-            return;
+/// Accepts the control stream as the acceptor of `conn`, reads the header, and answers with ours.
+async fn control_accept(conn: &Connection) -> Result<(SendStream, RecvStream, Session)> {
+    let (mut send, mut recv) = conn.accept_bi().await.std_context("accept control")?;
+    let session = Session::read(&mut recv, &mut Vec::new())
+        .await
+        .std_context("read control header")?;
+    send.write_all(&PEER_SESSION.to_frame())
+        .await
+        .std_context("write control header")?;
+    Ok((send, recv, session))
+}
+
+/// Reads the next control message of a raw test peer.
+async fn read_control(recv: &mut RecvStream) -> Result<ControlMessage> {
+    timeout(
+        Duration::from_secs(10),
+        ControlMessage::read(recv, &mut Vec::new(), TEST_FRAME_LIMIT),
+    )
+    .await
+    .std_context("no control message")?
+    .std_context("read control message")
+}
+
+/// The control stream of a raw test peer, after the handshake.
+///
+/// `ours` is the connection of the node under test, and `theirs` is the connection of the raw peer.
+struct RawControl {
+    send: SendStream,
+    recv: RecvStream,
+}
+
+impl RawControl {
+    /// Plays the acceptor: waits for the control stream of the node, and answers.
+    async fn accept(theirs: &Connection) -> Result<Self> {
+        let (send, recv, _) = control_accept(theirs).await?;
+        Ok(Self { send, recv })
+    }
+
+    /// Plays the dialer: opens the control stream, and reads the header of the node.
+    async fn open(theirs: &Connection) -> Result<Self> {
+        let (send, mut recv) = control_open(theirs).await?;
+        Session::read(&mut recv, &mut Vec::new())
+            .await
+            .std_context("read control header")?;
+        Ok(Self { send, recv })
+    }
+
+    async fn write(&mut self, message: ControlMessage) -> Result {
+        self.send
+            .write_all(&message.to_frame())
+            .await
+            .std_context("write control message")
+    }
+
+    async fn read(&mut self) -> Result<ControlMessage> {
+        read_control(&mut self.recv).await
+    }
+
+    /// Finishes our half: we read all that the node wrote.
+    fn finish(&mut self) -> Result {
+        self.send.finish().std_context("finish control")
+    }
+}
+
+/// A connection task on its own, without an actor.
+struct TestConn {
+    events: mpsc::Receiver<ConnEvent>,
+    queue: Arc<Mailbox<TakeQueue>>,
+    aborted: CancellationToken,
+    shutdown: CancellationToken,
+    task: AbortOnDropHandle<ConnExit>,
+}
+
+/// Runs `connection_loop` for `conn`.
+fn start_conn(conn: Connection, max_message_size: usize, retire_after: Duration) -> TestConn {
+    let (events_tx, events) = mpsc::channel::<ConnEvent>(64);
+    let queue = Arc::new(Mailbox::default());
+    let (aborted, retire, shutdown) = (
+        CancellationToken::new(),
+        CancellationToken::new(),
+        CancellationToken::new(),
+    );
+    let shared = ConnShared {
+        events: events_tx,
+        max_message_size,
+        session: Session([1; 8]),
+        retire_after,
+        shutdown: shutdown.clone(),
+    };
+    let args = ConnArgs {
+        id: 0,
+        conn,
+        aborted: aborted.clone(),
+        retire,
+        take_queue: queue.clone(),
+        shared,
+    };
+    TestConn {
+        events,
+        queue,
+        aborted,
+        shutdown,
+        task: AbortOnDropHandle::new(spawn(connection_loop(args))),
+    }
+}
+
+impl TestConn {
+    /// Moves `reader` to the writer, and gives it the topics that get a stream at once.
+    fn take_queue(&self, reader: QueueReader, topics: Vec<TopicId>) {
+        self.queue.put(TakeQueue { reader, topics });
+    }
+
+    /// Returns the next message that the receive loop dispatches.
+    async fn next(&mut self) -> Result<ProtoMessage> {
+        loop {
+            let event = timeout(Duration::from_secs(5), self.events.recv())
+                .await
+                .std_context("no message")?
+                .std_context("the connection task ended")?;
+            if let ConnEventKind::Message(message) = event.kind {
+                return Ok(message);
+            }
         }
     }
-}
 
-/// Returns the queue of `peer_id`, which must have an active connection.
-fn active_queue(actor: &Actor, peer_id: EndpointId) -> &SendQueue {
-    let peer = &actor.state.peers[&peer_id];
-    if peer.queue.is_closed() || peer.writer.is_none() {
-        panic!("not active: {:?}, writer: {:?}", peer.queue, peer.writer);
-    }
-    &peer.queue
-}
-
-/// Pushes `message` to the queue of the active peer `peer_id`.
-fn push_active(actor: &Actor, peer_id: EndpointId, message: ProtoMessage) {
-    let pushed = active_queue(actor, peer_id).send(message);
-    assert!(matches!(pushed, Pushed::Queued));
-}
-
-/// Pushes `count` payloads of distinct sizes, which may fill the windows of a connection.
-fn push_many(actor: &Actor, peer_id: EndpointId, topic: TopicId, count: usize) {
-    for i in 0..count {
-        push_active(actor, peer_id, numbered(topic, i));
+    /// Returns whether a message arrives within `wait`.
+    async fn gets_message_within(&mut self, wait: Duration) -> bool {
+        timeout(wait, self.next())
+            .await
+            .is_ok_and(|res| res.is_ok())
     }
 }
 
-/// Returns the payload number `i`, which differs from the others in its size.
+/// Runs `connection_loop` for `conn`, and plays the control stream of the raw peer `theirs`.
 ///
-/// Up to 3000 of them fit the frame limit of the actor.
-fn numbered(topic: TopicId, i: usize) -> ProtoMessage {
-    ProtoMessage {
-        topic,
-        message: TopicMessage::test_gossip(1000 + i),
-    }
+/// The peer of a dialer accepts the control stream, and the peer of an acceptor opens it.
+async fn start_conn_peered(
+    conn: Connection,
+    theirs: &Connection,
+    max_message_size: usize,
+) -> Result<(TestConn, RawControl)> {
+    let dialer = conn.side().is_client();
+    let test = start_conn(conn, max_message_size, Duration::from_secs(60));
+    let control = match dialer {
+        true => RawControl::accept(theirs).await?,
+        false => RawControl::open(theirs).await?,
+    };
+    Ok((test, control))
 }
 
-/// Returns the writer of the queue of `peer_id`, and whether the queue is draining.
-fn send_state(actor: &Actor, peer_id: EndpointId) -> Option<(Option<ConnId>, bool)> {
-    let peer = actor.state.peers.get(&peer_id)?;
-    Some((peer.writer, peer.queue.is_closed()))
+/// A dialed test connection that writes a queue, with a raw acceptor on the other side.
+struct Writer {
+    test: TestConn,
+    _control: RawControl,
 }
 
-/// Whether the peer has no messages and its queue is closed.
-fn is_idle(peer: &PeerState) -> bool {
-    peer.queue.is_closed() && peer.queue.is_empty()
+async fn start_writer(
+    conn: Connection,
+    theirs: &Connection,
+    reader: QueueReader,
+    max_message_size: usize,
+    topics: Vec<TopicId>,
+) -> Result<Writer> {
+    let (test, control) = start_conn_peered(conn, theirs, max_message_size).await?;
+    test.take_queue(reader, topics);
+    Ok(Writer {
+        test,
+        _control: control,
+    })
 }
 
-/// Returns the state of a peer with an open, empty queue of `size` bytes.
-fn open_peer(size: usize) -> PeerState {
-    let mut peer = PeerState::new(size);
-    peer.open_queue();
-    peer
-}
-
-/// Returns the state of a peer that we dial, with `messages` in its queue.
-fn pending_with(messages: Vec<ProtoMessage>) -> PeerState {
-    let state = open_peer(queue::QUEUE_SIZE);
-    for message in messages {
-        assert!(matches!(state.queue.send(message), Pushed::Queued));
-    }
-    state
+/// Handles the events of the connection tasks until `done` holds, or fails after 5 seconds.
+async fn pump_until(
+    actor: &mut ManualActorLoop,
+    what: &str,
+    done: impl Fn(&Actor) -> bool,
+) -> Result {
+    timeout(Duration::from_secs(5), async {
+        while !done(actor) {
+            tokio::select! {
+                _ = actor.step() => {}
+                _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+            }
+        }
+    })
+    .await
+    .with_std_context(|_| format!("timed out: {what}"))
 }
 
 /// Returns a join for `topic` carrying `data_len` bytes of peer data.
 ///
 /// The protocol state builds it, as the message types are private to `proto`.
-fn join_message(topic: TopicId, data_len: usize) -> ProtoMessage {
+pub(crate) fn join_message(topic: TopicId, data_len: usize) -> ProtoMessage {
     let me = SecretKey::generate().public();
     let peer = SecretKey::generate().public();
     let mut state = proto::State::new(
@@ -502,7 +629,7 @@ fn publish_forever(actor: &mut Actor) {
         Instant::now(),
     );
     let commands = commands_of(vec![Command::Broadcast(Bytes::new()); 4096]);
-    actor.command_rx.insert(topic, commands);
+    actor.command_rx.push(super::next_command(topic, commands));
     actor
         .state
         .topics
@@ -526,3 +653,31 @@ async fn direct_endpoint(
     lookup.set_endpoint_info(endpoint.addr());
     Ok(endpoint)
 }
+
+/// Returns how a connection task ended, or fails after `wait`.
+async fn ended(task: AbortOnDropHandle<ConnExit>, wait: Duration) -> Result<ConnEnd> {
+    Ok(exited(task, wait).await?.end)
+}
+
+/// Returns the result of a connection task, or fails after `wait`.
+async fn exited(task: AbortOnDropHandle<ConnExit>, wait: Duration) -> Result<ConnExit> {
+    timeout(wait, task)
+        .await
+        .std_context("the connection did not end")?
+        .std_context("connection task")
+}
+
+/// Waits until `conn` closed, and returns the code of an application close.
+async fn close_code(conn: &Connection, wait: Duration) -> Result<Option<CloseCode>> {
+    let reason = timeout(wait, conn.closed())
+        .await
+        .std_context("the connection stayed open")?;
+    Ok(match reason {
+        iroh::endpoint::ConnectionError::ApplicationClosed(close) => {
+            CloseCode::from_code(close.error_code)
+        }
+        _ => None,
+    })
+}
+
+const SECS_10: Duration = Duration::from_secs(10);

@@ -19,7 +19,7 @@ async fn close_does_not_wait_for_an_empty_queue() -> Result {
     );
     conn.close(0u32.into(), b"done");
     actor.add_connection(conn);
-    let (peer, conn, result) = actor
+    let (peer, id, end) = actor
         .connection_tasks
         .join_next()
         .await
@@ -27,20 +27,22 @@ async fn close_does_not_wait_for_an_empty_queue() -> Result {
         .expect("no panic");
 
     // Another connection: it sends ten full queues, as fast as the actor takes them.
-    let in_event_tx = actor.in_event_tx.clone();
+    let conn_events_tx = actor.conn_shared.events.clone();
     let other = SecretKey::generate().public();
     let producer = AbortOnDropHandle::new(spawn(async move {
-        for _ in 0..10 * IN_EVENT_CAP {
-            in_event_tx
-                .send(InEvent::PeerDisconnected(other))
-                .await
-                .expect("actor alive");
+        for _ in 0..10 * CONN_EVENT_CAP {
+            let event = ConnEvent {
+                peer: other,
+                conn: 99,
+                kind: ConnEventKind::Header(Session([0; 8])),
+            };
+            conn_events_tx.send(event).await.expect("actor alive");
         }
     }));
-    while actor.in_event_rx.len() < IN_EVENT_CAP {
+    while actor.conn_events_rx.len() < CONN_EVENT_CAP {
         tokio::task::yield_now().await;
     }
-    actor.on_conn_task_finished(peer, conn, result);
+    actor.on_conn_task_finished(peer, id, end);
     assert!(
         !producer.is_finished(),
         "the close waited for an empty queue"
@@ -79,5 +81,51 @@ async fn shutdown_comes_before_a_busy_publisher() -> Result {
         );
         reply_rx.try_recv().std_context("no shutdown reply")?;
     }
+    Ok(())
+}
+
+/// A shutdown lets the writer send its queue and finish its streams.
+///
+/// The connection then closes with `SHUTDOWN`.
+#[tokio::test]
+#[traced_test]
+async fn shutdown_sends_the_queue_then_closes() -> Result {
+    let pair = TestPair::new(1).await?;
+    let (conn, peer_conn) = pair.connect().await?;
+    let topic: TopicId = blake3::hash(b"shutdown").into();
+    let (queue, reader) = SendQueue::new(queue::MIN_QUEUE_SIZE);
+    let (test, _control) = start_conn_peered(conn, &peer_conn, TEST_FRAME_LIMIT).await?;
+    test.take_queue(reader, vec![]);
+    for _ in 0..3 {
+        assert!(matches!(queue.send(join_message(topic, 0)), Pushed::Queued));
+    }
+    test.shutdown.cancel();
+    let (sent, messages) = read_next_stream(&peer_conn).await?;
+    assert_eq!(
+        (sent, messages.len()),
+        (topic, 3),
+        "the queue did not go out"
+    );
+    assert_eq!(
+        close_code(&peer_conn, SECS_10).await?,
+        Some(CloseCode::Shutdown)
+    );
+    assert_eq!(ended(test.task, SECS_10).await?, ConnEnd::Failed);
+    Ok(())
+}
+
+/// An aborted peer closes the connection with `BLOCKED`.
+#[tokio::test]
+#[traced_test]
+async fn aborted_peer_closes_the_connection() -> Result {
+    let pair = TestPair::new(1).await?;
+    let (conn, peer_conn) = pair.connect().await?;
+    let (test, _control) = start_conn_peered(conn, &peer_conn, TEST_FRAME_LIMIT).await?;
+    test.aborted.cancel();
+    assert_eq!(
+        close_code(&peer_conn, SECS_10).await?,
+        Some(CloseCode::Blocked)
+    );
+    assert_eq!(ended(test.task, SECS_10).await?, ConnEnd::Failed);
     Ok(())
 }
