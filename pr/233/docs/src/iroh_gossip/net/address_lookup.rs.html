@@ -190,48 +190,83 @@
 <a href=#190 id=190 data-nosnippet>190</a>            .is_empty());
 <a href=#191 id=191 data-nosnippet>191</a>    }
 <a href=#192 id=192 data-nosnippet>192</a>
-<a href=#193 id=193 data-nosnippet>193</a>    <span class="attr">#[tokio::test]
-<a href=#194 id=194 data-nosnippet>194</a>    </span><span class="kw">async fn </span>test_retention() {
-<a href=#195 id=195 data-nosnippet>195</a>        <span class="kw">let </span>disco =
-<a href=#196 id=196 data-nosnippet>196</a>            GossipAddressLookup::with_times(Duration::from_millis(<span class="number">500</span>), Duration::from_millis(<span class="number">100</span>));
-<a href=#197 id=197 data-nosnippet>197</a>
-<a href=#198 id=198 data-nosnippet>198</a>        <span class="kw">let </span>rng = <span class="kw-2">&amp;mut </span>rand::rngs::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
-<a href=#199 id=199 data-nosnippet>199</a>        <span class="kw">let </span>k1 = SecretKey::from_bytes(<span class="kw-2">&amp;</span>rng.random());
-<a href=#200 id=200 data-nosnippet>200</a>        <span class="kw">let </span>a1 = EndpointAddr::new(k1.public());
-<a href=#201 id=201 data-nosnippet>201</a>
-<a href=#202 id=202 data-nosnippet>202</a>        disco.add(a1);
-<a href=#203 id=203 data-nosnippet>203</a>
-<a href=#204 id=204 data-nosnippet>204</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(
-<a href=#205 id=205 data-nosnippet>205</a>            disco.resolve(k1.public()).unwrap().next().<span class="kw">await</span>,
-<a href=#206 id=206 data-nosnippet>206</a>            <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(<span class="kw">_</span>))
-<a href=#207 id=207 data-nosnippet>207</a>        ));
-<a href=#208 id=208 data-nosnippet>208</a>
-<a href=#209 id=209 data-nosnippet>209</a>        tokio::time::sleep(Duration::from_millis(<span class="number">200</span>)).<span class="kw">await</span>;
-<a href=#210 id=210 data-nosnippet>210</a>
-<a href=#211 id=211 data-nosnippet>211</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(
-<a href=#212 id=212 data-nosnippet>212</a>            disco.resolve(k1.public()).unwrap().next().<span class="kw">await</span>,
-<a href=#213 id=213 data-nosnippet>213</a>            <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(<span class="kw">_</span>))
-<a href=#214 id=214 data-nosnippet>214</a>        ));
-<a href=#215 id=215 data-nosnippet>215</a>
-<a href=#216 id=216 data-nosnippet>216</a>        tokio::time::sleep(Duration::from_millis(<span class="number">700</span>)).<span class="kw">await</span>;
-<a href=#217 id=217 data-nosnippet>217</a>
-<a href=#218 id=218 data-nosnippet>218</a>        <span class="macro">assert!</span>(disco.resolve(k1.public()).is_none());
-<a href=#219 id=219 data-nosnippet>219</a>    }
-<a href=#220 id=220 data-nosnippet>220</a>
-<a href=#221 id=221 data-nosnippet>221</a>    <span class="doccomment">/// A peer whose address keeps changing has its newest addresses kept, up to the cap.
-<a href=#222 id=222 data-nosnippet>222</a>    </span><span class="attr">#[tokio::test]
-<a href=#223 id=223 data-nosnippet>223</a>    </span><span class="kw">async fn </span>changing_addresses_stay_capped() {
-<a href=#224 id=224 data-nosnippet>224</a>        <span class="kw">let </span>disco = GossipAddressLookup::default();
-<a href=#225 id=225 data-nosnippet>225</a>        <span class="kw">let </span>rng = <span class="kw-2">&amp;mut </span>rand::rngs::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
-<a href=#226 id=226 data-nosnippet>226</a>        <span class="kw">let </span>id = SecretKey::from_bytes(<span class="kw-2">&amp;</span>rng.random()).public();
-<a href=#227 id=227 data-nosnippet>227</a>        <span class="kw">let </span>addr = |port| SocketAddr::from(([<span class="number">10</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">1</span>], port));
-<a href=#228 id=228 data-nosnippet>228</a>        <span class="kw">for </span>port <span class="kw">in </span><span class="number">0</span>..<span class="number">1000 </span>{
-<a href=#229 id=229 data-nosnippet>229</a>            disco.add(EndpointAddr::new(id).with_ip_addr(addr(port)));
-<a href=#230 id=230 data-nosnippet>230</a>        }
-<a href=#231 id=231 data-nosnippet>231</a>
-<a href=#232 id=232 data-nosnippet>232</a>        <span class="kw">let </span>endpoints = disco.endpoints.read().expect(<span class="string">"poisoned"</span>);
-<a href=#233 id=233 data-nosnippet>233</a>        <span class="kw">let </span>ip_addrs: Vec&lt;<span class="kw">_</span>&gt; = endpoints[<span class="kw-2">&amp;</span>id].data.ip_addrs().copied().collect();
-<a href=#234 id=234 data-nosnippet>234</a>        <span class="macro">assert_eq!</span>(ip_addrs.len(), MAX_ADDRS);
-<a href=#235 id=235 data-nosnippet>235</a>        <span class="macro">assert_eq!</span>(ip_addrs[<span class="number">0</span>], addr(<span class="number">999</span>), <span class="string">"the newest address comes first"</span>);
-<a href=#236 id=236 data-nosnippet>236</a>    }
-<a href=#237 id=237 data-nosnippet>237</a>}</code></pre></div></section></main></body></html>
+<a href=#193 id=193 data-nosnippet>193</a>    <span class="doccomment">/// Pins the wire bytes of peer data of the addresses kind.
+<a href=#194 id=194 data-nosnippet>194</a>    ///
+<a href=#195 id=195 data-nosnippet>195</a>    /// The bytes are the kind, the length, and the postcard `AddrInfo`. A change of the
+<a href=#196 id=196 data-nosnippet>196</a>    /// serde of `RelayUrl` or `SocketAddr` would change them.
+<a href=#197 id=197 data-nosnippet>197</a>    </span><span class="attr">#[test]
+<a href=#198 id=198 data-nosnippet>198</a>    </span><span class="kw">fn </span>peer_data_vectors() {
+<a href=#199 id=199 data-nosnippet>199</a>        <span class="kw">let </span>encode = |relay: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>str&gt;, addrs: <span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>str]| {
+<a href=#200 id=200 data-nosnippet>200</a>            <span class="kw">let </span>info = AddrInfo {
+<a href=#201 id=201 data-nosnippet>201</a>                relay_url: relay.map(|url| url.parse().unwrap()),
+<a href=#202 id=202 data-nosnippet>202</a>                direct_addresses: addrs.iter().map(|addr| addr.parse().unwrap()).collect(),
+<a href=#203 id=203 data-nosnippet>203</a>            };
+<a href=#204 id=204 data-nosnippet>204</a>            hex::encode(postcard::to_stdvec(<span class="kw-2">&amp;</span>encode_peer_data(<span class="kw-2">&amp;</span>info)).unwrap())
+<a href=#205 id=205 data-nosnippet>205</a>        };
+<a href=#206 id=206 data-nosnippet>206</a>        <span class="comment">// No relay, no address.
+<a href=#207 id=207 data-nosnippet>207</a>        </span><span class="macro">assert_eq!</span>(encode(<span class="prelude-val">None</span>, <span class="kw-2">&amp;</span>[]), <span class="string">"00020000"</span>);
+<a href=#208 id=208 data-nosnippet>208</a>        <span class="comment">// No relay, one address: variant 0 (V4), the 4 bytes of the IP, the port as a varint.
+<a href=#209 id=209 data-nosnippet>209</a>        </span><span class="macro">assert_eq!</span>(
+<a href=#210 id=210 data-nosnippet>210</a>            encode(<span class="prelude-val">None</span>, <span class="kw-2">&amp;</span>[<span class="string">"127.0.0.1:4433"</span>]),
+<a href=#211 id=211 data-nosnippet>211</a>            <span class="macro">concat!</span>(<span class="string">"0009"</span>, <span class="string">"00"</span>, <span class="string">"01"</span>, <span class="string">"00"</span>, <span class="string">"7f000001"</span>, <span class="string">"d122"</span>)
+<a href=#212 id=212 data-nosnippet>212</a>        );
+<a href=#213 id=213 data-nosnippet>213</a>        <span class="comment">// The relay as a string, and variant 1 (V6) with the 16 bytes of the IP.
+<a href=#214 id=214 data-nosnippet>214</a>        </span><span class="macro">assert_eq!</span>(
+<a href=#215 id=215 data-nosnippet>215</a>            encode(<span class="prelude-val">Some</span>(<span class="string">"https://relay.example/"</span>), <span class="kw-2">&amp;</span>[<span class="string">"[::1]:7"</span>]),
+<a href=#216 id=216 data-nosnippet>216</a>            <span class="macro">concat!</span>(
+<a href=#217 id=217 data-nosnippet>217</a>                <span class="string">"002b"</span>,
+<a href=#218 id=218 data-nosnippet>218</a>                <span class="string">"0116"</span>,
+<a href=#219 id=219 data-nosnippet>219</a>                <span class="string">"68747470733a2f2f72656c61792e6578616d706c652f"</span>,
+<a href=#220 id=220 data-nosnippet>220</a>                <span class="string">"01"</span>,
+<a href=#221 id=221 data-nosnippet>221</a>                <span class="string">"01"</span>,
+<a href=#222 id=222 data-nosnippet>222</a>                <span class="string">"00000000000000000000000000000001"</span>,
+<a href=#223 id=223 data-nosnippet>223</a>                <span class="string">"07"
+<a href=#224 id=224 data-nosnippet>224</a>            </span>)
+<a href=#225 id=225 data-nosnippet>225</a>        );
+<a href=#226 id=226 data-nosnippet>226</a>    }
+<a href=#227 id=227 data-nosnippet>227</a>
+<a href=#228 id=228 data-nosnippet>228</a>    <span class="attr">#[tokio::test]
+<a href=#229 id=229 data-nosnippet>229</a>    </span><span class="kw">async fn </span>test_retention() {
+<a href=#230 id=230 data-nosnippet>230</a>        <span class="kw">let </span>disco =
+<a href=#231 id=231 data-nosnippet>231</a>            GossipAddressLookup::with_times(Duration::from_millis(<span class="number">500</span>), Duration::from_millis(<span class="number">100</span>));
+<a href=#232 id=232 data-nosnippet>232</a>
+<a href=#233 id=233 data-nosnippet>233</a>        <span class="kw">let </span>rng = <span class="kw-2">&amp;mut </span>rand::rngs::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
+<a href=#234 id=234 data-nosnippet>234</a>        <span class="kw">let </span>k1 = SecretKey::from_bytes(<span class="kw-2">&amp;</span>rng.random());
+<a href=#235 id=235 data-nosnippet>235</a>        <span class="kw">let </span>a1 = EndpointAddr::new(k1.public());
+<a href=#236 id=236 data-nosnippet>236</a>
+<a href=#237 id=237 data-nosnippet>237</a>        disco.add(a1);
+<a href=#238 id=238 data-nosnippet>238</a>
+<a href=#239 id=239 data-nosnippet>239</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(
+<a href=#240 id=240 data-nosnippet>240</a>            disco.resolve(k1.public()).unwrap().next().<span class="kw">await</span>,
+<a href=#241 id=241 data-nosnippet>241</a>            <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(<span class="kw">_</span>))
+<a href=#242 id=242 data-nosnippet>242</a>        ));
+<a href=#243 id=243 data-nosnippet>243</a>
+<a href=#244 id=244 data-nosnippet>244</a>        tokio::time::sleep(Duration::from_millis(<span class="number">200</span>)).<span class="kw">await</span>;
+<a href=#245 id=245 data-nosnippet>245</a>
+<a href=#246 id=246 data-nosnippet>246</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(
+<a href=#247 id=247 data-nosnippet>247</a>            disco.resolve(k1.public()).unwrap().next().<span class="kw">await</span>,
+<a href=#248 id=248 data-nosnippet>248</a>            <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(<span class="kw">_</span>))
+<a href=#249 id=249 data-nosnippet>249</a>        ));
+<a href=#250 id=250 data-nosnippet>250</a>
+<a href=#251 id=251 data-nosnippet>251</a>        tokio::time::sleep(Duration::from_millis(<span class="number">700</span>)).<span class="kw">await</span>;
+<a href=#252 id=252 data-nosnippet>252</a>
+<a href=#253 id=253 data-nosnippet>253</a>        <span class="macro">assert!</span>(disco.resolve(k1.public()).is_none());
+<a href=#254 id=254 data-nosnippet>254</a>    }
+<a href=#255 id=255 data-nosnippet>255</a>
+<a href=#256 id=256 data-nosnippet>256</a>    <span class="doccomment">/// A peer whose address keeps changing has its newest addresses kept, up to the cap.
+<a href=#257 id=257 data-nosnippet>257</a>    </span><span class="attr">#[tokio::test]
+<a href=#258 id=258 data-nosnippet>258</a>    </span><span class="kw">async fn </span>changing_addresses_stay_capped() {
+<a href=#259 id=259 data-nosnippet>259</a>        <span class="kw">let </span>disco = GossipAddressLookup::default();
+<a href=#260 id=260 data-nosnippet>260</a>        <span class="kw">let </span>rng = <span class="kw-2">&amp;mut </span>rand::rngs::ChaCha12Rng::seed_from_u64(<span class="number">1</span>);
+<a href=#261 id=261 data-nosnippet>261</a>        <span class="kw">let </span>id = SecretKey::from_bytes(<span class="kw-2">&amp;</span>rng.random()).public();
+<a href=#262 id=262 data-nosnippet>262</a>        <span class="kw">let </span>addr = |port| SocketAddr::from(([<span class="number">10</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">1</span>], port));
+<a href=#263 id=263 data-nosnippet>263</a>        <span class="kw">for </span>port <span class="kw">in </span><span class="number">0</span>..<span class="number">1000 </span>{
+<a href=#264 id=264 data-nosnippet>264</a>            disco.add(EndpointAddr::new(id).with_ip_addr(addr(port)));
+<a href=#265 id=265 data-nosnippet>265</a>        }
+<a href=#266 id=266 data-nosnippet>266</a>
+<a href=#267 id=267 data-nosnippet>267</a>        <span class="kw">let </span>endpoints = disco.endpoints.read().expect(<span class="string">"poisoned"</span>);
+<a href=#268 id=268 data-nosnippet>268</a>        <span class="kw">let </span>ip_addrs: Vec&lt;<span class="kw">_</span>&gt; = endpoints[<span class="kw-2">&amp;</span>id].data.ip_addrs().copied().collect();
+<a href=#269 id=269 data-nosnippet>269</a>        <span class="macro">assert_eq!</span>(ip_addrs.len(), MAX_ADDRS);
+<a href=#270 id=270 data-nosnippet>270</a>        <span class="macro">assert_eq!</span>(ip_addrs[<span class="number">0</span>], addr(<span class="number">999</span>), <span class="string">"the newest address comes first"</span>);
+<a href=#271 id=271 data-nosnippet>271</a>    }
+<a href=#272 id=272 data-nosnippet>272</a>}</code></pre></div></section></main></body></html>
