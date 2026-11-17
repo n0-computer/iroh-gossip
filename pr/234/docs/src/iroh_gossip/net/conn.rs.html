@@ -29,7 +29,7 @@
 <a href=#29 id=29 data-nosnippet>29</a>
 <a href=#30 id=30 data-nosnippet>30</a><span class="kw">use super</span>::{
 <a href=#31 id=31 data-nosnippet>31</a>    peers::{ConnEnd, ConnId},
-<a href=#32 id=32 data-nosnippet>32</a>    queue::{set_if_changed, QueueReader, QueuedMessage},
+<a href=#32 id=32 data-nosnippet>32</a>    queue::{set_if_changed, QueueItem, QueueReader, QueuedMessage},
 <a href=#33 id=33 data-nosnippet>33</a>    wire::{
 <a href=#34 id=34 data-nosnippet>34</a>        may_skip_over_limit, read_message, write_all, write_sized_message, CloseCode,
 <a href=#35 id=35 data-nosnippet>35</a>        ControlMessage, ReadError, Session, StreamHeader, WriteError, HEADER_TIMEOUT, OPEN_TIMEOUT,
@@ -760,108 +760,120 @@
 <a href=#760 id=760 data-nosnippet>760</a>        <span class="self">self</span>.retiring_until = <span class="prelude-val">Some</span>(Instant::now() + RETIRE_TIMEOUT);
 <a href=#761 id=761 data-nosnippet>761</a>    }
 <a href=#762 id=762 data-nosnippet>762</a>
-<a href=#763 id=763 data-nosnippet>763</a>    <span class="doccomment">/// Writes the message that the queue has ready.
+<a href=#763 id=763 data-nosnippet>763</a>    <span class="doccomment">/// Writes the message that the queue has ready, or finishes the stream of a topic.
 <a href=#764 id=764 data-nosnippet>764</a>    </span><span class="kw">async fn </span>write_current(<span class="kw-2">&amp;mut </span><span class="self">self</span>, queue: <span class="kw-2">&amp;mut </span>QueueReader) -&gt; <span class="prelude-ty">Result</span>&lt;(), WriteError&gt; {
-<a href=#765 id=765 data-nosnippet>765</a>        <span class="kw">let </span>item = queue.current().expect(<span class="string">"wait_next returned a message"</span>);
-<a href=#766 id=766 data-nosnippet>766</a>        <span class="kw">let </span>topic = item.message.topic;
-<a href=#767 id=767 data-nosnippet>767</a>        <span class="self">self</span>.open_stream(topic).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#768 id=768 data-nosnippet>768</a>        <span class="self">self</span>.send(item).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#769 id=769 data-nosnippet>769</a>        <span class="comment">// A topic that we just left needs no stream.
-<a href=#770 id=770 data-nosnippet>770</a>        </span><span class="kw">if </span>item.message.message.is_disconnect() {
-<a href=#771 id=771 data-nosnippet>771</a>            <span class="self">self</span>.topics_to_open.retain(|t| <span class="kw-2">*</span>t != topic);
-<a href=#772 id=772 data-nosnippet>772</a>        }
-<a href=#773 id=773 data-nosnippet>773</a>        queue.advance();
-<a href=#774 id=774 data-nosnippet>774</a>        <span class="prelude-val">Ok</span>(())
-<a href=#775 id=775 data-nosnippet>775</a>    }
-<a href=#776 id=776 data-nosnippet>776</a>
-<a href=#777 id=777 data-nosnippet>777</a>    <span class="doccomment">/// Writes a message on the stream of its topic, and finishes the stream after a `Close`.
-<a href=#778 id=778 data-nosnippet>778</a>    ///
-<a href=#779 id=779 data-nosnippet>779</a>    /// A message over the size limit is lost, if [`may_skip_over_limit`] allows it.
-<a href=#780 id=780 data-nosnippet>780</a>    /// Returns the error if the write failed otherwise, which fails the connection.
-<a href=#781 id=781 data-nosnippet>781</a>    </span><span class="kw">async fn </span>send(<span class="kw-2">&amp;mut </span><span class="self">self</span>, item: <span class="kw-2">&amp;</span>QueuedMessage) -&gt; <span class="prelude-ty">Result</span>&lt;(), WriteError&gt; {
-<a href=#782 id=782 data-nosnippet>782</a>        <span class="kw">let </span>ProtoMessage { topic, message } = <span class="kw-2">&amp;</span>item.message;
-<a href=#783 id=783 data-nosnippet>783</a>        <span class="kw">let </span>stream = <span class="self">self
-<a href=#784 id=784 data-nosnippet>784</a>            </span>.streams
-<a href=#785 id=785 data-nosnippet>785</a>            .get_mut(topic)
-<a href=#786 id=786 data-nosnippet>786</a>            .expect(<span class="string">"the stream was opened before"</span>);
-<a href=#787 id=787 data-nosnippet>787</a>        <span class="kw">let </span>len = item.encoded_len();
-<a href=#788 id=788 data-nosnippet>788</a>        <span class="kw">match </span>write_sized_message(
-<a href=#789 id=789 data-nosnippet>789</a>            stream,
-<a href=#790 id=790 data-nosnippet>790</a>            message,
-<a href=#791 id=791 data-nosnippet>791</a>            len,
-<a href=#792 id=792 data-nosnippet>792</a>            <span class="kw-2">&amp;mut </span><span class="self">self</span>.buffer,
-<a href=#793 id=793 data-nosnippet>793</a>            <span class="self">self</span>.max_message_size,
-<a href=#794 id=794 data-nosnippet>794</a>        )
-<a href=#795 id=795 data-nosnippet>795</a>        .<span class="kw">await
-<a href=#796 id=796 data-nosnippet>796</a>        </span>{
-<a href=#797 id=797 data-nosnippet>797</a>            <span class="prelude-val">Ok</span>(()) =&gt; {
-<a href=#798 id=798 data-nosnippet>798</a>                <span class="kw">if </span>message.is_disconnect() {
-<a href=#799 id=799 data-nosnippet>799</a>                    <span class="comment">// Dropping a stream finishes it.
-<a href=#800 id=800 data-nosnippet>800</a>                    </span><span class="self">self</span>.streams.remove(topic);
-<a href=#801 id=801 data-nosnippet>801</a>                }
-<a href=#802 id=802 data-nosnippet>802</a>                <span class="prelude-val">Ok</span>(())
-<a href=#803 id=803 data-nosnippet>803</a>            }
-<a href=#804 id=804 data-nosnippet>804</a>            <span class="comment">// Refused before any byte went out, so the stream is intact.
-<a href=#805 id=805 data-nosnippet>805</a>            </span><span class="prelude-val">Err</span>(err @ WriteError::TooLarge { .. }) =&gt; {
-<a href=#806 id=806 data-nosnippet>806</a>                <span class="kw">if </span>may_skip_over_limit(message) {
-<a href=#807 id=807 data-nosnippet>807</a>                    <span class="macro">warn!</span>(max = <span class="self">self</span>.max_message_size, <span class="string">"message too large, dropped"</span>);
-<a href=#808 id=808 data-nosnippet>808</a>                    <span class="prelude-val">Ok</span>(())
-<a href=#809 id=809 data-nosnippet>809</a>                } <span class="kw">else </span>{
-<a href=#810 id=810 data-nosnippet>810</a>                    <span class="macro">warn!</span>(
-<a href=#811 id=811 data-nosnippet>811</a>                        max = <span class="self">self</span>.max_message_size,
-<a href=#812 id=812 data-nosnippet>812</a>                        <span class="string">"control message too large, fail the connection"
-<a href=#813 id=813 data-nosnippet>813</a>                    </span>);
-<a href=#814 id=814 data-nosnippet>814</a>                    <span class="prelude-val">Err</span>(err)
-<a href=#815 id=815 data-nosnippet>815</a>                }
-<a href=#816 id=816 data-nosnippet>816</a>            }
-<a href=#817 id=817 data-nosnippet>817</a>            <span class="prelude-val">Err</span>(err) =&gt; <span class="prelude-val">Err</span>(err),
-<a href=#818 id=818 data-nosnippet>818</a>        }
-<a href=#819 id=819 data-nosnippet>819</a>    }
-<a href=#820 id=820 data-nosnippet>820</a>
-<a href=#821 id=821 data-nosnippet>821</a>    <span class="doccomment">/// Opens the stream of `topic` and writes its header, unless it is open.
-<a href=#822 id=822 data-nosnippet>822</a>    ///
-<a href=#823 id=823 data-nosnippet>823</a>    /// The header goes out in full once the stream opened. If the actor aborts the
-<a href=#824 id=824 data-nosnippet>824</a>    /// peer, the connection closes anyway and cuts the header.
-<a href=#825 id=825 data-nosnippet>825</a>    </span><span class="kw">async fn </span>open_stream(<span class="kw-2">&amp;mut </span><span class="self">self</span>, topic: TopicId) -&gt; <span class="prelude-ty">Result</span>&lt;(), WriteError&gt; {
-<a href=#826 id=826 data-nosnippet>826</a>        <span class="kw">let </span>Entry::Vacant(entry) = <span class="self">self</span>.streams.entry(topic) <span class="kw">else </span>{
-<a href=#827 id=827 data-nosnippet>827</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(());
-<a href=#828 id=828 data-nosnippet>828</a>        };
-<a href=#829 id=829 data-nosnippet>829</a>        <span class="kw">let </span><span class="kw-2">mut </span>stream = time::timeout(OPEN_TIMEOUT, <span class="self">self</span>.conn.open_uni())
-<a href=#830 id=830 data-nosnippet>830</a>            .<span class="kw">await
-<a href=#831 id=831 data-nosnippet>831</a>            </span>.map_err(|<span class="kw">_</span>| <span class="macro">n0_error::e!</span>(WriteError::OpenStalled))<span class="question-mark">??</span>;
-<a href=#832 id=832 data-nosnippet>832</a>        <span class="comment">// The stream counts for the `GOAWAY` once it opened, also if the peer stops it
-<a href=#833 id=833 data-nosnippet>833</a>        // before the header write returns: the peer accepted it then. A header write
-<a href=#834 id=834 data-nosnippet>834</a>        // that fails otherwise fails the connection.
-<a href=#835 id=835 data-nosnippet>835</a>        </span><span class="self">self</span>.opened_count += <span class="number">1</span>;
-<a href=#836 id=836 data-nosnippet>836</a>        StreamHeader::write(topic, <span class="kw-2">&amp;mut </span>stream, <span class="kw-2">&amp;mut </span><span class="self">self</span>.buffer).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#837 id=837 data-nosnippet>837</a>        <span class="macro">debug!</span>(topic=%topic.fmt_short(), <span class="string">"stream opened"</span>);
-<a href=#838 id=838 data-nosnippet>838</a>        <span class="comment">// The QUIC stack of the peer acknowledges data that its app did not read
-<a href=#839 id=839 data-nosnippet>839</a>        // yet, so this needs no timeout.
-<a href=#840 id=840 data-nosnippet>840</a>        </span><span class="kw">let </span>(id, stopped) = (stream.id(), stream.stopped());
-<a href=#841 id=841 data-nosnippet>841</a>        <span class="self">self</span>.stream_ends.push(Box::pin(<span class="kw">async move </span>{
-<a href=#842 id=842 data-nosnippet>842</a>            <span class="kw">let </span>stop = stopped.<span class="kw">await</span>.ok().flatten();
-<a href=#843 id=843 data-nosnippet>843</a>            (topic, id, stop)
-<a href=#844 id=844 data-nosnippet>844</a>        }));
-<a href=#845 id=845 data-nosnippet>845</a>        entry.insert(stream);
-<a href=#846 id=846 data-nosnippet>846</a>        <span class="prelude-val">Ok</span>(())
-<a href=#847 id=847 data-nosnippet>847</a>    }
-<a href=#848 id=848 data-nosnippet>848</a>}
-<a href=#849 id=849 data-nosnippet>849</a>
-<a href=#850 id=850 data-nosnippet>850</a><span class="attr">#[cfg(test)]
-<a href=#851 id=851 data-nosnippet>851</a></span><span class="kw">mod </span>tests {
-<a href=#852 id=852 data-nosnippet>852</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
-<a href=#853 id=853 data-nosnippet>853</a>
-<a href=#854 id=854 data-nosnippet>854</a>    <span class="doccomment">/// A put replaces the value that nobody took, and a take that waits gets the next put.
-<a href=#855 id=855 data-nosnippet>855</a>    </span><span class="attr">#[tokio::test]
-<a href=#856 id=856 data-nosnippet>856</a>    </span><span class="kw">async fn </span>mailbox_keeps_the_latest_value() {
-<a href=#857 id=857 data-nosnippet>857</a>        <span class="kw">let </span>mailbox = Mailbox::default();
-<a href=#858 id=858 data-nosnippet>858</a>        mailbox.put(<span class="number">1</span>);
-<a href=#859 id=859 data-nosnippet>859</a>        mailbox.put(<span class="number">2</span>);
-<a href=#860 id=860 data-nosnippet>860</a>        <span class="macro">assert_eq!</span>(mailbox.take().<span class="kw">await</span>, <span class="number">2</span>);
-<a href=#861 id=861 data-nosnippet>861</a>        <span class="macro">assert_eq!</span>(mailbox.try_take(), <span class="prelude-val">None</span>);
-<a href=#862 id=862 data-nosnippet>862</a>        <span class="kw">let </span><span class="kw-2">mut </span>take = <span class="macro">std::pin::pin!</span>(mailbox.take());
-<a href=#863 id=863 data-nosnippet>863</a>        <span class="macro">assert!</span>(n0_future::future::poll_once(<span class="kw-2">&amp;mut </span>take).<span class="kw">await</span>.is_none());
-<a href=#864 id=864 data-nosnippet>864</a>        mailbox.put(<span class="number">3</span>);
-<a href=#865 id=865 data-nosnippet>865</a>        <span class="macro">assert_eq!</span>(take.<span class="kw">await</span>, <span class="number">3</span>);
-<a href=#866 id=866 data-nosnippet>866</a>    }
-<a href=#867 id=867 data-nosnippet>867</a>}</code></pre></div></section></main></body></html>
+<a href=#765 id=765 data-nosnippet>765</a>        <span class="kw">let </span>item = <span class="kw">match </span>queue.current().expect(<span class="string">"wait_next returned an item"</span>) {
+<a href=#766 id=766 data-nosnippet>766</a>            QueueItem::Message(item) =&gt; item,
+<a href=#767 id=767 data-nosnippet>767</a>            QueueItem::Finish(topic) =&gt; {
+<a href=#768 id=768 data-nosnippet>768</a>                <span class="kw">let </span>topic = <span class="kw-2">*</span>topic;
+<a href=#769 id=769 data-nosnippet>769</a>                <span class="comment">// Dropping a stream finishes it. A later message opens a new one.
+<a href=#770 id=770 data-nosnippet>770</a>                </span><span class="kw">if </span><span class="self">self</span>.streams.remove(<span class="kw-2">&amp;</span>topic).is_some() {
+<a href=#771 id=771 data-nosnippet>771</a>                    <span class="macro">debug!</span>(topic = %topic.fmt_short(), <span class="string">"the topic no longer uses the peer, finish its stream"</span>);
+<a href=#772 id=772 data-nosnippet>772</a>                }
+<a href=#773 id=773 data-nosnippet>773</a>                <span class="self">self</span>.topics_to_open.retain(|t| <span class="kw-2">*</span>t != topic);
+<a href=#774 id=774 data-nosnippet>774</a>                queue.advance();
+<a href=#775 id=775 data-nosnippet>775</a>                <span class="kw">return </span><span class="prelude-val">Ok</span>(());
+<a href=#776 id=776 data-nosnippet>776</a>            }
+<a href=#777 id=777 data-nosnippet>777</a>        };
+<a href=#778 id=778 data-nosnippet>778</a>        <span class="kw">let </span>topic = item.message.topic;
+<a href=#779 id=779 data-nosnippet>779</a>        <span class="self">self</span>.open_stream(topic).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#780 id=780 data-nosnippet>780</a>        <span class="self">self</span>.send(item).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#781 id=781 data-nosnippet>781</a>        <span class="comment">// A topic that we just left needs no stream.
+<a href=#782 id=782 data-nosnippet>782</a>        </span><span class="kw">if </span>item.message.message.is_disconnect() {
+<a href=#783 id=783 data-nosnippet>783</a>            <span class="self">self</span>.topics_to_open.retain(|t| <span class="kw-2">*</span>t != topic);
+<a href=#784 id=784 data-nosnippet>784</a>        }
+<a href=#785 id=785 data-nosnippet>785</a>        queue.advance();
+<a href=#786 id=786 data-nosnippet>786</a>        <span class="prelude-val">Ok</span>(())
+<a href=#787 id=787 data-nosnippet>787</a>    }
+<a href=#788 id=788 data-nosnippet>788</a>
+<a href=#789 id=789 data-nosnippet>789</a>    <span class="doccomment">/// Writes a message on the stream of its topic, and finishes the stream after a `Close`.
+<a href=#790 id=790 data-nosnippet>790</a>    ///
+<a href=#791 id=791 data-nosnippet>791</a>    /// A message over the size limit is lost, if [`may_skip_over_limit`] allows it.
+<a href=#792 id=792 data-nosnippet>792</a>    /// Returns the error if the write failed otherwise, which fails the connection.
+<a href=#793 id=793 data-nosnippet>793</a>    </span><span class="kw">async fn </span>send(<span class="kw-2">&amp;mut </span><span class="self">self</span>, item: <span class="kw-2">&amp;</span>QueuedMessage) -&gt; <span class="prelude-ty">Result</span>&lt;(), WriteError&gt; {
+<a href=#794 id=794 data-nosnippet>794</a>        <span class="kw">let </span>ProtoMessage { topic, message } = <span class="kw-2">&amp;</span>item.message;
+<a href=#795 id=795 data-nosnippet>795</a>        <span class="kw">let </span>stream = <span class="self">self
+<a href=#796 id=796 data-nosnippet>796</a>            </span>.streams
+<a href=#797 id=797 data-nosnippet>797</a>            .get_mut(topic)
+<a href=#798 id=798 data-nosnippet>798</a>            .expect(<span class="string">"the stream was opened before"</span>);
+<a href=#799 id=799 data-nosnippet>799</a>        <span class="kw">let </span>len = item.encoded_len();
+<a href=#800 id=800 data-nosnippet>800</a>        <span class="kw">match </span>write_sized_message(
+<a href=#801 id=801 data-nosnippet>801</a>            stream,
+<a href=#802 id=802 data-nosnippet>802</a>            message,
+<a href=#803 id=803 data-nosnippet>803</a>            len,
+<a href=#804 id=804 data-nosnippet>804</a>            <span class="kw-2">&amp;mut </span><span class="self">self</span>.buffer,
+<a href=#805 id=805 data-nosnippet>805</a>            <span class="self">self</span>.max_message_size,
+<a href=#806 id=806 data-nosnippet>806</a>        )
+<a href=#807 id=807 data-nosnippet>807</a>        .<span class="kw">await
+<a href=#808 id=808 data-nosnippet>808</a>        </span>{
+<a href=#809 id=809 data-nosnippet>809</a>            <span class="prelude-val">Ok</span>(()) =&gt; {
+<a href=#810 id=810 data-nosnippet>810</a>                <span class="kw">if </span>message.is_disconnect() {
+<a href=#811 id=811 data-nosnippet>811</a>                    <span class="comment">// Dropping a stream finishes it.
+<a href=#812 id=812 data-nosnippet>812</a>                    </span><span class="self">self</span>.streams.remove(topic);
+<a href=#813 id=813 data-nosnippet>813</a>                }
+<a href=#814 id=814 data-nosnippet>814</a>                <span class="prelude-val">Ok</span>(())
+<a href=#815 id=815 data-nosnippet>815</a>            }
+<a href=#816 id=816 data-nosnippet>816</a>            <span class="comment">// Refused before any byte went out, so the stream is intact.
+<a href=#817 id=817 data-nosnippet>817</a>            </span><span class="prelude-val">Err</span>(err @ WriteError::TooLarge { .. }) =&gt; {
+<a href=#818 id=818 data-nosnippet>818</a>                <span class="kw">if </span>may_skip_over_limit(message) {
+<a href=#819 id=819 data-nosnippet>819</a>                    <span class="macro">warn!</span>(max = <span class="self">self</span>.max_message_size, <span class="string">"message too large, dropped"</span>);
+<a href=#820 id=820 data-nosnippet>820</a>                    <span class="prelude-val">Ok</span>(())
+<a href=#821 id=821 data-nosnippet>821</a>                } <span class="kw">else </span>{
+<a href=#822 id=822 data-nosnippet>822</a>                    <span class="macro">warn!</span>(
+<a href=#823 id=823 data-nosnippet>823</a>                        max = <span class="self">self</span>.max_message_size,
+<a href=#824 id=824 data-nosnippet>824</a>                        <span class="string">"control message too large, fail the connection"
+<a href=#825 id=825 data-nosnippet>825</a>                    </span>);
+<a href=#826 id=826 data-nosnippet>826</a>                    <span class="prelude-val">Err</span>(err)
+<a href=#827 id=827 data-nosnippet>827</a>                }
+<a href=#828 id=828 data-nosnippet>828</a>            }
+<a href=#829 id=829 data-nosnippet>829</a>            <span class="prelude-val">Err</span>(err) =&gt; <span class="prelude-val">Err</span>(err),
+<a href=#830 id=830 data-nosnippet>830</a>        }
+<a href=#831 id=831 data-nosnippet>831</a>    }
+<a href=#832 id=832 data-nosnippet>832</a>
+<a href=#833 id=833 data-nosnippet>833</a>    <span class="doccomment">/// Opens the stream of `topic` and writes its header, unless it is open.
+<a href=#834 id=834 data-nosnippet>834</a>    ///
+<a href=#835 id=835 data-nosnippet>835</a>    /// The header goes out in full once the stream opened. If the actor aborts the
+<a href=#836 id=836 data-nosnippet>836</a>    /// peer, the connection closes anyway and cuts the header.
+<a href=#837 id=837 data-nosnippet>837</a>    </span><span class="kw">async fn </span>open_stream(<span class="kw-2">&amp;mut </span><span class="self">self</span>, topic: TopicId) -&gt; <span class="prelude-ty">Result</span>&lt;(), WriteError&gt; {
+<a href=#838 id=838 data-nosnippet>838</a>        <span class="kw">let </span>Entry::Vacant(entry) = <span class="self">self</span>.streams.entry(topic) <span class="kw">else </span>{
+<a href=#839 id=839 data-nosnippet>839</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(());
+<a href=#840 id=840 data-nosnippet>840</a>        };
+<a href=#841 id=841 data-nosnippet>841</a>        <span class="kw">let </span><span class="kw-2">mut </span>stream = time::timeout(OPEN_TIMEOUT, <span class="self">self</span>.conn.open_uni())
+<a href=#842 id=842 data-nosnippet>842</a>            .<span class="kw">await
+<a href=#843 id=843 data-nosnippet>843</a>            </span>.map_err(|<span class="kw">_</span>| <span class="macro">n0_error::e!</span>(WriteError::OpenStalled))<span class="question-mark">??</span>;
+<a href=#844 id=844 data-nosnippet>844</a>        <span class="comment">// The stream counts for the `GOAWAY` once it opened, also if the peer stops it
+<a href=#845 id=845 data-nosnippet>845</a>        // before the header write returns: the peer accepted it then. A header write
+<a href=#846 id=846 data-nosnippet>846</a>        // that fails otherwise fails the connection.
+<a href=#847 id=847 data-nosnippet>847</a>        </span><span class="self">self</span>.opened_count += <span class="number">1</span>;
+<a href=#848 id=848 data-nosnippet>848</a>        StreamHeader::write(topic, <span class="kw-2">&amp;mut </span>stream, <span class="kw-2">&amp;mut </span><span class="self">self</span>.buffer).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#849 id=849 data-nosnippet>849</a>        <span class="macro">debug!</span>(topic=%topic.fmt_short(), <span class="string">"stream opened"</span>);
+<a href=#850 id=850 data-nosnippet>850</a>        <span class="comment">// The QUIC stack of the peer acknowledges data that its app did not read
+<a href=#851 id=851 data-nosnippet>851</a>        // yet, so this needs no timeout.
+<a href=#852 id=852 data-nosnippet>852</a>        </span><span class="kw">let </span>(id, stopped) = (stream.id(), stream.stopped());
+<a href=#853 id=853 data-nosnippet>853</a>        <span class="self">self</span>.stream_ends.push(Box::pin(<span class="kw">async move </span>{
+<a href=#854 id=854 data-nosnippet>854</a>            <span class="kw">let </span>stop = stopped.<span class="kw">await</span>.ok().flatten();
+<a href=#855 id=855 data-nosnippet>855</a>            (topic, id, stop)
+<a href=#856 id=856 data-nosnippet>856</a>        }));
+<a href=#857 id=857 data-nosnippet>857</a>        entry.insert(stream);
+<a href=#858 id=858 data-nosnippet>858</a>        <span class="prelude-val">Ok</span>(())
+<a href=#859 id=859 data-nosnippet>859</a>    }
+<a href=#860 id=860 data-nosnippet>860</a>}
+<a href=#861 id=861 data-nosnippet>861</a>
+<a href=#862 id=862 data-nosnippet>862</a><span class="attr">#[cfg(test)]
+<a href=#863 id=863 data-nosnippet>863</a></span><span class="kw">mod </span>tests {
+<a href=#864 id=864 data-nosnippet>864</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#865 id=865 data-nosnippet>865</a>
+<a href=#866 id=866 data-nosnippet>866</a>    <span class="doccomment">/// A put replaces the value that nobody took, and a take that waits gets the next put.
+<a href=#867 id=867 data-nosnippet>867</a>    </span><span class="attr">#[tokio::test]
+<a href=#868 id=868 data-nosnippet>868</a>    </span><span class="kw">async fn </span>mailbox_keeps_the_latest_value() {
+<a href=#869 id=869 data-nosnippet>869</a>        <span class="kw">let </span>mailbox = Mailbox::default();
+<a href=#870 id=870 data-nosnippet>870</a>        mailbox.put(<span class="number">1</span>);
+<a href=#871 id=871 data-nosnippet>871</a>        mailbox.put(<span class="number">2</span>);
+<a href=#872 id=872 data-nosnippet>872</a>        <span class="macro">assert_eq!</span>(mailbox.take().<span class="kw">await</span>, <span class="number">2</span>);
+<a href=#873 id=873 data-nosnippet>873</a>        <span class="macro">assert_eq!</span>(mailbox.try_take(), <span class="prelude-val">None</span>);
+<a href=#874 id=874 data-nosnippet>874</a>        <span class="kw">let </span><span class="kw-2">mut </span>take = <span class="macro">std::pin::pin!</span>(mailbox.take());
+<a href=#875 id=875 data-nosnippet>875</a>        <span class="macro">assert!</span>(n0_future::future::poll_once(<span class="kw-2">&amp;mut </span>take).<span class="kw">await</span>.is_none());
+<a href=#876 id=876 data-nosnippet>876</a>        mailbox.put(<span class="number">3</span>);
+<a href=#877 id=877 data-nosnippet>877</a>        <span class="macro">assert_eq!</span>(take.<span class="kw">await</span>, <span class="number">3</span>);
+<a href=#878 id=878 data-nosnippet>878</a>    }
+<a href=#879 id=879 data-nosnippet>879</a>}</code></pre></div></section></main></body></html>
