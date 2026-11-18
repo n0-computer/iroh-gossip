@@ -23,6 +23,7 @@ use tracing::{debug, error_span, trace, warn, Instrument};
 
 use super::{
     address_lookup::{decode_peer_data, encode_peer_data, GossipAddressLookup},
+    auth::TopicAuth,
     conn::{
         connection_loop, task_output, ConnArgs, ConnEvent, ConnEventKind, ConnExit, ConnShared,
         Mailbox, TakeQueue,
@@ -35,7 +36,7 @@ use super::{
     InEvent, Join, ProtoCommand, ProtoEvent, ProtoMessage, QueueOptions, Timer, ToActor, ALPN,
 };
 use crate::{
-    api::Command,
+    api::{AuthToken, Command},
     metrics::Metrics,
     proto::{self, state::MessageKind, util::TimerMap, PeerData, Scope, TopicId, IO},
 };
@@ -58,6 +59,7 @@ pub(super) struct ActorConfig {
     ///
     /// [`Builder::max_peer_streams`]: super::Builder::max_peer_streams
     pub(super) max_peer_streams: Option<u32>,
+    pub(super) topic_auth: TopicAuth,
     /// How long an idle connection waits before it retires.
     pub(super) retire_after: Duration,
 }
@@ -69,6 +71,7 @@ impl Default for ActorConfig {
             alpn: ALPN.to_vec().into(),
             send_queue: Default::default(),
             max_peer_streams: None,
+            topic_auth: Default::default(),
             retire_after: DEFAULT_RETIRE_AFTER,
         }
     }
@@ -144,6 +147,8 @@ struct ActorState {
     dialer: Dialer,
     /// Map of topics to their state.
     topics: HashMap<TopicId, TopicHandles>,
+    /// The tokens that we send, by topic.
+    tokens: HashMap<TopicId, AuthToken>,
     /// Internal queue of topics to close because all handles were dropped.
     quit_queue: VecDeque<TopicId>,
     /// Events that the handling of an event caused, handled after it.
@@ -168,6 +173,7 @@ impl Actor {
             alpn,
             send_queue,
             max_peer_streams,
+            topic_auth,
             retire_after,
         } = config;
         let me = endpoint.id();
@@ -183,6 +189,7 @@ impl Actor {
         let conn_shared = ConnShared {
             events: conn_events_tx,
             max_message_size,
+            verifier: topic_auth,
             session: Session::random(),
             retire_after,
             shutdown: CancellationToken::new(),
@@ -192,6 +199,7 @@ impl Actor {
             max_peer_streams,
             dialer: Dialer::new(endpoint.clone(), alpn),
             topics: Default::default(),
+            tokens: Default::default(),
             quit_queue: Default::default(),
             follow_ups: Default::default(),
             timers: TimerMap::default(),
@@ -490,6 +498,10 @@ impl Actor {
                     };
                     let topics: Vec<TopicId> = self.proto.topics_wanting(&peer_id).collect();
                     peer.add_topic_streams(&topics);
+                    let topics = topics
+                        .into_iter()
+                        .map(|topic| (topic, self.state.tokens.get(&topic).cloned()))
+                        .collect();
                     handle.take_queue.put(TakeQueue { reader, topics });
                 }
                 Action::Disconnect => {
@@ -528,6 +540,12 @@ impl Actor {
         match kind {
             ConnEventKind::Message(message) => {
                 self.handle_in_event(InEvent::RecvMessage(peer, message), now)
+            }
+            ConnEventKind::Refused(topic) => {
+                self.handle_in_event(InEvent::PeerRefused(topic, peer), now)
+            }
+            ConnEventKind::Rejected(topic) => {
+                self.handle_in_event(InEvent::PeerRejected(topic, peer), now)
             }
             ConnEventKind::Header(session) => {
                 let mut actions = Vec::new();
@@ -575,10 +593,17 @@ impl Actor {
         let Join {
             topic_id,
             bootstrap,
+            auth_token,
             events_tx,
             commands_rx,
             registered,
         } = join;
+        if let Some(token) = auth_token {
+            let tokens = &mut self.state.tokens;
+            if *tokens.entry(topic_id).or_insert_with(|| token.clone()) != token {
+                warn!(topic = %topic_id.fmt_short(), "joined with another auth token than the topic has, keep the first");
+            }
+        }
         let TopicHandles {
             events,
             command_receivers,
@@ -618,6 +643,7 @@ impl Actor {
                 InEvent::Command(topic_id, ProtoCommand::Quit),
                 Instant::now(),
             );
+            self.state.tokens.remove(&topic_id);
             if self.state.topics.remove(&topic_id).is_some() {
                 debug!(%topic_id, "no publisher or subscriber left, leave the topic");
             }
@@ -744,10 +770,11 @@ impl IO<PublicKey> for ActorIO<'_> {
             return None;
         }
         let peer = state.peers.get_or_insert(peer_id);
+        let token = state.tokens.get(&message.topic).cloned();
         self.opened_queue |= peer.queue.is_closed();
         let len = super::wire::message_len(&message.message).ok();
         let (kind, topic) = (message.kind(), message.topic);
-        let dropped = match peer.push(message, len) {
+        let dropped = match peer.push(message, len, token) {
             Pushed::Queued => {
                 track_message(kind, len, true, &state.metrics);
                 // A dropped message opens no stream, so only a queued one counts.

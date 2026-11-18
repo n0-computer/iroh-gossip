@@ -27,6 +27,7 @@ use super::*;
 use crate::{
     api::{self, Command, Event, GossipReceiver, GossipSender},
     net::{
+        auth::TopicAuth,
         conn::{
             self, connection_loop, task_output, ConnArgs, ConnEvent, ConnEventKind, ConnExit,
             ConnShared, Mailbox, TakeQueue,
@@ -294,7 +295,7 @@ async fn open_stream(
 ) -> Result<iroh::endpoint::SendStream> {
     let mut stream = conn.open_uni().await.std_context("open stream")?;
     let mut buffer = Vec::new();
-    wire::StreamHeader::write(topic, &mut stream, &mut buffer)
+    wire::StreamHeader::write(topic, None, &mut stream, &mut buffer)
         .await
         .std_context("write header")?;
     for message in messages {
@@ -474,8 +475,13 @@ struct TestConn {
     task: AbortOnDropHandle<ConnExit>,
 }
 
-/// Runs `connection_loop` for `conn`.
-fn start_conn(conn: Connection, max_message_size: usize, retire_after: Duration) -> TestConn {
+/// Runs `connection_loop` for `conn` with a verifier of the streams of the peer.
+fn start_conn_with(
+    conn: Connection,
+    max_message_size: usize,
+    retire_after: Duration,
+    verifier: TopicAuth,
+) -> TestConn {
     let (events_tx, events) = mpsc::channel::<ConnEvent>(64);
     let queue = Arc::new(Mailbox::default());
     let (aborted, retire, shutdown) = (
@@ -486,6 +492,7 @@ fn start_conn(conn: Connection, max_message_size: usize, retire_after: Duration)
     let shared = ConnShared {
         events: events_tx,
         max_message_size,
+        verifier,
         session: Session([1; 8]),
         retire_after,
         shutdown: shutdown.clone(),
@@ -508,9 +515,15 @@ fn start_conn(conn: Connection, max_message_size: usize, retire_after: Duration)
     }
 }
 
+/// Runs `connection_loop` for `conn`.
+fn start_conn(conn: Connection, max_message_size: usize, retire_after: Duration) -> TestConn {
+    start_conn_with(conn, max_message_size, retire_after, Default::default())
+}
+
 impl TestConn {
     /// Moves `reader` to the writer, and gives it the topics that get a stream at once.
     fn take_queue(&self, reader: QueueReader, topics: Vec<TopicId>) {
+        let topics = topics.into_iter().map(|topic| (topic, None)).collect();
         self.queue.put(TakeQueue { reader, topics });
     }
 

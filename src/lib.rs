@@ -34,7 +34,10 @@ pub use self::proto::{
 };
 #[cfg(feature = "net")]
 pub use self::{
-    api::{DeliveryScope, Event, GossipReceiver, GossipSender, GossipTopic, JoinOptions, Message},
+    api::{
+        AuthToken, DeliveryScope, Event, GossipReceiver, GossipSender, GossipTopic, JoinOptions,
+        Message,
+    },
     error::Error,
-    net::{Builder, Gossip, QueueOptions, ALPN},
+    net::{AuthContext, Builder, Gossip, QueueOptions, Verdict, ALPN},
 };
