@@ -65,6 +65,9 @@ tokio-util = { version = "0.7.20", optional = true, features = ["codec"] }
 tracing = "0.1"
 n0-error = { version = "1", features = ["anyhow"] }
 
+# test-utils dependencies (optional)
+jiff = { version = "1", default-features = false, features = ["std", "serde"], optional = true }
+
 # simulator dependencies (optional)
 clap = { version = "4", features = ["derive"], optional = true }
 toml = { version = "1.2.1", optional = true }
@@ -109,7 +112,7 @@ net = [
 ]
 # Makes the protocol state machine public. Its API may change in any release.
 experimental-proto-internals = []
-test-utils = ["experimental-proto-internals", "rand/chacha"]
+test-utils = ["experimental-proto-internals", "rand/chacha", "dep:jiff"]
 simulator = [
     "test-utils",
     "dep:tracing-subscriber",

@@ -60,54 +60,14 @@ pub enum LatencyConfig {
     },
 }
 
-/// Reads and writes a [`Duration`] as a whole number with a unit, such as `"50ms"`.
+/// Reads and writes a [`Duration`] in the friendly format of jiff, such as `"50ms"` or `"1s 500ms"`.
 ///
-/// The units are `us`, `ms`, `s` and `m`.
+/// It reads fractions such as `"1.5s"` and the units from `ns` to `h`, and writes nanoseconds
+/// exactly.
 mod duration_str {
-    use n0_future::time::Duration;
-    use serde::{de::Error, Deserialize, Deserializer, Serializer};
-
-    pub(super) fn serialize<S: Serializer>(
-        duration: &Duration,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&format(*duration))
-    }
-
-    /// Writes whole milliseconds, or whole microseconds if there is a rest.
-    pub(super) fn format(duration: Duration) -> String {
-        if duration.subsec_nanos().is_multiple_of(1_000_000) {
-            format!("{}ms", duration.as_millis())
-        } else {
-            format!("{}us", duration.as_micros())
-        }
-    }
-
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Duration, D::Error> {
-        let text = String::deserialize(deserializer)?;
-        parse(&text).ok_or_else(|| {
-            D::Error::custom(format!(
-                "invalid duration {text:?}, expected a whole number and us, ms, s or m"
-            ))
-        })
-    }
-
-    /// Parses a whole number with a unit, such as `"50ms"`.
-    pub(super) fn parse(text: &str) -> Option<Duration> {
-        let text = text.trim();
-        let digits = text.find(|c: char| !c.is_ascii_digit())?;
-        let (number, unit) = text.split_at(digits);
-        let number: u64 = number.parse().ok()?;
-        match unit.trim() {
-            "us" => Some(Duration::from_micros(number)),
-            "ms" => Some(Duration::from_millis(number)),
-            "s" => Some(Duration::from_secs(number)),
-            "m" => number.checked_mul(60).map(Duration::from_secs),
-            _ => None,
-        }
-    }
+    pub(super) use jiff::fmt::serde::unsigned_duration::friendly::compact::required::{
+        deserialize, serialize,
+    };
 }
 
 impl LatencyConfig {
@@ -1555,24 +1515,36 @@ mod round_stats_tests {
 mod network_tests {
     use super::*;
 
-    /// Latency durations read with a unit, and write so that they read back.
+    /// Latency durations read the formats of the simulator configs, and write so that they read back.
     #[test]
     fn latency_durations_read_and_write() {
-        assert_eq!(duration_str::parse("10ms"), Some(Duration::from_millis(10)));
-        assert_eq!(duration_str::parse("2s"), Some(Duration::from_secs(2)));
-        assert_eq!(duration_str::parse("1m"), Some(Duration::from_secs(60)));
-        assert_eq!(
-            duration_str::parse("250us"),
-            Some(Duration::from_micros(250))
-        );
-        for invalid in ["", "ms", "10", "10 h", "1.5s", "-1ms"] {
-            assert_eq!(duration_str::parse(invalid), None, "{invalid:?}");
+        use jiff::fmt::friendly::{Designator, SpanPrinter};
+        use serde::de::value::{Error, StrDeserializer};
+        let parse = |text: &str| duration_str::deserialize(StrDeserializer::<Error>::new(text));
+        let cases = [
+            ("10ms", Duration::from_millis(10)),
+            ("1.5s", Duration::from_millis(1500)),
+            ("1s 500ms", Duration::from_millis(1500)),
+            ("500ns", Duration::from_nanos(500)),
+            ("250us", Duration::from_micros(250)),
+            ("1m", Duration::from_secs(60)),
+        ];
+        for (text, duration) in cases {
+            assert_eq!(parse(text).ok(), Some(duration), "{text:?}");
         }
-        for duration in [Duration::from_millis(50), Duration::from_micros(1500)] {
-            assert_eq!(
-                duration_str::parse(&duration_str::format(duration)),
-                Some(duration)
-            );
+        for invalid in ["", "ms", "10 parsecs", "-1ms"] {
+            assert!(parse(invalid).is_err(), "{invalid:?}");
+        }
+        // The same printer as the serializer, so a written duration reads back exactly.
+        let printer = SpanPrinter::new().designator(Designator::Compact);
+        for duration in [
+            Duration::from_nanos(500),
+            Duration::from_nanos(1500),
+            Duration::from_micros(1500),
+            Duration::from_millis(50),
+        ] {
+            let text = printer.unsigned_duration_to_string(&duration);
+            assert_eq!(parse(&text).ok(), Some(duration), "{text:?}");
         }
     }
 
