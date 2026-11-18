@@ -797,3 +797,108 @@ async fn oversized_control_message_fails_the_connection() -> Result {
     assert_eq!(end, ConnEnd::Failed);
     closed_with(&peer_conn, CloseCode::SendFailed).await
 }
+
+/// A rejected stream stops the streams of its topic that the verifier accepted before.
+///
+/// The peer sends on the older stream after the `Rejected`, and the actor gets nothing.
+#[tokio::test]
+#[traced_test]
+async fn rejected_topic_stops_its_older_streams() -> Result {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let pair = TestPair::new(77).await?;
+    let (conn, theirs) = pair.connect_back().await?;
+    let allow = Arc::new(AtomicBool::new(true));
+    let policy = allow.clone();
+    let verifier = TopicAuth::new(move |_| {
+        if policy.load(Ordering::SeqCst) {
+            Verdict::Accept
+        } else {
+            Verdict::Reject
+        }
+    });
+    let mut test = start_conn_with(conn, TEST_FRAME_LIMIT, Duration::from_secs(60), verifier);
+    let _control = RawControl::open(&theirs).await?;
+    let topic = TopicId::from_bytes([77; 32]);
+    let mut old = open_stream(&theirs, topic, &[join_message(topic, 0).message]).await?;
+    assert_eq!(test.next().await?.topic, topic);
+    allow.store(false, Ordering::SeqCst);
+    let _rejected = open_stream(&theirs, topic, &[]).await?;
+    timeout(SECS_10, async {
+        loop {
+            let event = test.events.recv().await.expect("connection still running");
+            if matches!(event.kind, ConnEventKind::Rejected(t) if t == topic) {
+                break;
+            }
+        }
+    })
+    .await
+    .std_context("rejection not observed")?;
+    // The message goes out after the `Rejected`, so it was not on its way before.
+    let message = TopicMessage::test_payload(Bytes::from_static(b"after rejection"));
+    let sent = wire::write_message(&mut old, &message, &mut Vec::new(), TEST_FRAME_LIMIT).await;
+    if sent.is_ok() {
+        assert!(
+            !test.gets_message_within(Duration::from_secs(1)).await,
+            "a rejected topic still dispatches messages from its older stream"
+        );
+    }
+    let stop = timeout(SECS_10, old.stopped())
+        .await
+        .std_context("the older stream was not stopped")?
+        .std_context("stopped")?;
+    assert_eq!(stop, Some(conn::STOP_REJECTED));
+    Ok(())
+}
+
+/// A refusal that comes while we write the header reaches the actor, as a later one does.
+///
+/// The header does not fit the receive window of the peer, which stops the stream
+/// before it read the header.
+#[tokio::test]
+#[traced_test]
+async fn refusal_during_the_header_is_reported() -> Result {
+    let lookup = MemoryLookup::new();
+    let ours = direct_endpoint(&lookup, QuicTransportConfig::builder().build()).await?;
+    let transport = QuicTransportConfig::builder()
+        .stream_receive_window(VarInt::from_u32(16))
+        .build();
+    let theirs = direct_endpoint(&lookup, transport).await?;
+    let accept = async {
+        theirs
+            .accept()
+            .await
+            .std_context("endpoint closed")?
+            .await
+            .std_context("accept")
+    };
+    let dial = async { ours.connect(theirs.id(), ALPN).await.std_context("connect") };
+    let (peer_conn, conn) = (accept, dial).try_join().await?;
+    let topic = TopicId::from_bytes([78; 32]);
+    let (queue, reader) = SendQueue::new(queue::MIN_QUEUE_SIZE);
+    assert!(matches!(queue.send(join_message(topic, 0)), Pushed::Queued));
+    let mut writer = start_writer(conn, &peer_conn, reader, TEST_FRAME_LIMIT, Vec::new()).await?;
+    let mut stream = timeout(SECS_10, peer_conn.accept_uni())
+        .await
+        .std_context("accept timeout")?
+        .std_context("accept stream")?;
+    // The header is larger than the receive window. Stop the stream without a read,
+    // so that the header write fails with the reject code.
+    stream
+        .stop(conn::STOP_REJECTED)
+        .std_context("stop stream")?;
+    let refused = timeout(Duration::from_secs(1), async {
+        while let Some(event) = writer.test.events.recv().await {
+            if matches!(event.kind, ConnEventKind::Refused(t) if t == topic) {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false);
+    assert!(
+        refused,
+        "STOP_REJECTED during the header was silently swallowed"
+    );
+    Ok(())
+}

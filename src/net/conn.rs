@@ -388,6 +388,18 @@ struct RecvLoop {
     signals: Arc<Signals>,
 }
 
+/// The streams of a topic that the receive loop reads: one at a time, the others wait.
+#[derive(Default)]
+struct TopicStreams {
+    /// Stops the streams of the topic that the verifier accepted so far.
+    ///
+    /// A rejected stream of the topic cancels it, and puts a fresh one in its place for
+    /// later streams.
+    rejected: CancellationToken,
+    /// The streams that wait for the one that the loop reads.
+    waiting: VecDeque<TopicReader>,
+}
+
 /// The result of a stream read: the stream, and its next message or its end.
 type ReadResult = (TopicReader, Result<Option<ProtoMessage>, ReadError>);
 
@@ -414,7 +426,7 @@ impl RecvLoop {
         // The next message of each stream that we read.
         let mut reads: FuturesUnordered<BoxFuture<ReadResult>> = FuturesUnordered::new();
         // The topics with a stream that the loop reads, and the streams that wait for them.
-        let mut waiting: HashMap<TopicId, VecDeque<TopicReader>> = HashMap::new();
+        let mut waiting: HashMap<TopicId, TopicStreams> = HashMap::new();
         // The streams of the peer that we accepted and that ended, and how many it
         // opened, once it said so. A count below the accepted streams is a protocol error.
         let mut accepted = 0u64;
@@ -472,12 +484,28 @@ impl RecvLoop {
                     if self.verify(&mut reader) == Verdict::Reject {
                         // A stopped stream ends here.
                         ended += 1;
+                        // The streams of the topic that the verifier accepted before stop at
+                        // their next poll, before they yield another message. So the actor
+                        // gets no message of the topic after the `Rejected`. They end as
+                        // any stream does, and count for the `GOAWAY`.
+                        if let Some(streams) = waiting.get_mut(&topic) {
+                            std::mem::take(&mut streams.rejected).cancel();
+                        }
                         self.events.send(ConnEventKind::Rejected(topic)).await?;
-                    } else if let Some(queue) = waiting.get_mut(&topic) {
-                        queue.push_back(reader);
                     } else {
-                        waiting.insert(topic, VecDeque::new());
-                        reads.push(Box::pin(reader.read_next()));
+                        // An entry means that the loop reads a stream of the topic.
+                        match waiting.entry(topic) {
+                            Entry::Occupied(mut entry) => {
+                                let streams = entry.get_mut();
+                                reader.rejected = streams.rejected.clone();
+                                streams.waiting.push_back(reader);
+                            }
+                            Entry::Vacant(entry) => {
+                                let streams = entry.insert(TopicStreams::default());
+                                reader.rejected = streams.rejected.clone();
+                                reads.push(Box::pin(reader.read_next()));
+                            }
+                        }
                     }
                 }
 
@@ -502,7 +530,7 @@ impl RecvLoop {
                     }
                     // The stream ended. The loop now reads the next stream of its topic, if any.
                     ended += 1;
-                    match waiting.get_mut(&topic).and_then(VecDeque::pop_front) {
+                    match waiting.get_mut(&topic).and_then(|streams| streams.waiting.pop_front()) {
                         Some(next) => reads.push(Box::pin(next.read_next())),
                         None => {
                             waiting.remove(&topic);
@@ -578,6 +606,8 @@ struct TopicReader {
     header: StreamHeader,
     buffer: Vec<u8>,
     max_message_size: usize,
+    /// Cancelled when a later stream of the topic is rejected, see [`TopicStreams`].
+    rejected: CancellationToken,
 }
 
 impl TopicReader {
@@ -590,6 +620,7 @@ impl TopicReader {
             max_message_size,
             stream,
             header,
+            rejected: Default::default(),
         })
     }
 
@@ -597,9 +628,18 @@ impl TopicReader {
     ///
     /// Returns `self` together with the result, also when the read failed.
     async fn read_next(mut self) -> ReadResult {
-        let msg = read_message(&mut self.stream, &mut self.buffer, self.max_message_size).await;
         let topic = self.header.topic;
-        let msg = msg.map(|msg| msg.map(|message| ProtoMessage { topic, message }));
+        let msg = tokio::select! {
+            biased;
+            _ = self.rejected.cancelled() => {
+                debug!(topic=%topic.fmt_short(), "the topic was rejected, stop the stream");
+                self.stream.stop(STOP_REJECTED).ok();
+                Ok(None)
+            }
+            msg = read_message(&mut self.stream, &mut self.buffer, self.max_message_size) => {
+                msg.map(|msg| msg.map(|message| ProtoMessage { topic, message }))
+            }
+        };
         (self, msg)
     }
 }
@@ -957,7 +997,18 @@ impl SendLoop {
         // before the header write returns: the peer accepted it then. A header write
         // that fails otherwise fails the connection.
         self.opened_count += 1;
-        StreamHeader::write(topic, token.as_ref(), &mut stream, &mut self.buffer).await?;
+        if let Err(err) =
+            StreamHeader::write(topic, token.as_ref(), &mut stream, &mut self.buffer).await
+        {
+            // A refusal during the header takes the same path as a later one, see
+            // `on_stream_end`, so the protocol learns of it.
+            if is_refusal(&err) {
+                let id = stream.id();
+                self.stream_ends
+                    .push(Box::pin(async move { (topic, id, Some(STOP_REJECTED)) }));
+            }
+            return Err(err);
+        }
         debug!(topic=%topic.fmt_short(), "stream opened");
         // The QUIC stack of the peer acknowledges data that its app did not read
         // yet, so this needs no timeout.
@@ -975,13 +1026,17 @@ impl SendLoop {
 ///
 /// A stream that the peer stopped with the reject code only loses its message.
 fn tolerate_refusal(topic: TopicId, err: WriteError) -> Result<(), WriteError> {
-    match &err {
-        WriteError::Stopped { code, .. } if *code == STOP_REJECTED.into_inner() => {
-            debug!(topic = %topic.fmt_short(), "the peer refused the stream, drop the message");
-            Ok(())
-        }
-        _ => Err(err),
+    if is_refusal(&err) {
+        debug!(topic = %topic.fmt_short(), "the peer refused the stream, drop the message");
+        Ok(())
+    } else {
+        Err(err)
     }
+}
+
+/// Returns whether the write failed because the peer stopped the stream with the reject code.
+fn is_refusal(err: &WriteError) -> bool {
+    matches!(err, WriteError::Stopped { code, .. } if *code == STOP_REJECTED.into_inner())
 }
 
 #[cfg(test)]
