@@ -37,7 +37,7 @@ use crate::{
     proto::{
         hyparview,
         plumtree::{self, Round},
-        topic, DeliveryScope, TopicId,
+        topic, DeliveryScope, TopicId, TreeId,
     },
 };
 
@@ -95,10 +95,16 @@ mod types {
     pub(super) const SWARM_NEIGHBOR_REQUEST: u64 = 0x05;
     pub(super) const SWARM_NEIGHBOR_REPLY: u64 = 0x06;
     pub(super) const SWARM_CLOSE: u64 = 0x07;
-    /// Content for the swarm: `content: bytes, round: u16`.
+    /// Content for the swarm: `content: bytes, round: u16, tree: [u8; 8]`.
+    ///
+    /// The tree is the first 8 bytes of the BLAKE3 hash of the origin's endpoint id.
+    /// Receivers copy it and never derive it.
     pub(super) const GOSSIP_MESSAGE: u64 = 0x10;
+    /// Moves the sender to the lazy set of a tree: `tree: [u8; 8]`.
     pub(super) const GOSSIP_PRUNE: u64 = 0x11;
+    /// Moves the sender to the eager set of a tree: `id: Option<[u8; 32]>, tree: [u8; 8]`.
     pub(super) const GOSSIP_GRAFT: u64 = 0x12;
+    /// Announces messages: `Vec<(id: [u8; 32], round: u16, tree: [u8; 8])>`.
     pub(super) const GOSSIP_IHAVE: u64 = 0x13;
     /// Content for the direct neighbors only: `content: bytes`. It has no round.
     ///
@@ -572,10 +578,12 @@ impl Serialize for WireBody<'_> {
             },
             topic::Message::Gossip(message) => match message {
                 Broadcast::Gossip(gossip) => match gossip.scope {
-                    DeliveryScope::Swarm(round) => (code, &gossip.content, round).serialize(s),
+                    DeliveryScope::Swarm(round) => {
+                        (code, &gossip.content, round, gossip.tree).serialize(s)
+                    }
                     DeliveryScope::Neighbors => (code, &gossip.content).serialize(s),
                 },
-                Broadcast::Prune => (code,).serialize(s),
+                Broadcast::Prune(tree) => (code, tree).serialize(s),
                 Broadcast::Graft(graft) => (code, graft).serialize(s),
                 Broadcast::IHave(ihave) => (code, ihave).serialize(s),
             },
@@ -602,7 +610,7 @@ fn type_code(message: &WireMessage) -> u64 {
                 DeliveryScope::Swarm(_) => types::GOSSIP_MESSAGE,
                 DeliveryScope::Neighbors => types::GOSSIP_MESSAGE_NEIGHBOR,
             },
-            Broadcast::Prune => types::GOSSIP_PRUNE,
+            Broadcast::Prune(_) => types::GOSSIP_PRUNE,
             Broadcast::Graft(_) => types::GOSSIP_GRAFT,
             Broadcast::IHave(_) => types::GOSSIP_IHAVE,
         },
@@ -631,6 +639,13 @@ fn decode_message(mut buf: &[u8]) -> Result<Option<WireMessage>, ReadError> {
     use hyparview::Message as Swarm;
     use plumtree::Message as Broadcast;
     let buf = &mut buf;
+    // The wire layout of a gossip message is not the serde of `plumtree::Gossip`:
+    // the type code holds the scope, and the receiver derives the id from the content.
+    let gossip = |content, scope, tree| {
+        WireMessage::Gossip(Broadcast::Gossip(plumtree::Gossip::new(
+            content, scope, tree,
+        )))
+    };
     let message = match take(buf)? {
         types::SWARM_JOIN => WireMessage::Swarm(Swarm::Join(take(buf)?)),
         types::SWARM_FORWARD_JOIN => WireMessage::Swarm(Swarm::ForwardJoin(take(buf)?)),
@@ -640,16 +655,13 @@ fn decode_message(mut buf: &[u8]) -> Result<Option<WireMessage>, ReadError> {
         types::SWARM_NEIGHBOR_REPLY => WireMessage::Swarm(Swarm::NeighborReply(take(buf)?)),
         types::SWARM_CLOSE => WireMessage::Swarm(Swarm::Close(take(buf)?)),
         types::GOSSIP_MESSAGE => {
-            let (content, round): (Bytes, Round) = take(buf)?;
-            let scope = DeliveryScope::Swarm(round);
-            WireMessage::Gossip(Broadcast::Gossip(plumtree::Gossip::new(content, scope)))
+            let (content, round, tree): (Bytes, Round, TreeId) = take(buf)?;
+            gossip(content, DeliveryScope::Swarm(round), tree)
         }
         types::GOSSIP_MESSAGE_NEIGHBOR => {
-            let content: Bytes = take(buf)?;
-            let scope = DeliveryScope::Neighbors;
-            WireMessage::Gossip(Broadcast::Gossip(plumtree::Gossip::new(content, scope)))
+            gossip(take(buf)?, DeliveryScope::Neighbors, TreeId::default())
         }
-        types::GOSSIP_PRUNE => WireMessage::Gossip(Broadcast::Prune),
+        types::GOSSIP_PRUNE => WireMessage::Gossip(Broadcast::Prune(take(buf)?)),
         types::GOSSIP_GRAFT => WireMessage::Gossip(Broadcast::Graft(take(buf)?)),
         types::GOSSIP_IHAVE => WireMessage::Gossip(Broadcast::IHave(take(buf)?)),
         _ => return Ok(None),
@@ -729,6 +741,8 @@ mod tests {
     const TOPIC: [u8; 32] = [0x11; 32];
     /// The id of `hi`, the BLAKE3 hash of its content.
     const ID: &str = "85052e9aab1b67b6622d94a08441b09fd5b7aca61ee360416d70de5da67d86ca";
+    /// A tree id.
+    const T: &str = "3333333333333333";
 
     /// Returns a header payload of the topic kind with `params`.
     fn header(params: &[(u64, &[u8])]) -> Vec<u8> {
@@ -752,7 +766,12 @@ mod tests {
     }
 
     fn prune() -> WireMessage {
-        WireMessage::Gossip(plumtree::Message::Prune)
+        decode_hex(&format!("11{T}"))
+    }
+
+    /// The frame payload of [`prune`].
+    fn prune_bytes() -> Vec<u8> {
+        hex::decode(format!("11{T}")).unwrap()
     }
 
     /// The encodings of every message type, as hex.
@@ -773,12 +792,12 @@ mod tests {
             "06010003aabbcc".to_string(),
             "0700".to_string(),
             "0701".to_string(),
-            "10026869ac02".to_string(),
+            format!("10026869ac02{T}"),
             "14026869".to_string(),
-            "11".to_string(),
-            format!("1201{ID}"),
-            "1200".to_string(),
-            format!("1301{ID}02"),
+            format!("11{T}"),
+            format!("1201{ID}{T}"),
+            format!("1200{T}"),
+            format!("1301{ID}02{T}"),
         ]
     }
 
@@ -1078,7 +1097,7 @@ mod tests {
         bytes.extend(framed(&vec![types::SWARM_FORWARD_JOIN as u8; 5000]));
         bytes.extend(framed(&vec![types::SWARM_SHUFFLE as u8; 5000]));
         bytes.extend(framed(&vec![types::SWARM_SHUFFLE_REPLY as u8; 5000]));
-        bytes.extend(framed(&[types::GOSSIP_PRUNE as u8]));
+        bytes.extend(framed(&prune_bytes()));
         let mut buffer = Vec::new();
         let reader = &mut &bytes[..];
         let message = read_message(reader, &mut buffer, 100).await.unwrap();
@@ -1103,7 +1122,7 @@ mod tests {
             0x7f,
         ] {
             let mut bytes = framed(&vec![code as u8; 5000]);
-            bytes.extend(framed(&[types::GOSSIP_PRUNE as u8]));
+            bytes.extend(framed(&prune_bytes()));
             let err = read_message(&mut &bytes[..], &mut Vec::new(), 100).await;
             assert!(
                 matches!(err, Err(ReadError::TooLarge { .. })),
@@ -1126,7 +1145,7 @@ mod tests {
     async fn unknown_types_fail() {
         let mut bytes = framed(&[0x7f, 1, 2, 3]);
         bytes.extend(framed(&[0x08]));
-        bytes.extend(framed(&[types::GOSSIP_PRUNE as u8]));
+        bytes.extend(framed(&prune_bytes()));
         let message = read_message(&mut &bytes[..], &mut Vec::new(), 100).await;
         assert!(
             matches!(message, Err(ReadError::UnknownType { code: 0x7f, .. })),
@@ -1138,9 +1157,9 @@ mod tests {
     fn trailing_bytes_are_ignored() {
         for (bytes, expected) in [
             ("0100dead", "0100"),
-            ("1101", "11"),
+            (&format!("11{T}01"), &format!("11{T}")),
             ("070109", "0701"),
-            (&format!("1201{ID}00"), &format!("1201{ID}")),
+            (&format!("1201{ID}{T}00"), &format!("1201{ID}{T}")),
         ] {
             assert_eq!(hex::encode(encode(&decode_hex(bytes))), expected);
         }
@@ -1159,6 +1178,12 @@ mod tests {
             "0305",
             "1305",
             "1201",
+            // Without the tree.
+            "11",
+            "113333",
+            "10026869ac02",
+            "1200",
+            "130100",
             long_round,
             bad_scope_round,
         ] {
@@ -1182,7 +1207,7 @@ mod tests {
     fn max_gossip_size_covers_every_round() {
         use crate::proto::Scope;
         let size = |content: &Bytes, scope| {
-            let gossip = plumtree::Gossip::new(content.clone(), scope);
+            let gossip = plumtree::Gossip::new(content.clone(), scope, TreeId::default());
             message_len(&WireMessage::Gossip(plumtree::Message::Gossip(gossip))).unwrap()
         };
         for len in [0, 127, 128, 4000, 20_000] {
