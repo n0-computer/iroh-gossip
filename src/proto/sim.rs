@@ -48,16 +48,26 @@ impl From<Config> for NetworkConfig {
 #[serde(rename_all = "lowercase")]
 pub enum LatencyConfig {
     /// Use the same latency, always.
-    Static(#[serde(with = "humantime_serde")] Duration),
+    Static(#[serde(with = "duration_str")] Duration),
     /// Chooses a random latency for each connection within the specified bounds.
     Dynamic {
         /// The lower bound for the latency between two peers.
-        #[serde(with = "humantime_serde")]
+        #[serde(with = "duration_str")]
         min: Duration,
         /// The upper bound for the latency between two peers.
-        #[serde(with = "humantime_serde")]
+        #[serde(with = "duration_str")]
         max: Duration,
     },
+}
+
+/// Reads and writes a [`Duration`] in the friendly format of jiff, such as `"50ms"` or `"1s 500ms"`.
+///
+/// It reads fractions such as `"1.5s"` and the units from `ns` to `h`, and writes nanoseconds
+/// exactly.
+mod duration_str {
+    pub(super) use jiff::fmt::serde::unsigned_duration::friendly::compact::required::{
+        deserialize, serialize,
+    };
 }
 
 impl LatencyConfig {
@@ -1504,6 +1514,39 @@ mod round_stats_tests {
 #[cfg(test)]
 mod network_tests {
     use super::*;
+
+    /// Latency durations read the formats of the simulator configs, and write so that they read back.
+    #[test]
+    fn latency_durations_read_and_write() {
+        use jiff::fmt::friendly::{Designator, SpanPrinter};
+        use serde::de::value::{Error, StrDeserializer};
+        let parse = |text: &str| duration_str::deserialize(StrDeserializer::<Error>::new(text));
+        let cases = [
+            ("10ms", Duration::from_millis(10)),
+            ("1.5s", Duration::from_millis(1500)),
+            ("1s 500ms", Duration::from_millis(1500)),
+            ("500ns", Duration::from_nanos(500)),
+            ("250us", Duration::from_micros(250)),
+            ("1m", Duration::from_secs(60)),
+        ];
+        for (text, duration) in cases {
+            assert_eq!(parse(text).ok(), Some(duration), "{text:?}");
+        }
+        for invalid in ["", "ms", "10 parsecs", "-1ms"] {
+            assert!(parse(invalid).is_err(), "{invalid:?}");
+        }
+        // The same printer as the serializer, so a written duration reads back exactly.
+        let printer = SpanPrinter::new().designator(Designator::Compact);
+        for duration in [
+            Duration::from_nanos(500),
+            Duration::from_nanos(1500),
+            Duration::from_micros(1500),
+            Duration::from_millis(50),
+        ] {
+            let text = printer.unsigned_duration_to_string(&duration);
+            assert_eq!(parse(&text).ok(), Some(duration), "{text:?}");
+        }
+    }
 
     /// A Plumtree reply to a peer that no topic wants closes the connection after it.
     ///
