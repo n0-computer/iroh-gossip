@@ -2,6 +2,8 @@
 yanked = "deny"
 ignore = [
     "RUSTSEC-2024-0436", # unmaintained: paste, pulled in transitively
+    "RUSTSEC-2026-0543", # unmaintained: chrono, pulled in transitively by iroh
+    "RUSTSEC-2026-0542", # unmaintained: humantime, pulled in by the dev dependency humantime-serde
 ]
 
 [bans]
