@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["ALPN"],"enum":["Error"],"mod":["api","metrics","net","proto"]};
+window.SIDEBAR_ITEMS = {"constant":["ALPN","DEFAULT_MAX_MESSAGE_SIZE","MIN_MAX_MESSAGE_SIZE"],"enum":["DeliveryScope","Error","Event","Verdict"],"struct":["AuthContext","AuthToken","BroadcastConfig","Builder","FilterContext","Gossip","GossipReceiver","GossipSender","GossipTopic","JoinOptions","MembershipConfig","Message","Metrics","ParseIdError","QueueOptions","TopicId"]};
