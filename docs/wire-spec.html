@@ -1,0 +1,1887 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>The iroh-gossip protocol</title>
+<script>(function(){var d=document.documentElement,t;try{t=localStorage.getItem("spec.theme")}catch(e){}
+d.dataset.theme=t||(matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light")})();</script>
+<style>
+:root{--bg:#fff;--fg:#222;--muted:#5d5d5d;--rule:#d7d7d7;--code-bg:#f6f6f6;--link:#1a5ca8;--th:#f2f2f2;--accent:#b5470b;--box:#f3f1ec;--box2:#e7eef7;--side:#fafafa;
+--serif:"Noto Serif","Source Serif 4","Source Serif Pro",Georgia,"Times New Roman",serif;
+--sans:"Noto Sans","Source Sans 3",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+--mono:"Roboto Mono","JetBrains Mono","DejaVu Sans Mono",Menlo,Consolas,monospace}
+[data-theme=dark]{--bg:#16181b;--fg:#dcdcd8;--muted:#a0a09a;--rule:#3b3f45;--code-bg:#1f2226;--link:#80b6f0;--th:#22262b;--accent:#eba06b;--box:#23272c;--box2:#1e2a38;--side:#1a1c20}
+*{box-sizing:border-box}
+html{scroll-padding-top:1rem}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 var(--serif)}
+main{max-width:48rem;margin:0 auto;padding:2.5rem 1.25rem 5rem}
+a{color:var(--link);text-decoration:none}
+a:hover{text-decoration:underline}
+h1,h2,h3,h4{font-family:var(--sans);line-height:1.3;font-weight:700}
+h1{font-size:1.75rem;text-align:center;margin:1.6rem 0 2rem}
+h2{font-size:1.35rem;margin:2.6rem 0 .7rem}
+h3{font-size:1.1rem;margin:1.9rem 0 .5rem}
+h2 a,h3 a{color:inherit}
+a.secno{margin-right:.35em}
+dl.front{display:grid;grid-template-columns:max-content 1fr;gap:.1rem 1rem;margin:0;font:.9rem/1.5 var(--sans);color:var(--muted)}
+dl.front dt{font-weight:600;margin:0}dl.front dd{margin:0}
+code{font:.86em var(--mono);background:var(--code-bg);padding:.05em .25em;border-radius:3px;overflow-wrap:anywhere}
+pre{font:.82rem/1.45 var(--mono);background:var(--code-bg);padding:.75rem 1rem;overflow-x:auto;border:1px solid var(--rule);border-radius:3px}
+pre code{background:none;padding:0;font-size:inherit;overflow-wrap:normal}
+table{border-collapse:collapse;width:100%;margin:1.1rem 0;font:.86rem/1.45 var(--sans)}
+th,td{border:1px solid var(--rule);padding:.35rem .55rem;text-align:left;vertical-align:top}
+th{background:var(--th)}
+li{margin:.2rem 0}
+dl{margin:1rem 0}
+dt{font-weight:700;font-family:var(--sans);margin-top:.7rem}
+dt a{color:inherit}
+dd{margin:.15rem 0 0 2rem}
+figure{margin:1.5rem 0;padding:0}
+figure .art{overflow-x:auto;padding:.4rem 0;color:var(--fg)}
+figure svg.fig{display:block;margin:0 auto;max-width:100%;height:auto}
+figcaption{font:.88rem/1.45 var(--sans);text-align:center;margin-top:.4rem;color:var(--muted)}
+figcaption a{font-weight:600;color:inherit}
+details{margin:.3rem 0;font:.8rem var(--sans)}
+details summary{cursor:pointer;color:var(--muted);text-align:center}
+details pre{text-align:left}
+svg.fig{font:13px var(--sans)}
+svg.fig text{fill:currentColor}
+svg.fig .b{font-weight:700}
+svg.fig .mono{font-family:var(--mono);font-size:11.5px;paint-order:stroke;stroke:var(--bg);stroke-width:5px;stroke-linejoin:round}
+svg.fig .small{font-size:12px}
+svg.fig .note{fill:var(--muted);font-style:italic;font-size:12px}
+svg.fig .box{fill:var(--box);stroke:currentColor;stroke-width:1}
+svg.fig .box.base{fill:var(--box2)}
+svg.fig .box.acc,svg.fig .node.acc{stroke:var(--accent);stroke-width:2}
+svg.fig .node{fill:var(--bg);stroke:currentColor;stroke-width:1.4}
+svg.fig .ln{stroke:currentColor;stroke-width:1.3;fill:none}
+svg.fig .acc-ln{stroke:var(--accent)}
+svg.fig .life{stroke:var(--muted);stroke-width:1;stroke-dasharray:3 3}
+svg.fig .eager{stroke:currentColor;stroke-width:2.4}
+svg.fig .lazy{stroke:var(--muted);stroke-width:1.4;stroke-dasharray:4 4}
+svg.defs{position:absolute;width:0;height:0;overflow:hidden;color:var(--fg)}
+.ahf{fill:currentColor}.ahf-acc{fill:var(--accent)}
+#toc{font:.86rem/1.4 var(--sans)}
+#toc .toc-h{font-size:1rem;margin:0 0 .6rem}
+#toc ul{list-style:none;margin:0;padding:0}
+#toc ul ul{padding-left:1.2rem;font-size:.95em}
+#toc li{margin:.12rem 0}
+#toc a{color:var(--fg);display:block;padding:.08rem .3rem;border-radius:3px}
+#toc a:hover{background:var(--code-bg);text-decoration:none}
+#toc a.on{color:var(--accent);font-weight:600}
+#toc .tn{color:var(--muted);margin-right:.2em}
+#theme{position:fixed;top:.6rem;right:.7rem;z-index:10;width:2.1rem;height:2.1rem;display:grid;place-items:center;border:1px solid var(--rule);border-radius:50%;background:var(--bg);color:var(--fg);cursor:pointer;padding:0}
+#theme:hover{border-color:var(--fg)}
+#theme svg{width:1.1rem;height:1.1rem}
+#theme .sun{display:none}[data-theme=dark] #theme .sun{display:block}[data-theme=dark] #theme .moon{display:none}
+@media (min-width:1180px){
+ #toc{position:fixed;top:0;right:0;bottom:0;width:21rem;overflow-y:auto;padding:3.2rem 1rem 2rem;background:var(--side);border-left:1px solid var(--rule)}
+ main{margin-left:max(1.25rem,calc((100vw - 21rem - 48rem)/2));margin-right:21rem}
+}
+@media (max-width:1179px){#toc{border:1px solid var(--rule);border-radius:4px;padding:1rem;margin:2rem 0;background:var(--side)}}
+@media print{#theme{display:none}#toc{position:static;width:auto;border:0}main{margin:0 auto}}
+</style>
+</head>
+<body>
+<svg class="defs" aria-hidden="true" width="0" height="0"><defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ahf"/></marker><marker id="ah-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ahf-acc"/></marker></defs></svg>
+<button id="theme" type="button" title="Switch light and dark mode" aria-label="Switch light and dark mode"><svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg><svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 1.5v2.5M12 20v2.5M1.5 12H4M20 12h2.5M4.6 4.6l1.8 1.8M17.6 17.6l1.8 1.8M4.6 19.4l1.8-1.8M17.6 6.4l1.8-1.8"/></svg></button>
+<main>
+<header id="front"><dl class="front"><dt>Status</dt><dd>Draft for iroh-gossip 1.0</dd><dt>ALPN</dt><dd><code>iroh-gossip/2-canary.4</code></dd><dt>Date</dt><dd>2026-11-10</dd></dl>
+<h1 id="title">The iroh-gossip protocol</h1></header>
+<h2 id="abstract"><a class="selfref" href="#abstract">Abstract</a></h2>
+<p>iroh-gossip lets iroh endpoints form a swarm per topic and broadcast
+messages to all members of the swarm. It runs over QUIC connections
+that iroh authenticates with the endpoint id of each side.</p>
+<p>The protocol has three layers. The connection layer keeps at most one
+connection that writes to each peer, and closes idle connections
+without a loss. The membership layer is HyParView: per topic, it keeps
+a small active view of neighbors and a larger passive view of known
+peers. The broadcast layer is Plumtree: it pushes each message along a
+spanning tree of the neighbors, and announces it on the other links so
+that a receiver can repair a gap. Each sender that keeps sending gets a
+tree of its own.</p>
+<p>The protocol gives ordered delivery per topic and connection, bounded
+resources per peer, and repair of lost broadcasts while a copy is
+cached. It gives no storage, no acknowledgement of delivery, and no
+proof of the author of a message.</p>
+<nav id="toc" aria-label="Table of contents"><h2 class="toc-h">Table of Contents</h2><ul><li><a href="#abstract">Abstract</a></li><li><a href="#section-1"><span class="tn">1.</span> Introduction</a><ul><li><a href="#section-1.1"><span class="tn">1.1</span> Scope</a></li><li><a href="#section-1.2"><span class="tn">1.2</span> Conventions</a></li></ul></li><li><a href="#section-2"><span class="tn">2.</span> Overview</a><ul><li><a href="#section-2.1"><span class="tn">2.1</span> Roles</a></li><li><a href="#section-2.2"><span class="tn">2.2</span> Layers</a></li><li><a href="#section-2.3"><span class="tn">2.3</span> An example</a></li></ul></li><li><a href="#section-3"><span class="tn">3.</span> Connections</a><ul><li><a href="#section-3.1"><span class="tn">3.1</span> ALPN and identity</a></li><li><a href="#section-3.2"><span class="tn">3.2</span> Control stream</a></li><li><a href="#section-3.3"><span class="tn">3.3</span> Sessions</a></li><li><a href="#section-3.4"><span class="tn">3.4</span> Writer selection</a></li><li><a href="#section-3.5"><span class="tn">3.5</span> Crossed dials</a></li><li><a href="#section-3.6"><span class="tn">3.6</span> Retire with GOAWAY</a></li><li><a href="#section-3.7"><span class="tn">3.7</span> Close codes</a></li><li><a href="#section-3.8"><span class="tn">3.8</span> Shutdown</a></li><li><a href="#section-3.9"><span class="tn">3.9</span> Send queue</a></li><li><a href="#section-3.10"><span class="tn">3.10</span> Timeouts</a></li></ul></li><li><a href="#section-4"><span class="tn">4.</span> Topic streams</a><ul><li><a href="#section-4.1"><span class="tn">4.1</span> Opening</a></li><li><a href="#section-4.2"><span class="tn">4.2</span> Header</a></li><li><a href="#section-4.3"><span class="tn">4.3</span> Auth tokens and refusal</a></li><li><a href="#section-4.4"><span class="tn">4.4</span> Ordering</a></li><li><a href="#section-4.5"><span class="tn">4.5</span> The end of a stream</a></li><li><a href="#section-4.6"><span class="tn">4.6</span> Messages for a topic the node did not join</a></li></ul></li><li><a href="#section-5"><span class="tn">5.</span> Membership (HyParView)</a><ul><li><a href="#section-5.1"><span class="tn">5.1</span> Views</a></li><li><a href="#section-5.2"><span class="tn">5.2</span> Peer info and peer data</a></li><li><a href="#section-5.3"><span class="tn">5.3</span> Join</a></li><li><a href="#section-5.4"><span class="tn">5.4</span> Contact and forward join</a></li><li><a href="#section-5.5"><span class="tn">5.5</span> Neighbor request and reply</a></li><li><a href="#section-5.6"><span class="tn">5.6</span> Close and reasons</a></li><li><a href="#section-5.7"><span class="tn">5.7</span> Shuffle</a></li><li><a href="#section-5.8"><span class="tn">5.8</span> Failure handling and refill</a></li><li><a href="#section-5.9"><span class="tn">5.9</span> Leaving a topic</a></li></ul></li><li><a href="#section-6"><span class="tn">6.</span> Broadcast (Plumtree)</a><ul><li><a href="#section-6.1"><span class="tn">6.1</span> Message ids and dedup</a></li><li><a href="#section-6.2"><span class="tn">6.2</span> Scopes</a></li><li><a href="#section-6.3"><span class="tn">6.3</span> Rounds</a></li><li><a href="#section-6.4"><span class="tn">6.4</span> Eager and lazy push</a></li><li><a href="#section-6.5"><span class="tn">6.5</span> IHave and Graft</a></li><li><a href="#section-6.6"><span class="tn">6.6</span> Prune</a></li><li><a href="#section-6.7"><span class="tn">6.7</span> Trees per sender</a></li><li><a href="#section-6.8"><span class="tn">6.8</span> Tree optimization and late graft replies</a></li><li><a href="#section-6.9"><span class="tn">6.9</span> Dropped messages</a></li><li><a href="#section-6.10"><span class="tn">6.10</span> Message filter</a></li></ul></li><li><a href="#section-7"><span class="tn">7.</span> Error handling</a></li><li><a href="#section-8"><span class="tn">8.</span> Extensibility</a><ul><li><a href="#section-8.1"><span class="tn">8.1</span> Model</a></li><li><a href="#section-8.2"><span class="tn">8.2</span> Declaration and negotiation</a></li><li><a href="#section-8.3"><span class="tn">8.3</span> Changes without negotiation</a></li><li><a href="#section-8.4"><span class="tn">8.4</span> Changes that need a new ALPN</a></li></ul></li><li><a href="#section-9"><span class="tn">9.</span> Encoding</a><ul><li><a href="#section-9.1"><span class="tn">9.1</span> Varints</a></li><li><a href="#section-9.2"><span class="tn">9.2</span> Field types</a></li><li><a href="#section-9.3"><span class="tn">9.3</span> Frames and messages</a></li><li><a href="#section-9.4"><span class="tn">9.4</span> Headers</a></li><li><a href="#section-9.5"><span class="tn">9.5</span> Control messages</a></li><li><a href="#section-9.6"><span class="tn">9.6</span> Topic messages</a></li><li><a href="#section-9.7"><span class="tn">9.7</span> Peer data</a></li><li><a href="#section-9.8"><span class="tn">9.8</span> Limits</a></li></ul></li><li><a href="#section-10"><span class="tn">10.</span> Registries</a><ul><li><a href="#section-10.1"><span class="tn">10.1</span> Stream kinds</a></li><li><a href="#section-10.2"><span class="tn">10.2</span> Header parameters</a></li><li><a href="#section-10.3"><span class="tn">10.3</span> Message types</a></li><li><a href="#section-10.4"><span class="tn">10.4</span> Codes</a></li></ul></li><li><a href="#section-11"><span class="tn">11.</span> Security considerations</a><ul><li><a href="#section-11.1"><span class="tn">11.1</span> Identity and authorization</a></li><li><a href="#section-11.2"><span class="tn">11.2</span> Resource use by a peer</a></li><li><a href="#section-11.3"><span class="tn">11.3</span> Made-up tree ids</a></li><li><a href="#section-11.4"><span class="tn">11.4</span> Contacts caused by peers</a></li><li><a href="#section-11.5"><span class="tn">11.5</span> Rounds and announcements</a></li><li><a href="#section-11.6"><span class="tn">11.6</span> 0-RTT</a></li></ul></li><li><a href="#section-12"><span class="tn">12.</span> References</a><ul><li><a href="#section-12.1"><span class="tn">12.1</span> Normative references</a></li><li><a href="#section-12.2"><span class="tn">12.2</span> Informative references</a></li></ul></li><li><a href="#appendix-A"><span class="tn">Appendix A.</span> Test vectors</a><ul><li><a href="#appendix-A.1"><span class="tn">A.1</span> Headers</a></li><li><a href="#appendix-A.2"><span class="tn">A.2</span> Messages</a></li><li><a href="#appendix-A.3"><span class="tn">A.3</span> Peer data</a></li></ul></li><li><a href="#appendix-B"><span class="tn">Appendix B.</span> Defaults</a></li></ul></nav>
+<h2 id="section-1"><a class="secno" href="#section-1">1.</a> <a class="selfref" href="#section-1">Introduction</a></h2>
+<h3 id="section-1.1"><a class="secno" href="#section-1.1">1.1</a> <a class="selfref" href="#section-1.1">Scope</a></h3>
+<p>This document specifies the bytes on the wire and the behavior that a
+peer can observe. It also gives the defaults of local policy where
+that policy shapes what a peer sees, such as timeouts. <a class="xref" href="#appendix-B">Appendix B</a> lists
+the defaults.</p>
+<h3 id="section-1.2"><a class="secno" href="#section-1.2">1.2</a> <a class="selfref" href="#section-1.2">Conventions</a></h3>
+<p>The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+"SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and
+"OPTIONAL" in this document are to be interpreted as described in BCP
+14 [<a class="cite" href="#RFC2119">RFC2119</a>] [<a class="cite" href="#RFC8174">RFC8174</a>] when, and only when, they appear in all
+capitals, as shown here.</p>
+<p>A value marked <em>(policy)</em> is a local default. Another implementation
+can choose a different value and still interoperate.</p>
+<p>Byte layouts use this notation:</p>
+<pre class="text"><code>Name {
+  field   type
+}</code></pre>
+<p><a class="xref" href="#section-9.2">Section 9.2</a> defines the types. Hex bytes appear in lowercase. <code>x*n</code>
+means the byte <code>x</code> repeated <code>n</code> times.</p>
+<h2 id="section-2"><a class="secno" href="#section-2">2.</a> <a class="selfref" href="#section-2">Overview</a></h2>
+<h3 id="section-2.1"><a class="secno" href="#section-2.1">2.1</a> <a class="selfref" href="#section-2.1">Roles</a></h3>
+<p>A <em>node</em> is one running instance of the protocol on one iroh endpoint.
+A <em>peer</em> is another node, as seen from a node. The <em>endpoint id</em> is
+the 32-byte Ed25519 public key that iroh authenticates for each side of
+a connection. It identifies a node.</p>
+<p>Every node has the same role. A <em>topic</em> is a swarm and its broadcasts,
+named by a 32-byte topic id. A node joins a topic through one or more
+bootstrap peers, which the application supplies. It then learns other
+members of the topic from the protocol.</p>
+<p>Topics are independent and share only connections: one connection to
+a peer carries all topics that the two nodes share.</p>
+<h3 id="section-2.2"><a class="secno" href="#section-2.2">2.2</a> <a class="selfref" href="#section-2.2">Layers</a></h3>
+<figure id="figure-1" data-src="fig-layers">
+<div class="art"><svg class="fig" viewBox="0 0 680 296" width="680" role="img" aria-label="The five layers of the protocol, from QUIC up to broadcast" xmlns="http://www.w3.org/2000/svg"><rect x="4" y="6" width="672" height="50" rx="5" class="box"/><text x="18" y="27" text-anchor="start" class="b">Broadcast (Plumtree)</text><text x="18" y="45" text-anchor="start" class="small">GOSSIP_* messages: eager push, IHave, Graft, Prune, trees</text><text x="662" y="27" text-anchor="end" class="note">section 6</text><rect x="4" y="64" width="672" height="50" rx="5" class="box"/><text x="18" y="85" text-anchor="start" class="b">Membership (HyParView)</text><text x="18" y="103" text-anchor="start" class="small">SWARM_* messages: join, forward join, neighbor request and reply, shuffle</text><text x="662" y="85" text-anchor="end" class="note">section 5</text><rect x="4" y="122" width="672" height="50" rx="5" class="box"/><text x="18" y="143" text-anchor="start" class="b">Topic streams</text><text x="18" y="161" text-anchor="start" class="small">one unidirectional stream per topic: header with topic id and token, framed messages</text><text x="662" y="143" text-anchor="end" class="note">section 4</text><rect x="4" y="180" width="672" height="50" rx="5" class="box"/><text x="18" y="201" text-anchor="start" class="b">Connection</text><text x="18" y="219" text-anchor="start" class="small">control stream, session id, GOAWAY, closes</text><text x="662" y="201" text-anchor="end" class="note">section 3</text><rect x="4" y="238" width="672" height="50" rx="5" class="box base"/><text x="18" y="259" text-anchor="start" class="b">QUIC (iroh)</text><text x="18" y="277" text-anchor="start" class="small">ALPN iroh-gossip/2-canary.4</text><text x="662" y="259" text-anchor="end" class="note">RFC 9000</text></svg></div>
+<details><summary>Text version</summary><pre><code>+---------------------------------------------------------+
+| Broadcast (Plumtree): GOSSIP_* messages                 |
+|   eager push, IHave, Graft, Prune, trees                |
++---------------------------------------------------------+
+| Membership (HyParView): SWARM_* messages                |
+|   join, forward join, neighbor request/reply, shuffle   |
++---------------------------------------------------------+
+| Topic streams: one unidirectional stream per topic      |
+|   header with topic id and token, then message frames   |
++---------------------------------------------------------+
+| Connection: control stream, session id, GOAWAY, closes  |
++---------------------------------------------------------+
+| QUIC (iroh), ALPN iroh-gossip/2-canary.4                |
++---------------------------------------------------------+</code></pre></details>
+<figcaption><a class="selfref" href="#figure-1">Figure 1</a>: The layers of the protocol.</figcaption>
+</figure>
+<ul>
+<li>The connection layer (<a class="xref" href="#section-3">section 3</a>) decides which connection writes to
+a peer, and closes connections that are idle or stale.</li>
+<li>The topic stream layer (<a class="xref" href="#section-4">section 4</a>) maps the messages of a topic onto
+QUIC streams [<a class="cite" href="#RFC9000">RFC9000</a>], and checks the auth token of the sender.</li>
+<li>The membership layer (<a class="xref" href="#section-5">section 5</a>) keeps the neighbors.</li>
+<li>The broadcast layer (<a class="xref" href="#section-6">section 6</a>) spreads content through the
+neighbors.</li>
+</ul>
+<h3 id="section-2.3"><a class="secno" href="#section-2.3">2.3</a> <a class="selfref" href="#section-2.3">An example</a></h3>
+<p>Node A joins topic <code>T</code> through node B (<a class="xref" href="#figure-2">figure 2</a>):</p>
+<ol type="1">
+<li>A dials B and opens the control stream. Both sides write a control
+header with their session ids.</li>
+<li>A opens a topic stream for <code>T</code> and sends <code>SWARM_JOIN</code>.</li>
+<li>B adds A to its active view. It answers with <code>SWARM_NEIGHBOR_REPLY</code>
+on its own topic stream for <code>T</code>, and sends <code>SWARM_FORWARD_JOIN</code> for
+A to its other neighbors.</li>
+<li>A forward join ends at node C, a neighbor of B. C sends
+<code>SWARM_NEIGHBOR_REQUEST</code> to A, and A answers with
+<code>SWARM_NEIGHBOR_REPLY</code>. A and C become neighbors.</li>
+</ol>
+<p>A then broadcasts the content <code>hi</code>. A pushes <code>GOSSIP_MESSAGE</code> with
+round 0 to its eager peers B and C. B forwards it with round 1, so C
+gets a second copy. C keeps the first copy, and sends <code>GOSSIP_PRUNE</code> to
+B. B is now a lazy peer of C in that tree.</p>
+<figure id="figure-2" data-src="fig-example">
+<div class="art"><svg class="fig" viewBox="0 0 610 430" width="610" role="img" aria-label="Message flow: A joins through B, C becomes a neighbor of A, then A broadcasts" xmlns="http://www.w3.org/2000/svg"><rect x="26" y="6" width="68" height="26" rx="4" class="box"/><text x="60" y="24" text-anchor="middle" class="b">A</text><line x1="60" y1="32" x2="60" y2="422" class="life"/><rect x="246" y="6" width="68" height="26" rx="4" class="box"/><text x="280" y="24" text-anchor="middle" class="b">B</text><line x1="280" y1="32" x2="280" y2="422" class="life"/><rect x="466" y="6" width="68" height="26" rx="4" class="box"/><text x="500" y="24" text-anchor="middle" class="b">C</text><line x1="500" y1="32" x2="500" y2="422" class="life"/><line x1="60" y1="76" x2="277" y2="76" class="ln" marker-end="url(#ah)"/><text x="170.0" y="70" text-anchor="middle" class="mono">control header</text><line x1="280" y1="106" x2="63" y2="106" class="ln" marker-end="url(#ah)"/><text x="170.0" y="100" text-anchor="middle" class="mono">control header</text><line x1="60" y1="136" x2="277" y2="136" class="ln" marker-end="url(#ah)"/><text x="170.0" y="130" text-anchor="middle" class="mono">SWARM_JOIN</text><line x1="280" y1="166" x2="63" y2="166" class="ln" marker-end="url(#ah)"/><text x="170.0" y="160" text-anchor="middle" class="mono">SWARM_NEIGHBOR_REPLY</text><line x1="280" y1="196" x2="497" y2="196" class="ln" marker-end="url(#ah)"/><text x="390.0" y="190" text-anchor="middle" class="mono">SWARM_FORWARD_JOIN</text><line x1="500" y1="226" x2="63" y2="226" class="ln" marker-end="url(#ah)"/><text x="280.0" y="220" text-anchor="middle" class="mono">SWARM_NEIGHBOR_REQUEST</text><line x1="60" y1="256" x2="497" y2="256" class="ln" marker-end="url(#ah)"/><text x="280.0" y="250" text-anchor="middle" class="mono">SWARM_NEIGHBOR_REPLY</text><line x1="60" y1="316" x2="277" y2="316" class="ln" marker-end="url(#ah)"/><text x="170.0" y="310" text-anchor="middle" class="mono">GOSSIP_MESSAGE r0</text><line x1="60" y1="346" x2="497" y2="346" class="ln" marker-end="url(#ah)"/><text x="280.0" y="340" text-anchor="middle" class="mono">GOSSIP_MESSAGE r0</text><line x1="280" y1="376" x2="497" y2="376" class="ln" marker-end="url(#ah)"/><text x="390.0" y="370" text-anchor="middle" class="mono">GOSSIP_MESSAGE r1</text><text x="514" y="380" text-anchor="start" class="note">duplicate</text><line x1="500" y1="406" x2="283" y2="406" class="ln" marker-end="url(#ah)"/><text x="390.0" y="400" text-anchor="middle" class="mono">GOSSIP_PRUNE</text></svg></div>
+<details><summary>Text version</summary><pre><code>   A                             B                             C
+   |                             |                             |
+   |--- control header ---------&gt;|                             |
+   |&lt;--------- control header ---|                             |
+   |--- SWARM_JOIN -------------&gt;|                             |
+   |&lt;--- SWARM_NEIGHBOR_REPLY ---|                             |
+   |                             |--- SWARM_FORWARD_JOIN -----&gt;|
+   |&lt;------------------------------- SWARM_NEIGHBOR_REQUEST ---|
+   |--- SWARM_NEIGHBOR_REPLY ---------------------------------&gt;|
+   |                             |                             |
+   |--- GOSSIP_MESSAGE r0 ------&gt;|                             |
+   |--- GOSSIP_MESSAGE r0 ------------------------------------&gt;|
+   |                             |--- GOSSIP_MESSAGE r1 ------&gt;|  duplicate
+   |                             |&lt;----------- GOSSIP_PRUNE ---|</code></pre></details>
+<figcaption><a class="selfref" href="#figure-2">Figure 2</a>: A joins through B, then broadcasts. C has only B as a
+neighbor, so the walk of the forward join ends at C (<a class="xref" href="#section-5.4">section 5.4</a>).</figcaption>
+</figure>
+<h2 id="section-3"><a class="secno" href="#section-3">3.</a> <a class="selfref" href="#section-3">Connections</a></h2>
+<h3 id="section-3.1"><a class="secno" href="#section-3.1">3.1</a> <a class="selfref" href="#section-3.1">ALPN and identity</a></h3>
+<p>A connection of this protocol MUST use the ALPN
+<code>iroh-gossip/2-canary.4</code>. An application can choose another ALPN. All
+nodes of a network then MUST use the same one.</p>
+<p>iroh authenticates the endpoint id of each side during the QUIC
+handshake. The protocol uses that id as the identity of the peer. No
+message carries the identity of its sender.</p>
+<p>The side that dials is the <em>dialer</em>. The other side is the <em>acceptor</em>.</p>
+<h3 id="section-3.2"><a class="secno" href="#section-3.2">3.2</a> <a class="selfref" href="#section-3.2">Control stream</a></h3>
+<p>The <em>control stream</em> is the first bidirectional stream of a
+connection. The dialer MUST open it as the first stream. Each side MUST
+write its control header (<a class="xref" href="#section-9.4">section 9.4</a>) as the first bytes of its half
+of the stream, without waiting for the header of the peer.</p>
+<p>The control header carries the session id of the sender, and the
+connection-scope extensions that the sender declares (<a class="xref" href="#section-8">section 8</a>). After
+the header, the control stream carries control messages, then <code>GOAWAY</code>
+(<a class="xref" href="#section-3.6">section 3.6</a>), then the FIN. The base protocol has no control message
+other than <code>GOAWAY</code>.</p>
+<p>A side fails the connection with <code>PROTOCOL</code> when one of these takes
+longer than <code>HEADER_TIMEOUT</code> (10 s):</p>
+<ul>
+<li>the dialer opens the control stream,</li>
+<li>the control stream of the dialer arrives at the acceptor, or</li>
+<li>the control header of the peer arrives in full, from the time the
+side starts to read it.</li>
+</ul>
+<p>A <em>topic stream</em> is a unidirectional stream that carries the messages
+of one topic (<a class="xref" href="#section-4">section 4</a>). A side reads the topic streams of the peer
+only after it read the control header of the peer. A dialer MAY open
+topic streams before it read the header of the acceptor.</p>
+<p>A node opens no other bidirectional stream, unless a negotiated
+extension defines one.</p>
+<h3 id="section-3.3"><a class="secno" href="#section-3.3">3.3</a> <a class="selfref" href="#section-3.3">Sessions</a></h3>
+<p>A <em>session</em> is one run of a node, from start to shutdown. A node MUST
+draw a new random session id of 8 bytes each time it starts, and MUST
+send it on all its connections in that run. A session id needs no
+secrecy.</p>
+<p>A node tracks the current session id of each peer, and some older
+ones (16, <em>policy</em>). It can forget them when it has no state left for
+the peer: no connection, no queued message, no dial, and no topic that
+wants the peer (<a class="xref" href="#section-5.1">section 5.1</a>).</p>
+<p>When the control header of a peer arrives, the node compares its
+session id:</p>
+<ol type="1">
+<li>The id is the current session of the peer, or the node knows no
+session of the peer. The node records the id on the connection.</li>
+<li>The id is new, and the node knows another current session. The peer
+restarted. The node MUST close each connection with the old session
+with <code>STALE</code>. It discards its send queue to the peer, and reports to
+every topic that the peer disconnected. The new id becomes current.</li>
+<li>The id is an older session. The connection leads to a <em>former
+instance</em> of the peer: a process that still runs with an old
+session, for example after a restart that did not end it. The node
+MUST close that connection with <code>STALE</code>. If the node dialed it, the
+dial failed. If the peer dialed it and messages are queued, the node
+dials the peer again.</li>
+</ol>
+<p>Rule 3 keeps messages away from a former instance only while the node
+remembers the older sessions. After that, a former instance that dials
+in can receive messages, which are then lost. This ends when the live
+instance connects, because rule 2 then closes the old connection.</p>
+<h3 id="section-3.4"><a class="secno" href="#section-3.4">3.4</a> <a class="selfref" href="#section-3.4">Writer selection</a></h3>
+<p>A node keeps one send queue per peer, shared by all topics. It writes
+the queue on one connection at a time: the <em>writer</em>. The queue moves
+to the writer, and back when the writer's connection ends.</p>
+<p>A connection is <em>ready</em> to become the writer when:</p>
+<ul>
+<li>the node read the control header of the peer on it, or</li>
+<li>the node dialed it, and the node has seen no restart of the peer.</li>
+</ul>
+<p>A connection that retires is never ready. When no connection writes,
+the node picks the first ready connection. After a restart of the
+peer, a dialed connection waits for the header, because it may lead to
+a former instance.</p>
+<p>The writer opens a topic stream for each topic that wants the peer at
+once, also without a message to send (<a class="xref" href="#section-4.1">section 4.1</a>). The other
+connections to the peer only read.</p>
+<h3 id="section-3.5"><a class="secno" href="#section-3.5">3.5</a> <a class="selfref" href="#section-3.5">Crossed dials</a></h3>
+<p>Two nodes can dial each other at the same time. Each node then has two
+connections to the peer. The connection that the node with the higher
+endpoint id dialed loses. Endpoint ids compare as 32-byte strings,
+byte by byte.</p>
+<p>A node decides once it read the control headers of all its connections
+to the peer that do not retire. If at least one of them wins, the node
+retires every loser (<a class="xref" href="#section-3.6">section 3.6</a>). The retire keeps the order of
+messages, because the writer moves to the winner only after the loser
+closed.</p>
+<p>A node marks a connection as retiring only when it sends its own
+<code>GOAWAY</code>. For a short time, a new dial during a retire can thus look
+like a crossed dial to the peer, which can then retire the new
+connection. No message is lost: the queue waits, and the node dials
+again.</p>
+<h3 id="section-3.6"><a class="secno" href="#section-3.6">3.6</a> <a class="selfref" href="#section-3.6">Retire with GOAWAY</a></h3>
+<p>A <em>retire</em> is the orderly end of a connection that both sides agree on
+with <code>GOAWAY</code>. It loses no message. A side starts a retire when:</p>
+<ul>
+<li>the connection was idle for <code>retire_after</code> (10 s, <em>policy</em>),</li>
+<li>the connection lost a crossed dial, or</li>
+<li>it read all streams that the peer counted in its <code>GOAWAY</code>.</li>
+</ul>
+<p>A connection is <em>idle</em> when no topic stream is open in either
+direction, the send queue is empty, and the writer has no topic stream
+left to open. A topic stream whose header the node still reads counts
+as open.</p>
+<p>To retire, a side:</p>
+<ol type="1">
+<li>finishes all its topic streams, and opens no new one,</li>
+<li>sends <code>GOAWAY</code> on the control stream, with the number of topic
+streams that the side opened on this connection, and</li>
+<li>writes nothing more on the connection, except the FIN of the
+control stream.</li>
+</ol>
+<p>A side that receives <code>GOAWAY(n)</code> reads on until <code>n</code> streams of the
+peer ended. A stream that the side stopped (<a class="xref" href="#section-4.3">section 4.3</a>) counts as
+ended. Then the side retires too, if it did not yet.</p>
+<p>A side closes the connection with <code>RETIRED</code> when it read all streams
+that the peer counted, and the peer finished its half of the control
+stream. Either side can close first. The queued messages go out on the
+next connection.</p>
+<figure id="figure-3" data-src="fig-retire">
+<div class="art"><svg class="fig" viewBox="0 0 660 400" width="660" role="img" aria-label="The retire handshake with GOAWAY between X and Y" xmlns="http://www.w3.org/2000/svg"><rect x="26" y="6" width="68" height="26" rx="4" class="box"/><text x="60" y="24" text-anchor="middle" class="b">X</text><line x1="60" y1="32" x2="60" y2="392" class="life"/><rect x="406" y="6" width="68" height="26" rx="4" class="box"/><text x="440" y="24" text-anchor="middle" class="b">Y</text><line x1="440" y1="32" x2="440" y2="392" class="life"/><text x="70" y="72" text-anchor="start" class="note">starts a retire</text><line x1="60" y1="106" x2="437" y2="106" class="ln" marker-end="url(#ah)"/><text x="250.0" y="100" text-anchor="middle" class="mono">FIN on each open topic stream</text><line x1="60" y1="136" x2="437" y2="136" class="ln" marker-end="url(#ah)"/><text x="250.0" y="130" text-anchor="middle" class="mono">GOAWAY(2)</text><line x1="440" y1="196" x2="63" y2="196" class="ln" marker-end="url(#ah)"/><text x="250.0" y="190" text-anchor="middle" class="mono">FIN on each open topic stream</text><text x="454" y="200" text-anchor="start" class="note">after 2 streams of X ended</text><line x1="440" y1="226" x2="63" y2="226" class="ln" marker-end="url(#ah)"/><text x="250.0" y="220" text-anchor="middle" class="mono">GOAWAY(1)</text><line x1="440" y1="256" x2="63" y2="256" class="ln" marker-end="url(#ah)"/><text x="250.0" y="250" text-anchor="middle" class="mono">FIN on the control stream</text><text x="70" y="282" text-anchor="start" class="note">reads until 1 stream of Y ended</text><line x1="60" y1="316" x2="437" y2="316" class="ln" marker-end="url(#ah)"/><text x="250.0" y="310" text-anchor="middle" class="mono">FIN on the control stream</text><text x="70" y="372" text-anchor="start" class="note">each side closes with RETIRED</text></svg></div>
+<details><summary>Text version</summary><pre><code>   X                                               Y
+   |                                               |
+   |  starts a retire                              |
+   |--- FIN on each open topic stream ------------&gt;|
+   |--- GOAWAY(2) --------------------------------&gt;|
+   |                                               |
+   |&lt;------------ FIN on each open topic stream ---|  after 2 streams of X ended
+   |&lt;-------------------------------- GOAWAY(1) ---|
+   |&lt;---------------- FIN on the control stream ---|
+   |  reads until 1 stream of Y ended              |
+   |--- FIN on the control stream ----------------&gt;|
+   |                                               |
+   |  each side closes with RETIRED                |</code></pre></details>
+<figcaption><a class="selfref" href="#figure-3">Figure 3</a>: A retire that X starts. X opened 2 topic streams on the
+connection, and Y opened 1.</figcaption>
+</figure>
+<p>Rules:</p>
+<ul>
+<li>A side MUST NOT open a topic stream after it sent <code>GOAWAY</code>. A stream
+that the side opened before can arrive after the <code>GOAWAY</code>. The
+receiver reads it as usual.</li>
+<li>The count of <code>GOAWAY</code> MUST equal the number of topic streams that
+the side opened. A receiver fails the connection with <code>PROTOCOL</code> when
+the peer opens more streams than the count, or when the count is
+lower than the streams it accepted already.</li>
+<li>A side MUST NOT send any byte on the control stream after <code>GOAWAY</code>,
+except the FIN, and MUST NOT finish the control stream before
+<code>GOAWAY</code>. A receiver fails the connection with <code>PROTOCOL</code> otherwise.</li>
+<li>A side SHOULD bound the time of a retire. The default is 120 s
+(<code>RETIRE_TIMEOUT</code>, <em>policy</em>), after which the side fails the
+connection with <code>BLOCKED</code>.</li>
+</ul>
+<p>While all connections to a peer retire, a node keeps new messages in
+the queue, and dials the peer once.</p>
+<h3 id="section-3.7"><a class="secno" href="#section-3.7">3.7</a> <a class="selfref" href="#section-3.7">Close codes</a></h3>
+<p>A node closes a connection with a QUIC application close [<a class="cite" href="#RFC9000">RFC9000</a>].
+The error code tells the peer why. A receiver MUST NOT act on the
+reason phrase.</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>Code</th>
+<th>Name</th>
+<th>The sender closes because</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><code>RETIRED</code></td>
+<td>Both sides finished a retire (<a class="xref" href="#section-3.6">section 3.6</a>).</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>STALE</code></td>
+<td>The connection carries an old session of the peer (<a class="xref" href="#section-3.3">section 3.3</a>).</td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>SHUTDOWN</code></td>
+<td>The node shuts down.</td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>PROTOCOL</code></td>
+<td>The peer broke the protocol (<a class="xref" href="#section-7">section 7</a>).</td>
+</tr>
+<tr>
+<td>5</td>
+<td><code>SEND_FAILED</code></td>
+<td>A write failed, the peer stopped a topic stream with a code other than <code>REJECTED</code>, or an own message other than a payload was over its limit.</td>
+</tr>
+<tr>
+<td>6</td>
+<td><code>BLOCKED</code></td>
+<td>A write, a stream open, or a retire made no progress in time, or a control message did not fit the send queue.</td>
+</tr>
+</tbody>
+</table>
+<p>Code 0 is never sent on purpose. The QUIC stack sends it when a node
+drops a connection without a close, for example in a crash. <code>RETIRED</code>
+is not 0, so that a crash does not look like a retire.</p>
+<p>The receiver of a close acts on the code:</p>
+<ul>
+<li><code>STALE</code>: the node reports nothing to its topics.</li>
+<li><code>RETIRED</code>: no message was lost. The send queue and the membership
+state stay. The node dials the peer again if messages wait, or if a
+topic still wants the peer.</li>
+<li>Any other code, or a transport error: the connection failed. If it
+was the writer, the node discards the send queue to the peer and
+reports a disconnect to every topic.</li>
+</ul>
+<h3 id="section-3.8"><a class="secno" href="#section-3.8">3.8</a> <a class="selfref" href="#section-3.8">Shutdown</a></h3>
+<p>When a node shuts down, it leaves every topic (<a class="xref" href="#section-5.9">section 5.9</a>). Each
+writer sends what is left in its queue, finishes its streams, and
+closes with <code>SHUTDOWN</code>. A node SHOULD bound this wait (1 s, <em>policy</em>).</p>
+<h3 id="section-3.9"><a class="secno" href="#section-3.9">3.9</a> <a class="selfref" href="#section-3.9">Send queue</a></h3>
+<p>A node keeps one send queue per peer, with a size limit (1 MiB,
+<em>policy</em>). A node MAY drop these messages to a peer that stays
+connected, for example when its queue is full:</p>
+<ul>
+<li>payloads (<code>GOSSIP_MESSAGE</code>, <code>GOSSIP_MESSAGE_NEIGHBOR</code>). Plumtree
+announces a dropped swarm broadcast again (<a class="xref" href="#section-6.9">section 6.9</a>).</li>
+<li>announcements (<code>GOSSIP_IHAVE</code>).</li>
+<li>the messages of a random walk (<code>SWARM_FORWARD_JOIN</code>,
+<code>SWARM_SHUFFLE</code>, <code>SWARM_SHUFFLE_REPLY</code>). A dropped walk only ends
+early. Without the drop, a neighbor could fill the queue to an honest
+peer with shuffles that the node forwards.</li>
+</ul>
+<p>A node MUST NOT drop any other message and then send the messages
+after it. The peer would act on the later messages without the dropped
+one, and the two sides would see the link differently. A node aborts
+the peer instead: it closes every connection to the peer with
+<code>BLOCKED</code>, discards the queue, and reports a disconnect. Both sides
+then start over.</p>
+<p>A node can split its queue into sections, so that payloads and
+announcements cannot take the room of other messages. The default
+gives payloads and walks three quarters of the queue, and
+announcements one eighth.</p>
+<h3 id="section-3.10"><a class="secno" href="#section-3.10">3.10</a> <a class="selfref" href="#section-3.10">Timeouts</a></h3>
+<p>All timeouts are <em>policy</em>. Only <code>HEADER_TIMEOUT</code> sets a limit that a
+peer must meet.</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>Name</th>
+<th>Value</th>
+<th>Effect when it expires</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>HEADER_TIMEOUT</code></td>
+<td>10 s</td>
+<td>A control stream or a header did not arrive in time: close with <code>PROTOCOL</code>.</td>
+</tr>
+<tr>
+<td><code>WRITE_TIMEOUT</code></td>
+<td>60 s</td>
+<td>A write made no progress: close with <code>BLOCKED</code>.</td>
+</tr>
+<tr>
+<td><code>OPEN_TIMEOUT</code></td>
+<td>15 s</td>
+<td>A stream open for a queued message waits at the stream limit of the peer: close with <code>BLOCKED</code>.</td>
+</tr>
+<tr>
+<td><code>RETIRE_TIMEOUT</code></td>
+<td>120 s</td>
+<td>A retire did not end: close with <code>BLOCKED</code>.</td>
+</tr>
+<tr>
+<td><code>retire_after</code></td>
+<td>10 s</td>
+<td>An idle connection starts a retire.</td>
+</tr>
+</tbody>
+</table>
+<p>A slow reader keeps its connection as long as it takes some bytes at
+least once per <code>WRITE_TIMEOUT</code>.</p>
+<h2 id="section-4"><a class="secno" href="#section-4">4.</a> <a class="selfref" href="#section-4">Topic streams</a></h2>
+<h3 id="section-4.1"><a class="secno" href="#section-4.1">4.1</a> <a class="selfref" href="#section-4.1">Opening</a></h3>
+<p>A topic stream starts with a topic header (<a class="xref" href="#section-9.4">section 9.4</a>), then carries
+messages (<a class="xref" href="#section-9.3">section 9.3</a>). The writer opens a topic stream:</p>
+<ul>
+<li>for each topic that wants the peer, when the connection becomes the
+writer, also without a message, and</li>
+<li>for a message whose topic has no open stream on the connection.</li>
+</ul>
+<p>A node SHOULD have at most one open topic stream per topic and
+connection. It opens a new stream for a topic only after it finished
+the previous one. It keeps the stream of a topic open while the topic
+wants the peer.</p>
+<p>The receiver reads the headers of new streams one at a time, in the
+order in which it accepts the streams.</p>
+<h3 id="section-4.2"><a class="secno" href="#section-4.2">4.2</a> <a class="selfref" href="#section-4.2">Header</a></h3>
+<p>The topic header names the topic, and can carry an auth token. A
+header MUST arrive in full within <code>HEADER_TIMEOUT</code> after the receiver
+accepted the stream, and MUST NOT be longer than <code>MAX_HEADER_LEN</code>
+(4096 bytes). Otherwise the receiver fails the connection with
+<code>PROTOCOL</code>.</p>
+<p>The sender MUST send the topic parameter. It MAY send the token
+parameter, and the parameters of the topic-scope extensions that it
+declares (<a class="xref" href="#section-8.2">section 8.2</a>). A reader accepts the parameters in any order,
+skips unknown ones, and takes the first of a repeated one. An empty
+token is a token.</p>
+<h3 id="section-4.3"><a class="secno" href="#section-4.3">4.3</a> <a class="selfref" href="#section-4.3">Auth tokens and refusal</a></h3>
+<p>A node can set an auth token per topic. It sends the token in the
+header of each topic stream of that topic. A node can also install a
+verifier. The verifier gets the topic id, the endpoint id of the peer,
+and the token, and accepts or rejects the stream. Without a verifier, a
+node accepts every stream.</p>
+<p>The receiver runs the verifier on each new topic stream, after the
+header and before the first message. On reject, the receiver:</p>
+<ul>
+<li>MUST stop the stream with the stop code <code>REJECTED</code> (1), and MUST NOT
+hand any message of the stream to the protocol,</li>
+<li>drops the peer from the topic as for a disconnect, and cancels a
+pending join to it.</li>
+</ul>
+<p>The connection stays open, and other topics are not affected. The
+stopped stream counts as ended for <code>GOAWAY</code> (<a class="xref" href="#section-3.6">section 3.6</a>). A node MAY
+remember the reject for the rest of the connection, and stop later
+streams of the topic without a new verifier call.</p>
+<p>The sender of a stream that the peer stopped with <code>REJECTED</code> loses the
+messages of that stream. On this connection, it opens no new stream
+for the topic, and drops the queued messages of the topic. The topic
+drops the peer as for a disconnect, and tells the application that the
+peer refused it. A new connection starts without refusals.</p>
+<p>A node MUST NOT stop a topic stream with another code, unless a
+negotiated extension defines the code. The sender of such a stream
+fails the connection with <code>SEND_FAILED</code>.</p>
+<h3 id="section-4.4"><a class="secno" href="#section-4.4">4.4</a> <a class="selfref" href="#section-4.4">Ordering</a></h3>
+<p>The protocol keeps the order of the messages of one topic from one
+sender:</p>
+<ul>
+<li>Within a stream, QUIC delivers in order.</li>
+<li>Within a connection, the receiver reads a newer stream of a topic
+only after the older stream of the topic ended.</li>
+<li>Across connections, a node writes on one writer at a time. After a
+retire, the next writer starts only after the peer read all that the
+previous writer sent.</li>
+</ul>
+<p>When a connection fails, the queue may lose messages. The node then
+reports a disconnect, so the topics start over with the peer. The
+protocol gives no order between topics, and no order between senders.</p>
+<h3 id="section-4.5"><a class="secno" href="#section-4.5">4.5</a> <a class="selfref" href="#section-4.5">The end of a stream</a></h3>
+<p>A node finishes (FIN) a topic stream:</p>
+<ul>
+<li>after <code>SWARM_CLOSE</code>, which is thus the last message of the topic to
+that peer,</li>
+<li>when its topic no longer wants the peer, after the messages queued
+before,</li>
+<li>before it sends <code>GOAWAY</code>, and</li>
+<li>when the node shuts down.</li>
+</ul>
+<p>The end of a stream is not a membership event. Only <code>SWARM_CLOSE</code> and
+the end of a connection change the views.</p>
+<p>A node MUST NOT reset a topic stream. A reader fails the connection
+with <code>PROTOCOL</code> when the peer resets a topic stream.</p>
+<h3 id="section-4.6"><a class="secno" href="#section-4.6">4.6</a> <a class="selfref" href="#section-4.6">Messages for a topic the node did not join</a></h3>
+<p>A node can receive a stream for a topic it did not join, for example
+after it left. It answers each membership message other than
+<code>SWARM_CLOSE</code> with <code>SWARM_CLOSE(Shutdown)</code>, and ignores broadcast
+messages.</p>
+<h2 id="section-5"><a class="secno" href="#section-5">5.</a> <a class="selfref" href="#section-5">Membership (HyParView)</a></h2>
+<p>The membership layer follows HyParView [<a class="cite" href="#HYPARVIEW">HYPARVIEW</a>], with the changes
+that this section states. It runs per topic.</p>
+<h3 id="section-5.1"><a class="secno" href="#section-5.1">5.1</a> <a class="selfref" href="#section-5.1">Views</a></h3>
+<p>Each node keeps two views of a topic:</p>
+<ul>
+<li>The <em>active view</em> holds the <em>neighbors</em> of the node: at most
+<code>active_view_capacity</code> peers (default 5).</li>
+<li>The <em>passive view</em> holds peers that the node knows but does not use
+as neighbors: at most <code>passive_view_capacity</code> peers (default 30).</li>
+</ul>
+<p>A peer is in at most one view. A node never puts itself into a view.</p>
+<p>Links in the active view are symmetric. A node adds a peer when it
+accepts a <code>SWARM_JOIN</code> or a <code>SWARM_NEIGHBOR_REQUEST</code> of the peer, or
+when the peer answers its own <code>SWARM_JOIN</code> or request. Two crossed
+requests add the link on both sides without a reply. Both sides drop
+the link with <code>SWARM_CLOSE</code>, or when the connection fails.</p>
+<p>A topic <em>wants</em> a peer while the peer is a neighbor, while the topic
+waits for the reply of the peer to a <code>SWARM_JOIN</code> or a
+<code>SWARM_NEIGHBOR_REQUEST</code>, or while a join connects to the peer. When no
+topic wants a peer, the node finishes its streams to the peer, and the
+connection can retire.</p>
+<h3 id="section-5.2"><a class="secno" href="#section-5.2">5.2</a> <a class="selfref" href="#section-5.2">Peer info and peer data</a></h3>
+<p>Messages that introduce a peer carry a <code>PeerInfo</code>: the endpoint id and
+optional peer data (<a class="xref" href="#section-9.7">section 9.7</a>). Peer data has a kind and bytes:</p>
+<ul>
+<li>Kind 0 holds the addresses of the peer: an optional relay URL and a
+set of socket addresses. A node uses them to dial the peer.</li>
+<li>A node MUST keep peer data of an unknown kind, and MUST forward it
+unchanged when it forwards the <code>PeerInfo</code>.</li>
+</ul>
+<p>A node sends its own peer data in <code>SWARM_JOIN</code>,
+<code>SWARM_NEIGHBOR_REQUEST</code>, <code>SWARM_NEIGHBOR_REPLY</code>, and in its own entry
+of <code>SWARM_SHUFFLE</code>. Peer data of kind 0 that does not decode is no
+protocol error. The node ignores it.</p>
+<p>The data of one <code>PeerData</code> MUST NOT be longer than <code>MAX_PEER_DATA_LEN</code>
+(1024 bytes). A node with more addresses MUST drop some of them.</p>
+<h3 id="section-5.3"><a class="secno" href="#section-5.3">5.3</a> <a class="selfref" href="#section-5.3">Join</a></h3>
+<p>The application starts a join with a list of bootstrap peers. A node
+connects first, and sends <code>SWARM_JOIN</code> only to a few of them:</p>
+<ol type="1">
+<li>It connects to up to <code>join_dials</code> bootstrap peers (default 5) at
+once, without a message.</li>
+<li>The first <code>join_contacts</code> peers that connect (default 2) become
+<em>contacts</em>. Each contact gets <code>SWARM_JOIN</code>.</li>
+<li>When a dial fails, or a contact sends <code>SWARM_CLOSE</code>, refuses the
+stream, or does not answer in time, the join tries the next
+bootstrap peer.</li>
+<li>The other peers go to the passive view.</li>
+</ol>
+<p>A contact answers with <code>SWARM_NEIGHBOR_REPLY</code> (<a class="xref" href="#section-5.4">section 5.4</a>). The
+joiner then adds the contact to its active view with high priority: if
+the view is full, it evicts a random neighbor.</p>
+<p>If no reply comes within <code>JOIN_RETRY_DELAY</code> (10 s), the joiner sends
+<code>SWARM_JOIN</code> once more. A refused join gets no retry. A node remembers
+some bootstrap peers (8, <em>policy</em>) for a later rejoin (<a class="xref" href="#section-5.8">section 5.8</a>).</p>
+<h3 id="section-5.4"><a class="secno" href="#section-5.4">5.4</a> <a class="selfref" href="#section-5.4">Contact and forward join</a></h3>
+<p>A node that receives <code>SWARM_JOIN</code> from peer J:</p>
+<ol type="1">
+<li>cancels a pending join retry or <code>SWARM_NEIGHBOR_REQUEST</code> to J,</li>
+<li>adds J to its active view with high priority, and evicts a random
+neighbor if the view is full (<a class="xref" href="#section-5.6">section 5.6</a>),</li>
+<li>sends <code>SWARM_NEIGHBOR_REPLY</code> with its peer data to J, also if J was
+a neighbor already, and</li>
+<li>if J was not a neighbor before, sends <code>SWARM_FORWARD_JOIN</code> with J's
+<code>PeerInfo</code> and <code>ttl = active_random_walk_length</code> (ARWL, default 6)
+to each other neighbor.</li>
+</ol>
+<p>A node P that receives <code>SWARM_FORWARD_JOIN</code> for peer J from peer S
+ignores it if S is not a neighbor of P, or if J is P. Else:</p>
+<ol type="1">
+<li>If J is a neighbor, P sends <code>SWARM_NEIGHBOR_REQUEST(High)</code> to J.
+This renews the link.</li>
+<li>Else, if the ttl is 0, or P has at most one neighbor, P sends
+<code>SWARM_NEIGHBOR_REQUEST(High)</code> to J. P adds J to its active view
+only when J replies. The paper adds J at once. The change keeps
+unreachable peers out of the active view. If P reached its contact
+limit (<a class="xref" href="#section-11.4">section 11.4</a>), P adds J to its passive view instead.</li>
+<li>Else, P forwards the message with <code>ttl - 1</code> to a random neighbor
+other than S. If the ttl equals <code>passive_random_walk_length</code> (PRWL,
+default 3), P first adds J to its passive view.</li>
+</ol>
+<p>A node sends at most one pending request per peer (<a class="xref" href="#section-5.5">section 5.5</a>).</p>
+<figure id="figure-4" data-src="fig-walk">
+<div class="art"><svg class="fig" viewBox="0 0 784 220" width="784" role="img" aria-label="A random walk of a forward join from B to P7, which then asks J to become a neighbor" xmlns="http://www.w3.org/2000/svg"><line x1="59" y1="70" x2="149" y2="70" class="ln" marker-end="url(#ah)"/><text x="105.0" y="62" text-anchor="middle" class="mono small">SWARM_JOIN</text><line x1="189" y1="70" x2="231" y2="70" class="ln" marker-end="url(#ah)"/><text x="211.0" y="62" text-anchor="middle" class="mono small">ttl 6</text><line x1="271" y1="70" x2="313" y2="70" class="ln" marker-end="url(#ah)"/><text x="293.0" y="62" text-anchor="middle" class="mono small">ttl 5</text><line x1="353" y1="70" x2="395" y2="70" class="ln" marker-end="url(#ah)"/><text x="375.0" y="62" text-anchor="middle" class="mono small">ttl 4</text><line x1="435" y1="70" x2="477" y2="70" class="ln" marker-end="url(#ah)"/><text x="457.0" y="62" text-anchor="middle" class="mono small">ttl 3</text><line x1="517" y1="70" x2="559" y2="70" class="ln" marker-end="url(#ah)"/><text x="539.0" y="62" text-anchor="middle" class="mono small">ttl 2</text><line x1="599" y1="70" x2="641" y2="70" class="ln" marker-end="url(#ah)"/><text x="621.0" y="62" text-anchor="middle" class="mono small">ttl 1</text><line x1="681" y1="70" x2="723" y2="70" class="ln" marker-end="url(#ah)"/><text x="703.0" y="62" text-anchor="middle" class="mono small">ttl 0</text><circle cx="40" cy="70" r="18" class="node acc"/><text x="40" y="75" text-anchor="middle" class="b">J</text><circle cx="170" cy="70" r="18" class="node"/><text x="170" y="75" text-anchor="middle" class="b">B</text><circle cx="252" cy="70" r="18" class="node"/><text x="252" y="75" text-anchor="middle" class="b">P1</text><circle cx="334" cy="70" r="18" class="node"/><text x="334" y="75" text-anchor="middle" class="b">P2</text><circle cx="416" cy="70" r="18" class="node"/><text x="416" y="75" text-anchor="middle" class="b">P3</text><circle cx="498" cy="70" r="18" class="node acc"/><text x="498" y="75" text-anchor="middle" class="b">P4</text><circle cx="580" cy="70" r="18" class="node"/><text x="580" y="75" text-anchor="middle" class="b">P5</text><circle cx="662" cy="70" r="18" class="node"/><text x="662" y="75" text-anchor="middle" class="b">P6</text><circle cx="744" cy="70" r="18" class="node"/><text x="744" y="75" text-anchor="middle" class="b">P7</text><text x="498" y="106" text-anchor="middle" class="note">ttl 3 = PRWL:</text><text x="498" y="121" text-anchor="middle" class="note">adds J to its</text><text x="498" y="136" text-anchor="middle" class="note">passive view</text><path d="M744,89 L744,170 L43,170" class="ln acc-ln" marker-end="url(#ah-acc)" fill="none"/><line x1="40" y1="167" x2="40" y2="90" class="ln acc-ln" marker-end="url(#ah-acc)"/><text x="392.0" y="163" text-anchor="middle" class="mono">SWARM_NEIGHBOR_REQUEST(High)</text><line x1="40" y1="205" x2="741" y2="205" class="ln" marker-end="url(#ah)"/><text x="392.0" y="198" text-anchor="middle" class="mono">SWARM_NEIGHBOR_REPLY</text><line x1="40" y1="173" x2="40" y2="205" class="life"/><line x1="744" y1="170" x2="744" y2="205" class="life"/></svg></div>
+<details><summary>Text version</summary><pre><code>          SWARM_JOIN        ttl 6         ttl 5         ttl 3          ttl 0
+     J -------------&gt; B ----------&gt; P1 ---------&gt; ... --------&gt; P4 ... ---------&gt; P7
+     ^                                                          adds J to        |
+     |                                                          passive view     |
+     +-------------------- SWARM_NEIGHBOR_REQUEST(High) -------------------------+
+     J -------------------- SWARM_NEIGHBOR_REPLY ------------------------------&gt; P7</code></pre></details>
+<figcaption><a class="selfref" href="#figure-4">Figure 4</a>: One random walk of a forward join, with ARWL 6 and PRWL 3.
+B starts such a walk at each of its other neighbors.</figcaption>
+</figure>
+<h3 id="section-5.5"><a class="secno" href="#section-5.5">5.5</a> <a class="selfref" href="#section-5.5">Neighbor request and reply</a></h3>
+<p><code>SWARM_NEIGHBOR_REQUEST</code> asks the receiver to add the sender to its
+active view. It has a priority:</p>
+<ul>
+<li><code>High</code> (0): the receiver MUST accept. If its active view is full, it
+evicts a random neighbor. A node sends <code>High</code> when its active view is
+empty, and for a forward join.</li>
+<li><code>Low</code> (1): the receiver accepts only if its active view has a free
+slot. Else it refuses with <code>SWARM_CLOSE(NoCapacity)</code>. An unknown
+priority reads as <code>Low</code>.</li>
+</ul>
+<p>On accept, the receiver answers with <code>SWARM_NEIGHBOR_REPLY</code>, unless
+the request crossed its own pending request to the sender. In that
+case neither side replies, and each side applies the priority rules.</p>
+<p><code>SWARM_NEIGHBOR_REPLY</code> carries the peer data of the sender. Its
+receiver:</p>
+<ul>
+<li>adds the sender to its active view with high priority, if the reply
+matches a pending join or request,</li>
+<li>ignores the reply if it does not match and the sender is a neighbor,
+and</li>
+<li>answers with <code>SWARM_CLOSE(NoCapacity)</code> otherwise.</li>
+</ul>
+<p>A request times out after <code>neighbor_request_timeout</code> (3 s, <em>policy</em>).
+The node then removes the peer from its passive view and tries another
+passive peer.</p>
+<h3 id="section-5.6"><a class="secno" href="#section-5.6">5.6</a> <a class="selfref" href="#section-5.6">Close and reasons</a></h3>
+<p><code>SWARM_CLOSE</code> asks the receiver to drop the link. It carries a reason:</p>
+<ul>
+<li><code>Shutdown</code> (0): the sender leaves the topic, or is not on it. An
+unknown reason reads as <code>Shutdown</code>.</li>
+<li><code>NoCapacity</code> (1): the sender stays on the topic and only drops the
+link. The sender sends it when it evicts a neighbor, refuses a <code>Low</code>
+request, or gets a reply it did not ask for.</li>
+</ul>
+<p>A node on the topic sends <code>SWARM_SHUFFLE_REPLY</code> before each
+<code>SWARM_CLOSE</code>, with passive peers first. A peer that just joined thus
+does not run out of contacts.</p>
+<p>The receiver of <code>SWARM_CLOSE</code> removes the sender from its active view.
+With <code>NoCapacity</code>, it keeps the sender in the passive view. If the
+close refused a pending request, the node skips the sender for <code>Low</code>
+requests for a while. With <code>Shutdown</code>, it forgets the sender.</p>
+<h3 id="section-5.7"><a class="secno" href="#section-5.7">5.7</a> <a class="selfref" href="#section-5.7">Shuffle</a></h3>
+<p>A node shuffles to keep its passive view fresh. The first shuffle comes
+1 s after the topic starts. The interval doubles up to
+<code>shuffle_interval</code> (60 s, <em>policy</em>), with a random variation of 25
+percent.</p>
+<p>To shuffle, a node picks a random neighbor N and sends it
+<code>SWARM_SHUFFLE</code> with:</p>
+<ul>
+<li><code>origin</code>: its own endpoint id,</li>
+<li><code>nodes</code>: up to <code>shuffle_active_view_count</code> (3) neighbors and up to
+<code>shuffle_passive_view_count</code> (4) passive peers, none of them N, and
+its own <code>PeerInfo</code> last. At most <code>MAX_SHUFFLE_NODES</code> (15) nodes in
+total.</li>
+<li><code>ttl</code>: <code>shuffle_random_walk_length</code> (default 6).</li>
+</ul>
+<p>A node that receives <code>SWARM_SHUFFLE</code> from peer S ignores it if S is
+not a neighbor, or if the origin is the node itself. Else:</p>
+<ul>
+<li>If the ttl is 0, or the node has at most one neighbor, it adds the
+nodes to its passive view. It then sends <code>SWARM_SHUFFLE_REPLY</code> to the
+origin, with up to as many peers as the shuffle carried, passive
+peers first. If the node reached its contact limit (<a class="xref" href="#section-11.4">section 11.4</a>), it
+sends no reply.</li>
+<li>Else it forwards the shuffle with <code>ttl - 1</code> to a random neighbor
+other than the origin and S, if one exists.</li>
+</ul>
+<p>The reply goes to the origin directly, which can need a new
+connection. The origin adds the peers of the reply to its passive view.
+A full passive view evicts a random peer for each new one.</p>
+<h3 id="section-5.8"><a class="secno" href="#section-5.8">5.8</a> <a class="selfref" href="#section-5.8">Failure handling and refill</a></h3>
+<p>A node detects the failure of a neighbor by the end of the connection
+(<a class="xref" href="#section-3.7">section 3.7</a>), or by <code>SWARM_CLOSE</code>. It then removes the neighbor and
+starts a <em>refill</em>: it sends <code>SWARM_NEIGHBOR_REQUEST</code> to a random
+passive peer. The priority is <code>High</code> if the active view is empty, else
+<code>Low</code>. When a dial fails or a request times out, the refill asks the
+next passive peer.</p>
+<p>A maintenance pass runs every 5 s (<em>policy</em>):</p>
+<ul>
+<li>A node with both views empty rejoins through its remembered bootstrap
+peers and its recent neighbors, with a backoff.</li>
+<li>A node with passive peers but no neighbor sends a <code>High</code> request.</li>
+<li>A node with less than half of its active view sends a few <code>Low</code>
+requests, with a backoff.</li>
+</ul>
+<p>A node remembers its recent neighbors (8, <em>policy</em>) for rejoins. A
+failed connection does not remove a peer from this list, because the
+node itself may have lost its network.</p>
+<h3 id="section-5.9"><a class="secno" href="#section-5.9">5.9</a> <a class="selfref" href="#section-5.9">Leaving a topic</a></h3>
+<p>To leave a topic, a node sends <code>SWARM_SHUFFLE_REPLY</code> and then
+<code>SWARM_CLOSE(Shutdown)</code> to each neighbor. It then finishes the streams
+of the topic, and drops all state of the topic.</p>
+<h2 id="section-6"><a class="secno" href="#section-6">6.</a> <a class="selfref" href="#section-6">Broadcast (Plumtree)</a></h2>
+<p>The broadcast layer follows Plumtree [<a class="cite" href="#PLUMTREE">PLUMTREE</a>], with a tree per
+sender, and the changes that this section states. It runs per topic,
+over the active view.</p>
+<h3 id="section-6.1"><a class="secno" href="#section-6.1">6.1</a> <a class="selfref" href="#section-6.1">Message ids and dedup</a></h3>
+<p>The <em>content</em> of a broadcast is the bytes that the application gave.
+The <em>origin</em> of a broadcast is the node that sent it first. The
+<em>message id</em> is the BLAKE3 hash [<a class="cite" href="#BLAKE3">BLAKE3</a>] of the content, 32 bytes. The
+id is not on the wire: each receiver MUST compute it. Two broadcasts
+with the same content are the same message.</p>
+<p>A node remembers the ids of the swarm broadcasts it saw for
+<code>message_id_retention</code> (90 s, <em>policy</em>). A copy of a known id is a
+<em>duplicate</em>. A node delivers each swarm broadcast at most once in that
+time. To answer grafts, a node caches the content of each swarm
+broadcast for <code>message_cache_retention</code> (30 s, <em>policy</em>).</p>
+<h3 id="section-6.2"><a class="secno" href="#section-6.2">6.2</a> <a class="selfref" href="#section-6.2">Scopes</a></h3>
+<p>A broadcast has one of two scopes, each with its own message type:</p>
+<ul>
+<li>Swarm (<code>GOSSIP_MESSAGE</code>): the message reaches every member of the
+topic. It has a round and a tree.</li>
+<li>Neighbors (<code>GOSSIP_MESSAGE_NEIGHBOR</code>): the message goes to the
+neighbors of the origin only. A receiver delivers it and does not
+forward it.</li>
+</ul>
+<p>A node does not deduplicate, cache, or repair neighbor messages. The
+id covers only the content, so a neighbor message with the id of a
+known swarm broadcast is a duplicate, and the node drops it.</p>
+<h3 id="section-6.3"><a class="secno" href="#section-6.3">6.3</a> <a class="selfref" href="#section-6.3">Rounds</a></h3>
+<p>The <em>round</em> of a swarm broadcast counts its hops. The origin sends
+round 0. A node that forwards a message sends the round it received
+plus one, up to 65535. Announcements carry the round that the node
+would send. Rounds are not authenticated, and only steer the tree
+optimization (<a class="xref" href="#section-6.8">section 6.8</a>).</p>
+<h3 id="section-6.4"><a class="secno" href="#section-6.4">6.4</a> <a class="selfref" href="#section-6.4">Eager and lazy push</a></h3>
+<p>A <em>tree</em> is one broadcast tree of a topic, named by an 8-byte tree id
+(<a class="xref" href="#section-6.7">section 6.7</a>). Each tree splits the neighbors of a node into two sets:</p>
+<ul>
+<li>An <em>eager peer</em> gets the content (<code>GOSSIP_MESSAGE</code>).</li>
+<li>A <em>lazy peer</em> gets only announcements of the ids (<code>GOSSIP_IHAVE</code>).</li>
+</ul>
+<p>A new neighbor starts as an eager peer in every tree.</p>
+<figure id="figure-5" data-src="fig-tree">
+<div class="art"><svg class="fig" viewBox="0 0 720 215" width="720" role="img" aria-label="One broadcast tree: eager links form a spanning tree, other links are lazy" xmlns="http://www.w3.org/2000/svg"><line x1="188.0" y1="42.0" x2="132.0" y2="98.0" class="eager"/><line x1="212.0" y1="42.0" x2="268.0" y2="98.0" class="eager"/><line x1="111.0" y1="124.4" x2="79.0" y2="175.6" class="eager"/><line x1="129.0" y1="124.4" x2="161.0" y2="175.6" class="eager"/><line x1="284.1" y1="126.5" x2="295.9" y2="173.5" class="eager"/><line x1="137.0" y1="110.0" x2="263.0" y2="110.0" class="lazy"/><line x1="297.0" y1="110.0" x2="383.0" y2="110.0" class="lazy"/><line x1="215.8" y1="36.3" x2="384.2" y2="103.7" class="lazy"/><line x1="87.0" y1="190.0" x2="153.0" y2="190.0" class="lazy"/><circle cx="200" cy="30" r="17" class="node acc"/><text x="200" y="35" text-anchor="middle" class="b">O</text><circle cx="120" cy="110" r="17" class="node"/><text x="120" y="115" text-anchor="middle" class="b">A</text><circle cx="280" cy="110" r="17" class="node"/><text x="280" y="115" text-anchor="middle" class="b">B</text><circle cx="400" cy="110" r="17" class="node"/><text x="400" y="115" text-anchor="middle" class="b">C</text><circle cx="70" cy="190" r="17" class="node"/><text x="70" y="195" text-anchor="middle" class="b">D</text><circle cx="170" cy="190" r="17" class="node"/><text x="170" y="195" text-anchor="middle" class="b">E</text><circle cx="300" cy="190" r="17" class="node"/><text x="300" y="195" text-anchor="middle" class="b">F</text><text x="224" y="26" text-anchor="start" class="note">origin</text><line x1="470" y1="80" x2="510" y2="80" class="eager"/><text x="520" y="84" text-anchor="start" class="small">eager link: GOSSIP_MESSAGE</text><text x="520" y="101" text-anchor="start" class="small">with the content</text><line x1="470" y1="135" x2="510" y2="135" class="lazy"/><text x="520" y="139" text-anchor="start" class="small">lazy link: GOSSIP_IHAVE</text><text x="520" y="156" text-anchor="start" class="small">with the id, round, and tree</text></svg></div>
+<details><summary>Text version</summary><pre><code>                 O   (origin)
+                / \
+               /   \
+              A . . B
+             / \     \
+            /   \     \
+           D . . E     F
+
+     ----   eager link: GOSSIP_MESSAGE with the content
+     . . .  lazy link: GOSSIP_IHAVE with the id, round, and tree</code></pre></details>
+<figcaption><a class="selfref" href="#figure-5">Figure 5</a>: One tree. Eager links form a spanning tree. The lazy links
+carry announcements that repair a gap.</figcaption>
+</figure>
+<p>When a node receives a new swarm broadcast from S, it:</p>
+<ol type="1">
+<li>asks the local filter, if any (<a class="xref" href="#section-6.10">section 6.10</a>), and stops if the
+filter rejects it,</li>
+<li>records the id, and caches the message,</li>
+<li>creates the tree if it does not know it (<a class="xref" href="#section-6.7">section 6.7</a>),</li>
+<li>makes each peer that it grafted for this message eager,</li>
+<li>sends <code>GOSSIP_MESSAGE</code> with the next round to each eager peer of
+the tree, except S and the grafted peers,</li>
+<li>queues an announcement for each lazy peer of the tree, except S,
+and</li>
+<li>delivers the content to the application.</li>
+</ol>
+<p>The origin does steps 2, 5, and 6 with round 0. A node sends its
+queued announcements to each lazy peer after <code>dispatch_timeout</code> (5 ms,
+<em>policy</em>), as one <code>GOSSIP_IHAVE</code> or more.</p>
+<p>A node also accepts a swarm broadcast from a peer that is not a
+neighbor, often a former neighbor. Such a message changes no eager or
+lazy set. A neighbor message goes to every neighbor.</p>
+<h3 id="section-6.5"><a class="secno" href="#section-6.5">6.5</a> <a class="selfref" href="#section-6.5">IHave and Graft</a></h3>
+<p><code>GOSSIP_IHAVE</code> announces messages. Each entry has the id, the round,
+and the tree. For each entry with an id that the node did not see, the
+node records the sender as an announcer of the id. If no graft chain
+runs for the id, the node starts one, with a timer of <code>graft_timeout_1</code>
+(80 ms, <em>policy</em>).</p>
+<p>A <em>graft chain</em> asks the announcers of one id, one after the other.
+When the timer expires and the message did not arrive, the node:</p>
+<ol type="1">
+<li>takes the first announcer that it did not ask yet,</li>
+<li>makes it an eager peer in the tree of the announcement,</li>
+<li>sends it <code>GOSSIP_GRAFT</code> with the id and the tree, and</li>
+<li>starts a timer of <code>graft_timeout_2</code> (40 ms, <em>policy</em>), after which
+it asks the next announcer.</li>
+</ol>
+<p>The chain ends when the message arrives, or when no announcer is left.</p>
+<figure id="figure-6" data-src="fig-graft">
+<div class="art"><svg class="fig" viewBox="0 0 670 340" width="670" role="img" aria-label="A graft chain with two announcers" xmlns="http://www.w3.org/2000/svg"><rect x="26" y="6" width="68" height="26" rx="4" class="box"/><text x="60" y="24" text-anchor="middle" class="b">node</text><line x1="60" y1="32" x2="60" y2="332" class="life"/><rect x="246" y="6" width="68" height="26" rx="4" class="box"/><text x="280" y="24" text-anchor="middle" class="b">L1</text><line x1="280" y1="32" x2="280" y2="332" class="life"/><rect x="466" y="6" width="68" height="26" rx="4" class="box"/><text x="500" y="24" text-anchor="middle" class="b">L2</text><line x1="500" y1="32" x2="500" y2="332" class="life"/><line x1="280" y1="76" x2="63" y2="76" class="ln" marker-end="url(#ah)"/><text x="170.0" y="70" text-anchor="middle" class="mono">GOSSIP_IHAVE</text><text x="70" y="102" text-anchor="start" class="note">start graft_timeout_1</text><line x1="500" y1="136" x2="63" y2="136" class="ln" marker-end="url(#ah)"/><text x="280.0" y="130" text-anchor="middle" class="mono">GOSSIP_IHAVE</text><text x="514" y="140" text-anchor="start" class="note">L2 joins the list</text><text x="70" y="162" text-anchor="start" class="note">80 ms, no message</text><line x1="60" y1="196" x2="277" y2="196" class="ln" marker-end="url(#ah)"/><text x="170.0" y="190" text-anchor="middle" class="mono">GOSSIP_GRAFT</text><text x="514" y="200" text-anchor="start" class="note">L1 becomes eager</text><text x="70" y="222" text-anchor="start" class="note">start graft_timeout_2</text><text x="70" y="252" text-anchor="start" class="note">40 ms, no message</text><line x1="60" y1="286" x2="497" y2="286" class="ln" marker-end="url(#ah)"/><text x="280.0" y="280" text-anchor="middle" class="mono">GOSSIP_GRAFT</text><text x="514" y="290" text-anchor="start" class="note">L2 becomes eager</text><line x1="500" y1="316" x2="63" y2="316" class="ln" marker-end="url(#ah)"/><text x="280.0" y="310" text-anchor="middle" class="mono">GOSSIP_MESSAGE</text><text x="514" y="320" text-anchor="start" class="note">the chain ends</text></svg></div>
+<details><summary>Text version</summary><pre><code>   node                        L1                          L2
+   |                           |                           |
+   |&lt;--------- GOSSIP_IHAVE ---|                           |
+   |  start graft_timeout_1    |                           |
+   |&lt;------------------------------------- GOSSIP_IHAVE ---|  L2 joins the list
+   |  80 ms, no message        |                           |
+   |--- GOSSIP_GRAFT ---------&gt;|                           |  L1 becomes eager
+   |  start graft_timeout_2    |                           |
+   |  40 ms, no message        |                           |
+   |--- GOSSIP_GRAFT -------------------------------------&gt;|  L2 becomes eager
+   |&lt;----------------------------------- GOSSIP_MESSAGE ---|  the chain ends</code></pre></details>
+<figcaption><a class="selfref" href="#figure-6">Figure 6</a>: A graft chain with two announcers and the default timers.</figcaption>
+</figure>
+<p>A node that receives <code>GOSSIP_GRAFT</code> from a neighbor makes the sender
+an eager peer in the tree, if it knows the tree or it is the shared
+tree. If the graft names an id that the node caches, the node sends
+the message back. A graft without an id only changes the tree.</p>
+<p>A node ignores <code>GOSSIP_IHAVE</code>, <code>GOSSIP_GRAFT</code>, and <code>GOSSIP_PRUNE</code> from
+a peer that is not a neighbor.</p>
+<h3 id="section-6.6"><a class="secno" href="#section-6.6">6.6</a> <a class="selfref" href="#section-6.6">Prune</a></h3>
+<p><code>GOSSIP_PRUNE</code> names a tree. Its receiver makes the sender a lazy peer
+in that tree, if it knows the tree or it is the shared tree. The sender
+makes the receiver lazy in the same tree.</p>
+<p>A node that receives a duplicate swarm broadcast from S applies these
+rules in order:</p>
+<ol type="1">
+<li>If the duplicate is a late reply to a graft, the node handles it as
+in <a class="xref" href="#section-6.8">section 6.8</a>.</li>
+<li>If S is not a neighbor, the node does not know the tree, or S is
+not eager in it, the node sends <code>GOSSIP_PRUNE</code>.</li>
+<li>If S is eager, the node prunes S, as in the paper. The exception is
+a message that the node first saw less than <code>graft_timeout_1</code> after
+its last prune in that tree. That message was in flight during the
+prune, and a second cut could split the tree.</li>
+</ol>
+<p>A duplicate creates no tree.</p>
+<h3 id="section-6.7"><a class="secno" href="#section-6.7">6.7</a> <a class="selfref" href="#section-6.7">Trees per sender</a></h3>
+<p>Each swarm broadcast names its tree in its <code>tree</code> field. A node keeps
+an eager set and a lazy set per tree.</p>
+<p>The <em>shared tree</em> has the id <code>00*8</code>. Any other tree id is a value that
+an origin picks for its own broadcasts. A node that forwards or
+announces a message MUST copy the tree id unchanged. A receiver does
+not derive or check the id. An origin SHOULD use a tree id that is
+stable across its broadcasts and unlikely to match the id of another
+origin. The default is the first 8 bytes of the BLAKE3 hash of the
+endpoint id of the origin. Two origins with the same tree id share a
+tree, which costs latency, not delivery.</p>
+<p>A node names the shared tree for its first broadcast (<em>policy</em>), and
+its own tree from then on. The count starts again after the node did
+not broadcast for 300 s.</p>
+<p>The first copy of a swarm broadcast with an unknown tree id creates
+the tree, as a copy of the eager and lazy sets of the shared tree.
+Without a shared tree, every neighbor is eager. The copy makes the
+switch of a sender to its own tree cheap: its first message on the new
+tree follows the shared tree, so it does not flood. <code>GOSSIP_IHAVE</code>,
+<code>GOSSIP_GRAFT</code>, and <code>GOSSIP_PRUNE</code> never create a tree.</p>
+<p>A node keeps a limited number of trees per topic (1024, <em>policy</em>), and
+evicts the least recently used one, never the shared tree. It drops a
+tree that no message used for 300 s.</p>
+<h3 id="section-6.8"><a class="secno" href="#section-6.8">6.8</a> <a class="selfref" href="#section-6.8">Tree optimization and late graft replies</a></h3>
+<p>Tree optimization follows the paper. When a new swarm broadcast from
+neighbor S arrives after announcements of it, the node compares the
+best announced round with the round that it forwards. If the announced
+round is lower by <code>optimization_threshold</code> (default 7) or more, the
+node sends <code>GOSSIP_GRAFT</code> without an id to that announcer, and
+<code>GOSSIP_PRUNE</code> to S.</p>
+<p>A node can graft peer G for a message, and then get the eager copy from
+F before G answers. When G's copy arrives, the node keeps G eager and
+sends <code>GOSSIP_PRUNE</code> to F if:</p>
+<ul>
+<li>G's copy took no more hops than F's copy,</li>
+<li>F is not a grafted peer of this message, and</li>
+<li>both F and G are eager in the tree.</li>
+</ul>
+<p>G announced the message well before F's copy came, so its path is
+faster.</p>
+<h3 id="section-6.9"><a class="secno" href="#section-6.9">6.9</a> <a class="selfref" href="#section-6.9">Dropped messages</a></h3>
+<p>A full send queue can drop a payload or an announcement to a neighbor
+(<a class="xref" href="#section-3.9">section 3.9</a>). The node then announces each dropped swarm broadcast
+that it still caches to that neighbor again, at a limited rate. A
+dropped neighbor message is lost.</p>
+<h3 id="section-6.10"><a class="secno" href="#section-6.10">6.10</a> <a class="selfref" href="#section-6.10">Message filter</a></h3>
+<p>A node can install a filter. The filter sees the topic, the id, the
+content, the scope, and the peer that delivered the message. It runs
+once per new id, before the node caches, forwards, announces, or
+delivers the message. A rejected id counts as seen. The only effect on
+the wire is that a rejected message does not travel on.</p>
+<h2 id="section-7"><a class="secno" href="#section-7">7.</a> <a class="selfref" href="#section-7">Error handling</a></h2>
+<p>A reader handles each problem in one of four ways:</p>
+<ol type="1">
+<li><strong>Skip.</strong> The reader ignores the item and reads on.</li>
+<li><strong>Default.</strong> The reader reads an unknown value as a defined default.</li>
+<li><strong>Refuse the stream.</strong> The verifier rejects the stream (<a class="xref" href="#section-4.3">section 4.3</a>).</li>
+<li><strong>Fail the connection.</strong> The node closes the connection with a close
+code. The other topics on the connection fail with it.</li>
+</ol>
+<p>A <em>protocol error</em> is a violation of the encoding or of the connection
+rules. It fails the connection with <code>PROTOCOL</code>. A membership or
+broadcast message that is well formed but makes no sense in the current
+state is no protocol error. The receiver handles it as sections <a class="xref" href="#section-5">5</a> and
+<a class="xref" href="#section-6">6</a> say, often by ignoring it.</p>
+<p>A reader skips:</p>
+<ul>
+<li>an unknown header parameter,</li>
+<li>the bytes after the known fields of a message, and</li>
+<li>a payload over the content limit of the reader (<a class="xref" href="#section-9.8">section 9.8</a>). Only
+that message is lost.</li>
+</ul>
+<p>A reader reads an unknown <code>Priority</code> as <code>Low</code>, an unknown
+<code>CloseReason</code> as <code>Shutdown</code>, and keeps peer data of an unknown kind.</p>
+<p>A reader fails the connection with <code>PROTOCOL</code> on:</p>
+<ul>
+<li>a message type that is not permitted on the stream (<a class="xref" href="#section-8.2">section 8.2</a>),</li>
+<li>a stream kind that no negotiated extension defines,</li>
+<li>a frame other than a payload over <code>MAX_CONTROL_SIZE</code>, peer data over
+<code>MAX_PEER_DATA_LEN</code>, or a shuffle over <code>MAX_SHUFFLE_NODES</code>,</li>
+<li>a frame or a header that does not decode, or a stream that ends
+inside a frame,</li>
+<li>a header that is late, too long, or misses a required parameter,</li>
+<li>a violation of the <code>GOAWAY</code> rules (<a class="xref" href="#section-3.6">section 3.6</a>), and</li>
+<li>a reset topic stream.</li>
+</ul>
+<p>A node fails the connection with <code>SEND_FAILED</code> or <code>BLOCKED</code> for the
+local causes of <a class="xref" href="#section-3.7">section 3.7</a>. A node closes with the first failure it
+sees.</p>
+<h2 id="section-8"><a class="secno" href="#section-8">8.</a> <a class="selfref" href="#section-8">Extensibility</a></h2>
+<h3 id="section-8.1"><a class="secno" href="#section-8.1">8.1</a> <a class="selfref" href="#section-8.1">Model</a></h3>
+<p>The protocol grows by extensions, not by new ALPNs. An <em>extension</em>
+adds items that an older reader does not know, such as message types,
+control messages, stream kinds, or codes. An older reader fails the
+connection on such an item. So a node sends the item only to a peer
+that declared support for the extension.</p>
+<p>A node <em>declares</em> an extension with a parameter in a header. An older
+reader skips the unknown parameter, and declares nothing in its own
+header. A newer node then sees no declaration, and keeps to the base
+protocol.</p>
+<h3 id="section-8.2"><a class="secno" href="#section-8.2">8.2</a> <a class="selfref" href="#section-8.2">Declaration and negotiation</a></h3>
+<p>Each extension has one header parameter id and a scope:</p>
+<ul>
+<li><strong>Connection scope.</strong> The parameter goes in the control header. The
+extension is <em>negotiated</em> on the connection when both control
+headers carry it.</li>
+<li><strong>Topic scope.</strong> The parameter goes in topic headers. The extension
+is negotiated for one topic on one connection when a topic header of
+that topic from each side carries it.</li>
+</ul>
+<p>The value of the parameter is empty, unless the extension defines a
+value. A stream <em>permits</em> the message types of the base protocol for
+that stream, and the types of the extensions negotiated for it.</p>
+<p>Rules:</p>
+<ul>
+<li>A node MUST NOT declare an extension that it does not implement.</li>
+<li>A node MUST send the same topic-scope parameters in every topic
+header of one topic on one connection.</li>
+<li>A node MUST NOT send an item of an extension before it read the
+declaration of the peer.</li>
+<li>An extension MUST leave the base protocol valid on a link where it
+is not negotiated.</li>
+<li>An extension that defines a stream kind MUST say how its streams
+count for the idle time and for <code>GOAWAY</code>.</li>
+</ul>
+<p>Negotiation covers one link. A change that every node of a topic must
+apply cannot be negotiated per link.</p>
+<h3 id="section-8.3"><a class="secno" href="#section-8.3">8.3</a> <a class="selfref" href="#section-8.3">Changes without negotiation</a></h3>
+<p>Some changes need no declaration, because an older reader skips or
+defaults the new item:</p>
+<ul>
+<li>A new field at the end of a message, if a reader can ignore it. The
+message MUST stay within the limit of its type.</li>
+<li>A new header parameter, if its absence leaves the base behavior
+valid.</li>
+<li>A new <code>Priority</code> or <code>CloseReason</code> value that is safe to read as the
+default.</li>
+<li>A new kind of peer data. Older nodes keep and forward it.</li>
+</ul>
+<h3 id="section-8.4"><a class="secno" href="#section-8.4">8.4</a> <a class="selfref" href="#section-8.4">Changes that need a new ALPN</a></h3>
+<ul>
+<li>A change that a reader needs before it can read the declarations of
+the peer, such as the varints, the frames, or the headers.</li>
+<li>A change of a fixed limit (<a class="xref" href="#section-9.8">section 9.8</a>). With a higher limit, an
+older reader fails the connection on a larger item.</li>
+<li>A change to the meaning or layout of an existing item, if the old and
+the new form cannot both stay valid on one link.</li>
+<li>A change that every node of a topic must apply, such as the message
+id.</li>
+</ul>
+<p>The tree id of an origin is no wire value, so a change of its
+derivation needs no new ALPN.</p>
+<h2 id="section-9"><a class="secno" href="#section-9">9.</a> <a class="selfref" href="#section-9">Encoding</a></h2>
+<h3 id="section-9.1"><a class="secno" href="#section-9.1">9.1</a> <a class="selfref" href="#section-9.1">Varints</a></h3>
+<p>All integers are unsigned LEB128 varints, as in postcard [<a class="cite" href="#POSTCARD">POSTCARD</a>].
+Each byte holds seven value bits, the least significant group first.
+Bit 7 is set on each byte except the last.</p>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Max bytes</th>
+<th>Max value of the last byte</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>u16</code></td>
+<td>3</td>
+<td><code>0x03</code></td>
+</tr>
+<tr>
+<td><code>u32</code></td>
+<td>5</td>
+<td><code>0x0f</code></td>
+</tr>
+<tr>
+<td><code>u64</code></td>
+<td>10</td>
+<td><code>0x01</code></td>
+</tr>
+</tbody>
+</table>
+<p>A sender MUST use the shortest form. A reader MUST reject a varint
+that is longer than the maximum, or that does not fit its type.</p>
+<p>Examples: <code>0</code> is <code>00</code>. <code>127</code> is <code>7f</code>. <code>128</code> is <code>80 01</code>. <code>300</code> is
+<code>ac 02</code>. <code>16384</code> is <code>80 80 01</code>.</p>
+<p>Frame lengths, header kinds, parameter ids, and parameter lengths are
+<code>u64</code> varints.</p>
+<h3 id="section-9.2"><a class="secno" href="#section-9.2">9.2</a> <a class="selfref" href="#section-9.2">Field types</a></h3>
+<p>The fields of a message are the postcard encoding [<a class="cite" href="#POSTCARD">POSTCARD</a>] of the
+fields of its type, in order:</p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Type</th>
+<th>Encoding</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>varint</code></td>
+<td>A <code>u64</code> varint.</td>
+</tr>
+<tr>
+<td><code>u32</code>, <code>u16</code></td>
+<td>A varint of that type.</td>
+</tr>
+<tr>
+<td><code>[u8; N]</code></td>
+<td>N bytes, no length.</td>
+</tr>
+<tr>
+<td><code>bytes</code></td>
+<td><code>length: varint</code>, then that many bytes.</td>
+</tr>
+<tr>
+<td><code>Vec&lt;T&gt;</code></td>
+<td><code>count: varint</code>, then that many values of <code>T</code>.</td>
+</tr>
+<tr>
+<td><code>Option&lt;T&gt;</code></td>
+<td><code>00</code> for none, or <code>01</code> then <code>T</code>. Any other byte is an error.</td>
+</tr>
+<tr>
+<td><code>EndpointId</code></td>
+<td>32 bytes, a valid compressed Ed25519 point.</td>
+</tr>
+<tr>
+<td><code>PeerData</code></td>
+<td><code>kind: varint</code>, then <code>data: bytes</code> (<a class="xref" href="#section-9.7">section 9.7</a>).</td>
+</tr>
+<tr>
+<td><code>PeerInfo</code></td>
+<td><code>id: EndpointId</code>, then <code>data: Option&lt;PeerData&gt;</code>.</td>
+</tr>
+<tr>
+<td><code>TreeId</code></td>
+<td><code>[u8; 8]</code>.</td>
+</tr>
+<tr>
+<td><code>MessageId</code></td>
+<td><code>[u8; 32]</code>.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="section-9.3"><a class="secno" href="#section-9.3">9.3</a> <a class="selfref" href="#section-9.3">Frames and messages</a></h3>
+<p>Each stream carries a sequence of frames. A frame is a length, then
+that many bytes. The first frame of a stream is the header. Each later
+frame carries one message:</p>
+<pre class="text"><code>Stream {
+  header    Frame        (payload: header, section 9.4)
+  messages  Frame*       (payload: Message, until the end of the stream)
+}
+
+Frame {
+  length   varint        (the number of bytes of the payload)
+  payload  [u8; length]
+}
+
+Message {
+  type    varint
+  fields  ...            (postcard, layout per type, sections 9.5 and 9.6)
+}</code></pre>
+<p>A sender MUST NOT send a message frame of length 0. A reader ignores
+the bytes after the fields that it knows (<a class="xref" href="#section-8.3">section 8.3</a>).</p>
+<p>A reader reads each message frame in these steps:</p>
+<ol type="1">
+<li>It reads the length and the type, and picks the limit of the type
+(<a class="xref" href="#section-9.8">section 9.8</a>).</li>
+<li>If the length is over the limit, it skips the rest of a payload
+frame without keeping it. For any other type, it fails the
+connection before it reads the rest.</li>
+<li>Else it reads the frame and decodes the fields.</li>
+<li>It skips a payload with content longer than C, and fails the
+connection on peer data or shuffle nodes over their limits.</li>
+</ol>
+<p>A topic stream that ends between two frames ends normally (<a class="xref" href="#section-4.5">section 4.5</a>).</p>
+<h3 id="section-9.4"><a class="secno" href="#section-9.4">9.4</a> <a class="selfref" href="#section-9.4">Headers</a></h3>
+<pre class="text"><code>HeaderFrame {
+  length      varint       (the number of bytes after this field)
+  kind        varint
+  parameters  Parameter*   (until the end of the frame)
+}
+
+Parameter {
+  id      varint
+  length  varint
+  value   [u8; length]
+}</code></pre>
+<p>The kind MUST match the stream: kind 0 on the control stream, kind 1
+on a topic stream. Another kind on a unidirectional stream belongs to
+an extension (<a class="xref" href="#section-8.2">section 8.2</a>). The payload of a header frame MUST NOT
+exceed <code>MAX_HEADER_LEN</code> (4096 bytes). Headers do not count against
+<code>MAX_CONTROL_SIZE</code>.</p>
+<p>Control header (kind <code>0x00</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Param</th>
+<th>Name</th>
+<th>Value</th>
+<th>Rule</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0x01</code></td>
+<td><code>SESSION</code></td>
+<td>8 bytes</td>
+<td>Required.</td>
+</tr>
+</tbody>
+</table>
+<p>Topic header (kind <code>0x01</code>):</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>Param</th>
+<th>Name</th>
+<th>Value</th>
+<th>Rule</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0x00</code></td>
+<td><code>TOPIC_ID</code></td>
+<td>32 bytes</td>
+<td>Required.</td>
+</tr>
+<tr>
+<td><code>0x02</code></td>
+<td><code>TOKEN</code></td>
+<td>opaque bytes</td>
+<td>Optional. At most 4058 bytes next to the topic.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="section-9.5"><a class="secno" href="#section-9.5">9.5</a> <a class="selfref" href="#section-9.5">Control messages</a></h3>
+<pre class="text"><code>GOAWAY {
+  type    varint = 0x20
+  opened  varint     (topic streams the sender opened on this connection)
+}</code></pre>
+<p><code>GOAWAY(5)</code> is the frame <code>02 20 05</code>.</p>
+<h3 id="section-9.6"><a class="secno" href="#section-9.6">9.6</a> <a class="selfref" href="#section-9.6">Topic messages</a></h3>
+<p>Membership messages:</p>
+<pre class="text"><code>SWARM_JOIN {
+  type  varint = 0x01
+  data  Option&lt;PeerData&gt;       (the sender&#39;s peer data)
+}
+
+SWARM_FORWARD_JOIN {
+  type  varint = 0x02
+  peer  PeerInfo               (the peer that joined)
+  ttl   u16
+}
+
+SWARM_SHUFFLE {
+  type    varint = 0x03
+  origin  EndpointId           (the node that started the shuffle)
+  nodes   Vec&lt;PeerInfo&gt;        (at most MAX_SHUFFLE_NODES)
+  ttl     u16
+}
+
+SWARM_SHUFFLE_REPLY {
+  type   varint = 0x04
+  nodes  Vec&lt;PeerInfo&gt;         (at most MAX_SHUFFLE_NODES)
+}
+
+SWARM_NEIGHBOR_REQUEST {
+  type      varint = 0x05
+  priority  u32                (0 High, 1 Low, unknown reads as Low)
+  data      Option&lt;PeerData&gt;
+}
+
+SWARM_NEIGHBOR_REPLY {
+  type  varint = 0x06
+  data  Option&lt;PeerData&gt;
+}
+
+SWARM_CLOSE {
+  type    varint = 0x07
+  reason  varint               (0 Shutdown, 1 NoCapacity, unknown reads as Shutdown)
+}</code></pre>
+<p>Broadcast messages:</p>
+<pre class="text"><code>GOSSIP_MESSAGE {
+  type     varint = 0x10
+  content  bytes
+  round    u16
+  tree     TreeId
+}
+
+GOSSIP_PRUNE {
+  type  varint = 0x11
+  tree  TreeId
+}
+
+GOSSIP_GRAFT {
+  type  varint = 0x12
+  id    Option&lt;MessageId&gt;      (the message to send back, if any)
+  tree  TreeId
+}
+
+GOSSIP_IHAVE {
+  type     varint = 0x13
+  entries  Vec&lt;IHaveEntry&gt;
+}
+
+IHaveEntry {
+  id     MessageId
+  round  u16
+  tree   TreeId
+}
+
+GOSSIP_MESSAGE_NEIGHBOR {
+  type     varint = 0x14
+  content  bytes
+}</code></pre>
+<p><code>GOSSIP_MESSAGE</code> and <code>GOSSIP_MESSAGE_NEIGHBOR</code> are the <em>payloads</em>.</p>
+<h3 id="section-9.7"><a class="secno" href="#section-9.7">9.7</a> <a class="selfref" href="#section-9.7">Peer data</a></h3>
+<pre class="text"><code>PeerData {
+  kind    varint
+  length  varint             (at most MAX_PEER_DATA_LEN)
+  data    [u8; length]
+}</code></pre>
+<p>Kind 0 holds the postcard encoding [<a class="cite" href="#POSTCARD">POSTCARD</a>] of:</p>
+<pre class="text"><code>AddrInfo {
+  relay_url         Option&lt;string&gt;      (a varint length and UTF-8 bytes of a URL)
+  direct_addresses  Vec&lt;SocketAddr&gt;
+}
+
+SocketAddr {
+  family  varint              (0 IPv4, 1 IPv6)
+  ip      [u8; 4] or [u8; 16] (by family)
+  port    u16
+}</code></pre>
+<p>A sender SHOULD sort the addresses and SHOULD NOT repeat one. A reader
+MUST NOT depend on the order. Empty data of kind 0 gives no addresses.</p>
+<h3 id="section-9.8"><a class="secno" href="#section-9.8">9.8</a> <a class="selfref" href="#section-9.8">Limits</a></h3>
+<p>The fixed limits are wire values, the same on all nodes. A sender MUST
+NOT exceed one, and a reader fails the connection with <code>PROTOCOL</code> on an
+item over one:</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>Name</th>
+<th>Value</th>
+<th>Limits</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>MAX_CONTROL_SIZE</code></td>
+<td>16384 bytes</td>
+<td>The frame of each message other than a payload.</td>
+</tr>
+<tr>
+<td><code>MAX_PEER_DATA_LEN</code></td>
+<td>1024 bytes</td>
+<td>The data of one <code>PeerData</code>.</td>
+</tr>
+<tr>
+<td><code>MAX_SHUFFLE_NODES</code></td>
+<td>15</td>
+<td>The nodes of one <code>SWARM_SHUFFLE</code> or <code>SWARM_SHUFFLE_REPLY</code>.</td>
+</tr>
+<tr>
+<td><code>MAX_HEADER_LEN</code></td>
+<td>4096 bytes</td>
+<td>The payload of a header frame.</td>
+</tr>
+</tbody>
+</table>
+<p>The limits fit together: a <code>SWARM_SHUFFLE</code> with 15 nodes of full peer
+data takes at most 16072 bytes. A node splits its announcements so
+that each <code>GOSSIP_IHAVE</code> fits <code>MAX_CONTROL_SIZE</code>.</p>
+<p>The <em>content limit</em> C is local, with a default of 4096 bytes. It bounds
+the content of a payload. C is not announced, so the nodes of one
+network SHOULD use the same C. A node does not send a broadcast with
+content over its own C.</p>
+<p>The <em>payload limit</em> P(C) bounds the frame of a payload. It is the size
+of a <code>GOSSIP_MESSAGE</code> with C bytes of content at the largest round:</p>
+<pre class="text"><code>P(C) = 1 + len(varint(C)) + C + 3 + 8</code></pre>
+<p>For C = 4096, P(C) is 4110 bytes. A reader skips a payload frame over
+P(C) without reading it into memory. It also skips a payload whose
+content is longer than C. Only that message is lost, and the connection
+stays open.</p>
+<h2 id="section-10"><a class="secno" href="#section-10">10.</a> <a class="selfref" href="#section-10">Registries</a></h2>
+<h3 id="section-10.1"><a class="secno" href="#section-10.1">10.1</a> <a class="selfref" href="#section-10.1">Stream kinds</a></h3>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Name</th>
+<th>Stream</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0x00</code></td>
+<td><code>CONTROL</code></td>
+<td>The bidirectional control stream</td>
+</tr>
+<tr>
+<td><code>0x01</code></td>
+<td><code>TOPIC</code></td>
+<td>A unidirectional topic stream</td>
+</tr>
+</tbody>
+</table>
+<h3 id="section-10.2"><a class="secno" href="#section-10.2">10.2</a> <a class="selfref" href="#section-10.2">Header parameters</a></h3>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Name</th>
+<th>Kind</th>
+<th>Value</th>
+<th>Presence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0x00</code></td>
+<td><code>TOPIC_ID</code></td>
+<td><code>TOPIC</code></td>
+<td>32 bytes</td>
+<td>Required</td>
+</tr>
+<tr>
+<td><code>0x01</code></td>
+<td><code>SESSION</code></td>
+<td><code>CONTROL</code></td>
+<td>8 bytes</td>
+<td>Required</td>
+</tr>
+<tr>
+<td><code>0x02</code></td>
+<td><code>TOKEN</code></td>
+<td><code>TOPIC</code></td>
+<td>opaque</td>
+<td>Optional</td>
+</tr>
+</tbody>
+</table>
+<h3 id="section-10.3"><a class="secno" href="#section-10.3">10.3</a> <a class="selfref" href="#section-10.3">Message types</a></h3>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Name</th>
+<th>Stream</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0x01</code></td>
+<td><code>SWARM_JOIN</code></td>
+<td>topic</td>
+</tr>
+<tr>
+<td><code>0x02</code></td>
+<td><code>SWARM_FORWARD_JOIN</code></td>
+<td>topic</td>
+</tr>
+<tr>
+<td><code>0x03</code></td>
+<td><code>SWARM_SHUFFLE</code></td>
+<td>topic</td>
+</tr>
+<tr>
+<td><code>0x04</code></td>
+<td><code>SWARM_SHUFFLE_REPLY</code></td>
+<td>topic</td>
+</tr>
+<tr>
+<td><code>0x05</code></td>
+<td><code>SWARM_NEIGHBOR_REQUEST</code></td>
+<td>topic</td>
+</tr>
+<tr>
+<td><code>0x06</code></td>
+<td><code>SWARM_NEIGHBOR_REPLY</code></td>
+<td>topic</td>
+</tr>
+<tr>
+<td><code>0x07</code></td>
+<td><code>SWARM_CLOSE</code></td>
+<td>topic</td>
+</tr>
+<tr>
+<td><code>0x10</code></td>
+<td><code>GOSSIP_MESSAGE</code></td>
+<td>topic</td>
+</tr>
+<tr>
+<td><code>0x11</code></td>
+<td><code>GOSSIP_PRUNE</code></td>
+<td>topic</td>
+</tr>
+<tr>
+<td><code>0x12</code></td>
+<td><code>GOSSIP_GRAFT</code></td>
+<td>topic</td>
+</tr>
+<tr>
+<td><code>0x13</code></td>
+<td><code>GOSSIP_IHAVE</code></td>
+<td>topic</td>
+</tr>
+<tr>
+<td><code>0x14</code></td>
+<td><code>GOSSIP_MESSAGE_NEIGHBOR</code></td>
+<td>topic</td>
+</tr>
+<tr>
+<td><code>0x20</code></td>
+<td><code>GOAWAY</code></td>
+<td>control</td>
+</tr>
+</tbody>
+</table>
+<h3 id="section-10.4"><a class="secno" href="#section-10.4">10.4</a> <a class="selfref" href="#section-10.4">Codes</a></h3>
+<p>Connection close codes: 1 <code>RETIRED</code>, 2 <code>STALE</code>, 3 <code>SHUTDOWN</code>, 4
+<code>PROTOCOL</code>, 5 <code>SEND_FAILED</code>, 6 <code>BLOCKED</code> (<a class="xref" href="#section-3.7">section 3.7</a>). Code 0 and
+unknown codes mean a failure.</p>
+<p>Stop codes of topic streams: 1 <code>REJECTED</code> (<a class="xref" href="#section-4.3">section 4.3</a>).</p>
+<h2 id="section-11"><a class="secno" href="#section-11">11.</a> <a class="selfref" href="#section-11">Security considerations</a></h2>
+<h3 id="section-11.1"><a class="secno" href="#section-11.1">11.1</a> <a class="selfref" href="#section-11.1">Identity and authorization</a></h3>
+<p>iroh authenticates the endpoint id of a peer. The protocol trusts
+nothing else about a peer. Messages carry no signature, and a peer can
+forward any content. The message id proves the integrity of the
+content, not its author. Anyone can name any tree.</p>
+<p>An auth token gates what a node reads on a topic. The scope is narrow:</p>
+<ul>
+<li>The token goes to every peer to which the node opens a stream of the
+topic, and that peer can replay it. A verifier SHOULD bind a token to
+the endpoint id of the peer.</li>
+<li>A verdict holds for one stream. A new connection asks the verifier
+again.</li>
+<li>A verifier does not stop an accepted member from leaking, dropping,
+or flooding content.</li>
+</ul>
+<h3 id="section-11.2"><a class="secno" href="#section-11.2">11.2</a> <a class="selfref" href="#section-11.2">Resource use by a peer</a></h3>
+<p>The fixed limits (<a class="xref" href="#section-9.8">section 9.8</a>), the content limit, and the header
+limits bound the memory of one message. The QUIC stream limit bounds
+the streams of a peer. The send queue has a size limit, and walks that
+the node forwards cannot fill it (<a class="xref" href="#section-3.9">section 3.9</a>). Each table that a peer
+can grow has a count limit: rejected topics, older sessions, trees, and
+re-announced ids.</p>
+<p>The message cache, the seen ids, and the filter verdicts have no count
+limit. Time bounds them. A peer that sends many distinct broadcasts
+fills them at the rate of its link. A node that takes data from peers
+it does not trust SHOULD install a filter, or shorten the retention.</p>
+<h3 id="section-11.3"><a class="secno" href="#section-11.3">11.3</a> <a class="selfref" href="#section-11.3">Made-up tree ids</a></h3>
+<p>A swarm broadcast with a new tree id creates a tree, after the filter
+accepted it. A peer that sends broadcasts with many tree ids evicts
+real trees. The tree limit bounds the memory, and never evicts the
+shared tree. An evicted tree comes back as a copy of the shared tree.
+The cost is latency, not lost messages. Announcements, grafts, and
+prunes never create a tree.</p>
+<h3 id="section-11.4"><a class="secno" href="#section-11.4">11.4</a> <a class="selfref" href="#section-11.4">Contacts caused by peers</a></h3>
+<p><code>SWARM_SHUFFLE</code> and <code>SWARM_FORWARD_JOIN</code> make the end of a walk contact
+a peer that the sender names. A peer could thus make a node dial
+endpoint ids of its choice. iroh authenticates the other end, so a
+dial gives no access, but it costs work. Two rules bound the cost:</p>
+<ul>
+<li>A node MUST ignore both messages from a peer that is not a neighbor.</li>
+<li>A node SHOULD limit the rate of the contacts that they cause. The
+default is 32 peers per topic in each maintenance pass. At the limit,
+the node adds the peer of a walk to its passive view, and sends no
+shuffle reply.</li>
+</ul>
+<h3 id="section-11.5"><a class="secno" href="#section-11.5">11.5</a> <a class="selfref" href="#section-11.5">Rounds and announcements</a></h3>
+<p>Rounds are not authenticated. A peer that announces low rounds can
+make itself eager in many trees. The worst outcome is a slower tree.
+A neighbor can also announce ids that it does not have. Each such id
+costs a few grafts.</p>
+<h3 id="section-11.6"><a class="secno" href="#section-11.6">11.6</a> <a class="selfref" href="#section-11.6">0-RTT</a></h3>
+<p>A node MUST NOT process gossip messages that arrive as QUIC 0-RTT data
+before the handshake completes.</p>
+<h2 id="section-12"><a class="secno" href="#section-12">12.</a> <a class="selfref" href="#section-12">References</a></h2>
+<h3 id="section-12.1"><a class="secno" href="#section-12.1">12.1</a> <a class="selfref" href="#section-12.1">Normative references</a></h3>
+<dl>
+<dt id="BLAKE3">[<a class="cite" href="#BLAKE3">BLAKE3</a>]</dt>
+<dd>
+O'Connor, J., Aumasson, J.-P., Neves, S., Wilcox-O'Hearn, Z.,
+"BLAKE3: one function, fast everywhere", 2020,
+<a href="https://github.com/BLAKE3-team/BLAKE3-specs/blob/master/blake3.pdf" class="uri">https://github.com/BLAKE3-team/BLAKE3-specs/blob/master/blake3.pdf</a>.
+</dd>
+<dt id="POSTCARD">[<a class="cite" href="#POSTCARD">POSTCARD</a>]</dt>
+<dd>
+The postcard wire format specification,
+<a href="https://postcard.jamesmunns.com/wire-format" class="uri">https://postcard.jamesmunns.com/wire-format</a>.
+</dd>
+<dt id="RFC2119">[<a class="cite" href="#RFC2119">RFC2119</a>]</dt>
+<dd>
+Bradner, S., "Key words for use in RFCs to Indicate Requirement
+Levels", BCP 14, RFC 2119, DOI 10.17487/RFC2119, March 1997,
+<a href="https://www.rfc-editor.org/info/rfc2119" class="uri">https://www.rfc-editor.org/info/rfc2119</a>.
+</dd>
+<dt id="RFC8174">[<a class="cite" href="#RFC8174">RFC8174</a>]</dt>
+<dd>
+Leiba, B., "Ambiguity of Uppercase vs Lowercase in RFC 2119 Key
+Words", BCP 14, RFC 8174, DOI 10.17487/RFC8174, May 2017,
+<a href="https://www.rfc-editor.org/info/rfc8174" class="uri">https://www.rfc-editor.org/info/rfc8174</a>.
+</dd>
+<dt id="RFC9000">[<a class="cite" href="#RFC9000">RFC9000</a>]</dt>
+<dd>
+Iyengar, J., Thomson, M., "QUIC: A UDP-Based Multiplexed and Secure
+Transport", RFC 9000, DOI 10.17487/RFC9000, May 2021,
+<a href="https://www.rfc-editor.org/info/rfc9000" class="uri">https://www.rfc-editor.org/info/rfc9000</a>.
+</dd>
+</dl>
+<h3 id="section-12.2"><a class="secno" href="#section-12.2">12.2</a> <a class="selfref" href="#section-12.2">Informative references</a></h3>
+<dl>
+<dt id="HYPARVIEW">[<a class="cite" href="#HYPARVIEW">HYPARVIEW</a>]</dt>
+<dd>
+Leitão, J., Pereira, J., Rodrigues, L., "HyParView: a membership
+protocol for reliable gossip-based broadcast", DSN 2007,
+DOI 10.1109/DSN.2007.56.
+</dd>
+<dt id="PLUMTREE">[<a class="cite" href="#PLUMTREE">PLUMTREE</a>]</dt>
+<dd>
+Leitão, J., Pereira, J., Rodrigues, L., "Epidemic broadcast trees",
+SRDS 2007, DOI 10.1109/SRDS.2007.27.
+</dd>
+</dl>
+<h2 id="appendix-A"><a class="secno" href="#appendix-A">Appendix A.</a> <a class="selfref" href="#appendix-A">Test vectors</a></h2>
+<p>Symbols:</p>
+<ul>
+<li><code>P</code> is the endpoint id of the secret key <code>05*32</code>:
+<code>6e7a1cdd29b0b78fd13af4c5598feff4ef2a97166e3ca6f2e4fbfccd80505bf1</code>.</li>
+<li><code>I</code> is the message id of the content <code>hi</code> (<code>6869</code>):
+<code>85052e9aab1b67b6622d94a08441b09fd5b7aca61ee360416d70de5da67d86ca</code>.</li>
+<li><code>T</code> is the tree id <code>33*8</code>.</li>
+</ul>
+<h3 id="appendix-A.1"><a class="secno" href="#appendix-A.1">A.1</a> <a class="selfref" href="#appendix-A.1">Headers</a></h3>
+<p>Topic header frame for topic <code>11*32</code>:</p>
+<pre class="text"><code>23                  length 35
+01                  kind TOPIC
+00 20 11*32         TOPIC_ID, length 32, topic</code></pre>
+<p>The same header payload with the token <code>secret</code>:</p>
+<pre class="text"><code>01 00 20 11*32 02 06 736563726574</code></pre>
+<p>Control header frame for session <code>0102030405060708</code>:</p>
+<pre class="text"><code>0b 00 01 08 0102030405060708</code></pre>
+<h3 id="appendix-A.2"><a class="secno" href="#appendix-A.2">A.2</a> <a class="selfref" href="#appendix-A.2">Messages</a></h3>
+<p>Each payload goes in a frame after its length. For example,
+<code>SWARM_JOIN(None)</code> is the frame <code>02 01 00</code>.</p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Message</th>
+<th>Payload</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GOAWAY(300)</code></td>
+<td><code>20 ac02</code></td>
+</tr>
+<tr>
+<td><code>SWARM_JOIN(None)</code></td>
+<td><code>01 00</code></td>
+</tr>
+<tr>
+<td><code>SWARM_JOIN(kind 0, aabbcc)</code></td>
+<td><code>01 01 00 03 aabbcc</code></td>
+</tr>
+<tr>
+<td><code>SWARM_FORWARD_JOIN(P, None, ttl 6)</code></td>
+<td><code>02 P 00 06</code></td>
+</tr>
+<tr>
+<td><code>SWARM_SHUFFLE(origin P, [P, None], ttl 6)</code></td>
+<td><code>03 P 01 P 00 06</code></td>
+</tr>
+<tr>
+<td><code>SWARM_SHUFFLE_REPLY([P, kind 7, 01])</code></td>
+<td><code>04 01 P 01 07 01 01</code></td>
+</tr>
+<tr>
+<td><code>SWARM_NEIGHBOR_REQUEST(High, kind 0, 010203)</code></td>
+<td><code>05 00 01 00 03 010203</code></td>
+</tr>
+<tr>
+<td><code>SWARM_NEIGHBOR_REPLY(None)</code></td>
+<td><code>06 00</code></td>
+</tr>
+<tr>
+<td><code>SWARM_CLOSE(NoCapacity)</code></td>
+<td><code>07 01</code></td>
+</tr>
+<tr>
+<td><code>GOSSIP_MESSAGE("hi", round 300, T)</code></td>
+<td><code>10 02 6869 ac02 T</code></td>
+</tr>
+<tr>
+<td><code>GOSSIP_PRUNE(T)</code></td>
+<td><code>11 T</code></td>
+</tr>
+<tr>
+<td><code>GOSSIP_GRAFT(Some(I), T)</code></td>
+<td><code>12 01 I T</code></td>
+</tr>
+<tr>
+<td><code>GOSSIP_GRAFT(None, T)</code></td>
+<td><code>12 00 T</code></td>
+</tr>
+<tr>
+<td><code>GOSSIP_IHAVE([(I, round 2, T)])</code></td>
+<td><code>13 01 I 02 T</code></td>
+</tr>
+<tr>
+<td><code>GOSSIP_MESSAGE_NEIGHBOR("hi")</code></td>
+<td><code>14 02 6869</code></td>
+</tr>
+</tbody>
+</table>
+<p>A reader reads <code>01 00 dead</code> as <code>01 00</code> (bytes after the fields),
+<code>05 09 00</code> as <code>05 01 00</code> (unknown priority), and <code>07 09</code> as <code>07 00</code>
+(unknown reason). It fails on <code>10 02 6869</code> (no round) and on
+<code>10 00 ffffff7f</code> (round over a <code>u16</code>).</p>
+<h3 id="appendix-A.3"><a class="secno" href="#appendix-A.3">A.3</a> <a class="selfref" href="#appendix-A.3">Peer data</a></h3>
+<p>Kind 0 with no relay and the address <code>127.0.0.1:4433</code>:</p>
+<pre class="text"><code>00                  kind 0, addresses
+09                  data length 9
+00                  relay_url: none
+01                  one address
+00                  family IPv4
+7f000001            127.0.0.1
+d122                port 4433</code></pre>
+<h2 id="appendix-B"><a class="secno" href="#appendix-B">Appendix B.</a> <a class="selfref" href="#appendix-B">Defaults</a></h2>
+<p>All values are <em>policy</em>, except the fixed limits of <a class="xref" href="#section-9.8">section 9.8</a>.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Content limit C</td>
+<td>4096 bytes</td>
+</tr>
+<tr>
+<td>Send queue per peer</td>
+<td>1 MiB</td>
+</tr>
+<tr>
+<td><code>HEADER_TIMEOUT</code></td>
+<td>10 s</td>
+</tr>
+<tr>
+<td><code>WRITE_TIMEOUT</code></td>
+<td>60 s</td>
+</tr>
+<tr>
+<td><code>OPEN_TIMEOUT</code></td>
+<td>15 s</td>
+</tr>
+<tr>
+<td><code>RETIRE_TIMEOUT</code></td>
+<td>120 s</td>
+</tr>
+<tr>
+<td><code>retire_after</code></td>
+<td>10 s</td>
+</tr>
+<tr>
+<td>Shutdown wait</td>
+<td>1 s</td>
+</tr>
+<tr>
+<td><code>active_view_capacity</code></td>
+<td>5</td>
+</tr>
+<tr>
+<td><code>passive_view_capacity</code></td>
+<td>30</td>
+</tr>
+<tr>
+<td><code>active_random_walk_length</code> (ARWL)</td>
+<td>6</td>
+</tr>
+<tr>
+<td><code>passive_random_walk_length</code> (PRWL)</td>
+<td>3</td>
+</tr>
+<tr>
+<td><code>shuffle_random_walk_length</code></td>
+<td>6</td>
+</tr>
+<tr>
+<td><code>shuffle_active_view_count</code></td>
+<td>3</td>
+</tr>
+<tr>
+<td><code>shuffle_passive_view_count</code></td>
+<td>4</td>
+</tr>
+<tr>
+<td><code>shuffle_interval</code></td>
+<td>1 s at first, doubling up to 60 s</td>
+</tr>
+<tr>
+<td><code>neighbor_request_timeout</code></td>
+<td>3 s</td>
+</tr>
+<tr>
+<td><code>join_dials</code></td>
+<td>5</td>
+</tr>
+<tr>
+<td><code>join_contacts</code></td>
+<td>2</td>
+</tr>
+<tr>
+<td><code>JOIN_RETRY_DELAY</code></td>
+<td>10 s</td>
+</tr>
+<tr>
+<td>Maintenance interval</td>
+<td>5 s</td>
+</tr>
+<tr>
+<td>Contacts caused by peers</td>
+<td>32 per topic and maintenance pass</td>
+</tr>
+<tr>
+<td><code>graft_timeout_1</code></td>
+<td>80 ms</td>
+</tr>
+<tr>
+<td><code>graft_timeout_2</code></td>
+<td>40 ms</td>
+</tr>
+<tr>
+<td><code>dispatch_timeout</code></td>
+<td>5 ms</td>
+</tr>
+<tr>
+<td><code>optimization_threshold</code></td>
+<td>7</td>
+</tr>
+<tr>
+<td><code>message_cache_retention</code></td>
+<td>30 s</td>
+</tr>
+<tr>
+<td><code>message_id_retention</code></td>
+<td>90 s</td>
+</tr>
+<tr>
+<td>Tree of an origin</td>
+<td>from its second broadcast</td>
+</tr>
+<tr>
+<td>Trees per topic</td>
+<td>1024, each dropped after 300 s unused</td>
+</tr>
+</tbody>
+</table>
+</main>
+<script>(function(){var d=document.documentElement,b=document.getElementById("theme");
+b.onclick=function(){var t=d.dataset.theme=="dark"?"light":"dark";d.dataset.theme=t;try{localStorage.setItem("spec.theme",t)}catch(e){}};
+var links=[].slice.call(document.querySelectorAll("#toc a")),hs=links.map(function(a){return document.getElementById(a.getAttribute("href").slice(1))});
+function spy(){var cur=0;for(var i=0;i<hs.length;i++){if(hs[i]&&hs[i].getBoundingClientRect().top<90)cur=i}
+links.forEach(function(a,i){a.classList.toggle("on",i==cur)})}
+addEventListener("scroll",spy,{passive:true});spy()})();</script>
+</body></html>
