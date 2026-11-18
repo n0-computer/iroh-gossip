@@ -27,6 +27,8 @@ pub struct Metrics {
     pub msgs_dropped: Counter,
     /// Number of peers aborted because their send queue had no room for a control message
     pub peers_send_queue_full: Counter,
+    /// Number of connections closed because their peer opened a new one over the cap
+    pub conns_evicted: Counter,
     /// Total size of all data messages sent, counted as [`Self::msgs_data_sent`]
     pub msgs_data_sent_size: Counter,
     /// Total size of all data messages received

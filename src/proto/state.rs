@@ -125,6 +125,19 @@ impl<PI> InEvent<PI> {
             _ => true,
         }
     }
+
+    /// Returns the topic that handles this event, or `None` if every topic does.
+    ///
+    /// Only that topic can change what it wants, see [`State::wants_connection`].
+    #[cfg(feature = "net")]
+    pub(crate) fn topic(&self) -> Option<TopicId> {
+        match self {
+            InEvent::RecvMessage(_, message) => Some(message.topic),
+            InEvent::Command(topic, _) => Some(*topic),
+            InEvent::TimerExpired(timer) => Some(timer.topic),
+            InEvent::PeerDisconnected(_) | InEvent::UpdatePeerData(_) => None,
+        }
+    }
 }
 
 /// The receiver of the actions of the protocol state.
@@ -282,14 +295,6 @@ impl<PI: PeerIdentity, R: Rng + SeedableRng> State<PI, R> {
             .iter()
             .filter(move |(_, state)| state.wants_connection(peer))
             .map(|(topic, _)| *topic)
-    }
-
-    /// Returns the peers to which `topic` pushes its payloads.
-    #[cfg(feature = "net")]
-    pub(crate) fn eager_peers(&self, topic: &TopicId) -> impl Iterator<Item = &PI> {
-        self.state(topic)
-            .into_iter()
-            .flat_map(|state| state.gossip.eager_push_peers.iter())
     }
 
     /// Returns the neighbors of `topic`, its active view.
