@@ -2,6 +2,7 @@
 
 use std::{collections::BTreeSet, sync::Arc};
 
+use bytes::Bytes;
 use iroh::{
     endpoint::Connection,
     protocol::{AcceptError, ProtocolHandler},
@@ -19,7 +20,7 @@ use self::{
     auth::TopicAuth,
 };
 use crate::{
-    api::{AuthToken, Command, Event, GossipTopic, JoinOptions},
+    api::{AuthToken, Command, DeliveryScope, Event, GossipTopic, JoinOptions},
     metrics::Metrics,
     proto::{self, BroadcastConfig, MembershipConfig, TopicId},
     Error,
@@ -41,15 +42,45 @@ pub const ALPN: &[u8] = b"iroh-gossip/2-canary.4";
 type ProtoEvent = proto::Event<PublicKey>;
 type ProtoCommand = proto::Command<PublicKey>;
 
-/// The decision of a verifier about a stream of a peer, see [`Builder::topic_auth`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Verdict {
-    /// The node reads the stream.
-    Accept,
-    /// The node stops the stream, and reads nothing from it.
-    Reject,
+/// A received message, as a [`Builder::message_filter`] sees it.
+#[derive(Debug)]
+pub struct FilterContext<'a>(proto::FilterContext<'a, PublicKey>);
+
+impl<'a> FilterContext<'a> {
+    /// Returns the topic of the message.
+    pub fn topic(&self) -> TopicId {
+        self.0.topic
+    }
+
+    /// Returns the id of the message, the BLAKE3 hash of its content.
+    pub fn id(&self) -> &[u8; 32] {
+        self.0.id.as_bytes()
+    }
+
+    /// Returns the content of the message.
+    pub fn content(&self) -> &'a Bytes {
+        self.0.content
+    }
+
+    /// Returns whether the message is for the swarm or for the neighbors only.
+    pub fn scope(&self) -> DeliveryScope {
+        self.0.scope.into()
+    }
+
+    /// Returns the peer that sent the message to us. This is not the author.
+    pub fn delivered_from(&self) -> EndpointId {
+        self.0.delivered_from
+    }
 }
+
+pub use proto::Verdict;
+
+type FilterFn = dyn Fn(FilterContext<'_>) -> Verdict + Send + Sync;
+
+/// The filter of received messages that the application set.
+#[derive(Clone, derive_more::Debug)]
+#[debug("MessageFilter")]
+struct MessageFilter(Arc<FilterFn>);
 
 type InEvent = proto::InEvent<PublicKey>;
 type Timer = proto::Timer<PublicKey>;
@@ -214,6 +245,64 @@ impl Builder {
     /// the endpoint, and all streams of a connection up to its `receive_window`.
     pub fn max_peer_streams(mut self, max: u32) -> Self {
         self.config.max_peer_streams = Some(max);
+        self
+    }
+
+    /// Sets a filter that decides whether each received message is delivered and forwarded.
+    ///
+    /// The filter applies to all topics of this [`Gossip`]. It returns a [`Verdict`]:
+    /// [`Verdict::Accept`] delivers the message to the local subscribers and forwards it
+    /// to peers, as without a filter. [`Verdict::Reject`] does neither, so the message does
+    /// not spread beyond this node. Use it to drop messages that are invalid, obsolete, or
+    /// expired before they cost the swarm bandwidth.
+    ///
+    /// - The filter runs once per message id and topic, also if several peers send the
+    ///   message. A rejected message counts as seen for the
+    ///   [message id retention], so the filter does not run on a later copy. The node does
+    ///   not cache a rejected message, so a peer that asks this node for it with a graft gets
+    ///   nothing.
+    /// - The node does not forward a message that a peer sent to its neighbors only. For
+    ///   such a message, the filter decides only the delivery. A later copy gets the first
+    ///   verdict.
+    /// - Messages that this node broadcasts do not pass the filter.
+    /// - The filter runs on the task of the gossip actor and delays all topics while it
+    ///   runs. Keep it short and do not block. Check the cheap things first. If it needs
+    ///   state, keep it behind a lock.
+    /// - A rejection is final for this node: it does not deliver or forward the message
+    ///   later, also if the filter would now accept it.
+    /// - A later copy gets the verdict of the first copy, also when another peer sends it.
+    ///   So base the verdict on the topic and the content only. A verdict that depends on
+    ///   [`FilterContext::delivered_from`] applies to the copies of other peers too.
+    ///
+    /// Gossip does not authenticate the message content. A filter that checks authorship has to
+    /// verify a signature in the content.
+    ///
+    /// # Example
+    ///
+    /// A filter that accepts only messages in version 1 of an application format:
+    ///
+    /// ```
+    /// use iroh_gossip::{Gossip, Verdict};
+    ///
+    /// /// The first byte of the content holds the version of the format.
+    /// const VERSION: u8 = 1;
+    ///
+    /// let builder = Gossip::builder().message_filter(|message| {
+    ///     // The verdict depends only on the content, so it holds for every copy.
+    ///     match message.content().first() {
+    ///         Some(&VERSION) => Verdict::Accept,
+    ///         _ => Verdict::Reject,
+    ///     }
+    /// });
+    /// # drop(builder);
+    /// ```
+    ///
+    /// [message id retention]: BroadcastConfig::message_id_retention
+    pub fn message_filter(
+        mut self,
+        filter: impl Fn(FilterContext<'_>) -> Verdict + Send + Sync + 'static,
+    ) -> Self {
+        self.config.filter = Some(MessageFilter(Arc::new(filter)));
         self
     }
 
