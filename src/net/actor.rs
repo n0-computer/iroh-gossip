@@ -538,6 +538,7 @@ impl Actor {
             track_message(message.kind(), len, false, &self.metrics);
         }
         let may_affect_membership = event.may_affect_membership();
+        let event_topic = event.topic();
         let mut io = ActorIO {
             state: &mut self.state,
             now,
@@ -556,13 +557,32 @@ impl Actor {
                 if !peer.queue.is_closed() && !proto.wants_connection(peer_id) {
                     peer.queue.close();
                 }
-                peer.finish_unwanted_streams(|topic| proto.topic_wants_connection(topic, peer_id));
             }
-        } else {
-            for (peer_id, topic) in new_topic_streams {
-                if let Some(peer) = self.state.peers.get_mut(&peer_id) {
-                    if !proto.topic_wants_connection(&topic, &peer_id) {
+        }
+        // A membership event of one topic changes only what that topic wants, so we check
+        // only that topic: a check of all topics would cost the square of the topics that
+        // share a peer.
+        match (may_affect_membership, event_topic) {
+            (true, None) => {
+                for (peer_id, peer) in self.state.peers.iter_mut() {
+                    peer.finish_unwanted_streams(|topic| {
+                        proto.topic_wants_connection(topic, peer_id)
+                    });
+                }
+            }
+            (true, Some(topic)) => {
+                for (peer_id, peer) in self.state.peers.iter_mut() {
+                    if !proto.topic_wants_connection(&topic, peer_id) {
                         peer.finish_topic_stream(topic);
+                    }
+                }
+            }
+            (false, _) => {
+                for (peer_id, topic) in new_topic_streams {
+                    if let Some(peer) = self.state.peers.get_mut(&peer_id) {
+                        if !proto.topic_wants_connection(&topic, &peer_id) {
+                            peer.finish_topic_stream(topic);
+                        }
                     }
                 }
             }
