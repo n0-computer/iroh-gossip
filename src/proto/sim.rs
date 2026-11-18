@@ -48,16 +48,66 @@ impl From<Config> for NetworkConfig {
 #[serde(rename_all = "lowercase")]
 pub enum LatencyConfig {
     /// Use the same latency, always.
-    Static(#[serde(with = "humantime_serde")] Duration),
+    Static(#[serde(with = "duration_str")] Duration),
     /// Chooses a random latency for each connection within the specified bounds.
     Dynamic {
         /// The lower bound for the latency between two peers.
-        #[serde(with = "humantime_serde")]
+        #[serde(with = "duration_str")]
         min: Duration,
         /// The upper bound for the latency between two peers.
-        #[serde(with = "humantime_serde")]
+        #[serde(with = "duration_str")]
         max: Duration,
     },
+}
+
+/// Reads and writes a [`Duration`] as a whole number with a unit, such as `"50ms"`.
+///
+/// The units are `us`, `ms`, `s` and `m`.
+mod duration_str {
+    use n0_future::time::Duration;
+    use serde::{de::Error, Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(
+        duration: &Duration,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&format(*duration))
+    }
+
+    /// Writes whole milliseconds, or whole microseconds if there is a rest.
+    pub(super) fn format(duration: Duration) -> String {
+        if duration.subsec_nanos().is_multiple_of(1_000_000) {
+            format!("{}ms", duration.as_millis())
+        } else {
+            format!("{}us", duration.as_micros())
+        }
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Duration, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        parse(&text).ok_or_else(|| {
+            D::Error::custom(format!(
+                "invalid duration {text:?}, expected a whole number and us, ms, s or m"
+            ))
+        })
+    }
+
+    /// Parses a whole number with a unit, such as `"50ms"`.
+    pub(super) fn parse(text: &str) -> Option<Duration> {
+        let text = text.trim();
+        let digits = text.find(|c: char| !c.is_ascii_digit())?;
+        let (number, unit) = text.split_at(digits);
+        let number: u64 = number.parse().ok()?;
+        match unit.trim() {
+            "us" => Some(Duration::from_micros(number)),
+            "ms" => Some(Duration::from_millis(number)),
+            "s" => Some(Duration::from_secs(number)),
+            "m" => number.checked_mul(60).map(Duration::from_secs),
+            _ => None,
+        }
+    }
 }
 
 impl LatencyConfig {
@@ -1504,6 +1554,27 @@ mod round_stats_tests {
 #[cfg(test)]
 mod network_tests {
     use super::*;
+
+    /// Latency durations read with a unit, and write so that they read back.
+    #[test]
+    fn latency_durations_read_and_write() {
+        assert_eq!(duration_str::parse("10ms"), Some(Duration::from_millis(10)));
+        assert_eq!(duration_str::parse("2s"), Some(Duration::from_secs(2)));
+        assert_eq!(duration_str::parse("1m"), Some(Duration::from_secs(60)));
+        assert_eq!(
+            duration_str::parse("250us"),
+            Some(Duration::from_micros(250))
+        );
+        for invalid in ["", "ms", "10", "10 h", "1.5s", "-1ms"] {
+            assert_eq!(duration_str::parse(invalid), None, "{invalid:?}");
+        }
+        for duration in [Duration::from_millis(50), Duration::from_micros(1500)] {
+            assert_eq!(
+                duration_str::parse(&duration_str::format(duration)),
+                Some(duration)
+            );
+        }
+    }
 
     /// A Plumtree reply to a peer that no topic wants closes the connection after it.
     ///
